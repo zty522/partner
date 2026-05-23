@@ -143,11 +143,21 @@ That's it. All conversation happens through your agent.
 
 ## Supported Agents
 
-| Agent | Status |
-|-------|--------|
-| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Supported |
-| ⚡ [OpenAI Codex](https://openai.com/codex) | 🔜 Coming soon |
-| 🧠 [Claude Code](https://claude.ai/code) | 🔜 Coming soon |
+Partner works on top of existing agent frameworks — like how agents work on top of LLMs.
+
+| Agent | Stars | Status | Notes |
+|-------|-------|--------|-------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | — | ✅ Full support | Skills + cron integration |
+| 🦞 [OpenClaw](https://github.com/openclaw/openclaw) | 374k | ✅ Supported | Gateway API integration |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | — | ✅ Supported | CLI integration |
+| 👥 [CrewAI](https://github.com/crewAIInc/crewAI) | 52k | 🔜 Experimental | Multi-agent orchestration |
+| 🤖 [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT) | 184k | 🔜 Experimental | Full automation |
+| 👐 [OpenHands](https://github.com/OpenHands/OpenHands) | 75k | 🔜 Experimental | Software development |
+| 💻 [gptme](https://github.com/gptme/gptme) | 4k | 🔜 Experimental | Terminal agent |
+| 🧠 [Claude Code](https://claude.ai/code) | — | 🔜 Coming soon | |
+| 📌 Direct mode | — | ✅ Built-in | No external agent needed |
+
+Run `partner setup` to auto-detect installed agents.
 
 ---
 
