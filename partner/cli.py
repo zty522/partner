@@ -15,15 +15,25 @@ from pathlib import Path
 
 def get_workspace() -> str:
     """Get configured workspace path."""
-    # Check env var
+    import json as _json
+    
+    # 1. Environment variable
     ws = os.environ.get("PARTNER_WORKSPACE")
     if ws and os.path.exists(ws):
         return ws
     
-    # Check common locations
+    # 2. Pointer file at ~/.partner
+    pointer = os.path.expanduser("~/.partner")
+    if os.path.exists(pointer):
+        with open(pointer) as f:
+            path = f.read().strip()
+        if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            return path
+    
+    # 3. Common locations
     candidates = [
         os.path.expanduser("~/partner_workspace"),
-        os.path.expanduser("~/.partner"),
+        os.path.expanduser("~/.partner_workspace"),
     ]
     for c in candidates:
         config = os.path.join(c, "partner_config.json")

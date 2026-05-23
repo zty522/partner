@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 🤝 Partner
 
@@ -6,7 +6,7 @@
 
 **LLM generates text. Agent executes tasks. Partner does research — on its own.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
 </div>
@@ -24,8 +24,8 @@ The best part? You can just ask:
 And it tells you everything it discovered while you were away.
 
 ```
-LLM:    You ask → Model answers → Done
-Agent:  You command → Agent executes → Waits for next command
+LLM:     You ask → Model answers → Done
+Agent:   You command → Agent executes → Waits for next command
 Partner: Partner works on its own → You check in → Partner reports
 ```
 
@@ -36,76 +36,69 @@ Partner: Partner works on its own → You check in → Partner reports
 ## Quick Start
 
 ```bash
-pip install partner-research
+# Install
+git clone https://github.com/zty522/partner.git
+cd partner
+pip install -e .
+
+# First-time setup (interactive wizard)
+partner setup
+
+# Talk to Partner through your agent (Hermes, Claude Code, etc.)
+# Just say: "partner 最近在研究什么？"
 ```
 
-```bash
-# Initialize a workspace
-partner init --workspace ~/my_research
-
-# Start Partner (it begins working immediately)
-partner start --workspace ~/my_research
-
-# Later, talk to Partner
-partner chat --workspace ~/my_research
-```
+### What you see during setup
 
 ```
-你: 最近在研究什么？
+  🤝 Partner v0.1.0
+  Your AI Research Companion
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Partner: 📊 我最近的研究进展：
+  🔍 检测已安装的 Agent
+────────────────────────────────────────────────
+    ✓ 🔮 Hermes Agent  /home/you/.local/bin/hermes
+    ✓ ⚡ OpenAI Codex  /usr/bin/codex
+    ✗ 🧠 Claude Code   未安装
 
-  ⏱  完成了 12 个研究周期
-  📋 完成了 8 个任务
-  📚 积累了 15 条知识
+  ⚙️ 选择 Agent 后端
+────────────────────────────────────────────────
+    ▶ 1. 🔮 Hermes Agent
+     · 2. ⚡ OpenAI Codex
 
-  📖 最近活动：
-  1. [2026-05-23 10:22] 搜索转录组年龄预测最新方法
-     → 发现 OMICmAge (Nature Aging 2024) 多组学时钟
-  2. [2026-05-23 11:15] 分析探索树实验结果
-     → 最佳方案：年龄匹配+年龄感知校正，MAE=5.95
+  📂 创建工作区
+────────────────────────────────────────────────
+    ✓ 工作区: ~/partner_workspace
+    ✓ 状态文件已初始化
 
-  🔑 最近重要发现：
-  • [high] 单细胞基础模型在衰老建模上尚不成熟
-  • [medium] 扩散模型正在取代 VAE 做分子生成
+  🧩 注册 Partner 技能
+────────────────────────────────────────────────
+    ✓ 技能已注册
+
+  🎉 Partner 配置完成！
 ```
 
 ---
 
-## Core Features
+## How to Use
 
-### 🧠 Autonomous Research
-Partner doesn't wait for your commands. It generates its own research tasks, searches for literature, analyzes your projects, and builds a knowledge base — all in the background.
+Partner talks through your existing agent. No new UI to learn.
 
-### 💬 Conversational Check-in
-The killer feature. Just talk to Partner like a colleague:
-- "最近在研究什么？" — See what it's been up to
-- "关于扩散模型你知道什么？" — Search its knowledge
-- "暂停A，集中做B" — Adjust its direction
-- "详细说说" — Deep dive into any finding
-
-### 📚 Growing Knowledge Base
-Every research cycle adds to Partner's knowledge. Over time, it builds a comprehensive understanding of your research domain — and it never forgets.
-
-### 🔄 Crash Recovery
-Power outage? Network down? API quota exhausted? Partner detects interruptions via heartbeat signals and automatically recovers when restarted. No progress lost.
-
-### 🔌 Pluggable Agent Backend
-Partner works on top of existing agent frameworks (like how agents work on top of LLMs):
-- **Hermes Agent** (default) — full-featured with web search, code execution
-- **Direct mode** — lightweight, no external agent needed
-- More backends coming: Claude Code, Codex, OpenClaw
-
-### 📂 Workspace Isolation
-Partner operates in its own workspace. It can read your projects but only writes within its designated area. Your data stays safe.
+| You say | Partner does |
+|---------|-------------|
+| "partner 最近在研究什么？" | Reports its recent research activity |
+| "partner 知道关于 X 的什么？" | Searches its knowledge base |
+| "让 partner 去研究 X" | Adds a new research task |
+| "暂停 X，让 partner 集中做 Y" | Adjusts research direction |
+| "partner status" | Quick status check |
 
 ---
 
-## Architecture
+## How It Works
 
 ```
 You (the researcher)
-        ↕ conversation
+        ↕ natural language through your agent
    ┌─────────────┐
    │   Partner    │ ← autonomous research loop
    │   ┌───────┐  │
@@ -115,50 +108,35 @@ You (the researcher)
    │   └───────┘  │
    └──────┬──────┘
           ↕
-   Agent Backend (Hermes, Claude Code, ...)
+   Agent Backend (Hermes, Claude Code, Codex)
           ↕
    Workspace (files, state, checkpoints)
 ```
 
----
-
-## Commands
-
-```bash
-partner init                    # Initialize workspace
-partner start                   # Start Partner
-partner start --once            # Run one cycle and exit
-partner chat                    # Interactive conversation
-partner chat "最近干了什么"      # Single message
-partner status                  # Quick status check
-partner task list               # View task queue
-partner task add "title" "desc" # Add a task
-partner knowledge search "query" # Search knowledge
-partner run                     # Run one research cycle
-```
-
----
-
-## How It Works
-
-1. **Partner starts** and loads its state (tasks, knowledge, journal)
+1. **Partner starts** and loads its state
 2. **Every N minutes**, it wakes up and picks the highest priority task
 3. **Executes the task** via the agent backend (search literature, analyze code, etc.)
 4. **Records findings** in the knowledge base and journal
 5. **Generates new tasks** based on what it learned
 6. **Repeats** — forever, until you tell it to stop
 
-When you check in, Partner reads its journal and knowledge base to give you a clear, concise summary of everything it discovered.
-
 ---
 
-## Use Cases
+## Architecture
 
-- **Research labs**: Let Partner explore related work while you do experiments
-- **Graduate students**: Have a research companion that never sleeps
-- **Data science teams**: Automatically monitor and improve ML pipelines
-- **Literature reviews**: Partner reads papers so you don't have to
-- **Cross-project insights**: Partner finds connections you'd miss
+Partner sits **on top of** existing agent frameworks, like how agents sit on top of LLMs:
+
+```
+┌─────────────────────────────────────────┐
+│  Partner (research entity layer)         │
+│  Task Queue · Knowledge · Journal        │
+├─────────────────────────────────────────┤
+│  Agent Backend (Hermes / Claude / Codex) │
+│  Web Search · File Ops · Code Execution  │
+├─────────────────────────────────────────┤
+│  LLM (GPT / Claude / DeepSeek / etc.)   │
+└─────────────────────────────────────────┘
+```
 
 ---
 
@@ -174,9 +152,30 @@ When you check in, Partner reads its journal and knowledge base to give you a cl
 
 ---
 
+## Commands
+
+```bash
+partner              # Guide to start talking
+partner setup        # First-time configuration
+partner status       # Check Partner status
+partner setup --status  # Quick status check
+```
+
+---
+
+## Use Cases
+
+- **Research labs**: Let Partner explore related work while you do experiments
+- **Graduate students**: Have a research companion that never sleeps
+- **Data science teams**: Automatically monitor and improve ML pipelines
+- **Literature reviews**: Partner reads papers so you don't have to
+- **Cross-project insights**: Partner finds connections you'd miss
+
+---
+
 ## License
 
-MIT — use it however you want.
+Apache 2.0 — use it however you want.
 
 ---
 
@@ -187,4 +186,3 @@ MIT — use it however you want.
 *Built with the belief that AI should be a research companion, not just a tool.*
 
 </div>
-]]>
