@@ -187,19 +187,23 @@ def main():
     # start
     p_start = sub.add_parser('start', help='Start Partner')
     p_start.add_argument('--once', action='store_true', help='Run one cycle and exit')
+    p_start.add_argument('--workspace', '-w', help='Workspace path')
     p_start.set_defaults(func=cmd_start)
     
     # chat
     p_chat = sub.add_parser('chat', help='Talk to Partner')
     p_chat.add_argument('message', nargs='?', help='Message (omit for interactive mode)')
+    p_chat.add_argument('--workspace', '-w', help='Workspace path')
     p_chat.set_defaults(func=cmd_chat)
     
     # status
     p_status = sub.add_parser('status', help='Quick status check')
+    p_status.add_argument('--workspace', '-w', help='Workspace path')
     p_status.set_defaults(func=cmd_status)
     
     # task
     p_task = sub.add_parser('task', help='Task management')
+    p_task.add_argument('--workspace', '-w', help='Workspace path')
     task_sub = p_task.add_subparsers(dest='task_action')
     
     p_task_add = task_sub.add_parser('add', help='Add a task')
@@ -212,6 +216,7 @@ def main():
     
     # knowledge
     p_kb = sub.add_parser('knowledge', help='Knowledge base')
+    p_kb.add_argument('--workspace', '-w', help='Workspace path')
     kb_sub = p_kb.add_subparsers(dest='kb_action')
     
     p_kb_search = kb_sub.add_parser('search', help='Search knowledge')
@@ -222,6 +227,7 @@ def main():
     
     # run
     p_run = sub.add_parser('run', help='Run one research cycle')
+    p_run.add_argument('--workspace', '-w', help='Workspace path')
     p_run.set_defaults(func=cmd_run)
     
     # init
