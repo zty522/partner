@@ -3,6 +3,8 @@
 Usage:
     partner setup              First-time configuration
     partner setup --status     Check configuration status
+    partner wechat             Start WeChat bridge
+    partner qq                 Start QQ bridge
     partner                    Start talking (opens your agent)
 """
 
@@ -198,6 +200,102 @@ def cmd_status(args):
     print(f"  {C_DIM}Tip: Open {backend} and say 'partner, what have you been doing?'{C_RESET}")
     print()
 
+
+def cmd_wechat(args):
+    """Start WeChat bridge."""
+    workspace = args.workspace or get_workspace()
+    if not workspace:
+        print("❌ Partner not configured. Run 'partner setup' first.")
+        return
+    
+    print(f"  {C_CYAN}📱 Starting WeChat Bridge...{C_RESET}")
+    print()
+    
+    # Check platform
+    import platform
+    if platform.system() == "Windows":
+        # Direct WeChatFerry on Windows
+        print("  Windows detected - using WeChatFerry directly")
+        print()
+        try:
+            from .wechat_bridge import WeChatBridge, BridgeConfig
+            config = BridgeConfig(
+                voice_enabled=not args.no_voice,
+                voice_reply=args.voice_reply,
+            )
+            bridge = WeChatBridge(workspace=workspace, config=config)
+            print(f"  {C_GREEN}✅ WeChatFerry connected{C_RESET}")
+            print(f"  {C_DIM}Listening for messages... Ctrl+C to stop{C_RESET}")
+            print()
+            bridge.start()
+        except ImportError:
+            print(f"  {C_RED}❌ WeChatFerry not installed{C_RESET}")
+            print(f"  {C_DIM}Install: pip install wcferry{C_RESET}")
+        except Exception as e:
+            print(f"  {C_RED}❌ Error: {e}{C_RESET}")
+    else:
+        # WSL/Linux: connect to Windows bridge
+        host = args.host or "localhost"
+        port = args.port or 8765
+        print(f"  Linux/WSL detected - connecting to Windows bridge")
+        print(f"  {C_DIM}Target: ws://{host}:{port}{C_RESET}")
+        print()
+        print(f"  {C_YELLOW}⚠️  Make sure the Windows bridge is running:{C_RESET}")
+        print(f"  {C_DIM}  Windows PowerShell:{C_RESET}")
+        print(f"  {C_DIM}  python -m partner.windows_bridge --port {port}{C_RESET}")
+        print()
+        
+        try:
+            from .wechat_ws_client import WeChatWSClient
+            client = WeChatWSClient(
+                workspace=workspace,
+                ws_url=f"ws://{host}:{port}",
+                voice_enabled=not args.no_voice,
+            )
+            print(f"  {C_GREEN}✅ Connected to Windows bridge{C_RESET}")
+            print(f"  {C_DIM}Listening for messages... Ctrl+C to stop{C_RESET}")
+            print()
+            client.start()
+        except ImportError:
+            print(f"  {C_RED}❌ websockets not installed{C_RESET}")
+            print(f"  {C_DIM}Install: pip install websockets{C_RESET}")
+        except Exception as e:
+            print(f"  {C_RED}❌ Error: {e}{C_RESET}")
+
+
+def cmd_qq(args):
+    """Start QQ bridge."""
+    workspace = args.workspace or get_workspace()
+    if not workspace:
+        print("❌ Partner not configured. Run 'partner setup' first.")
+        return
+    
+    ws_url = args.url or "ws://127.0.0.1:3001"
+    
+    print(f"  {C_CYAN}🐧 Starting QQ Bridge...{C_RESET}")
+    print()
+    print(f"  NapCat WebSocket: {ws_url}")
+    print()
+    
+    try:
+        from .qq_bridge import QQBridge, QQBridgeConfig
+        config = QQBridgeConfig(
+            ws_url=ws_url,
+            voice_enabled=not args.no_voice,
+            voice_reply=args.voice_reply,
+        )
+        bridge = QQBridge(workspace=workspace, config=config)
+        print(f"  {C_GREEN}✅ Connected to NapCat{C_RESET}")
+        print(f"  {C_DIM}Listening for QQ messages... Ctrl+C to stop{C_RESET}")
+        print()
+        bridge.start()
+    except ImportError:
+        print(f"  {C_RED}❌ websockets not installed{C_RESET}")
+        print(f"  {C_DIM}Install: pip install websockets{C_RESET}")
+    except Exception as e:
+        print(f"  {C_RED}❌ Error: {e}{C_RESET}")
+
+
 def cmd_default(args):
     """Default action: guide user to the right place."""
     workspace = get_workspace()
@@ -262,6 +360,23 @@ def main():
     p_status = sub.add_parser('status', help='Check Partner status')
     p_status.add_argument('--workspace', '-w', help='Workspace path')
     p_status.set_defaults(func=cmd_status)
+    
+    # wechat
+    p_wechat = sub.add_parser('wechat', help='Start WeChat bridge')
+    p_wechat.add_argument('--workspace', '-w', help='Workspace path')
+    p_wechat.add_argument('--host', help='Windows bridge host (for WSL)')
+    p_wechat.add_argument('--port', type=int, default=8765, help='Windows bridge port')
+    p_wechat.add_argument('--no-voice', action='store_true', help='Disable voice')
+    p_wechat.add_argument('--voice-reply', action='store_true', help='Reply with voice')
+    p_wechat.set_defaults(func=cmd_wechat)
+    
+    # qq
+    p_qq = sub.add_parser('qq', help='Start QQ bridge')
+    p_qq.add_argument('--workspace', '-w', help='Workspace path')
+    p_qq.add_argument('--url', help='NapCat WebSocket URL')
+    p_qq.add_argument('--no-voice', action='store_true', help='Disable voice')
+    p_qq.add_argument('--voice-reply', action='store_true', help='Reply with voice')
+    p_qq.set_defaults(func=cmd_qq)
     
     args = parser.parse_args()
     
