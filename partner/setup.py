@@ -1,67 +1,235 @@
-"""Setup - configure Partner to work with an existing agent.
-
-This module handles first-time setup:
-1. Detect available agents (Hermes, Claude Code, Codex)
-2. Configure workspace
-3. Register Partner as a skill/plugin in the chosen agent
-4. Set up background cron job for autonomous research
-"""
+"""Partner Setup - beautiful interactive configuration wizard."""
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
-def find_hermes() -> dict:
-    """Check if Hermes Agent is installed and configured."""
-    info = {"available": False, "path": None, "version": None}
+# ── ANSI Colors ──────────────────────────────────────────────
+
+class C:
+    """ANSI color codes."""
+    RESET   = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    ITALIC  = "\033[3m"
+    UNDER   = "\033[4m"
+    
+    BLACK   = "\033[30m"
+    RED     = "\033[31m"
+    GREEN   = "\033[32m"
+    YELLOW  = "\033[33m"
+    BLUE    = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN    = "\033[36m"
+    WHITE   = "\033[37m"
+    
+    BG_BLACK  = "\033[40m"
+    BG_GREEN  = "\033[42m"
+    BG_BLUE   = "\033[44m"
+    BG_CYAN   = "\033[46m"
+    BG_WHITE  = "\033[47m"
+
+
+def line(char="─", width=60, color=C.DIM):
+    """Print a horizontal line."""
+    print(f"{color}{char * width}{C.RESET}")
+
+
+def banner():
+    """Print the Partner banner."""
+    print()
+    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.1.0{C.RESET}")
+    print(f"  {C.DIM}Your AI Research Companion{C.RESET}")
+    line("━", 50, C.CYAN)
+    print()
+
+
+def section(title, emoji="▸"):
+    """Print a section header."""
+    print(f"\n  {C.BOLD}{emoji} {title}{C.RESET}")
+    line("─", 48, C.DIM)
+
+
+def status_ok(msg):
+    print(f"    {C.GREEN}✓{C.RESET} {msg}")
+
+
+def status_fail(msg):
+    print(f"    {C.RED}✗{C.RESET} {msg}")
+
+
+def status_info(msg):
+    print(f"    {C.BLUE}ℹ{C.RESET} {msg}")
+
+
+def status_warn(msg):
+    print(f"    {C.YELLOW}⚠{C.RESET} {msg}")
+
+
+def prompt_choice(prompt, options, default=0):
+    """Ask user to choose from options."""
+    print(f"\n  {C.BOLD}{prompt}{C.RESET}")
+    for i, opt in enumerate(options):
+        marker = f"{C.CYAN}▶{C.RESET}" if i == default else f" {C.DIM}·{C.RESET}"
+        print(f"    {marker} {i + 1}. {opt}")
+    
+    print()
+    choice = input(f"  {C.DIM}选择 [{default + 1}]: {C.RESET}").strip()
+    if not choice:
+        return default
     try:
-        result = subprocess.run(["hermes", "--version"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            info["available"] = True
-            info["version"] = result.stdout.strip()
-            info["path"] = subprocess.run(["which", "hermes"], capture_output=True, text=True).stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        idx = int(choice) - 1
+        if 0 <= idx < len(options):
+            return idx
+    except ValueError:
         pass
-    return info
+    return default
 
 
-def find_claude_code() -> dict:
-    """Check if Claude Code is installed."""
-    info = {"available": False, "path": None}
-    try:
-        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            info["available"] = True
-            info["path"] = subprocess.run(["which", "claude"], capture_output=True, text=True).stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return info
+def prompt_input(prompt, default=""):
+    """Ask user for input with a default."""
+    if default:
+        display = f"{C.DIM}({default}){C.RESET}"
+        val = input(f"  {C.BOLD}{prompt}{C.RESET} {display}: ").strip()
+        return val if val else default
+    else:
+        return input(f"  {C.BOLD}{prompt}{C.RESET}: ").strip()
 
 
-def get_hermes_skills_dir() -> str:
-    """Find Hermes personalized skills directory."""
+# ── Agent Detection ──────────────────────────────────────────
+
+class AgentInfo:
+    def __init__(self, name, display_name, emoji, available, path=None, version=None, config_path=None):
+        self.name = name
+        self.display_name = display_name
+        self.emoji = emoji
+        self.available = available
+        self.path = path
+        self.version = version
+        self.config_path = config_path
+
+
+def detect_hermes() -> AgentInfo:
+    """Detect Hermes Agent installation."""
     home = Path.home()
+    
+    # Check 1: ~/.hermes/ directory
+    hermes_dir = home / ".hermes"
+    if not hermes_dir.exists():
+        return AgentInfo("hermes", "Hermes Agent", "🔮", False)
+    
+    # Check 2: hermes binary
     candidates = [
-        home / ".hermes" / "skills" / "personalized",
-        home / ".hermes" / "skills",
+        home / ".local" / "bin" / "hermes",
+        hermes_dir / "hermes-agent" / "venv" / "bin" / "hermes",
+        Path("/usr/local/bin/hermes"),
     ]
+    
+    hermes_bin = None
     for c in candidates:
         if c.exists():
-            return str(c)
-    # Create it
-    target = home / ".hermes" / "skills" / "personalized"
-    target.mkdir(parents=True, exist_ok=True)
-    return str(target)
+            hermes_bin = str(c)
+            break
+    
+    if not hermes_bin:
+        # Try which
+        try:
+            result = subprocess.run(["which", "hermes"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                hermes_bin = result.stdout.strip()
+        except:
+            pass
+    
+    if not hermes_bin:
+        return AgentInfo("hermes", "Hermes Agent", "🔮", False)
+    
+    # Check 3: config
+    config_path = hermes_dir / "config.yaml"
+    version = None
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                content = f.read()
+            # Try to extract model info
+            for line in content.split("\n"):
+                if "default:" in line and "model" not in line.lower():
+                    version = line.split(":")[-1].strip()
+                    break
+        except:
+            pass
+    
+    return AgentInfo(
+        name="hermes",
+        display_name="Hermes Agent",
+        emoji="🔮",
+        available=True,
+        path=hermes_bin,
+        version=version,
+        config_path=str(config_path) if config_path.exists() else None,
+    )
 
 
-def create_partner_skill(workspace: str) -> str:
-    """Create a Hermes skill that makes Partner accessible through Hermes conversation."""
+def detect_claude_code() -> AgentInfo:
+    """Detect Claude Code installation."""
+    candidates = [
+        Path.home() / ".local" / "bin" / "claude",
+        Path("/usr/local/bin/claude"),
+        Path("/usr/bin/claude"),
+    ]
+    
+    claude_bin = None
+    for c in candidates:
+        if c.exists():
+            claude_bin = str(c)
+            break
+    
+    if not claude_bin:
+        try:
+            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                claude_bin = result.stdout.strip()
+        except:
+            pass
+    
+    return AgentInfo(
+        name="claude_code",
+        display_name="Claude Code",
+        emoji="🧠",
+        available=claude_bin is not None,
+        path=claude_bin,
+    )
+
+
+def detect_codex() -> AgentInfo:
+    """Detect OpenAI Codex installation."""
+    try:
+        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            return AgentInfo("codex", "OpenAI Codex", "⚡", True, path=result.stdout.strip())
+    except:
+        pass
+    return AgentInfo("codex", "OpenAI Codex", "⚡", False)
+
+
+# ── Skill Registration ──────────────────────────────────────
+
+def register_hermes_skill(workspace: str) -> str:
+    """Register Partner as a Hermes skill."""
+    home = Path.home()
+    skills_dir = home / ".hermes" / "skills" / "personalized"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    
+    skill_dir = skills_dir / "partner"
+    skill_dir.mkdir(exist_ok=True)
+    
     skill_content = f'''---
 name: partner
-description: "Partner - 自主研究伙伴。用户可以通过自然语言与 Partner 对话，查看研究进展、调整方向、搜索知识。"
+description: "Partner 🤝 - 自主研究伙伴。用户说 'partner' 关键词时激活。可查询研究进展、添加任务、搜索知识。"
 version: 0.1.0
 author: Partner Team
 tags: [partner, autonomous, research, companion]
@@ -69,182 +237,276 @@ tags: [partner, autonomous, research, companion]
 
 # Partner 🤝 - Your AI Research Companion
 
-## 概述
-Partner 是一个自主研究伙伴，驻扎在 `{workspace}`。它在后台自主运行：搜索文献、分析项目、积累知识、生成想法。用户可以随时通过自然语言与它对话。
+当用户提到 "partner"、"研究伙伴"、"最近研究了什么" 时，进入 Partner 模式。
 
-## 核心交互
+## 工作区
+Partner 数据在 `{workspace}/state/` 下。
 
-当用户提到 "Partner"、"研究伙伴"、"最近研究了什么"、"partner" 等关键词时，进入 Partner 模式。
+## 交互方式
 
-### 查看研究进展
-当用户问 "最近在研究什么"、"partner 做了什么"、"研究进展" 时：
-1. 用 execute_code 读取 `{workspace}/state/journal.jsonl`（最近 10 条）
-2. 读取 `{workspace}/state/stats.json`
-3. 读取 `{workspace}/state/knowledge.json`（最近 5 条）
-4. 用中文向用户汇报：完成的任务、关键发现、待探索方向
+### 查询进展
+用户说 "partner 最近在研究什么"、"研究进展" 时：
+用 execute_code 读取 `{workspace}/state/journal.jsonl`（最近10条）和 `stats.json`，用中文汇报。
 
-### 搜索知识库
-当用户问 "关于 X partner 知道什么"、"partner 的知识" 时：
-1. 用 execute_code 搜索 `{workspace}/state/knowledge.json`
-2. 返回匹配的知识条目
+### 搜索知识
+用户说 "partner 知道关于 X 的什么" 时：
+用 execute_code 搜索 `{workspace}/state/knowledge.json`。
 
-### 添加研究任务
-当用户说 "让 partner 去研究 X"、"给 partner 添加任务" 时：
-1. 用 execute_code 向 `{workspace}/state/task_queue.json` 添加任务
-2. 确认任务已添加
+### 添加任务
+用户说 "让 partner 去研究 X" 时：
+用 execute_code 向 `{workspace}/state/task_queue.json` 添加任务。
 
-### 调整研究方向
-当用户说 "暂停 X，让 partner 集中做 Y" 时：
-1. 用 execute_code 修改任务优先级
-2. 确认调整完成
+### 执行研究
+用户说 "让 partner 做一次研究" 时：
+用 execute_code 读取最高优先级任务，用 web_search/read_file 执行，更新状态。
 
-### 执行研究周期
-当用户说 "让 partner 现在做一个研究"、"执行一次" 时：
-1. 用 execute_code 读取 `{workspace}/state/task_queue.json` 获取最高优先级任务
-2. 用 web_search / read_file 执行任务
-3. 用 execute_code 更新状态（complete task, add knowledge, log journal）
-
-## 文件位置
-- 任务队列: `{workspace}/state/task_queue.json`
-- 知识库: `{workspace}/state/knowledge.json`
-- 日志: `{workspace}/state/journal.jsonl`
-- 统计: `{workspace}/state/stats.json`
-- 心跳: `{workspace}/state/heartbeat.json`
-
-## 注意事项
-- Partner 的文件只能在 `{workspace}` 内修改
-- 可以读取其他目录的项目文件（只读）
-- 所有对话用中文
-- 不要暴露内部实现细节（JSON 文件路径等），用户只需要自然语言对话
+## 注意
+- 只在 `{workspace}` 内写文件
+- 用中文对话
+- 不暴露 JSON 文件路径等内部细节
 '''
-    return skill_content
-
-
-def setup_hermes(workspace: str):
-    """Set up Partner as a Hermes skill + cron job."""
-    print("🔧 配置 Hermes 集成...")
     
-    # 1. Create skill
-    skills_dir = get_hermes_skills_dir()
-    skill_dir = os.path.join(skills_dir, "partner")
-    os.makedirs(skill_dir, exist_ok=True)
+    skill_path = skill_dir / "SKILL.md"
+    with open(skill_path, 'w') as f:
+        f.write(skill_content)
     
-    skill_md = os.path.join(skill_dir, "SKILL.md")
-    with open(skill_md, 'w') as f:
-        f.write(create_partner_skill(workspace))
-    print(f"  ✅ 技能已注册: {skill_md}")
+    return str(skill_path)
+
+
+# ── Cron Setup ──────────────────────────────────────────────
+
+def setup_cron_hermes(workspace: str):
+    """Set up Hermes cron job for Partner."""
+    print()
+    status_info("Partner 的自动研究需要通过 Hermes cron 驱动")
+    status_info("请在 Hermes 中运行以下命令设置 cron：")
+    print()
+    print(f"    {C.CYAN}hermes{C.RESET}")
+    print(f"    {C.DIM}然后说：'请设置 Partner 的自动研究 cron，每 30 分钟执行一次'{C.RESET}")
+    print()
+
+
+# ── Main Setup Flow ─────────────────────────────────────────
+
+def interactive_setup():
+    """Main setup wizard."""
+    banner()
     
-    # 2. Create cron setup script
-    cron_script = os.path.join(workspace, "setup_cron.py")
-    with open(cron_script, 'w') as f:
-        f.write(f'''"""Set up Partner cron job for autonomous research."""
-import subprocess
-import sys
-
-# This script should be run inside a Hermes session
-# It uses hermes cronjob to schedule periodic research cycles
-
-CRON_PROMPT = """你是 Partner 的执行引擎。在 {workspace} 下工作。
-
-执行步骤：
-1. 用 execute_code 读取 {workspace}/state/task_queue.json，获取最高优先级的 pending 任务
-2. 根据任务类型执行：literature_search 用 web_search，project_scan 用 read_file，其他用 web_search
-3. 用 execute_code 更新状态：标记完成、添加知识、记录日志、生成新任务
-
-只在 {workspace} 内写文件。用中文。"""
-
-print("Cron prompt ready. Run this inside Hermes to set up:")
-print(f"  hermes cronjob create --schedule 'every 30m' --prompt '...'")
-print()
-print("Or ask Hermes: '请设置 Partner 的自动研究 cron，每 30 分钟执行一次'")
-''')
-    print(f"  ✅ Cron 脚本已创建: {cron_script}")
+    # ── Step 1: Detect Agents ──
+    section("检测已安装的 Agent", "🔍")
     
-    # 3. Save config
+    agents = [
+        detect_hermes(),
+        detect_claude_code(),
+        detect_codex(),
+    ]
+    
+    available = [a for a in agents if a.available]
+    unavailable = [a for a in agents if not a.available]
+    
+    for a in available:
+        info = f"{C.DIM}{a.path}{C.RESET}" if a.path else ""
+        status_ok(f"{a.emoji} {a.display_name}  {info}")
+    
+    for a in unavailable:
+        status_fail(f"{a.emoji} {a.display_name}  {C.DIM}未安装{C.RESET}")
+    
+    if not available:
+        print()
+        status_warn("没有检测到已安装的 Agent")
+        status_info("请先安装其中一个：")
+        print(f"      • Hermes Agent: {C.UNDER}https://hermes-agent.nousresearch.com{C.RESET}")
+        print(f"      • Claude Code:  {C.UNDER}https://claude.ai/code{C.RESET}")
+        print()
+        return
+    
+    # ── Step 2: Select Agent ──
+    section("选择 Agent 后端", "⚙️")
+    
+    if len(available) == 1:
+        selected = available[0]
+        status_info(f"自动选择: {selected.emoji} {selected.display_name}")
+    else:
+        options = [f"{a.emoji} {a.display_name}" for a in available]
+        idx = prompt_choice("选择要使用的 Agent：", options)
+        selected = available[idx]
+    
+    print(f"\n    {C.GREEN}▶{C.RESET} 使用 {C.BOLD}{selected.emoji} {selected.display_name}{C.RESET}")
+    
+    # ── Step 3: Agent Config ──
+    section("Agent 配置", "🔧")
+    
+    if selected.config_path:
+        status_info(f"配置文件: {selected.config_path}")
+        if selected.version:
+            status_info(f"默认模型: {selected.version}")
+        
+        reconfigure = prompt_choice("是否需要重新配置 Agent 的 API？", [
+            "使用当前配置（推荐）",
+            "重新配置"
+        ], default=0)
+        
+        if reconfigure == 1:
+            status_info("请手动编辑配置文件后重新运行 setup")
+            print(f"    {C.DIM}{selected.config_path}{C.RESET}")
+            return
+    else:
+        status_warn("未找到配置文件")
+    
+    # ── Step 4: Workspace ──
+    section("创建工作区", "📂")
+    
+    default_ws = os.path.expanduser("~/partner_workspace")
+    workspace = prompt_input("工作区路径", default_ws)
+    workspace = os.path.expanduser(workspace)
+    
+    # Create workspace structure
+    os.makedirs(workspace, exist_ok=True)
+    for d in ["state", "knowledge", "ideas", "logs"]:
+        os.makedirs(os.path.join(workspace, d), exist_ok=True)
+    
+    status_ok(f"工作区: {workspace}")
+    
+    # Initialize empty state files
+    state_dir = os.path.join(workspace, "state")
+    for fname, default in [
+        ("task_queue.json", []),
+        ("knowledge.json", {"meta": {"total_entries": 0}, "entries": []}),
+        ("stats.json", {"total_cycles": 0, "total_tasks_completed": 0, "created_at": datetime.now().isoformat()}),
+    ]:
+        fpath = os.path.join(state_dir, fname)
+        if not os.path.exists(fpath):
+            with open(fpath, 'w') as f:
+                json.dump(default, f, indent=2)
+    
+    # Empty journal
+    journal_path = os.path.join(state_dir, "journal.jsonl")
+    if not os.path.exists(journal_path):
+        open(journal_path, 'w').close()
+    
+    status_ok("状态文件已初始化")
+    
+    # ── Step 5: Register Skill ──
+    section("注册 Partner 技能", "🧩")
+    
+    if selected.name == "hermes":
+        skill_path = register_hermes_skill(workspace)
+        status_ok(f"技能已注册: {skill_path}")
+    else:
+        status_info(f"{selected.display_name} 集成即将推出")
+    
+    # ── Step 6: Save Config ──
     config = {
         "workspace": workspace,
-        "backend": "hermes",
-        "setup_time": __import__('datetime').datetime.now().isoformat(),
-        "skill_path": skill_md,
+        "backend": selected.name,
+        "setup_time": datetime.now().isoformat(),
+        "agent_path": selected.path,
     }
     config_path = os.path.join(workspace, "partner_config.json")
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
-    print(f"  ✅ 配置已保存: {config_path}")
+    status_ok(f"配置已保存: {config_path}")
     
+    # ── Step 7: Cron ──
+    section("设置自动研究", "⏰")
+    
+    if selected.name == "hermes":
+        setup_cron_hermes(workspace)
+    
+    # ── Done ──
     print()
-    print("🎉 Partner 已配置完成！")
+    line("━", 50, C.GREEN)
+    print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner 配置完成！{C.RESET}\n")
+    print(f"  使用方法：")
+    print(f"    1. 打开 {selected.emoji} {selected.display_name}")
+    print(f"    2. 直接说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
+    print(f"    3. 或者说：{C.CYAN}'让 partner 去研究 XXX'{C.RESET}")
+    print(f"    4. Partner 会在后台自主运行\n")
+    print(f"  管理命令：")
+    print(f"    {C.DIM}partner status    查看 Partner 状态{C.RESET}")
+    print(f"    {C.DIM}partner setup     重新配置{C.RESET}")
     print()
-    print("使用方法：")
-    print("  1. 打开 Hermes")
-    print("  2. 直接说：'partner 最近在研究什么？'")
-    print("  3. 或者说：'让 partner 去研究 XXX'")
-    print("  4. Partner 会在后台自主运行，你随时可以问它")
-    print()
-    print("设置自动研究：")
-    print("  在 Hermes 中说：'请设置 Partner 的自动研究 cron'")
 
 
-def interactive_setup():
-    """Interactive setup wizard."""
-    print("🤝 Partner - 首次配置")
-    print("=" * 40)
-    print()
+# ── Status Check ─────────────────────────────────────────────
+
+def show_status(workspace=None):
+    """Show Partner status with nice formatting."""
+    banner()
     
-    # Detect agents
-    hermes = find_hermes()
-    claude = find_claude_code()
+    if not workspace:
+        workspace = find_workspace()
     
-    print("检测已安装的 Agent：")
-    agents = []
-    if hermes["available"]:
-        print(f"  ✅ Hermes Agent ({hermes['version']})")
-        agents.append("hermes")
-    else:
-        print("  ❌ Hermes Agent 未安装")
-    
-    if claude["available"]:
-        print(f"  ✅ Claude Code")
-        agents.append("claude_code")
-    else:
-        print("  ❌ Claude Code 未安装")
-    
-    if not agents:
-        print()
-        print("没有检测到已安装的 Agent。")
-        print("请先安装 Hermes Agent: https://hermes-agent.nousresearch.com")
+    if not workspace:
+        status_warn("Partner 未配置")
+        status_info("运行 'partner setup' 开始配置")
         return
     
-    print()
+    config_path = os.path.join(workspace, "partner_config.json")
+    if not os.path.exists(config_path):
+        status_warn(f"未找到配置: {config_path}")
+        return
     
-    # Select agent
-    if len(agents) == 1:
-        selected = agents[0]
-        print(f"自动选择: {selected}")
+    with open(config_path) as f:
+        config = json.load(f)
+    
+    section("配置信息", "⚙️")
+    status_info(f"工作区: {config.get('workspace', workspace)}")
+    status_info(f"后端: {config.get('backend', 'unknown')}")
+    
+    section("研究统计", "📊")
+    
+    state_dir = os.path.join(workspace, "state")
+    
+    stats_path = os.path.join(state_dir, "stats.json")
+    if os.path.exists(stats_path):
+        with open(stats_path) as f:
+            stats = json.load(f)
+        print(f"    ⏱  研究周期: {C.BOLD}{stats.get('total_cycles', 0)}{C.RESET}")
+        print(f"    📋 完成任务: {C.BOLD}{stats.get('total_tasks_completed', 0)}{C.RESET}")
+    
+    kb_path = os.path.join(state_dir, "knowledge.json")
+    if os.path.exists(kb_path):
+        with open(kb_path) as f:
+            kb = json.load(f)
+        entries = kb.get("entries", []) if isinstance(kb, dict) else kb
+        print(f"    📚 知识条目: {C.BOLD}{len(entries)}{C.RESET}")
+    
+    tq_path = os.path.join(state_dir, "task_queue.json")
+    if os.path.exists(tq_path):
+        with open(tq_path) as f:
+            tasks = json.load(f)
+        pending = sum(1 for t in tasks if t.get("status") == "pending")
+        print(f"    ⏳ 待执行:   {C.BOLD}{pending}{C.RESET}")
+    
+    hb_path = os.path.join(state_dir, "heartbeat.json")
+    if os.path.exists(hb_path):
+        with open(hb_path) as f:
+            hb = json.load(f)
+        print(f"    💓 最后心跳: {hb.get('last_heartbeat', 'unknown')[:16]}")
+        print(f"    📶 状态:     {hb.get('status', 'unknown')}")
+    
+    section("使用方法", "💡")
+    backend = config.get('backend', 'hermes')
+    if backend == 'hermes':
+        print(f"    打开 Hermes，说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
     else:
-        print("选择要使用的 Agent：")
-        for i, a in enumerate(agents, 1):
-            print(f"  {i}. {a}")
-        choice = input("请输入编号: ").strip()
-        selected = agents[int(choice) - 1] if choice.isdigit() else agents[0]
+        print(f"    在 {backend} 中说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
     
-    # Workspace
     print()
-    default_workspace = os.path.expanduser("~/partner_workspace")
-    workspace = input(f"工作区路径 [{default_workspace}]: ").strip() or default_workspace
-    workspace = os.path.expanduser(workspace)
-    os.makedirs(workspace, exist_ok=True)
-    
-    # Create workspace structure
-    for d in ["state", "knowledge", "ideas", "logs"]:
-        os.makedirs(os.path.join(workspace, d), exist_ok=True)
-    
-    # Setup based on selected agent
-    if selected == "hermes":
-        setup_hermes(workspace)
-    elif selected == "claude_code":
-        print("Claude Code 集成即将推出，敬请期待！")
 
 
-if __name__ == "__main__":
-    interactive_setup()
+def find_workspace():
+    """Find Partner workspace."""
+    ws = os.environ.get("PARTNER_WORKSPACE")
+    if ws and os.path.exists(ws):
+        return ws
+    
+    candidates = [
+        os.path.expanduser("~/partner_workspace"),
+        os.path.expanduser("~/.partner"),
+    ]
+    for c in candidates:
+        if os.path.exists(os.path.join(c, "partner_config.json")):
+            return c
+    return None
