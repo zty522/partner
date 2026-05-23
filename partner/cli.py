@@ -126,6 +126,8 @@ def cmd_status(args):
     if os.path.exists(tq_path):
         with open(tq_path) as f:
             tasks = _json.load(f)
+        # Filter out malformed entries (e.g. bare strings from buggy cron writes)
+        tasks = [t for t in tasks if isinstance(t, dict)]
         pending = [t for t in tasks if t.get("status") == "pending"]
         completed = [t for t in tasks if t.get("status") == "completed"]
         in_progress = [t for t in tasks if t.get("status") == "in_progress"]

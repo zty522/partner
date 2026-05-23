@@ -56,6 +56,9 @@ class TaskQueue:
             valid_fields = {f.name for f in Task.__dataclass_fields__.values()}
             self.tasks = []
             for t in data:
+                # Skip malformed entries (e.g. bare strings from buggy cron writes)
+                if not isinstance(t, dict):
+                    continue
                 filtered = {k: v for k, v in t.items() if k in valid_fields}
                 self.tasks.append(Task(**filtered))
         except (FileNotFoundError, json.JSONDecodeError):

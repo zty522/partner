@@ -255,6 +255,11 @@ Partner 数据在 `{workspace}/state/` 下。
 ### 添加任务
 用户说 "让 partner 去研究 X" 时：
 用 execute_code 向 `{workspace}/state/task_queue.json` 添加任务。
+⚠️ 每个任务必须是字典对象，包含字段：
+```json
+{{"id": "task_xxxxxxxx", "type": "deep_dive", "title": "任务标题", "description": "描述", "priority": 5, "status": "pending", "created_at": "ISO时间", "tags": []}}
+```
+绝对不要写入纯字符串！
 
 ### 执行研究
 用户说 "让 partner 做一次研究" 时：
@@ -300,6 +305,10 @@ def setup_cron_hermes(workspace: str):
 1. 用 execute_code 读取 {workspace}/state/task_queue.json，获取最高优先级的 pending 任务
 2. 根据任务类型执行：literature_search 用 web_search，project_scan 用 read_file，其他用 web_search
 3. 用 execute_code 更新状态：标记完成、添加知识、记录日志、生成新任务
+
+⚠️ task_queue.json 中每个任务必须是字典对象，格式：
+{{"id": "task_xxxxxxxx", "type": "deep_dive", "title": "任务标题", "description": "描述", "priority": 5, "status": "pending", "created_at": "ISO时间", "tags": []}}
+绝对不要写入纯字符串！所有新任务必须包含以上字段。
 
 只在 {workspace} 内写文件。用中文。"""
     
