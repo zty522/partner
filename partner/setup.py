@@ -863,14 +863,38 @@ def interactive_setup():
     print()
     line("━", 50, C.GREEN)
     print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner 配置完成！{C.RESET}\n")
-    print(f"  使用方法：")
+    print(f"  {C.BOLD}使用方法：{C.RESET}")
     print(f"    1. 打开 {selected.emoji} {selected.display_name}")
     print(f"    2. 直接说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
     print(f"    3. 或者说：{C.CYAN}'让 partner 去研究 XXX'{C.RESET}")
     print(f"    4. Partner 会在后台自主运行\n")
-    print(f"  管理命令：")
+    
+    # Show messaging instructions if configured
+    if messaging_config.get("enabled"):
+        platform = messaging_config.get("platform", "")
+        print(f"  {C.BOLD}消息平台：{C.RESET}")
+        if platform == "wechat":
+            import platform as _platform
+            if _platform.system() == "Windows":
+                print(f"    {C.CYAN}partner wechat{C.RESET}          启动微信桥接")
+                print(f"    或双击：{workspace}/scripts/start_wechat.bat")
+            else:
+                print(f"    {C.CYAN}partner wechat{C.RESET}          启动微信桥接")
+                print(f"    或运行：{workspace}/scripts/start_wechat.sh")
+        elif platform == "qq":
+            print(f"    {C.CYAN}partner qq{C.RESET}              启动 QQ 桥接")
+            print(f"    或运行：{workspace}/scripts/start_qq.sh")
+        print()
+    
+    print(f"  {C.BOLD}管理命令：{C.RESET}")
     print(f"    {C.DIM}partner status    查看 Partner 状态{C.RESET}")
     print(f"    {C.DIM}partner setup     重新配置{C.RESET}")
+    if messaging_config.get("enabled"):
+        platform = messaging_config.get("platform", "")
+        if platform == "wechat":
+            print(f"    {C.DIM}partner wechat    启动微信{C.RESET}")
+        elif platform == "qq":
+            print(f"    {C.DIM}partner qq        启动 QQ{C.RESET}")
     print()
 
 
