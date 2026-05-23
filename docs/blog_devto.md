@@ -50,7 +50,12 @@ An **Event** is one complete research cycle — like how Agents have Skills, Par
 
 Each Event follows a structured flow:
 
-![Event Flow](https://raw.githubusercontent.com/zty522/partner/main/docs/event_flow.png)
+📖 Literature    → Search and read papers
+🔬 Project Scan  → Analyze your codebase
+💡 Idea Generate → Propose improvements
+🧭 Exploration   → Try new directions
+📝 Knowledge     → Record findings
+🌱 Spawn         → Create new Events
 
 Events **grow on their own** — one Event's findings automatically spawn new Events. The research never stops.
 
