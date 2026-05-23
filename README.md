@@ -2,9 +2,10 @@
 
 # 🤝 Partner
 
-### Your AI Research Companion
+## *"Hey Partner, what have you been doing?"*
 
-**LLM generates text. Agent executes tasks. Partner does research — on its own.**
+**An AI research companion that works independently in the background.
+You don't give it commands. You just check in.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
@@ -13,187 +14,128 @@
 
 ---
 
-## What is Partner?
+## The Idea
 
-Partner is a new kind of AI system — an **autonomous research entity** that works independently in the background. It reads papers, explores your projects, builds knowledge, and proposes new ideas. All on its own.
+```
+LLM:     You ask → It answers → Done
+Agent:   You command → It executes → Waits
+Partner: It works on its own → You ask "what have you been doing?" → It reports
+```
 
-The best part? You can just ask:
+Partner is **proactive**. It reads papers, explores your projects, builds a knowledge base, and proposes new ideas — all without you telling it to. When you're ready, you just ask:
 
 > **"Hey Partner, what have you been doing?"**
 
 And it tells you everything it discovered while you were away.
-
-```
-LLM:     You ask → Model answers → Done
-Agent:   You command → Agent executes → Waits for next command
-Partner: Partner works on its own → You check in → Partner reports
-```
-
-**Partner is proactive, not reactive.**
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
 git clone https://github.com/zty522/partner.git
 cd partner
 pip install -e .
-
-# First-time setup (interactive wizard)
 partner setup
-
-# That's it! Talk to Partner through your agent.
-# Just say: "partner, what have you been doing?"
 ```
 
-### Setup Wizard
+The setup wizard detects your installed agents (Hermes, Codex, Claude Code), configures a workspace, and registers Partner as a skill. Then just talk naturally:
 
 ```
-  🤝 Partner v0.1.0
-  Your AI Research Companion
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You:       Hey Partner, what have you been doing?
 
-  🔍 Detecting installed Agents
-────────────────────────────────────────────────
-    ✓ 🔮 Hermes Agent  /home/you/.local/bin/hermes
-    ✓ ⚡ OpenAI Codex  /usr/bin/codex
-    ✗ 🧠 Claude Code   not installed
+Partner:   📊 Here's what I've been up to:
 
-  ⚙️  Select Agent Backend
-────────────────────────────────────────────────
-    ▶ 1. 🔮 Hermes Agent
-     · 2. ⚡ OpenAI Codex
+             ⏱  Completed 12 research cycles
+             📋 Finished 8 tasks
+             📚 Built up 15 knowledge entries
 
-  📂 Creating Workspace
-────────────────────────────────────────────────
-    ✓ Workspace: ~/partner_workspace
-    ✓ State files initialized
+           📖 Recent activity:
+             1. Searched for latest age prediction methods
+                → Found OMICmAge (Nature Aging 2024), MAE < 5 years
+             2. Analyzed exploration tree results
+                → Best method: age-matched + age-aware correction
 
-  🧩 Registering Partner Skill
-────────────────────────────────────────────────
-    ✓ Skill registered
+           🔑 Key findings:
+             • scGPT needs domain fine-tuning for aging tasks
+             • Diffusion models are replacing VAEs for molecule generation
 
-  🎉 Partner is ready!
+           🎯 71 tasks still queued for exploration
 ```
-
----
-
-## How to Use
-
-Partner talks through your existing agent. No new UI to learn.
-
-| You say | Partner does |
-|---------|-------------|
-| "partner, what have you been doing?" | Reports its recent research activity |
-| "partner, what do you know about X?" | Searches its knowledge base |
-| "partner, go research X" | Adds a new research task |
-| "pause X, partner should focus on Y" | Adjusts research direction |
-| `partner status` | Quick status check via CLI |
 
 ---
 
 ## How It Works
 
 ```
-You (the researcher)
-        ↕ natural language through your agent
-   ┌─────────────┐
-   │   Partner    │ ← autonomous research loop
-   │   ┌───────┐  │
-   │   │ Tasks  │  │ ← self-generated + user-injected
-   │   │Knowledge│ │ ← growing knowledge base
-   │   │ Journal │ │ ← activity log
-   │   └───────┘  │
-   └──────┬──────┘
-          ↕
-   Agent Backend (Hermes, Claude Code, Codex)
-          ↕
-   Workspace (files, state, checkpoints)
+┌──────────────────────────────────────────┐
+│            You (the researcher)           │
+│   "What have you been doing?"             │
+└──────────────────┬───────────────────────┘
+                   ↕ natural language
+┌──────────────────┴───────────────────────┐
+│              🤝 Partner                   │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
+│  │   Task   │ │Knowledge │ │  Journal  │ │
+│  │  Queue   │ │   Base   │ │  System   │ │
+│  └──────────┘ └──────────┘ └──────────┘ │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
+│  │Scheduler │ │  State   │ │  Agent    │ │
+│  │ (Cron)   │ │ Manager  │ │ Adapter   │ │
+│  └──────────┘ └──────────┘ └──────────┘ │
+└──────────────────┬───────────────────────┘
+                   ↕
+┌──────────────────┴───────────────────────┐
+│  Agent Backend (Hermes / Codex / Claude)  │
+│  Web Search · Code Execution · File Ops   │
+└──────────────────────────────────────────┘
 ```
 
-1. **Partner starts** and loads its state
-2. **Every N minutes**, it wakes up and picks the highest priority task
-3. **Executes the task** via the agent backend (search literature, analyze code, etc.)
-4. **Records findings** in the knowledge base and journal
-5. **Generates new tasks** based on what it learned
-6. **Repeats** — forever, until you tell it to stop
-
----
-
-## Architecture
-
-Partner sits **on top of** existing agent frameworks, like how agents sit on top of LLMs:
-
-```
-┌─────────────────────────────────────────┐
-│  Partner (research entity layer)         │
-│  Task Queue · Knowledge · Journal        │
-├─────────────────────────────────────────┤
-│  Agent Backend (Hermes / Claude / Codex) │
-│  Web Search · File Ops · Code Execution  │
-├─────────────────────────────────────────┤
-│  LLM (GPT / Claude / DeepSeek / etc.)   │
-└─────────────────────────────────────────┘
-```
-
-You configure which agent to use during `partner setup`. Partner then uses that agent's capabilities (web search, code execution, file operations) to conduct research autonomously.
-
----
-
-## Comparison
-
-| Feature | LLM | Agent | **Partner** |
-|---------|-----|-------|-------------|
-| Needs user input | ✅ Every time | ✅ Every task | ❌ Works on its own |
-| Accumulates knowledge | ❌ | ❌ | ✅ Growing KB |
-| Persistent | ❌ Per session | ❌ Per task | ✅ Continuous |
-| Crash recovery | ❌ | ❌ | ✅ Auto-recover |
-| "What have you done?" | ❌ | ❌ | ✅ Core feature |
+Partner generates its own tasks, executes them through your agent, and accumulates knowledge over time. It recovers from crashes via heartbeat + checkpoint system.
 
 ---
 
 ## Commands
 
 ```bash
-partner              # Guide to start talking
-partner setup        # First-time configuration (or reconfigure)
-partner status       # Check Partner status and research progress
+partner          # Guide to start talking
+partner setup    # First-time configuration (or reconfigure)
+partner status   # Check research progress
 ```
 
----
-
-## Use Cases
-
-- **Research labs** — Let Partner explore related work while you do experiments
-- **Graduate students** — Have a research companion that never sleeps
-- **Data science teams** — Automatically monitor and improve ML pipelines
-- **Literature reviews** — Partner reads papers so you don't have to
-- **Cross-project insights** — Partner finds connections you'd miss
+That's it. All conversation happens through your agent.
 
 ---
 
 ## Supported Agents
 
-| Agent | Status | Notes |
-|-------|--------|-------|
-| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Supported | Full integration via skills |
-| ⚡ [OpenAI Codex](https://openai.com/codex) | 🔜 Coming soon | |
-| 🧠 [Claude Code](https://claude.ai/code) | 🔜 Coming soon | |
+| Agent | Status |
+|-------|--------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Supported |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | 🔜 Coming soon |
+| 🧠 [Claude Code](https://claude.ai/code) | 🔜 Coming soon |
+
+---
+
+## Why Partner?
+
+| | LLM | Agent | **Partner** |
+|---|-----|-------|-------------|
+| Needs your input | ✅ Every time | ✅ Every task | ❌ Works on its own |
+| Learns over time | ❌ | ❌ | ✅ Growing knowledge base |
+| Survives restarts | ❌ | ❌ | ✅ Crash recovery |
+| "What have you done?" | ❌ | ❌ | ✅ **Core feature** |
 
 ---
 
 ## License
 
-Apache 2.0 — use it however you want.
+[Apache 2.0](LICENSE) — use it however you want.
 
 ---
 
 <div align="center">
 
-**Partner: because research shouldn't wait for you.**
-
-*Built with the belief that AI should be a research companion, not just a tool.*
+***Partner: because research shouldn't wait for you.***
 
 </div>
