@@ -35,7 +35,7 @@ def get_workspace() -> str:
 
 def cmd_setup(args):
     """Run first-time setup."""
-    from .setup import interactive_setup, find_hermes, find_claude_code
+    from .setup import interactive_setup, detect_hermes, detect_claude_code
     interactive_setup()
 
 
