@@ -44,38 +44,38 @@ pip install -e .
 # First-time setup (interactive wizard)
 partner setup
 
-# Talk to Partner through your agent (Hermes, Claude Code, etc.)
-# Just say: "partner 最近在研究什么？"
+# That's it! Talk to Partner through your agent.
+# Just say: "partner, what have you been doing?"
 ```
 
-### What you see during setup
+### Setup Wizard
 
 ```
   🤝 Partner v0.1.0
   Your AI Research Companion
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  🔍 检测已安装的 Agent
+  🔍 Detecting installed Agents
 ────────────────────────────────────────────────
     ✓ 🔮 Hermes Agent  /home/you/.local/bin/hermes
     ✓ ⚡ OpenAI Codex  /usr/bin/codex
-    ✗ 🧠 Claude Code   未安装
+    ✗ 🧠 Claude Code   not installed
 
-  ⚙️ 选择 Agent 后端
+  ⚙️  Select Agent Backend
 ────────────────────────────────────────────────
     ▶ 1. 🔮 Hermes Agent
      · 2. ⚡ OpenAI Codex
 
-  📂 创建工作区
+  📂 Creating Workspace
 ────────────────────────────────────────────────
-    ✓ 工作区: ~/partner_workspace
-    ✓ 状态文件已初始化
+    ✓ Workspace: ~/partner_workspace
+    ✓ State files initialized
 
-  🧩 注册 Partner 技能
+  🧩 Registering Partner Skill
 ────────────────────────────────────────────────
-    ✓ 技能已注册
+    ✓ Skill registered
 
-  🎉 Partner 配置完成！
+  🎉 Partner is ready!
 ```
 
 ---
@@ -86,11 +86,11 @@ Partner talks through your existing agent. No new UI to learn.
 
 | You say | Partner does |
 |---------|-------------|
-| "partner 最近在研究什么？" | Reports its recent research activity |
-| "partner 知道关于 X 的什么？" | Searches its knowledge base |
-| "让 partner 去研究 X" | Adds a new research task |
-| "暂停 X，让 partner 集中做 Y" | Adjusts research direction |
-| "partner status" | Quick status check |
+| "partner, what have you been doing?" | Reports its recent research activity |
+| "partner, what do you know about X?" | Searches its knowledge base |
+| "partner, go research X" | Adds a new research task |
+| "pause X, partner should focus on Y" | Adjusts research direction |
+| `partner status` | Quick status check via CLI |
 
 ---
 
@@ -138,6 +138,8 @@ Partner sits **on top of** existing agent frameworks, like how agents sit on top
 └─────────────────────────────────────────┘
 ```
 
+You configure which agent to use during `partner setup`. Partner then uses that agent's capabilities (web search, code execution, file operations) to conduct research autonomously.
+
 ---
 
 ## Comparison
@@ -156,20 +158,29 @@ Partner sits **on top of** existing agent frameworks, like how agents sit on top
 
 ```bash
 partner              # Guide to start talking
-partner setup        # First-time configuration
-partner status       # Check Partner status
-partner setup --status  # Quick status check
+partner setup        # First-time configuration (or reconfigure)
+partner status       # Check Partner status and research progress
 ```
 
 ---
 
 ## Use Cases
 
-- **Research labs**: Let Partner explore related work while you do experiments
-- **Graduate students**: Have a research companion that never sleeps
-- **Data science teams**: Automatically monitor and improve ML pipelines
-- **Literature reviews**: Partner reads papers so you don't have to
-- **Cross-project insights**: Partner finds connections you'd miss
+- **Research labs** — Let Partner explore related work while you do experiments
+- **Graduate students** — Have a research companion that never sleeps
+- **Data science teams** — Automatically monitor and improve ML pipelines
+- **Literature reviews** — Partner reads papers so you don't have to
+- **Cross-project insights** — Partner finds connections you'd miss
+
+---
+
+## Supported Agents
+
+| Agent | Status | Notes |
+|-------|--------|-------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Supported | Full integration via skills |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | 🔜 Coming soon | |
+| 🧠 [Claude Code](https://claude.ai/code) | 🔜 Coming soon | |
 
 ---
 
