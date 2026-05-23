@@ -93,6 +93,40 @@ Partner:   📊 Here's what I've been up to:
 
 Partner generates its own tasks, executes them through your agent, and accumulates knowledge over time. It recovers from crashes via heartbeat + checkpoint system.
 
+
+
+---
+
+## Events: The Heart of Partner
+
+An **Event** is one complete research cycle. Like how Agents have Skills, Partner has Events.
+
+```
+┌─────────────────────────────────────────┐
+│              One Event                   │
+│                                          │
+│  📖 Literature    → Search papers        │
+│  🔬 Project Scan  → Analyze your code    │
+│  💡 Idea Generate → Propose improvements │
+│  🧭 Exploration   → Try new directions   │
+│  📝 Knowledge     → Record findings      │
+│  🌱 Spawn         → Create new Events    │
+└─────────────────────────────────────────┘
+```
+
+Events **grow on their own** — one Event's findings automatically spawn new Events. The research never stops.
+
+### Event Templates
+
+| Template | What it does |
+|----------|-------------|
+| `literature-deep-dive` | Search, read, and synthesize papers on a topic |
+| `project-audit` | Analyze a codebase, find improvements |
+| `idea-brainstorm` | Generate research ideas from accumulated knowledge |
+| `cross-pollination` | Find connections between different projects |
+
+Users can define custom Event templates — share them with the community, like Agent skills.
+
 ---
 
 ## Commands

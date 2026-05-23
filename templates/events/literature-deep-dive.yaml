@@ -1,0 +1,43 @@
+name: literature-deep-dive
+description: "深入研究特定主题的文献，整合发现并生成后续探索方向"
+version: 1.0.0
+tags: [literature, research, synthesis]
+priority_base: 7
+ttl_hours: 48
+estimated_minutes: 10
+
+triggers:
+  auto: true
+  keywords: ["研究", "搜索", "文献", "paper", "survey"]
+  min_knowledge_gap: 0.3
+
+inputs:
+  topic:
+    type: string
+    required: true
+    description: "研究主题"
+  depth:
+    type: enum
+    values: [shallow, medium, deep]
+    default: medium
+
+phases:
+  - name: search
+    type: literature_search
+    description: "搜索相关文献"
+    prompt: "搜索关于 {topic} 的最新论文（2024-2026），关注方法论创新"
+    max_queries: 3
+  - name: extract
+    type: knowledge_extraction
+    description: "提取关键发现"
+    prompt: "从搜索结果中提取关键发现、方法和工具"
+    min_entries: 1
+  - name: synthesize
+    type: knowledge_synthesis
+    description: "整合到知识库"
+    prompt: "将新发现与现有知识库整合，找到关联和空白"
+  - name: spawn
+    type: event_generation
+    description: "生成后续 Event"
+    prompt: "基于本次文献阅读，生成 1-2 个后续探索方向"
+    max_events: 2

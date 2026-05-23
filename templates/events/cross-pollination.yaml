@@ -1,0 +1,45 @@
+name: cross-pollination
+description: "跨项目知识迁移：发现不同项目间的方法复用机会"
+version: 1.0.0
+tags: [cross-project, transfer, analogy]
+priority_base: 6
+ttl_hours: 48
+estimated_minutes: 10
+
+triggers:
+  auto: false
+  keywords: ["迁移", "跨项目", "类比", "transfer"]
+
+inputs:
+  source_project:
+    type: string
+    default: ""
+    description: "源项目"
+  target_project:
+    type: string
+    default: ""
+    description: "目标项目"
+  methods:
+    type: list
+    default: []
+    description: "要迁移的方法"
+
+phases:
+  - name: compare
+    type: project_scan
+    description: "扫描所有活跃项目的方法论"
+    prompt: "扫描所有活跃项目的方法论，对比异同"
+    targets: "all_active_projects"
+  - name: find-analogies
+    type: knowledge_synthesis
+    description: "识别方法相似性"
+    prompt: "识别项目间的方法相似性和可迁移的技术"
+  - name: adapt
+    type: idea_generation
+    description: "设计迁移方案"
+    prompt: "设计跨项目方法迁移的具体方案"
+  - name: document
+    type: knowledge_extraction
+    description: "记录迁移方案"
+    prompt: "记录迁移方案到知识库"
+    max_events: 1

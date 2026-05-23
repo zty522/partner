@@ -1,0 +1,31 @@
+name: synthesis-review
+description: "知识库综合审查：发现空白、纠正错误、优化组织"
+version: 1.0.0
+tags: [synthesis, review, maintenance]
+priority_base: 5
+ttl_hours: 72
+estimated_minutes: 10
+
+triggers:
+  auto: true
+  schedule: "every_5_events"
+  keywords: ["审查", "综合", "清理", "review"]
+
+phases:
+  - name: scan
+    type: knowledge_scan
+    description: "扫描知识库"
+    prompt: "扫描知识库所有条目，标记过时、低置信度、重复的条目"
+  - name: find-gaps
+    type: gap_analysis
+    description: "识别知识空白"
+    prompt: "识别知识库中的空白领域"
+  - name: fill
+    type: literature_search
+    description: "填补空白"
+    prompt: "搜索填补空白的文献"
+    max_queries: 2
+  - name: reorganize
+    type: knowledge_synthesis
+    description: "重组知识库"
+    prompt: "重组知识库结构，更新关联关系"

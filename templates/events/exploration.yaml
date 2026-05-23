@@ -1,0 +1,37 @@
+name: exploration
+description: "探索性研究：自由探索新方向，寻找灵感和机会"
+version: 1.0.0
+tags: [exporation, discovery, serendipity]
+priority_base: 4
+ttl_hours: 72
+estimated_minutes: 10
+
+triggers:
+  auto: true
+  keywords: ["探索", "发现", "新方向", "explore"]
+  schedule: "every_10_events"
+
+inputs:
+  direction:
+    type: string
+    default: ""
+    description: "探索方向（可选，留空则随机探索）"
+
+phases:
+  - name: survey
+    type: literature_search
+    description: "浏览前沿"
+    prompt: "搜索最近一周的 AI/ML/生物信息学前沿论文和项目"
+    max_queries: 2
+  - name: discover
+    type: knowledge_extraction
+    description: "发现亮点"
+    prompt: "从搜索结果中发现有趣的方法、工具或想法"
+  - name: connect
+    type: knowledge_synthesis
+    description: "关联现有知识"
+    prompt: "将新发现与知识库中的现有条目关联，找到潜在联系"
+  - name: spark
+    type: idea_generation
+    description: "激发新想法"
+    prompt: "基于新发现和现有知识的关联，生成 2-3 个探索性想法"

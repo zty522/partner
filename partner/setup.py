@@ -276,14 +276,50 @@ Partner 数据在 `{workspace}/state/` 下。
 # ── Cron Setup ──────────────────────────────────────────────
 
 def setup_cron_hermes(workspace: str):
-    """Set up Hermes cron job for Partner."""
-    print()
-    status_info("Partner 的自动研究需要通过 Hermes cron 驱动")
-    status_info("请在 Hermes 中运行以下命令设置 cron：")
-    print()
-    print(f"    {C.CYAN}hermes{C.RESET}")
-    print(f"    {C.DIM}然后说：'请设置 Partner 的自动研究 cron，每 30 分钟执行一次'{C.RESET}")
-    print()
+    """Auto-create Hermes cron job for Partner."""
+    import subprocess
+    
+    # Check if cron already exists
+    try:
+        result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
+        if "partner" in result.stdout.lower() or "autonomous-researcher" in result.stdout.lower():
+            status_ok("Cron job 已存在，跳过创建")
+            # Extract job ID
+            for line in result.stdout.split("\n"):
+                if "[" in line and "active" in line:
+                    job_id = line.split("[")[0].strip()
+                    status_info(f"Job ID: {job_id}")
+                    return
+    except:
+        pass
+    
+    # Create cron job
+    cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
+
+执行步骤：
+1. 用 execute_code 读取 {workspace}/state/task_queue.json，获取最高优先级的 pending 任务
+2. 根据任务类型执行：literature_search 用 web_search，project_scan 用 read_file，其他用 web_search
+3. 用 execute_code 更新状态：标记完成、添加知识、记录日志、生成新任务
+
+只在 {workspace} 内写文件。用中文。"""
+    
+    try:
+        # Try using hermes CLI to create cron
+        result = subprocess.run(
+            ["hermes", "cron", "create", 
+             "--schedule", "every 30m",
+             "--name", "partner-research-cycle",
+             "--prompt", cron_prompt],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            status_ok("Cron job 已自动创建 (每 30 分钟)")
+        else:
+            status_warn("Cron 自动创建失败，请手动设置")
+            print(f"    {C.DIM}在 Hermes 中说：'设置 partner 的自动研究 cron'{C.RESET}")
+    except Exception as e:
+        status_warn(f"Cron 创建失败: {e}")
+        print(f"    {C.DIM}在 Hermes 中说：'设置 partner 的自动研究 cron'{C.RESET}")
 
 
 # ── Main Setup Flow ─────────────────────────────────────────
