@@ -203,15 +203,16 @@ def main():
     
     # task
     p_task = sub.add_parser('task', help='Task management')
-    p_task.add_argument('--workspace', '-w', help='Workspace path')
     task_sub = p_task.add_subparsers(dest='task_action')
     
     p_task_add = task_sub.add_parser('add', help='Add a task')
     p_task_add.add_argument('title', help='Task title')
     p_task_add.add_argument('description', nargs='?', default='', help='Task description')
     p_task_add.add_argument('--priority', '-p', type=int, default=5, help='Priority (1-10)')
+    p_task_add.add_argument('--workspace', '-w', help='Workspace path')
     
     p_task_list = task_sub.add_parser('list', help='List tasks')
+    p_task_list.add_argument('--workspace', '-w', help='Workspace path')
     p_task.set_defaults(func=cmd_task)
     
     # knowledge
