@@ -229,46 +229,104 @@ def register_hermes_skill(workspace: str) -> str:
     
     skill_content = f'''---
 name: partner
-description: "Partner 🤝 - 自主研究伙伴。用户说 'partner' 关键词时激活。可查询研究进展、添加任务、搜索知识。"
-version: 0.1.0
+description: "Partner 🤝 - 自主研究伙伴。用户提到 partner 时激活。Partner 在后台自主运行，Hermes 只负责传递指令（用 execute_code 写 task_queue.json），绝不替 Partner 做研究（禁止 delegate_task/web_search/read_file）。"
+version: 0.3.0
 author: Partner Team
 tags: [partner, autonomous, research, companion]
 ---
 
 # Partner 🤝 - Your AI Research Companion
 
-当用户提到 "partner"、"研究伙伴"、"最近研究了什么" 时，进入 Partner 模式。
+## ⛔ 第一步：禁用研究工具（必须执行）
+
+**每次加载此 skill 时，第一件事就是运行以下代码禁用研究工具：**
+
+```python
+import subprocess
+for toolset in ["web", "browser", "delegation"]:
+    subprocess.run(["hermes", "tools", "disable", toolset], capture_output=True)
+print("✅ 已禁用 web/browser/delegation 工具集")
+```
+
+用 execute_code 执行上面的代码。**这是你加载 skill 后做的第一件事，不要跳过。**
+
+---
+
+## 核心规则
+
+**你（当前会话）是传话筒，不是执行者。**
+
+当用户让 Partner 做某事时，你**只需要把任务加入队列**，然后回复"已加入队列"。
+
+**你不需要考虑 Partner 能不能做、怎么做。** 那是 Partner cron job 的事。cron job 是一个**独立的 Hermes 会话**，每 30 分钟自动运行一次，它会：
+1. 读取 task_queue.json
+2. 用 web_search/read_file 执行研究
+3. 记录结果到 knowledge.json
+
+**你和 cron job 是两个不同的会话。你只管传话，cron job 只管执行。**
+
+**你绝对不能：**
+- ❌ 分析任务是否适合 Partner
+- ❌ 判断 Partner 能不能做
+- ❌ 自己去执行研究
+- ❌ `delegate_task` — 不要派子代理
+- ❌ `web_search` — 不要搜索
+- ❌ `read_file` — 不要读研究文件（state/*.json 除外）
+- ❌ `browser_*` — 不要访问网页
+
+**你唯一能做的：**
+- ✅ `execute_code` — 读写 state/ 目录下的 JSON 文件
+
+---
 
 ## 工作区
 Partner 数据在 `{workspace}/state/` 下。
 
 ## 交互方式
 
-### 查询进展
-用户说 "partner 最近在研究什么"、"研究进展" 时：
-用 execute_code 读取 `{workspace}/state/journal.jsonl`（最近10条）和 `stats.json`，用中文汇报。
-
-### 搜索知识
-用户说 "partner 知道关于 X 的什么" 时：
-用 execute_code 搜索 `{workspace}/state/knowledge.json`。
-
 ### 添加任务
 用户说 "让 partner 去研究 X" 时：
-用 execute_code 向 `{workspace}/state/task_queue.json` 添加任务。
-⚠️ 每个任务必须是字典对象，包含字段：
+1. 运行工具限制 hook（如果还没运行的话）
+2. 用 execute_code 向 `{workspace}/state/task_queue.json` 添加一个 pending 任务
+3. 回复用户："已加入队列，Partner 会在下一个周期自动执行。"
+
+**任务格式（必须是字典，不是字符串）：**
 ```json
 {{"id": "task_xxxxxxxx", "type": "deep_dive", "title": "任务标题", "description": "描述", "priority": 5, "status": "pending", "created_at": "ISO时间", "tags": []}}
 ```
-绝对不要写入纯字符串！
+
+**⛔ STOP. 到此结束。不要继续做任何事。**
+
+### 查询进展
+用户说 "partner 最近在研究什么" 时：
+用 execute_code 读取 `{workspace}/state/journal.jsonl`（最后10条）和 `stats.json`，用中文汇报。**只读日志，不要自己分析。**
+
+### 搜索知识
+用户说 "partner 知道关于 X 的什么" 时：
+用 execute_code 搜索 `{workspace}/state/knowledge.json`。**只搜已有知识，不要上网搜。**
 
 ### 执行研究
-用户说 "让 partner 做一次研究" 时：
-用 execute_code 读取最高优先级任务，用 web_search/read_file 执行，更新状态。
+用户说 "让 partner 现在做一次研究" 时：
+触发 cron job。**不要自己执行。**
+
+### 调整方向
+用户说 "暂停 X，让 partner 集中做 Y" 时：
+用 execute_code 修改任务优先级。**只改队列，不要自己做。**
 
 ## 注意
 - 只在 `{workspace}` 内写文件
 - 用中文对话
-- 不暴露 JSON 文件路径等内部细节
+- **绝不替 Partner 执行研究任务，只传递指令**
+
+## 恢复工具
+当不再处理 Partner 相关指令时，运行以下代码恢复工具：
+
+```python
+import subprocess
+for toolset in ["web", "browser", "delegation"]:
+    subprocess.run(["hermes", "tools", "enable", toolset], capture_output=True)
+print("✅ 已恢复 web/browser/delegation 工具集")
+```
 '''
     
     skill_path = skill_dir / "SKILL.md"
