@@ -401,6 +401,7 @@ def interactive_setup():
     for d in ["state", "knowledge", "ideas", "logs"]:
         os.makedirs(os.path.join(workspace, d), exist_ok=True)
     
+    readonly_dirs = []
     status_ok(f"工作区: {workspace}")
     
     # Initialize empty state files
@@ -431,6 +432,71 @@ def interactive_setup():
     else:
         status_info(f"{selected.display_name} 集成即将推出")
     
+
+    # ── Step 5b: WSL Bridge ──
+    from .wsl_bridge import is_wsl, get_windows_drives, get_windows_user_dirs
+    
+    if is_wsl():
+        section("WSL Bridge (Windows 文件访问)", "🌉")
+        status_info("检测到 WSL 环境，可以访问 Windows 文件系统")
+        
+        enable_wsl = prompt_choice("是否启用 WSL Bridge？", [
+            "启用（推荐）",
+            "不启用",
+        ], default=0)
+        
+        if enable_wsl == 0:
+            drives = get_windows_drives()
+            if drives:
+                status_info(f"可用驱动器: {', '.join(d['label'] for d in drives)}")
+            
+            users = get_windows_user_dirs()
+            if users:
+                user = users[0]
+                status_info(f"Windows 用户: {user['user']}")
+                
+                # Let user pick directories
+                available_dirs = []
+                for name, path in user["dirs"].items():
+                    available_dirs.append(f"{name} ({path})")
+                
+                if available_dirs:
+                    print(f"\n  {C.BOLD}选择要访问的 Windows 目录：{C.RESET}")
+                    for i, d in enumerate(available_dirs, 1):
+                        print(f"    {i}. {d}")
+                    print(f"    {C.DIM}· 全部选择请输入 'all'，跳过直接回车{C.RESET}")
+                    
+                    choice = input(f"  {C.DIM}选择: {C.RESET}").strip()
+                    selected_dirs = []
+                    if choice.lower() == 'all':
+                        selected_dirs = list(user["dirs"].values())
+                    elif choice.isdigit() and 1 <= int(choice) <= len(user["dirs"]):
+                        selected_dirs = [list(user["dirs"].values())[int(choice) - 1]]
+                    elif choice:
+                        for idx_str in choice.split(","):
+                            idx_str = idx_str.strip()
+                            if idx_str.isdigit():
+                                idx = int(idx_str) - 1
+                                if 0 <= idx < len(user["dirs"]):
+                                    selected_dirs.append(list(user["dirs"].values())[idx])
+                    
+                    if selected_dirs:
+                        for d in selected_dirs:
+                            readonly_dirs.append(d)
+                            status_ok(f"已添加: {d}")
+                    else:
+                        status_info("跳过目录选择")
+            else:
+                status_warn("未找到 Windows 用户目录")
+        else:
+            status_info("WSL Bridge 已禁用")
+    else:
+        # Not WSL - still add platform detection
+        from .wsl_bridge import get_platform
+        plat = get_platform()
+        status_info(f"平台: {plat}")
+
+
     # ── Step 6: Research Interval ──
     section("研究频率", "⏰")
     
@@ -451,7 +517,7 @@ def interactive_setup():
         "name": "Partner",
         "workspace": {
             "path": workspace,
-            "readonly_dirs": [],
+            "readonly_dirs": readonly_dirs,
         },
         "agent": {
             "backend": selected.name,
