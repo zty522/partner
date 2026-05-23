@@ -234,31 +234,49 @@ def cmd_wechat(args):
         except Exception as e:
             print(f"  {C_RED}❌ Error: {e}{C_RESET}")
     else:
-        # WSL/Linux: connect to Windows bridge
-        host = args.host or "localhost"
-        port = args.port or 8765
-        print(f"  Linux/WSL detected - connecting to Windows bridge")
-        print(f"  {C_DIM}Target: ws://{host}:{port}{C_RESET}")
-        print()
-        print(f"  {C_YELLOW}⚠️  Make sure the Windows bridge is running:{C_RESET}")
-        print(f"  {C_DIM}  Windows PowerShell:{C_RESET}")
-        print(f"  {C_DIM}  python -m partner.windows_bridge --port {port}{C_RESET}")
-        print()
+        # Linux: try wechaty first, then WebSocket bridge
+        print("  Linux detected")
         
+        # Try wechaty first
         try:
-            from .wechat_ws_client import WeChatWSClient
-            client = WeChatWSClient(
-                workspace=workspace,
-                ws_url=f"ws://{host}:{port}",
-                voice_enabled=not args.no_voice,
-            )
-            print(f"  {C_GREEN}✅ Connected to Windows bridge{C_RESET}")
+            from .wechat_wechaty import WechatyAdapter
+            print("  Using Wechaty (cross-platform)")
+            print()
+            
+            adapter = WechatyAdapter(workspace=workspace)
+            print(f"  {C_GREEN}✅ Wechaty initialized{C_RESET}")
+            print(f"  {C_DIM}Scan QR code to login WeChat...{C_RESET}")
             print(f"  {C_DIM}Listening for messages... Ctrl+C to stop{C_RESET}")
             print()
-            client.start()
+            adapter.start()
         except ImportError:
-            print(f"  {C_RED}❌ websockets not installed{C_RESET}")
-            print(f"  {C_DIM}Install: pip install websockets{C_RESET}")
+            # Fall back to WebSocket bridge
+            print("  Wechaty not available, trying WebSocket bridge")
+            host = args.host or "localhost"
+            port = args.port or 8765
+            print(f"  {C_DIM}Target: ws://{host}:{port}{C_RESET}")
+            print()
+            print(f"  {C_YELLOW}⚠️  Make sure the Windows bridge is running:{C_RESET}")
+            print(f"  {C_DIM}  Windows PowerShell:{C_RESET}")
+            print(f"  {C_DIM}  python -m partner.windows_bridge --port {port}{C_RESET}")
+            print()
+            
+            try:
+                from .wechat_ws_client import WeChatWSClient
+                client = WeChatWSClient(
+                    workspace=workspace,
+                    ws_url=f"ws://{host}:{port}",
+                    voice_enabled=not args.no_voice,
+                )
+                print(f"  {C_GREEN}✅ Connected to Windows bridge{C_RESET}")
+                print(f"  {C_DIM}Listening for messages... Ctrl+C to stop{C_RESET}")
+                print()
+                client.start()
+            except ImportError:
+                print(f"  {C_RED}❌ websockets not installed{C_RESET}")
+                print(f"  {C_DIM}Install: pip install websockets{C_RESET}")
+            except Exception as e:
+                print(f"  {C_RED}❌ Error: {e}{C_RESET}")
         except Exception as e:
             print(f"  {C_RED}❌ Error: {e}{C_RESET}")
 
