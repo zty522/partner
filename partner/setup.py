@@ -324,6 +324,105 @@ def setup_cron_hermes(workspace: str):
 
 # ── Main Setup Flow ─────────────────────────────────────────
 
+
+
+def detect_openclaw() -> AgentInfo:
+    """Detect OpenClaw installation."""
+    import json as _json
+    home = Path.home()
+    config_dir = home / ".openclaw"
+    
+    if not config_dir.exists():
+        return AgentInfo("openclaw", "OpenClaw (小龙虾)", "🦞", False)
+    
+    config_path = config_dir / "openclaw.json"
+    config = {}
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = _json.load(f)
+        except:
+            pass
+    
+    # Check binary
+    bin_path = None
+    for candidate in [home / ".npm-global" / "bin" / "openclaw", Path("/usr/local/bin/openclaw")]:
+        if candidate.exists():
+            bin_path = str(candidate)
+            break
+    
+    if not bin_path:
+        try:
+            result = subprocess.run(["which", "openclaw"], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                bin_path = result.stdout.strip()
+        except:
+            pass
+    
+    model = config.get("agents", {}).get("defaults", {}).get("model", "")
+    
+    return AgentInfo(
+        name="openclaw",
+        display_name="OpenClaw (小龙虾)",
+        emoji="🦞",
+        available=bool(config_dir.exists()),
+        path=bin_path,
+        version=model,
+        config_path=str(config_path) if config_path.exists() else None,
+    )
+
+
+def detect_crewai() -> AgentInfo:
+    """Detect CrewAI installation."""
+    try:
+        import crewai
+        return AgentInfo("crewai", "CrewAI", "👥", True)
+    except ImportError:
+        pass
+    try:
+        result = subprocess.run(["which", "crewai"], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            return AgentInfo("crewai", "CrewAI", "👥", True, path=result.stdout.strip())
+    except:
+        pass
+    return AgentInfo("crewai", "CrewAI", "👥", False)
+
+
+def detect_autogpt() -> AgentInfo:
+    """Detect AutoGPT installation."""
+    for name in ["autogpt", "auto-gpt"]:
+        try:
+            result = subprocess.run(["which", name], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                return AgentInfo("autogpt", "AutoGPT", "🤖", True, path=result.stdout.strip())
+        except:
+            pass
+    return AgentInfo("autogpt", "AutoGPT", "🤖", False)
+
+
+def detect_openhands() -> AgentInfo:
+    """Detect OpenHands installation."""
+    try:
+        result = subprocess.run(["docker", "ps", "--filter", "name=openhands", "-q"], capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            return AgentInfo("openhands", "OpenHands", "👐", True)
+    except:
+        pass
+    return AgentInfo("openhands", "OpenHands", "👐", False)
+
+
+def detect_gptme() -> AgentInfo:
+    """Detect gptme installation."""
+    try:
+        result = subprocess.run(["which", "gptme"], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            return AgentInfo("gptme", "gptme", "💻", True, path=result.stdout.strip())
+    except:
+        pass
+    return AgentInfo("gptme", "gptme", "💻", False)
+
+
+
 def interactive_setup():
     """Main setup wizard."""
     banner()
@@ -333,6 +432,11 @@ def interactive_setup():
     
     agents = [
         detect_hermes(),
+        detect_openclaw(),
+        detect_crewai(),
+        detect_autogpt(),
+        detect_openhands(),
+        detect_gptme(),
         detect_claude_code(),
         detect_codex(),
     ]
