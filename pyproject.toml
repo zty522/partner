@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "partner-research"
+version = "0.1.0"
+description = "Partner - Your AI Research Companion. An autonomous research entity that works independently and talks to you when you ask: 'What have you been doing?'"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Partner Team"},
+]
+keywords = ["ai", "research", "autonomous", "agent", "science", "literature"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.scripts]
+partner = "partner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/partner"
+Documentation = "https://github.com/YOUR_USERNAME/partner#readme"
+Repository = "https://github.com/YOUR_USERNAME/partner"
+Issues = "https://github.com/YOUR_USERNAME/partner/issues"
+
+[tool.setuptools.packages.find]
+include = ["partner*"]
