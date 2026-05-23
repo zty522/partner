@@ -397,8 +397,21 @@ def interactive_setup():
     
     # ── Step 6: Save Config ──
     config = {
-        "workspace": workspace,
-        "backend": selected.name,
+        "name": "Partner",
+        "workspace": {
+            "path": workspace,
+            "readonly_dirs": [],
+        },
+        "agent": {
+            "backend": selected.name,
+            "model": None,
+            "provider": None,
+        },
+        "scheduler": {
+            "interval_minutes": 30,
+            "max_tasks_per_cycle": 1,
+            "heartbeat_timeout_minutes": 60,
+        },
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }

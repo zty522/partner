@@ -61,7 +61,7 @@ class Partner:
         config_path = os.path.join(self.workspace, "partner_config.json")
         self.config.save(config_path)
         
-        print("✅ Partner is running. Use 'partner chat' to talk to me.")
+        print("✅ Partner is running. Open Hermes and say 'partner 最近在研究什么？'")
     
     def run_cycle(self) -> Optional[str]:
         """Run one research cycle. Returns summary of what was done."""
@@ -81,6 +81,7 @@ class Partner:
         )
         
         # Execute task
+        result = None
         try:
             result = self._execute_task(task)
             self.task_queue.complete(task.id, result)
@@ -110,7 +111,7 @@ class Partner:
             ))
         
         self.state.heartbeat(status="idle")
-        return result if 'result' in dir() else str(e)
+        return result if result is not None else str(e)
     
     def _execute_task(self, task: Task) -> str:
         """Execute a single task via the agent adapter."""
