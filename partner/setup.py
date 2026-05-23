@@ -307,7 +307,7 @@ def setup_cron_hermes(workspace: str):
         # Try using hermes CLI to create cron
         result = subprocess.run(
             ["hermes", "cron", "create", 
-             "--schedule", "every 30m",
+             "--schedule", f"every {interval_minutes}m",
              "--name", "partner-research-cycle",
              "--prompt", cron_prompt],
             capture_output=True, text=True, timeout=30
@@ -431,7 +431,22 @@ def interactive_setup():
     else:
         status_info(f"{selected.display_name} 集成即将推出")
     
-    # ── Step 6: Save Config ──
+    # ── Step 6: Research Interval ──
+    section("研究频率", "⏰")
+    
+    interval_options = [
+        "每 15 分钟（高频，API 消耗大）",
+        "每 30 分钟（推荐）",
+        "每 1 小时",
+        "每 2 小时",
+        "每 4 小时（低频，省 API）",
+    ]
+    interval_values = [15, 30, 60, 120, 240]
+    interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=1)
+    interval_minutes = interval_values[interval_idx]
+    status_info(f"研究频率: 每 {interval_minutes} 分钟")
+    
+    # ── Step 7: Save Config ──
     config = {
         "name": "Partner",
         "workspace": {
@@ -444,7 +459,7 @@ def interactive_setup():
             "provider": None,
         },
         "scheduler": {
-            "interval_minutes": 30,
+            "interval_minutes": interval_minutes,
             "max_tasks_per_cycle": 1,
             "heartbeat_timeout_minutes": 60,
         },
