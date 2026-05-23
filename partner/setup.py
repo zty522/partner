@@ -769,6 +769,8 @@ def interactive_setup():
     
     enable_idx = prompt_choice("选择要启用的消息平台：", platform_options, default=len(platform_options)-1)
     
+    messaging_config = {"enabled": False}
+    
     if enable_idx < len(detected_platforms):
         selected_platform = detected_platforms[enable_idx]
         platform_name, platform_display, platform_status = selected_platform
@@ -793,8 +795,7 @@ def interactive_setup():
                              capture_output=True)
                 status_ok("已安装 websockets")
         
-        # Save platform config
-        config["messaging"] = {
+        messaging_config = {
             "enabled": True,
             "platform": platform_name,
             "auto_start": True,
@@ -808,7 +809,6 @@ def interactive_setup():
             _generate_qq_script(workspace)
     else:
         status_info("跳过消息平台配置")
-        config["messaging"] = {"enabled": False}
 
 
     # ── Step 6: Research Interval ──
@@ -845,6 +845,7 @@ def interactive_setup():
         },
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
+        "messaging": messaging_config,
     }
     config_path = os.path.join(workspace, "partner_config.json")
     with open(config_path, 'w') as f:
