@@ -18,18 +18,7 @@ What if I had a research companion that worked independently — reading papers,
 
 We've seen two layers of AI tools:
 
-```
-LLM:     You ask → It answers → Done
-Agent:   You command → It executes → Waits
-```
-
-**LLMs** are passive — they need a prompt. **Agents** are reactive — they need a command.
-
-I wanted something **proactive**: an AI that starts working when you turn it on, accumulates knowledge over time, and reports back when you ask.
-
-```
-Partner: It works on its own → You ask "what have you been doing?" → It reports
-```
+![Three Layers of AI](https://raw.githubusercontent.com/zty522/partner/main/docs/three_layers.png)
 
 ## Introducing Partner 🤝
 
@@ -53,17 +42,7 @@ Partner runs in the background, executing a research cycle every 30 minutes (con
 4. **Generates new tasks** based on what it learned
 5. **Repeats** — forever
 
-```
-┌──────────────────────────────────────────┐
-│              🤝 Partner                   │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
-│  │   Task   │ │Knowledge │ │  Journal  │ │
-│  │  Queue   │ │   Base   │ │  System   │ │
-│  └──────────┘ └──────────┘ └──────────┘ │
-└──────────────────┬───────────────────────┘
-                   ↕
-   Agent Backend (Hermes, OpenClaw, Codex, ...)
-```
+![Partner Architecture](https://raw.githubusercontent.com/zty522/partner/main/docs/architecture.png)
 
 ## Events: The Heart of Partner
 
@@ -71,14 +50,7 @@ An **Event** is one complete research cycle — like how Agents have Skills, Par
 
 Each Event follows a structured flow:
 
-```
-📖 Literature    → Search and read papers
-🔬 Project Scan  → Analyze your codebase
-💡 Idea Generate → Propose improvements
-🧭 Exploration   → Try new directions
-📝 Knowledge     → Record findings
-🌱 Spawn         → Create new Events
-```
+![Event Flow](https://raw.githubusercontent.com/zty522/partner/main/docs/event_flow.png)
 
 Events **grow on their own** — one Event's findings automatically spawn new Events. The research never stops.
 
@@ -93,12 +65,7 @@ I ran Partner overnight on my bioinformatics research projects. By morning:
 
 Key discoveries Partner made on its own:
 
-| Finding | Impact |
-|---------|--------|
-| scGPT needs domain fine-tuning for aging tasks | Avoided a dead-end approach |
-| Diffusion models replacing VAEs for molecule generation | Found 25+ new papers |
-| Batch correction improved cross-dataset generalization by 52.8% | Quantified the improvement |
-| ProDCARL RL alignment boosted AMP hit rate from 2% to 6.3% | New method for antimicrobial design |
+![Key Discoveries](https://raw.githubusercontent.com/zty522/partner/main/docs/findings_table.png)
 
 ![Partner status](https://raw.githubusercontent.com/zty522/partner/main/docs/status.png)
 
@@ -106,14 +73,7 @@ Key discoveries Partner made on its own:
 
 Partner works on top of existing agent frameworks — it doesn't reinvent the wheel.
 
-| Agent | Status |
-|-------|--------|
-| 🔮 Hermes Agent | ✅ Full support |
-| 🦞 OpenClaw | ✅ Supported |
-| ⚡ OpenAI Codex | ✅ Supported |
-| 👥 CrewAI | ✅ Supported |
-| 💻 gptme | ✅ Supported |
-| 🤖 AutoGPT, 👐 OpenHands, 🧠 Claude Code | 🔜 Coming |
+![Multi-Agent Support](https://raw.githubusercontent.com/zty522/partner/main/docs/agents_table.png)
 
 Run `partner setup` to auto-detect installed agents.
 
