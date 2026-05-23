@@ -407,7 +407,8 @@ def interactive_setup():
         json.dump(config, f, indent=2)
     status_ok(f"配置已保存: {config_path}")
     
-    # ── Step 7: Cron ──
+    # Save pointer for easy discovery
+    save_workspace_pointer(workspace)
     section("设置自动研究", "⏰")
     
     if selected.name == "hermes":
@@ -498,15 +499,32 @@ def show_status(workspace=None):
 
 def find_workspace():
     """Find Partner workspace."""
+    # 1. Environment variable
     ws = os.environ.get("PARTNER_WORKSPACE")
     if ws and os.path.exists(ws):
         return ws
     
+    # 2. Pointer file at ~/.partner
+    pointer = os.path.expanduser("~/.partner")
+    if os.path.exists(pointer):
+        with open(pointer) as f:
+            path = f.read().strip()
+        if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            return path
+    
+    # 3. Common locations
     candidates = [
         os.path.expanduser("~/partner_workspace"),
-        os.path.expanduser("~/.partner"),
+        os.path.expanduser("~/.partner_workspace"),
     ]
     for c in candidates:
         if os.path.exists(os.path.join(c, "partner_config.json")):
             return c
     return None
+
+
+def save_workspace_pointer(workspace: str):
+    """Save workspace path to ~/.partner for easy discovery."""
+    pointer = os.path.expanduser("~/.partner")
+    with open(pointer, 'w') as f:
+        f.write(workspace)
