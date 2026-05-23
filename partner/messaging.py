@@ -80,67 +80,86 @@ class MessagePlatform(ABC):
 
 
 class WeChatPlatform(MessagePlatform):
-    """WeChat integration via WeChatFerry or Wechaty."""
-    
+    """WeChat integration via WeChatFerry (Windows) or Wechaty (cross-platform).
+
+    Uses partner.wechat_wcf.WeChatFerryAdapter for WeChatFerry integration,
+    which provides proper message normalization, voice handling, and reconnection.
+    Falls back to Wechaty for cross-platform scenarios.
+    """
+
     def name(self) -> str:
         return "wechat"
-    
+
     def is_available(self) -> bool:
+        """Check if any WeChat backend is available."""
+        # Check WeChatFerry (Windows)
         try:
-            import wechatferry
-            return True
-        except ImportError:
+            from .wechat_wcf import WeChatFerryAdapter
+            adapter = WeChatFerryAdapter()
+            if adapter.is_available():
+                return True
+        except Exception:
             pass
+        # Check Wechaty (cross-platform)
         try:
             import wechaty
             return True
         except ImportError:
             pass
         return False
-    
+
     def start(self, on_message: Callable[[Message], None]):
         self._on_message = on_message
-        # Implementation depends on which library is available
+        # Try WeChatFerry first (better integration)
         try:
             self._start_wechatferry(on_message)
+            return
+        except (ImportError, RuntimeError) as e:
+            pass
+        # Fallback to Wechaty
+        try:
+            self._start_wechaty(on_message)
         except ImportError:
-            try:
-                self._start_wechaty(on_message)
-            except ImportError:
-                raise RuntimeError(
-                    "No WeChat library found. Install one:\n"
-                    "  pip install wechatferry  (Windows only)\n"
-                    "  pip install wechaty      (cross-platform)"
-                )
-    
+            raise RuntimeError(
+                "No WeChat library found. Install one:\n"
+                "  pip install wcferry      (Windows only, recommended)\n"
+                "  pip install wechaty       (cross-platform)"
+            )
+
     def _start_wechatferry(self, on_message):
-        """Start via WeChatFerry (DLL injection, Windows)."""
-        from wechatferry import Wf
-        
-        wf = Wf()
-        
-        @wf.on_message
-        def handle(msg):
+        """Start via WeChatFerry adapter (DLL injection, Windows)."""
+        from .wechat_wcf import WeChatFerryAdapter, WCFMsgType
+
+        adapter = WeChatFerryAdapter({
+            "msg_types": [WCFMsgType.TEXT.value, WCFMsgType.VOICE.value],
+        })
+
+        if not adapter.is_available():
+            raise RuntimeError("WeChatFerry not available")
+
+        def handle_wcf_msg(wcf_msg):
+            msg_type = MessageType.VOICE if wcf_msg.msg_type == WCFMsgType.VOICE.value else MessageType.TEXT
             m = Message(
                 platform="wechat",
-                chat_id=msg.sender,
-                sender=msg.sender,
-                content=msg.content,
-                type=MessageType.TEXT,
+                chat_id=wcf_msg.room_id or wcf_msg.sender,
+                sender=wcf_msg.sender,
+                content=wcf_msg.content,
+                type=msg_type,
+                metadata={"is_group": wcf_msg.is_group, "msg_id": wcf_msg.msg_id},
             )
             on_message(m)
-        
-        wf.start()
-        self._wf = wf
-    
+
+        adapter.start(on_message=handle_wcf_msg)
+        self._adapter = adapter
+
     def _start_wechaty(self, on_message):
         """Start via Wechaty (cross-platform)."""
         import asyncio
         from wechaty import Wechaty, Message as WechatyMessage
-        
+
         async def main():
             bot = Wechaty.instance()
-            
+
             @bot.on_message
             async def handle(msg: WechatyMessage):
                 if msg.is_self():
@@ -153,18 +172,36 @@ class WeChatPlatform(MessagePlatform):
                     type=MessageType.TEXT if msg.type() == 7 else MessageType.VOICE,
                 )
                 on_message(m)
-            
+
             await bot.start()
-        
+
         asyncio.run(main())
-    
+
     def stop(self):
-        if hasattr(self, '_wf'):
-            self._wf.stop()
-    
+        if hasattr(self, '_adapter'):
+            self._adapter.stop()
+
     def send_text(self, chat_id: str, text: str):
-        if hasattr(self, '_wf'):
-            self._wf.send_text(chat_id, text)
+        if hasattr(self, '_adapter'):
+            self._adapter.send_text(chat_id, text)
+
+    def send_voice(self, chat_id: str, text: str):
+        """Send a voice message (TTS then send audio)."""
+        if hasattr(self, '_adapter'):
+            # Generate voice using VoiceProcessor
+            try:
+                from .voice import VoiceProcessor
+                vp = VoiceProcessor()
+                audio_path = vp.synthesize(text)
+                if audio_path and not audio_path.startswith("[TTS error"):
+                    self._adapter.send_voice(chat_id, audio_path)
+                else:
+                    # Fallback to text
+                    self.send_text(chat_id, text)
+            except Exception:
+                self.send_text(chat_id, text)
+        else:
+            self.send_text(chat_id, text)
 
 
 class QQPlatform(MessagePlatform):
@@ -249,57 +286,33 @@ class TelegramPlatform(MessagePlatform):
 # ── Voice Processing ─────────────────────────────────────────
 
 class VoiceProcessor:
-    """Handle STT (speech-to-text) and TTS (text-to-speech)."""
+    """Handle STT (speech-to-text) and TTS (text-to-speech).
+    
+    Delegates to partner.voice.VoiceProcessor for actual processing.
+    This class exists for backward compatibility with the messaging API.
+    """
     
     def __init__(self, stt_engine: str = "funasr", tts_engine: str = "edge-tts"):
         self.stt_engine = stt_engine
         self.tts_engine = tts_engine
+        self._delegate = None
+    
+    def _get_delegate(self):
+        if self._delegate is None:
+            from .voice import VoiceProcessor as _VP, VoiceConfig
+            self._delegate = _VP(VoiceConfig(
+                stt_engine=self.stt_engine,
+                tts_engine=self.tts_engine,
+            ))
+        return self._delegate
     
     def transcribe(self, audio_path: str) -> str:
         """Convert speech to text."""
-        if self.stt_engine == "funasr":
-            return self._transcribe_funasr(audio_path)
-        elif self.stt_engine == "whisper":
-            return self._transcribe_whisper(audio_path)
-        return ""
+        return self._get_delegate().transcribe(audio_path)
     
-    def synthesize(self, text: str, output_path: str) -> str:
+    def synthesize(self, text: str, output_path: str = "") -> str:
         """Convert text to speech."""
-        if self.tts_engine == "edge-tts":
-            return self._synthesize_edge_tts(text, output_path)
-        return ""
-    
-    def _transcribe_funasr(self, audio_path: str) -> str:
-        try:
-            from funasr import AutoModel
-            model = AutoModel(model="paraformer-zh")
-            result = model.generate(input=audio_path)
-            return result[0]["text"] if result else ""
-        except Exception as e:
-            return f"[STT error: {e}]"
-    
-    def _transcribe_whisper(self, audio_path: str) -> str:
-        try:
-            import whisper
-            model = whisper.load_model("base")
-            result = model.transcribe(audio_path)
-            return result["text"]
-        except Exception as e:
-            return f"[STT error: {e}]"
-    
-    def _synthesize_edge_tts(self, text: str, output_path: str) -> str:
-        try:
-            import edge_tts
-            import asyncio
-            
-            async def generate():
-                communicate = edge_tts.Communicate(text, "zh-CN-XiaoxiaoNeural")
-                await communicate.save(output_path)
-            
-            asyncio.run(generate())
-            return output_path
-        except Exception as e:
-            return f"[TTS error: {e}]"
+        return self._get_delegate().synthesize(text, output_path or None)
 
 
 # ── Factory ──────────────────────────────────────────────────
