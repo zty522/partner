@@ -491,61 +491,6 @@ def detect_gptme() -> AgentInfo:
 
 
 
-def _generate_wechat_script(workspace: str, system: str):
-    """Generate WeChat startup script."""
-    scripts_dir = os.path.join(workspace, "scripts")
-    os.makedirs(scripts_dir, exist_ok=True)
-    
-    if system == "Windows":
-        # Windows: direct WeChatFerry
-        script = f'''@echo off
-echo Starting WeChat Bridge...
-cd /d "{workspace}"
-python -m partner.windows_bridge --port 8765
-pause
-'''
-        script_path = os.path.join(scripts_dir, "start_wechat.bat")
-    else:
-        # Linux/WSL: wechaty
-        script = f'''#!/bin/bash
-echo "Starting WeChat Bridge..."
-cd "{workspace}"
-python -c "
-from partner.wechat_ws_client import WeChatWSClient
-client = WeChatWSClient(workspace='{workspace}')
-client.start()
-"
-'''
-        script_path = os.path.join(scripts_dir, "start_wechat.sh")
-    
-    with open(script_path, 'w') as f:
-        f.write(script)
-    
-    if system != "Windows":
-        os.chmod(script_path, 0o755)
-    
-    status_ok(f"启动脚本: {script_path}")
-
-
-def _generate_qq_script(workspace: str):
-    """Generate QQ startup script."""
-    scripts_dir = os.path.join(workspace, "scripts")
-    os.makedirs(scripts_dir, exist_ok=True)
-    
-    script = f'''#!/bin/bash
-echo "Starting QQ Bridge..."
-cd "{workspace}"
-partner qq
-'''
-    script_path = os.path.join(scripts_dir, "start_qq.sh")
-    
-    with open(script_path, 'w') as f:
-        f.write(script)
-    
-    os.chmod(script_path, 0o755)
-    status_ok(f"启动脚本: {script_path}")
-
-
 def interactive_setup():
     """Main setup wizard."""
     banner()
@@ -724,93 +669,6 @@ def interactive_setup():
         status_info(f"平台: {plat}")
 
 
-    # ── Step 5c: Messaging Platforms ──
-    section("配置消息平台", "📱")
-    
-    import platform as _platform
-    system = _platform.system()
-    
-    detected_platforms = []
-    
-    # Check WeChat
-    if system == "Windows":
-        # Windows: can use WeChatFerry directly
-        try:
-            import wcferry
-            detected_platforms.append(("wechat", "微信 (WeChatFerry)", "ready"))
-        except ImportError:
-            detected_platforms.append(("wechat", "微信 (WeChatFerry)", "install"))
-    else:
-        # Linux/WSL: check if wechaty or other cross-platform solution available
-        try:
-            import wechaty
-            detected_platforms.append(("wechat", "微信 (Wechaty)", "ready"))
-        except ImportError:
-            # Try to install wechaty
-            detected_platforms.append(("wechat", "微信 (Wechaty)", "install"))
-    
-    # Check QQ (NapCat)
-    try:
-        import websockets
-        detected_platforms.append(("qq", "QQ (NapCat)", "ready"))
-    except ImportError:
-        detected_platforms.append(("qq", "QQ (NapCat)", "install"))
-    
-    # Show detected platforms
-    for name, display, status in detected_platforms:
-        if status == "ready":
-            status_ok(f"{display} - 已就绪")
-        else:
-            status_info(f"{display} - 需要安装依赖")
-    
-    # Ask which platforms to enable
-    platform_options = [f"{display}" for name, display, _ in detected_platforms]
-    platform_options.append("跳过（稍后配置）")
-    
-    enable_idx = prompt_choice("选择要启用的消息平台：", platform_options, default=len(platform_options)-1)
-    
-    messaging_config = {"enabled": False}
-    
-    if enable_idx < len(detected_platforms):
-        selected_platform = detected_platforms[enable_idx]
-        platform_name, platform_display, platform_status = selected_platform
-        
-        if platform_status == "install":
-            # Auto-install dependencies
-            status_info(f"正在安装 {platform_display} 依赖...")
-            
-            if platform_name == "wechat":
-                if system == "Windows":
-                    subprocess.run([sys.executable, "-m", "pip", "install", "wcferry", "websockets"], 
-                                 capture_output=True)
-                    status_ok("已安装 wcferry, websockets")
-                else:
-                    # Linux: try wechaty
-                    subprocess.run([sys.executable, "-m", "pip", "install", "wechaty"], 
-                                 capture_output=True)
-                    status_ok("已安装 wechaty")
-            
-            elif platform_name == "qq":
-                subprocess.run([sys.executable, "-m", "pip", "install", "websockets"], 
-                             capture_output=True)
-                status_ok("已安装 websockets")
-        
-        messaging_config = {
-            "enabled": True,
-            "platform": platform_name,
-            "auto_start": True,
-        }
-        status_ok(f"已启用 {platform_display}")
-        
-        # Generate startup script
-        if platform_name == "wechat":
-            _generate_wechat_script(workspace, system)
-        elif platform_name == "qq":
-            _generate_qq_script(workspace)
-    else:
-        status_info("跳过消息平台配置")
-
-
     # ── Step 6: Research Interval ──
     section("研究频率", "⏰")
     
@@ -845,7 +703,6 @@ def interactive_setup():
         },
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
-        "messaging": messaging_config,
     }
     config_path = os.path.join(workspace, "partner_config.json")
     with open(config_path, 'w') as f:
@@ -863,38 +720,14 @@ def interactive_setup():
     print()
     line("━", 50, C.GREEN)
     print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner 配置完成！{C.RESET}\n")
-    print(f"  {C.BOLD}使用方法：{C.RESET}")
+    print(f"  使用方法：")
     print(f"    1. 打开 {selected.emoji} {selected.display_name}")
     print(f"    2. 直接说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
     print(f"    3. 或者说：{C.CYAN}'让 partner 去研究 XXX'{C.RESET}")
     print(f"    4. Partner 会在后台自主运行\n")
-    
-    # Show messaging instructions if configured
-    if messaging_config.get("enabled"):
-        platform = messaging_config.get("platform", "")
-        print(f"  {C.BOLD}消息平台：{C.RESET}")
-        if platform == "wechat":
-            import platform as _platform
-            if _platform.system() == "Windows":
-                print(f"    {C.CYAN}partner wechat{C.RESET}          启动微信桥接")
-                print(f"    或双击：{workspace}/scripts/start_wechat.bat")
-            else:
-                print(f"    {C.CYAN}partner wechat{C.RESET}          启动微信桥接")
-                print(f"    或运行：{workspace}/scripts/start_wechat.sh")
-        elif platform == "qq":
-            print(f"    {C.CYAN}partner qq{C.RESET}              启动 QQ 桥接")
-            print(f"    或运行：{workspace}/scripts/start_qq.sh")
-        print()
-    
-    print(f"  {C.BOLD}管理命令：{C.RESET}")
+    print(f"  管理命令：")
     print(f"    {C.DIM}partner status    查看 Partner 状态{C.RESET}")
     print(f"    {C.DIM}partner setup     重新配置{C.RESET}")
-    if messaging_config.get("enabled"):
-        platform = messaging_config.get("platform", "")
-        if platform == "wechat":
-            print(f"    {C.DIM}partner wechat    启动微信{C.RESET}")
-        elif platform == "qq":
-            print(f"    {C.DIM}partner qq        启动 QQ{C.RESET}")
     print()
 
 
