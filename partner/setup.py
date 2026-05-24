@@ -945,12 +945,12 @@ def interactive_setup():
     print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner Setup Complete!{C.RESET}\n")
     print(f"  {C.BOLD}Usage:{C.RESET}")
     print(f"    1. Open {selected.emoji} {selected.display_name}")
-    print(f"    2. Say: {C.CYAN}'partner, what have you been doing?'{C_RESET}")
-    print(f"    3. Or: {C.CYAN}'partner, research XXX'{C_RESET}")
+    print(f"    2. Say: {C.CYAN}'partner, what have you been doing?'{C.RESET}")
+    print(f"    3. Or: {C.CYAN}'partner, research XXX'{C.RESET}")
     print(f"    4. Partner will run autonomously in the background\n")
     print(f"  {C.BOLD}Commands:{C.RESET}")
-    print(f"    {C.DIM}partner status    Check Partner status{C_RESET}")
-    print(f"    {C.DIM}partner setup     Reconfigure{C_RESET}")
+    print(f"    {C.DIM}partner status    Check Partner status{C.RESET}")
+    print(f"    {C.DIM}partner setup     Reconfigure{C.RESET}")
     print()
 
 
