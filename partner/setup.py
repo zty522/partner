@@ -517,7 +517,39 @@ def setup_cron_hermes(workspace: str):
     """Auto-create Hermes cron job for Partner."""
     import subprocess
     
+    # First check if Hermes Gateway is running
+    section("检查 Hermes Gateway", "🌐")
+    
+    gateway_running = False
+    try:
+        result = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True, timeout=10)
+        if "running" in result.stdout.lower() or "active" in result.stdout.lower():
+            gateway_running = True
+            status_ok("Hermes Gateway 正在运行")
+        else:
+            status_warn("Hermes Gateway 未运行")
+    except:
+        status_warn("无法检测 Hermes Gateway 状态")
+    
+    if not gateway_running:
+        status_info("正在启动 Hermes Gateway...")
+        try:
+            # Try to install and start gateway
+            subprocess.run(["hermes", "gateway", "install"], capture_output=True, text=True, timeout=30)
+            result = subprocess.run(["hermes", "gateway", "start"], capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                status_ok("Hermes Gateway 已启动")
+                gateway_running = True
+            else:
+                status_warn("Hermes Gateway 启动失败")
+                status_info("请手动运行: hermes gateway start")
+        except Exception as e:
+            status_warn(f"Gateway 启动失败: {e}")
+            status_info("请手动运行: hermes gateway install && hermes gateway start")
+    
     # Check if cron already exists
+    section("设置 Cron Job", "⏰")
+    
     try:
         result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
         if "partner" in result.stdout.lower() or "autonomous-researcher" in result.stdout.lower():
@@ -555,7 +587,7 @@ def setup_cron_hermes(workspace: str):
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            status_ok("Cron job 已自动创建 (每 30 分钟)")
+            status_ok(f"Cron job 已自动创建 (每 {interval_minutes} 分钟)")
         else:
             status_warn("Cron 自动创建失败，请手动设置")
             print(f"    {C.DIM}在 Hermes 中说：'设置 partner 的自动研究 cron'{C.RESET}")
