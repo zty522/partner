@@ -37,12 +37,13 @@ All notable changes to Partner will be documented in this file.
 - Fix task_queue string handling (bare strings instead of dicts)
 - Fix task detail printing (don't show internal info)
 - Add tool restriction hook for partner skill
+- Auto-configure Hermes Gateway in setup
 
 ### 📦 Infrastructure
 - pyproject.toml: support `pip install partner`
-- Optional dependencies: `partner[wechat]`, `partner[qq]`, `partner[voice]`
 - CHANGELOG.md: version history tracking
 - release.sh: automated release script
+- Auto Gateway setup: automatically installs and starts Hermes Gateway
 
 ### 🤖 Supported Agents
 - 🔮 Hermes Agent (Full support)
@@ -57,8 +58,8 @@ All notable changes to Partner will be documented in this file.
 
 ### v0.2.0 (In Progress)
 - [ ] QQ integration (NapCat)
-- [ ] WeChat integration (cross-platform)
-- [ ] OpenClaw integration check
+- [ ] WeChat integration (WeChatPad iPad protocol)
+- [ ] OpenClaw bridge improvements
 - [ ] Research agent adaptation (CytoBridge, etc.)
 - [ ] One-click messaging setup
 - [ ] Partner auto-upgrade mechanism
