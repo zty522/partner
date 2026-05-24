@@ -907,16 +907,6 @@ def interactive_setup():
     interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
     
-    # ── Step 6b: QQ Integration ──
-    qq_config = {}
-    enable_qq = prompt_choice("是否启用 QQ 聊天集成？", [
-        "跳过（稍后在 partner_config.json 中手动配置）",
-        "配置 QQ 集成"
-    ], default=0)
-    
-    if enable_qq == 1:
-        qq_config = setup_qq_config(workspace)
-    
     # ── Step 7: Save Config ──
     config = {
         "name": "Partner",
@@ -934,7 +924,6 @@ def interactive_setup():
             "max_tasks_per_cycle": 1,
             "heartbeat_timeout_minutes": 60,
         },
-        "qq": qq_config if qq_config else {"enabled": False},
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }
@@ -953,15 +942,15 @@ def interactive_setup():
     # ── Done ──
     print()
     line("━", 50, C.GREEN)
-    print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner 配置完成！{C.RESET}\n")
-    print(f"  使用方法：")
-    print(f"    1. 打开 {selected.emoji} {selected.display_name}")
-    print(f"    2. 直接说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
-    print(f"    3. 或者说：{C.CYAN}'让 partner 去研究 XXX'{C.RESET}")
-    print(f"    4. Partner 会在后台自主运行\n")
-    print(f"  管理命令：")
-    print(f"    {C.DIM}partner status    查看 Partner 状态{C.RESET}")
-    print(f"    {C.DIM}partner setup     重新配置{C.RESET}")
+    print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner Setup Complete!{C.RESET}\n")
+    print(f"  {C.BOLD}Usage:{C.RESET}")
+    print(f"    1. Open {selected.emoji} {selected.display_name}")
+    print(f"    2. Say: {C.CYAN}'partner, what have you been doing?'{C_RESET}")
+    print(f"    3. Or: {C.CYAN}'partner, research XXX'{C_RESET}")
+    print(f"    4. Partner will run autonomously in the background\n")
+    print(f"  {C.BOLD}Commands:{C.RESET}")
+    print(f"    {C.DIM}partner status    Check Partner status{C_RESET}")
+    print(f"    {C.DIM}partner setup     Reconfigure{C_RESET}")
     print()
 
 

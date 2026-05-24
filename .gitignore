@@ -1,21 +1,61 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-.pytest_cache/
-.mypy_cache/
+*.py[cod]
+*$py.class
 *.so
-.venv/
-venv/
-env/
-docs/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# QQ/WeChat/OpenClaw integration (not in v0.1.0, will be in v0.2.0)
+# Virtual Environment
+venv/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Partner specific
+state/
+knowledge/
+logs/
+ideas/
+design/
+docs/
+scripts/
+templates/
+tests/
+events/
 partner/openclaw_bridge.py
 partner/wechatpad_adapter.py
 partner/wechatpad_bridge.py
-
+CHANGELOG.md
+AUDIT_REPORT.md
+CONTRIBUTING.md
+MANIFEST.in
+release.sh
+releases/
+run_cycle.py
+demo.py
+dist/
+partner_research.egg-info/
+.pytest_cache/
