@@ -98,7 +98,7 @@ class EventEngine:
         if not valid:
             return None
 
-        # Score events: priority + freshness + chain bonus
+        # Score events: priority + freshness + chain bonus + knowledge gap bonus
         def score(e: Event) -> float:
             s = e.priority * 10
             # Freshness bonus: newer events get a small boost
@@ -107,6 +107,11 @@ class EventEngine:
             # Chain bonus: events spawned by other events get continuity bonus
             if e.meta.get("parent_event_id"):
                 s += 3
+            # Knowledge gap bonus: events targeting low-coverage topics get priority boost
+            topic = e.inputs.get("topic", "")
+            if topic and self.kb:
+                coverage = self.kb.topic_coverage(topic)
+                s += (1 - coverage) * 5  # Coverage越低，加分越高，最高+5
             return s
 
         valid.sort(key=score, reverse=True)
@@ -425,10 +430,10 @@ class EventEngine:
         }
 
     def auto_generate(self):
-        """Auto-generate events when queue is empty."""
+        """Auto-generate events when queue is empty, prioritizing knowledge gaps."""
         # Generate a synthesis review if we have enough knowledge entries
         kb_stats = self.kb.stats() if hasattr(self.kb, 'stats') else {}
-        total_entries = kb_stats.get("total_entries", 0)
+        total_entries = kb_stats.get("total", kb_stats.get("total_entries", 0))
 
         if total_entries > 10:
             template = self.registry.get("synthesis-review")
@@ -443,12 +448,36 @@ class EventEngine:
                     self.add_event(evt)
                     return evt
 
-        # Default: generate a literature deep dive on a random topic from knowledge
+        # Use knowledge gaps to find the best topic for a literature deep dive
+        best_topic = None
+        best_priority = 4
+
+        if self.kb and hasattr(self.kb, 'find_gaps'):
+            gaps = self.kb.find_gaps(min_gap_count=3)
+            if gaps:
+                # Pick the highest-priority gap
+                best_gap = gaps[0]
+                best_topic = best_gap["topic"]
+                best_priority = min(8, best_gap.get("suggested_priority", 4))
+
+        # Fallback: pick a random topic from knowledge tags with low coverage
+        if not best_topic and self.kb and hasattr(self.kb, 'knowledge_distribution'):
+            dist = self.kb.knowledge_distribution()
+            gap_tags = [item["tag"] for item in dist.get("coverage_summary", [])
+                        if item["level"] == "gap"]
+            if gap_tags:
+                best_topic = gap_tags[0]
+                best_priority = 6
+
+        # Final fallback: generic topic
+        if not best_topic:
+            best_topic = "recent advances in autonomous agents"
+
         template = self.registry.get("literature-deep-dive")
         if template:
             evt = template.create(
-                inputs={"topic": "recent advances in autonomous agents"},
-                priority=4,
+                inputs={"topic": best_topic},
+                priority=best_priority,
                 triggered_by="auto_generate",
             )
             self.add_event(evt)

@@ -93,6 +93,48 @@ class StateManager:
         except (FileNotFoundError, json.JSONDecodeError):
             return {"total_cycles": 0, "total_tasks_completed": 0}
     
+    # --- Event Stats Helpers ---
+    
+    def record_event_completed(self, template_name: str = "", phases_done: int = 0, new_events_spawned: int = 0):
+        """Record completion of an event: increment counters and track template usage."""
+        stats = self.load_stats()
+        stats["total_events_completed"] = stats.get("total_events_completed", 0) + 1
+        stats["total_events_spawned"] = stats.get("total_events_spawned", 0) + new_events_spawned
+        stats["total_phases_executed"] = stats.get("total_phases_executed", 0) + phases_done
+        if template_name:
+            templates_used = stats.get("event_templates_used", {})
+            templates_used[template_name] = templates_used.get(template_name, 0) + 1
+            stats["event_templates_used"] = templates_used
+        stats["last_updated"] = datetime.now().isoformat()
+        with open(self.stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+    
+    def increment_events_spawned(self, count: int = 1):
+        """Increment total_events_spawned counter."""
+        stats = self.load_stats()
+        stats["total_events_spawned"] = stats.get("total_events_spawned", 0) + count
+        stats["last_updated"] = datetime.now().isoformat()
+        with open(self.stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+    
+    def increment_phases_executed(self, count: int = 1):
+        """Increment total_phases_executed counter."""
+        stats = self.load_stats()
+        stats["total_phases_executed"] = stats.get("total_phases_executed", 0) + count
+        stats["last_updated"] = datetime.now().isoformat()
+        with open(self.stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+    
+    def get_event_stats(self) -> dict:
+        """Return event-related stats subset."""
+        stats = self.load_stats()
+        return {
+            "total_events_completed": stats.get("total_events_completed", 0),
+            "total_events_spawned": stats.get("total_events_spawned", 0),
+            "total_phases_executed": stats.get("total_phases_executed", 0),
+            "event_templates_used": stats.get("event_templates_used", {}),
+        }
+    
     # --- Checkpoints ---
     
     def create_checkpoint(self, reason: str, task_queue_path: str, knowledge_path: str) -> str:

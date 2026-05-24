@@ -1,7 +1,11 @@
 """OpenClaw (小龙虾) Adapter for Partner.
 
-Connects Partner to OpenClaw's gateway API for task execution.
+Connects Partner to OpenClaw's agent CLI for task execution.
 OpenClaw config: /home/os/.openclaw/openclaw.json
+Gateway port: 18789 (WebSocket)
+CLI command: openclaw agent --agent main --message "..." --json
+
+Requires Node.js v22+ (installed via n at ~/.n/bin/node).
 """
 
 import json
@@ -11,9 +15,14 @@ from typing import List, Optional
 
 from .adapter import AgentAdapter, SearchResult, ExecutionResult
 
+# Ensure Node.js 22+ is on PATH (installed via `n`)
+_N_BIN = os.path.expanduser("~/.n/bin")
+if _N_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = f"{_N_BIN}:{os.environ.get('PATH', '')}"
+
 
 class OpenClawAdapter(AgentAdapter):
-    """Adapter for OpenClaw Agent."""
+    """Adapter for OpenClaw Agent via CLI."""
     
     def __init__(self, workspace_path: str):
         self.workspace = workspace_path
@@ -32,8 +41,8 @@ class OpenClawAdapter(AgentAdapter):
     @property
     def gateway_url(self) -> str:
         if not self._gateway_url:
-            # Default gateway port
-            self._gateway_url = "http://localhost:3000"
+            port = self.config.get("gateway", {}).get("port", 18789)
+            self._gateway_url = f"http://localhost:{port}"
         return self._gateway_url
     
     @property
@@ -47,12 +56,19 @@ class OpenClawAdapter(AgentAdapter):
         return "openclaw"
     
     def is_available(self) -> bool:
-        """Check if OpenClaw is installed and gateway is accessible."""
-        config_path = os.path.join(self.config_dir, "openclaw.json")
-        if not os.path.exists(config_path):
+        """Check if OpenClaw CLI is installed and gateway is running."""
+        # Check 1: openclaw binary exists
+        try:
+            result = subprocess.run(
+                ["openclaw", "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode != 0:
+                return False
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
         
-        # Check if gateway is running
+        # Check 2: gateway health
         try:
             import urllib.request
             req = urllib.request.Request(
@@ -61,66 +77,66 @@ class OpenClawAdapter(AgentAdapter):
             )
             with urllib.request.urlopen(req, timeout=3) as resp:
                 return resp.status == 200
-        except:
-            # Gateway might not be running, but config exists
-            return os.path.exists(config_path)
+        except Exception:
+            return False
     
     def search_web(self, query: str) -> List[SearchResult]:
-        """Search web via OpenClaw's tools."""
-        prompt = f"Search the web for: {query}. Return titles, URLs, and snippets."
+        """Search web via OpenClaw's web_search tool."""
+        prompt = (
+            f"Use the web_search tool to search for: {query}. "
+            f"Return the top 5 results with title, URL, and a brief snippet for each."
+        )
         result = self.execute_task(prompt)
-        return [SearchResult(title="Search result", url="", snippet=result)]
+        return [SearchResult(title="OpenClaw web search", url="", snippet=result)]
     
-    def execute_task(self, prompt: str) -> str:
-        """Execute a task via OpenClaw gateway API."""
-        try:
-            import urllib.request
-            import urllib.parse
-            
-            data = json.dumps({
-                "message": prompt,
-                "agent": self.config.get("agents", {}).get("defaults", {}).get("model", "default"),
-            }).encode()
-            
-            req = urllib.request.Request(
-                f"{self.gateway_url}/api/v1/chat",
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.token}",
-                },
-                method="POST",
-            )
-            
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read())
-                return result.get("response", result.get("message", str(result)))
+    def execute_task(self, prompt: str, timeout: int = 300) -> str:
+        """Execute a task via OpenClaw agent CLI.
         
-        except Exception as e:
-            # Fallback: use CLI
-            return self._execute_via_cli(prompt)
-    
-    def _execute_via_cli(self, prompt: str) -> str:
-        """Fallback: execute via OpenClaw CLI."""
+        Uses `openclaw agent --agent main --message "..." --json`.
+        """
         try:
-            # Write prompt to temp file
-            prompt_file = os.path.join(self.workspace, "state", "_openclaw_task.md")
-            with open(prompt_file, 'w') as f:
-                f.write(prompt)
-            
             result = subprocess.run(
-                ["openclaw", "chat", "--message", prompt],
-                capture_output=True, text=True, timeout=120,
+                [
+                    "openclaw", "agent",
+                    "--agent", "main",
+                    "--message", prompt,
+                    "--json",
+                    "--timeout", str(timeout),
+                ],
+                capture_output=True, text=True, timeout=timeout + 30,
                 cwd=self.workspace,
+                env=os.environ.copy(),
             )
             
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return f"OpenClaw error: {result.stderr[:500]}"
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                # Try to parse JSON error from stdout
+                if stdout:
+                    try:
+                        data = json.loads(stdout)
+                        err = data.get("result", {}).get("error", "")
+                        if err:
+                            return f"OpenClaw error: {err}"
+                    except json.JSONDecodeError:
+                        pass
+                return f"OpenClaw error (rc={result.returncode}): {stderr[:500] or stdout[:500]}"
+            
+            # Parse JSON response
+            data = json.loads(result.stdout)
+            payloads = data.get("result", {}).get("payloads", [])
+            texts = [p.get("text", "") for p in payloads if p.get("text")]
+            return "\n".join(texts) if texts else str(data)
         
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-            return f"OpenClaw not available: {e}"
+        except subprocess.TimeoutExpired:
+            return f"OpenClaw timeout after {timeout}s"
+        except FileNotFoundError:
+            return "OpenClaw CLI not found. Install with: npm install -g openclaw"
+        except json.JSONDecodeError:
+            return f"OpenClaw returned non-JSON: {result.stdout[:300]}"
+        except Exception as e:
+            return f"OpenClaw adapter error: {e}"
     
     def chat(self, message: str) -> str:
         """Chat via OpenClaw."""
-        return self.execute_task(message)
+        return self.execute_task(message, timeout=120)

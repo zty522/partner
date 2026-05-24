@@ -2,8 +2,11 @@
 
 import os
 import json
+import logging
 from datetime import datetime
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from .config import PartnerConfig
 from .task_queue import TaskQueue, Task
@@ -14,6 +17,7 @@ from .adapter import AgentAdapter, create_adapter
 from .conversation import ConversationEngine
 from .event_engine import EventEngine
 from .event import Event, EventStatus
+from .self_evolution import SelfEvolutionEngine
 
 
 class Partner:
@@ -46,7 +50,8 @@ class Partner:
         self.state = StateManager(state_dir)
         self.adapter = create_adapter(config.agent.backend, self.workspace)
         self.conversation = ConversationEngine(
-            self.journal, self.knowledge, self.task_queue, self.state
+            self.journal, self.knowledge, self.task_queue, self.state,
+            workspace=self.workspace,
         )
         
         # Initialize Event Engine
@@ -57,6 +62,10 @@ class Partner:
             journal=self.journal,
             state=self.state,
         )
+
+        # Initialize Self-Evolution Engine
+        self.self_evolution = SelfEvolutionEngine(state_dir=state_dir)
+        self._cycle_count = 0
     
     def start(self):
         """Start Partner as a background process."""
@@ -83,8 +92,12 @@ class Partner:
         """Run one research cycle. Returns summary of what was done.
         
         Priority: Event > Task > auto-generate Event
+        
+        After execution, checks for proactive notifications.
         """
         self.state.heartbeat(status="working")
+        
+        result = None
         
         # --- Priority 1: Execute pending Events ---
         if self.event_engine.has_pending_events():
@@ -92,7 +105,6 @@ class Partner:
             if event:
                 try:
                     result = self._execute_event(event)
-                    return result
                 except Exception as e:
                     event.status = EventStatus.FAILED.value
                     self.event_engine._save_events()
@@ -105,56 +117,85 @@ class Partner:
                     # Fall through to try a task instead
         
         # --- Priority 2: Execute pending Tasks ---
-        task = self.task_queue.get_next()
-        if task:
-            # Create checkpoint before starting
-            self.state.create_checkpoint(
-                "before_task",
-                self.task_queue.path,
-                self.knowledge.path,
-            )
-            
-            result = None
-            try:
-                result = self._execute_task(task)
-                self.task_queue.complete(task.id, result)
+        if result is None:
+            task = self.task_queue.get_next()
+            if task:
+                # Create checkpoint before starting
+                self.state.create_checkpoint(
+                    "before_task",
+                    self.task_queue.path,
+                    self.knowledge.path,
+                )
                 
-                # Log to journal
-                self.journal.log(JournalEntry(
-                    task_id=task.id,
-                    task_type=task.type,
-                    task_title=task.title,
-                    result_summary=result[:500],
-                    new_tasks_generated=0,
-                    knowledge_entries_added=0,
-                ))
-                
-                # Update stats
-                stats = self.state.load_stats()
-                stats["total_tasks_completed"] = stats.get("total_tasks_completed", 0) + 1
-                self.state.update_stats(stats)
-                
-            except Exception as e:
-                self.task_queue.fail(task.id, str(e))
-                self.journal.log(JournalEntry(
-                    task_id=task.id,
-                    task_type=task.type,
-                    task_title=f"FAILED: {task.title}",
-                    result_summary=str(e),
-                ))
-            
-            self.state.heartbeat(status="idle")
-            return result if result is not None else str(e)
+                try:
+                    result = self._execute_task(task)
+                    self.task_queue.complete(task.id, result)
+                    
+                    # Log to journal
+                    self.journal.log(JournalEntry(
+                        task_id=task.id,
+                        task_type=task.type,
+                        task_title=task.title,
+                        result_summary=result[:500],
+                        new_tasks_generated=0,
+                        knowledge_entries_added=0,
+                    ))
+                    
+                    # Update stats
+                    stats = self.state.load_stats()
+                    stats["total_tasks_completed"] = stats.get("total_tasks_completed", 0) + 1
+                    self.state.update_stats(stats)
+                    
+                except Exception as e:
+                    self.task_queue.fail(task.id, str(e))
+                    self.journal.log(JournalEntry(
+                        task_id=task.id,
+                        task_type=task.type,
+                        task_title=f"FAILED: {task.title}",
+                        result_summary=str(e),
+                    ))
+                    result = str(e)
         
         # --- Priority 3: Auto-generate new Events ---
-        new_event = self.event_engine.auto_generate()
-        if new_event:
-            self.state.heartbeat(status="idle")
-            return f"Auto-generated event: {new_event.template} ({new_event.id})"
+        if result is None:
+            new_event = self.event_engine.auto_generate()
+            if new_event:
+                result = f"Auto-generated event: {new_event.template} ({new_event.id})"
         
-        # Nothing to do
+        # --- Phase 3: Self-evolution cycle ---
+        try:
+            self._cycle_count += 1
+            evo_result = self.self_evolution.run_evolution_cycle()
+            if evo_result:
+                if result:
+                    result += f"\n\n🧬 自我进化周期:\n{evo_result}"
+                else:
+                    result = f"🧬 自我进化周期:\n{evo_result}"
+        except Exception as e:
+            logger.warning(f"Self-evolution cycle failed: {e}")
+
+        # --- Phase 4: Check proactive notifications ---
+        try:
+            notifications = self.conversation.check_proactive()
+            if notifications:
+                # Store for user to see on next interaction
+                notif_file = os.path.join(self.workspace, "state", "pending_notifications.json")
+                existing = []
+                try:
+                    with open(notif_file, "r", encoding="utf-8") as f:
+                        existing = json.loads(f.read(), strict=False)
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
+                existing.extend(notifications)
+                with open(notif_file, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, ensure_ascii=False, indent=2)
+                if result:
+                    result += f"\n\n📬 生成了 {len(notifications)} 条主动通知"
+        except Exception as e:
+            logger.warning(f"Proactive notification check failed: {e}")
+        
         self.state.heartbeat(status="idle")
-        return None
+        return result
     
     def _execute_event(self, event: Event) -> str:
         """Execute an Event through the EventEngine.
@@ -195,16 +236,12 @@ class Partner:
             knowledge_entries_added=knowledge_count,
         ))
         
-        # Update stats
-        stats = self.state.load_stats()
-        stats["total_events_completed"] = stats.get("total_events_completed", 0) + 1
-        stats["total_events_spawned"] = stats.get("total_events_spawned", 0) + new_events_count
-        stats["total_phases_executed"] = stats.get("total_phases_executed", 0) + phases_done
-        # Track template usage
-        templates_used = stats.get("event_templates_used", {})
-        templates_used[event.template] = templates_used.get(event.template, 0) + 1
-        stats["event_templates_used"] = templates_used
-        self.state.update_stats(stats)
+        # Update stats using StateManager helper
+        self.state.record_event_completed(
+            template_name=event.template,
+            phases_done=phases_done,
+            new_events_spawned=new_events_count,
+        )
         
         self.state.heartbeat(status="idle")
         return summary

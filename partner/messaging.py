@@ -205,33 +205,98 @@ class WeChatPlatform(MessagePlatform):
 
 
 class QQPlatform(MessagePlatform):
-    """QQ integration via NapCat + NoneBot."""
-    
+    """QQ integration via NapCat (OneBot 11 WebSocket).
+
+    Uses partner.qq_napcat.NapCatAdapter for QQ integration via
+    OneBot 11 protocol. NapCat must be running and configured.
+
+    Config keys:
+        ws_url: NapCat WebSocket URL (default: ws://127.0.0.1:3001)
+        access_token: Optional OneBot access token
+        group_at_only: Only respond when @mentioned in groups (default: True)
+    """
+
     def name(self) -> str:
         return "qq"
-    
+
     def is_available(self) -> bool:
+        """Check if NapCat adapter can be used."""
         try:
-            import nonebot
-            return True
-        except ImportError:
+            from .qq_napcat import NapCatAdapter
+            adapter = NapCatAdapter()
+            return adapter.is_available()
+        except Exception:
             return False
-    
+
     def start(self, on_message: Callable[[Message], None]):
         self._on_message = on_message
-        # QQ bot runs as a separate process (NapCat)
-        # Partner connects via WebSocket/HTTP
-        raise NotImplementedError(
-            "QQ integration requires NapCat setup.\n"
-            "See: https://github.com/NapNeko/NapCatQQ\n"
-            "Run 'partner setup' to configure."
-        )
-    
+        self._start_napcat(on_message)
+
+    def _start_napcat(self, on_message):
+        """Start via NapCat adapter (OneBot 11 WebSocket)."""
+        from .qq_napcat import NapCatAdapter
+
+        adapter = NapCatAdapter({
+            "ws_url": self.config.config.get("ws_url", "ws://127.0.0.1:3001"),
+            "access_token": self.config.config.get("access_token", ""),
+            "group_at_only": self.config.config.get("group_at_only", True),
+        })
+
+        if not adapter.is_available():
+            raise RuntimeError(
+                "websockets package not installed. Install with:\n"
+                "  pip install websockets\n"
+                "Also ensure NapCat is running: https://github.com/NapNeko/NapCatQQ"
+            )
+
+        def handle_qq_msg(qq_msg):
+            is_group = qq_msg.message_type == "group"
+            msg_type = MessageType.VOICE if "[语音]" in qq_msg.content else MessageType.TEXT
+            m = Message(
+                platform="qq",
+                chat_id=qq_msg.group_id if is_group else qq_msg.sender_id,
+                sender=f"{qq_msg.sender_name}({qq_msg.sender_id})",
+                content=qq_msg.content,
+                type=msg_type,
+                metadata={
+                    "is_group": is_group,
+                    "msg_id": qq_msg.msg_id,
+                    "sender_id": qq_msg.sender_id,
+                    "is_at_me": qq_msg.is_at_me,
+                },
+            )
+            on_message(m)
+
+        adapter.start(on_message=handle_qq_msg)
+        self._adapter = adapter
+
     def stop(self):
-        pass
-    
+        if hasattr(self, '_adapter'):
+            self._adapter.stop()
+
     def send_text(self, chat_id: str, text: str):
-        pass
+        if hasattr(self, '_adapter'):
+            # Infer group vs private from chat_id format
+            # Group IDs are typically longer numbers; private are shorter
+            is_group = len(chat_id) > 10  # Heuristic
+            self._adapter.send_text(chat_id, text, is_group)
+
+    def send_voice(self, chat_id: str, text: str):
+        """Send a voice message (TTS then send audio)."""
+        if hasattr(self, '_adapter'):
+            try:
+                from .voice import VoiceProcessor
+                vp = VoiceProcessor()
+                audio_path = vp.synthesize(text)
+                if audio_path and not audio_path.startswith("[TTS error"):
+                    is_group = len(chat_id) > 10
+                    self._adapter.send_voice(chat_id, audio_path, is_group)
+                else:
+                    self.send_text(chat_id, text)
+            except Exception:
+                self.send_text(chat_id, text)
+        else:
+            self.send_text(chat_id, text)
 
 
 class TelegramPlatform(MessagePlatform):

@@ -3,8 +3,10 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -216,6 +218,178 @@ def detect_codex() -> AgentInfo:
     return AgentInfo("codex", "OpenAI Codex", "⚡", False)
 
 
+# ── NapCat/QQ Detection ───────────────────────────────────────
+
+def _try_ws_connect(ws_url: str, timeout: float = 3.0) -> dict:
+    """Try a minimal TCP connection to check if NapCat is alive.
+
+    Returns dict with keys: ok, latency_ms, error
+    """
+    result = {"ok": False, "latency_ms": 0, "error": ""}
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(ws_url if "://" in ws_url else f"ws://{ws_url}")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 3001
+        t0 = time.time()
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+        sock.close()
+        result["ok"] = True
+        result["latency_ms"] = round((time.time() - t0) * 1000)
+    except Exception as e:
+        result["error"] = str(e)
+    return result
+
+
+def detect_napcat() -> dict:
+    """Detect NapCat QQ bot server.
+
+    Returns dict: installed (bool), ws_url, latency_ms, error
+    """
+    info = {"installed": False, "ws_url": "", "latency_ms": 0, "error": ""}
+
+    # Common NapCat WebSocket ports
+    default_ports = [3001, 6700, 8080]
+
+    for port in default_ports:
+        ws_url = f"ws://127.0.0.1:{port}"
+        probe = _try_ws_connect(ws_url, timeout=2.0)
+        if probe["ok"]:
+            info["installed"] = True
+            info["ws_url"] = ws_url
+            info["latency_ms"] = probe["latency_ms"]
+            return info
+
+    info["error"] = "未检测到 NapCat 服务（尝试了端口 3001, 6700, 8080）"
+    return info
+
+
+def test_napcat_connection(ws_url: str, access_token: str = "") -> dict:
+    """Test NapCat connection and retrieve bot info via OneBot 11 HTTP API.
+
+    Returns dict: ok, bot_id, bot_name, latency_ms, error
+    """
+    result = {"ok": False, "bot_id": "", "bot_name": "", "latency_ms": 0, "error": ""}
+
+    # Try TCP connection first
+    ws_probe = _try_ws_connect(ws_url, timeout=5.0)
+    if not ws_probe["ok"]:
+        result["error"] = f"无法连接到 {ws_url}: {ws_probe['error']}"
+        return result
+    result["latency_ms"] = ws_probe["latency_ms"]
+
+    # Try HTTP API to get login info
+    try:
+        import urllib.request
+        from urllib.parse import urlparse
+        parsed = urlparse(ws_url if "://" in ws_url else f"ws://{ws_url}")
+        http_base = f"http://{parsed.hostname}:{parsed.port}"
+
+        headers = {"Content-Type": "application/json"}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+
+        req = urllib.request.Request(
+            f"{http_base}/get_login_info",
+            headers=headers,
+            method="GET",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        data = json.loads(resp.read().decode(), strict=False)
+        if data.get("retcode") == 0:
+            result["ok"] = True
+            result["bot_id"] = str(data.get("data", {}).get("user_id", ""))
+            result["bot_name"] = data.get("data", {}).get("nickname", "")
+        else:
+            result["ok"] = True
+            result["bot_id"] = "unknown"
+            result["bot_name"] = "(HTTP API 不可用，但连接正常)"
+    except Exception:
+        # WS works, HTTP doesn't - still OK
+        result["ok"] = True
+        result["bot_id"] = "unknown"
+        result["bot_name"] = "(HTTP API 不可用，但连接正常)"
+
+    return result
+
+
+def setup_qq_config(workspace: str) -> dict:
+    """Interactive QQ/NapCat configuration wizard.
+
+    Returns dict with QQ config to merge into partner_config.json
+    """
+    section("QQ 集成配置 (NapCat)", "🐧")
+
+    napcat = detect_napcat()
+    if napcat["installed"]:
+        status_ok(f"NapCat 服务已检测到  {napcat['ws_url']}  ({napcat['latency_ms']}ms)")
+    else:
+        status_warn(napcat["error"])
+        status_info("请先安装并启动 NapCat: https://github.com/NapNeko/NapCatQQ")
+
+    # ── WebSocket URL ──
+    default_ws = napcat["ws_url"] if napcat["installed"] else "ws://127.0.0.1:3001"
+    ws_url = prompt_input("NapCat WebSocket 地址", default_ws)
+    if not ws_url.startswith(("ws://", "wss://")):
+        ws_url = f"ws://{ws_url}"
+
+    # ── Access Token ──
+    access_token = prompt_input("Access Token (可选，直接回车跳过)", "")
+
+    # ── Test Connection ──
+    status_info("正在测试连接...")
+    test_result = test_napcat_connection(ws_url, access_token)
+    if test_result["ok"]:
+        status_ok(f"连接成功! Bot: {test_result['bot_name']} (QQ: {test_result['bot_id']})  延迟: {test_result['latency_ms']}ms")
+    else:
+        status_fail(f"连接失败: {test_result['error']}")
+        retry = prompt_choice("连接失败，是否仍要保存配置？", [
+            "保存配置（稍后手动检查）",
+            "取消配置"
+        ], default=0)
+        if retry == 1:
+            status_info("QQ 配置已取消")
+            return {}
+
+    # ── Group behavior ──
+    group_mode = prompt_choice("群聊响应模式：", [
+        "仅在 @我 时回复（推荐）",
+        "回复所有消息"
+    ], default=0)
+    group_at_only = (group_mode == 0)
+
+    # ── Voice ──
+    voice_mode = prompt_choice("语音功能：", [
+        "启用语音识别 + 文字回复（推荐）",
+        "启用语音识别 + 语音回复",
+        "禁用语音功能"
+    ], default=0)
+    voice_enabled = voice_mode in (0, 1)
+    voice_reply = (voice_mode == 1)
+
+    # ── Friend requests ──
+    friend_mode = prompt_choice("好友请求处理：", [
+        "手动审核（推荐）",
+        "自动通过"
+    ], default=0)
+    auto_approve_friend = (friend_mode == 1)
+
+    qq_config = {
+        "enabled": True,
+        "ws_url": ws_url,
+        "access_token": access_token,
+        "group_at_only": group_at_only,
+        "voice_enabled": voice_enabled,
+        "voice_reply": voice_reply,
+        "auto_approve_friend": auto_approve_friend,
+        "bot_id": test_result.get("bot_id", ""),
+        "bot_name": test_result.get("bot_name", ""),
+    }
+
+    status_ok(f"QQ 配置已保存: ws={ws_url}, group_at_only={group_at_only}, voice={voice_enabled}")
+    return qq_config
+
+
 # ── Skill Registration ──────────────────────────────────────
 
 def register_hermes_skill(workspace: str) -> str:
@@ -395,7 +569,7 @@ def setup_cron_hermes(workspace: str):
 
 
 def detect_openclaw() -> AgentInfo:
-    """Detect OpenClaw installation."""
+    """Detect OpenClaw installation and gateway status."""
     import json as _json
     home = Path.home()
     config_dir = home / ".openclaw"
@@ -412,9 +586,13 @@ def detect_openclaw() -> AgentInfo:
         except:
             pass
     
-    # Check binary
+    # Check binary (may be in n-managed dir or npm-global)
     bin_path = None
-    for candidate in [home / ".npm-global" / "bin" / "openclaw", Path("/usr/local/bin/openclaw")]:
+    for candidate in [
+        home / ".n" / "bin" / "openclaw",
+        home / ".npm-global" / "bin" / "openclaw",
+        Path("/usr/local/bin/openclaw"),
+    ]:
         if candidate.exists():
             bin_path = str(candidate)
             break
@@ -429,13 +607,26 @@ def detect_openclaw() -> AgentInfo:
     
     model = config.get("agents", {}).get("defaults", {}).get("model", "")
     
+    # Check gateway health
+    gateway_ok = False
+    try:
+        import socket
+        sock = socket.create_connection(("127.0.0.1", 18789), timeout=2)
+        sock.close()
+        gateway_ok = True
+    except:
+        pass
+    
+    status_emoji = "🟢" if gateway_ok else "🟡"
+    display = f"OpenClaw (小龙虾) {status_emoji}"
+    
     return AgentInfo(
         name="openclaw",
-        display_name="OpenClaw (小龙虾)",
+        display_name=display,
         emoji="🦞",
-        available=bool(config_dir.exists()),
+        available=bool(config_dir.exists() and bin_path),
         path=bin_path,
-        version=model,
+        version=model or None,
         config_path=str(config_path) if config_path.exists() else None,
     )
 
@@ -684,6 +875,16 @@ def interactive_setup():
     interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
     
+    # ── Step 6b: QQ Integration ──
+    qq_config = {}
+    enable_qq = prompt_choice("是否启用 QQ 聊天集成？", [
+        "跳过（稍后在 partner_config.json 中手动配置）",
+        "配置 QQ 集成"
+    ], default=0)
+    
+    if enable_qq == 1:
+        qq_config = setup_qq_config(workspace)
+    
     # ── Step 7: Save Config ──
     config = {
         "name": "Partner",
@@ -701,6 +902,7 @@ def interactive_setup():
             "max_tasks_per_cycle": 1,
             "heartbeat_timeout_minutes": 60,
         },
+        "qq": qq_config if qq_config else {"enabled": False},
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }

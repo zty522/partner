@@ -19,10 +19,9 @@ You don't give it commands. You just check in.**
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-24 | Stable release: core system, Event engine, multi-agent support |
-| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-23 | Initial release |
+| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | 首个稳定版：Event 系统、对话 V2、自我进化引擎 |
 
-**Coming soon:** v0.3.0 — QQ/WeChat integration, OpenClaw support, research agent adaptation
+**Coming soon:** v0.2.0 — QQ/WeChat integration, OpenClaw support, research agent adaptation
 
 [📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
 

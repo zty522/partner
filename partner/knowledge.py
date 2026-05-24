@@ -82,6 +82,113 @@ class KnowledgeBase:
         sorted_entries = sorted(self.entries, key=lambda e: e.created_at, reverse=True)
         return sorted_entries[:n]
     
+    def topic_coverage(self, topic: str) -> float:
+        """Calculate knowledge coverage for a topic (0.0 = no coverage, 1.0 = full coverage).
+
+        Algorithm:
+        1. Split topic into keywords (lowercased)
+        2. For each entry, check keyword presence in title/content/tags
+        3. Coverage = entries_with_any_match / total_entries (capped at 1.0)
+        4. Bonus weight for entries with high confidence
+        """
+        if not self.entries:
+            return 0.0
+
+        # Extract keywords: split topic, filter short words
+        keywords = [kw.strip().lower() for kw in topic.split() if len(kw.strip()) >= 2]
+        if not keywords:
+            return 0.0
+
+        matched = 0
+        weighted_matched = 0.0
+        total_weight = 0.0
+
+        confidence_weight = {"high": 1.5, "medium": 1.0, "low": 0.5}
+
+        for entry in self.entries:
+            w = confidence_weight.get(entry.confidence, 1.0)
+            total_weight += w
+
+            # Check keyword presence
+            text = f"{entry.title} {entry.content}".lower()
+            tag_text = " ".join(entry.tags).lower()
+
+            if any(kw in text or kw in tag_text for kw in keywords):
+                matched += 1
+                weighted_matched += w
+
+        if total_weight == 0:
+            return 0.0
+
+        return min(1.0, weighted_matched / total_weight)
+
+    def knowledge_distribution(self) -> dict:
+        """Analyze knowledge distribution across topics/categories/tags.
+
+        Returns a dict with:
+        - by_category: {category: count}
+        - by_tag: {tag: count}
+        - coverage_summary: list of (tag, count, coverage_level) sorted by count desc
+        """
+        cats = {}
+        tags = {}
+        for e in self.entries:
+            cats[e.category] = cats.get(e.category, 0) + 1
+            for t in e.tags:
+                tags[t] = tags.get(t, 0) + 1
+
+        # Classify coverage levels
+        coverage_summary = []
+        for tag, count in sorted(tags.items(), key=lambda x: -x[1]):
+            if count >= 5:
+                level = "well-covered"
+            elif count >= 2:
+                level = "moderate"
+            else:
+                level = "gap"
+            coverage_summary.append({"tag": tag, "count": count, "level": level})
+
+        return {
+            "total_entries": len(self.entries),
+            "by_category": cats,
+            "by_tag": tags,
+            "coverage_summary": coverage_summary,
+        }
+
+    def find_gaps(self, min_gap_count: int = 1) -> list:
+        """Find knowledge gaps - tags/categories with low coverage.
+
+        Returns list of dicts: [{"topic": str, "coverage": float, "suggested_priority": int}]
+        """
+        dist = self.knowledge_distribution()
+        gaps = []
+
+        for item in dist["coverage_summary"]:
+            if item["level"] == "gap":
+                # Calculate coverage via topic_coverage
+                cov = self.topic_coverage(item["tag"])
+                gaps.append({
+                    "topic": item["tag"],
+                    "entry_count": item["count"],
+                    "coverage": round(cov, 3),
+                    "suggested_priority": max(1, int((1 - cov) * 10)),
+                })
+
+        # Also check categories with very few entries
+        for cat, count in dist["by_category"].items():
+            if count <= 1:
+                existing = any(g["topic"] == cat for g in gaps)
+                if not existing:
+                    gaps.append({
+                        "topic": cat,
+                        "entry_count": count,
+                        "coverage": round(self.topic_coverage(cat), 3),
+                        "suggested_priority": 8,
+                    })
+
+        gaps.sort(key=lambda x: -x["suggested_priority"])
+        return gaps[:min_gap_count * 3]  # Return top candidates
+
     def stats(self) -> dict:
         cats = {}
         for e in self.entries:

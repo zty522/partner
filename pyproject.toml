@@ -12,17 +12,39 @@ requires-python = ">=3.9"
 authors = [
     {name = "Partner Team"},
 ]
-keywords = ["ai", "research", "autonomous", "agent", "science", "literature"]
+keywords = ["ai", "research", "autonomous", "agent", "science", "literature", "companion"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core dependencies (required)
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Messaging platforms
+wechat = ["wcferry>=39.0", "pilk>=0.2"]
+qq = ["websockets>=11.0"]
+# Voice processing
+voice = ["edge-tts>=6.1"]
+stt-whisper = ["openai-whisper>=20230918"]
+stt-funasr = ["funasr>=1.0"]
+tts-cosyvoice = ["torchaudio>=2.0"]
+# Development
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+# All optional dependencies
+all = [
+    "partner-research[wechat,qq,voice]",
 ]
 
 [project.scripts]
