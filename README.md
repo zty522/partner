@@ -7,10 +7,24 @@
 **An AI research companion that works independently in the background.
 You don't give it commands. You just check in.**
 
+[![Latest Release](https://img.shields.io/github/v/release/zty522/partner?label=Latest&style=flat-square)](https://github.com/zty522/partner/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
 </div>
+
+---
+
+## 📦 Versions
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-24 | Stable release: core system, Event engine, multi-agent support |
+| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-23 | Initial release |
+
+**Coming soon:** v0.3.0 — QQ/WeChat integration, OpenClaw support, research agent adaptation
+
+[📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
 
 ---
 
