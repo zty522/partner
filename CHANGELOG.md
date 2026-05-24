@@ -6,59 +6,59 @@ All notable changes to Partner will be documented in this file.
 
 ### ✨ Features
 
-#### Event 系统（自主研究）
-- 自主研究周期：每 15-30 分钟自动执行研究任务
-- Event 模板：8 种预定义研究流程
-- 知识空白检测：自动识别需要深入研究的领域
-- Event 统计：追踪完成数、衍生数、执行阶段数
+#### Event System (Autonomous Research)
+- Autonomous research cycles: runs tasks every 15-30 minutes
+- Event templates: 8 predefined research workflows
+- Knowledge gap detection: automatically identifies research gaps
+- Event statistics: tracks completed, spawned, and executed phases
 
-#### 对话引擎 V2
-- 多轮上下文：记住对话历史和上下文
-- 响应生成器：支持"第 3 个是什么"、"下一页"等指令
-- 主动通知：发现重要结果时主动提醒
-- 用户偏好学习：自动适应研究风格
+#### Conversation Engine V2
+- Multi-turn context: remembers conversation history
+- Response generator: supports "show me the 3rd one", "next page"
+- Proactive notifications: alerts about important findings
+- User preference learning: adapts to research style
 
-#### 自我进化引擎
-- 策略学习器：学习哪种任务类型最成功
-- 记忆清理器：自动清理过时知识
-- CPE 守护：监控核心能力，降级时告警
+#### Self-Evolution Engine
+- Strategy learner: learns which task types succeed
+- Memory pruner: cleans outdated knowledge automatically
+- CPE guard: monitors core capabilities, alerts on degradation
 
-#### 策略地图
-- DAG 结构：可视化研究路线图
-- 分支发现：自动发现新研究方向
-- 策略选择：5 因子评分决定下一步
+#### Strategy Map
+- DAG structure: visual research roadmap
+- Fork discovery: finds new research directions automatically
+- Policy selection: 5-factor scoring for next action
 
-#### 质量保证
-- 100+ 单元测试
-- 知识库自动审查
-- 端到端集成测试
+#### Quality Assurance
+- 100+ unit tests
+- Knowledge base automatic audit
+- End-to-end integration tests
 
 ### 🐛 Bug Fixes
-- 修复 task_queue 字符串处理问题
-- 修复任务详情打印问题
-- 添加 partner skill 工具限制钩子
+- Fix task_queue string handling (bare strings instead of dicts)
+- Fix task detail printing (don't show internal info)
+- Add tool restriction hook for partner skill
 
 ### 📦 Infrastructure
-- pyproject.toml：支持 pip install partner
-- 可选依赖：partner[wechat]、partner[qq]、partner[voice]
-- CHANGELOG.md：版本历史追踪
-- release.sh：自动发布脚本
+- pyproject.toml: support `pip install partner`
+- Optional dependencies: `partner[wechat]`, `partner[qq]`, `partner[voice]`
+- CHANGELOG.md: version history tracking
+- release.sh: automated release script
 
 ### 🤖 Supported Agents
-- 🔮 Hermes Agent (完全支持)
-- 🦞 OpenClaw (支持)
-- ⚡ OpenAI Codex (支持)
-- 👥 CrewAI (支持)
-- 💻 gptme (支持)
+- 🔮 Hermes Agent (Full support)
+- 🦞 OpenClaw (Supported)
+- ⚡ OpenAI Codex (Supported)
+- 👥 CrewAI (Supported)
+- 💻 gptme (Supported)
 
 ---
 
 ## Planned
 
 ### v0.2.0 (In Progress)
-- [ ] QQ 集成 (NapCat)
-- [ ] 微信集成 (跨平台方案)
-- [ ] OpenClaw 集成检查
-- [ ] 科研 Agent 适配 (CytoBridge 等)
-- [ ] 一键式消息平台配置
-- [ ] Partner 自动升级机制
+- [ ] QQ integration (NapCat)
+- [ ] WeChat integration (cross-platform)
+- [ ] OpenClaw integration check
+- [ ] Research agent adaptation (CytoBridge, etc.)
+- [ ] One-click messaging setup
+- [ ] Partner auto-upgrade mechanism
