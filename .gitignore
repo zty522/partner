@@ -13,9 +13,3 @@ build/
 venv/
 env/
 docs/
-
-# QQ/WeChat/OpenClaw integration (not in v0.1.0, will be in v0.2.0)
-partner/openclaw_bridge.py
-partner/wechatpad_adapter.py
-partner/wechatpad_bridge.py
-
