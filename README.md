@@ -19,8 +19,8 @@ You don't give it commands. You just check in.**
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-25 | 🎉 **QQ官方机器人** · **LLM对话** · **CLI重构** · **项目化Workspace** |
-| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | First stable release: Event system, Conversation V2, Self-Evolution Engine |
+| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-25 | 🎉 **QQ Official Bot** · **LLM-powered chat** · **CLI revamp** · **Project-based workspace** |
+| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | Event system, Conversation V2, Self-Evolution Engine |
 
 [📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
 
@@ -28,25 +28,25 @@ You don't give it commands. You just check in.**
 
 ## What's New in v0.2.0
 
-### 🐧 QQ官方机器人
-- 接入 **QQ开放平台** 官方 API（不再是 NapCat 方案）
-- 支持 **私聊(C2C)** 和 **群聊@** 
-- 无需 Windows，纯 Linux 运行
-- 自动后台启动：`partner bot start qq`
+### 🐧 QQ Official Bot
+- Integrated with the **QQ Open Platform** official API (replaces the old NapCat hack)
+- Supports **private (C2C)** and **group @mentions**
+- Runs natively on Linux — no Windows dependency
+- Auto-start in background: `partner bot start qq`
 
-### 🧠 LLM 驱动对话
-- QQ 对话不再用模板回复，而是通过 **Hermes LLM** 生成自然语言
-- 上下文记忆（最近5轮对话）
-- 简短口语化，不罗列格式化数据
+### 🧠 LLM-Powered Conversation
+- QQ chat now uses **Hermes LLM** for natural conversation — no more rigid templates
+- Context-aware (remembers last 5 exchanges)
+- Concise, conversational tone — no data dumps
 
-### 🎯 CLI 精简为三条命令
+### 🎯 Streamlined CLI
 ```
-partner setup      配置一切（Agent + QQ机器人 + 自动后台）
-partner status     查看全部状态（含机器人运行状态）
-partner bot        启动/停止机器人
+partner setup      Configure everything (Agent + QQ bot + auto-start)
+partner status     View full status (research stats + bot health)
+partner bot        Start / stop bots
 ```
 
-### 📁 项目化 Workspace
+### 📁 Project-Based Workspace
 ```
 workspace/
 ├── projects/
@@ -54,14 +54,14 @@ workspace/
 │   ├── cytobridge/
 │   ├── ligand_design/
 │   └── partner/
-├── dialogue/           每日对话记录 (.log)
-├── journal/            每日总结日志 (.log)
-├── knowledge/          共享知识库
-└── state/              Partner 运行时状态
+├── dialogue/           Daily conversation logs (.log)
+├── journal/            Daily summary & reflection logs (.log)
+├── knowledge/          Shared knowledge base
+└── state/              Partner runtime state
 ```
-- 每日自动整理（凌晨4点），**不删除任何内容**
-- 文件命名规范：`类型_主题_序号_日期.ext`
-- 旧版本自动归档，历史可追溯
+- **Non-destructive** daily auto-organization (4 AM cron)
+- Standardized file naming: `type_topic_serial_YYYYMMDD.ext`
+- Old versions auto-archived — full history traceable
 
 ---
 
@@ -90,7 +90,7 @@ pip install -e .
 partner setup
 ```
 
-The setup wizard detects your installed agents (Hermes, Codex, Claude Code), configures a workspace, and sets up QQ bot integration.
+The setup wizard detects installed agents (Hermes, Codex, Claude Code), configures a workspace, and sets up QQ bot integration.
 
 ```bash
 partner setup           # First-time configuration
@@ -102,14 +102,16 @@ partner bot start qq    # Start QQ bot in background
 
 1. Go to [q.qq.com](https://q.qq.com/) and register as a developer
 2. Create a bot application → get **AppID** + **AppSecret**
-3. Run `partner setup` and enter credentials
-4. Run `partner bot start qq`
+3. Enable **C2C messages** and **Group @mentions** in the dev console
+4. Run `partner setup` and enter credentials
+5. Run `partner bot start qq`
 
 Then open QQ, find your bot, and start chatting:
 
 ```
 You:       Hey Partner, what have you been doing?
-QQ Bot:    嘿，刚把大版本收了个尾——加了QQ官方机器人支持，顺手把setup流程重构了一遍。
+QQ Bot:    Just wrapped up a big release — added official QQ bot support, 
+           revamped the CLI, and reorganized the workspace. What's up?
 ```
 
 ---
@@ -121,7 +123,7 @@ QQ Bot:    嘿，刚把大版本收了个尾——加了QQ官方机器人支持�
 │            You (the researcher)           │
 │   "Hey Partner, what have you been doing?"│
 └──────────────────┬───────────────────────┘
-                   ↕ QQ / WeChat / Agent CLI
+                   ↕ QQ / Agent CLI
 ┌──────────────────┴───────────────────────┐
 │              🤝 Partner                   │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
@@ -133,7 +135,7 @@ QQ Bot:    嘿，刚把大版本收了个尾——加了QQ官方机器人支持�
 │  │ (Cron)   │ │ Manager  │ │ Adapter   │ │
 │  └──────────┘ └──────────┘ └──────────┘ │
 └──────────────────┬───────────────────────┘
-                   ↕ LLM-powered conversation
+                   ↕ LLM-powered chat
 ┌──────────────────┴───────────────────────┐
 │  QQ Bot Platform (api.sgroup.qq.com)      │
 │  WebSocket · REST API · Hermes Backend    │
@@ -146,7 +148,7 @@ QQ Bot:    嘿，刚把大版本收了个尾——加了QQ官方机器人支持�
 
 ```bash
 partner setup           # Configure everything (Agent + QQ + auto-start)
-partner status          # View full status (research + bot status)
+partner status          # View full status (research + bot health)
 partner bot start qq    # Start QQ bot in background
 partner bot stop qq     # Stop QQ bot
 ```
@@ -164,6 +166,19 @@ That's it. Partner talks to you through QQ or your agent.
 | ⚡ [OpenAI Codex](https://openai.com/codex) | ✅ Supported | CLI integration |
 | 🧠 [Claude Code](https://claude.ai/code) | ✅ Supported | CLI integration |
 | 📌 Direct mode | ✅ Built-in | No external agent needed |
+
+---
+
+## Events: The Heart of Partner
+
+An **Event** is one complete research cycle. Events grow on their own — one Event's findings automatically spawn new Events.
+
+| Template | What it does |
+|----------|-------------|
+| `literature-deep-dive` | Search, read, and synthesize papers on a topic |
+| `project-audit` | Analyze a codebase, find improvements |
+| `idea-brainstorm` | Generate research ideas from accumulated knowledge |
+| `cross-pollination` | Find connections between different projects |
 
 ---
 
