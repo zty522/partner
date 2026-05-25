@@ -56,8 +56,13 @@ class UserPreferenceStore:
         self.dialog_history_path = dialog_history_path
         self.prefs = self._load()
 
-    def _load(self) -> UserPreferences:
+    def _load(self) -> 'UserPreferences':
         """Load preferences from JSON file, or create defaults."""
+        if not self.path or not os.path.exists(self.path):
+            return UserPreferences(
+                created_at=datetime.now().isoformat(),
+                last_updated=datetime.now().isoformat(),
+            )
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.loads(f.read(), strict=False)
@@ -77,8 +82,10 @@ class UserPreferenceStore:
             self._save(prefs)
             return prefs
 
-    def _save(self, prefs: UserPreferences = None):
-        """Persist preferences to JSON."""
+    def _save(self, prefs: 'UserPreferences' = None):
+        """Save preferences to JSON."""
+        if not self.path:
+            return
         prefs = prefs or self.prefs
         prefs.last_updated = datetime.now().isoformat()
         data = asdict(prefs)

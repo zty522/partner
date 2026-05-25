@@ -1,6 +1,9 @@
 """Agent Adapter Layer - unified interface for different agent backends."""
 
+import logging
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -86,15 +89,25 @@ class HermesAdapter(AgentAdapter):
     def chat(self, message: str) -> str:
         """Chat via hermes subprocess."""
         import subprocess
+        import shlex
         try:
             result = subprocess.run(
-                ["hermes", "chat", "--message", message],
-                capture_output=True, text=True, timeout=60,
+                ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""],
+                capture_output=True, text=True, timeout=120,
                 cwd=self.workspace,
             )
-            return result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return "Hermes agent is not available."
+            out = result.stdout.strip()
+            if result.returncode == 0 and out:
+                return out
+            # Try with explicit provider fallback
+            logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
+            return out or f"Error: {result.stderr[:200]}"
+        except subprocess.TimeoutExpired:
+            return "请求超时，请稍后再试"
+        except FileNotFoundError:
+            return "Hermes agent is not available (not found in PATH)"
+        except Exception as e:
+            return f"Error: {e}"
 
 
 class DirectAdapter(AgentAdapter):

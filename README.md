@@ -19,9 +19,49 @@ You don't give it commands. You just check in.**
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-25 | 🎉 **QQ官方机器人** · **LLM对话** · **CLI重构** · **项目化Workspace** |
 | **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | First stable release: Event system, Conversation V2, Self-Evolution Engine |
 
 [📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
+
+---
+
+## What's New in v0.2.0
+
+### 🐧 QQ官方机器人
+- 接入 **QQ开放平台** 官方 API（不再是 NapCat 方案）
+- 支持 **私聊(C2C)** 和 **群聊@** 
+- 无需 Windows，纯 Linux 运行
+- 自动后台启动：`partner bot start qq`
+
+### 🧠 LLM 驱动对话
+- QQ 对话不再用模板回复，而是通过 **Hermes LLM** 生成自然语言
+- 上下文记忆（最近5轮对话）
+- 简短口语化，不罗列格式化数据
+
+### 🎯 CLI 精简为三条命令
+```
+partner setup      配置一切（Agent + QQ机器人 + 自动后台）
+partner status     查看全部状态（含机器人运行状态）
+partner bot        启动/停止机器人
+```
+
+### 📁 项目化 Workspace
+```
+workspace/
+├── projects/
+│   ├── age_prediction/  code/ ideas/ notes/ dialogue/ data/
+│   ├── cytobridge/
+│   ├── ligand_design/
+│   └── partner/
+├── dialogue/           每日对话记录 (.log)
+├── journal/            每日总结日志 (.log)
+├── knowledge/          共享知识库
+└── state/              Partner 运行时状态
+```
+- 每日自动整理（凌晨4点），**不删除任何内容**
+- 文件命名规范：`类型_主题_序号_日期.ext`
+- 旧版本自动归档，历史可追溯
 
 ---
 
@@ -50,28 +90,26 @@ pip install -e .
 partner setup
 ```
 
-The setup wizard detects your installed agents (Hermes, Codex, Claude Code), configures a workspace, and registers Partner as a skill. Then just talk naturally:
+The setup wizard detects your installed agents (Hermes, Codex, Claude Code), configures a workspace, and sets up QQ bot integration.
+
+```bash
+partner setup           # First-time configuration
+partner status          # Check everything
+partner bot start qq    # Start QQ bot in background
+```
+
+### QQ Bot Setup
+
+1. Go to [q.qq.com](https://q.qq.com/) and register as a developer
+2. Create a bot application → get **AppID** + **AppSecret**
+3. Run `partner setup` and enter credentials
+4. Run `partner bot start qq`
+
+Then open QQ, find your bot, and start chatting:
 
 ```
 You:       Hey Partner, what have you been doing?
-
-Partner:   📊 Here's what I've been up to:
-
-             ⏱  Completed 12 research cycles
-             📋 Finished 8 tasks
-             📚 Built up 15 knowledge entries
-
-           📖 Recent activity:
-             1. Searched for latest age prediction methods
-                → Found OMICmAge (Nature Aging 2024), MAE < 5 years
-             2. Analyzed exploration tree results
-                → Best method: age-matched + age-aware correction
-
-           🔑 Key findings:
-             • scGPT needs domain fine-tuning for aging tasks
-             • Diffusion models are replacing VAEs for molecule generation
-
-           🎯 71 tasks still queued for exploration
+QQ Bot:    嘿，刚把大版本收了个尾——加了QQ官方机器人支持，顺手把setup流程重构了一遍。
 ```
 
 ---
@@ -81,9 +119,9 @@ Partner:   📊 Here's what I've been up to:
 ```
 ┌──────────────────────────────────────────┐
 │            You (the researcher)           │
-│   "What have you been doing?"             │
+│   "Hey Partner, what have you been doing?"│
 └──────────────────┬───────────────────────┘
-                   ↕ natural language
+                   ↕ QQ / WeChat / Agent CLI
 ┌──────────────────┴───────────────────────┐
 │              🤝 Partner                   │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
@@ -95,91 +133,37 @@ Partner:   📊 Here's what I've been up to:
 │  │ (Cron)   │ │ Manager  │ │ Adapter   │ │
 │  └──────────┘ └──────────┘ └──────────┘ │
 └──────────────────┬───────────────────────┘
-                   ↕
+                   ↕ LLM-powered conversation
 ┌──────────────────┴───────────────────────┐
-│  Agent Backend (Hermes / Codex / Claude)  │
-│  Web Search · Code Execution · File Ops   │
+│  QQ Bot Platform (api.sgroup.qq.com)      │
+│  WebSocket · REST API · Hermes Backend    │
 └──────────────────────────────────────────┘
 ```
-
-Partner generates its own tasks, executes them through your agent, and accumulates knowledge over time. It recovers from crashes via heartbeat + checkpoint system.
-
-
-
----
-
-## Events: The Heart of Partner
-
-An **Event** is one complete research cycle. Like how Agents have Skills, Partner has Events.
-
-```
-┌─────────────────────────────────────────┐
-│              One Event                   │
-│                                          │
-│  📖 Literature    → Search papers        │
-│  🔬 Project Scan  → Analyze your code    │
-│  💡 Idea Generate → Propose improvements │
-│  🧭 Exploration   → Try new directions   │
-│  📝 Knowledge     → Record findings      │
-│  🌱 Spawn         → Create new Events    │
-└─────────────────────────────────────────┘
-```
-
-Events **grow on their own** — one Event's findings automatically spawn new Events. The research never stops.
-
-### Event Templates
-
-| Template | What it does |
-|----------|-------------|
-| `literature-deep-dive` | Search, read, and synthesize papers on a topic |
-| `project-audit` | Analyze a codebase, find improvements |
-| `idea-brainstorm` | Generate research ideas from accumulated knowledge |
-| `cross-pollination` | Find connections between different projects |
-
-Users can define custom Event templates — share them with the community, like Agent skills.
 
 ---
 
 ## Commands
 
 ```bash
-partner          # Guide to start talking
-partner setup    # First-time configuration (or reconfigure)
-partner status   # Check research progress
+partner setup           # Configure everything (Agent + QQ + auto-start)
+partner status          # View full status (research + bot status)
+partner bot start qq    # Start QQ bot in background
+partner bot stop qq     # Stop QQ bot
 ```
 
-That's it. All conversation happens through your agent.
+That's it. Partner talks to you through QQ or your agent.
 
 ---
 
 ## Supported Agents
 
-Partner works on top of existing agent frameworks — like how agents work on top of LLMs.
-
-| Agent | Stars | Status | Notes |
-|-------|-------|--------|-------|
-| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | — | ✅ Full support | Skills + cron integration |
-| 🦞 [OpenClaw](https://github.com/openclaw/openclaw) | 374k | ✅ Supported | Gateway API integration |
-| ⚡ [OpenAI Codex](https://openai.com/codex) | — | ✅ Supported | CLI integration |
-| 👥 [CrewAI](https://github.com/crewAIInc/crewAI) | 52k | 🔜 Experimental | Multi-agent orchestration |
-| 🤖 [AutoGPT](https://github.com/Significant-Gravitas/AutoGPT) | 184k | 🔜 Experimental | Full automation |
-| 👐 [OpenHands](https://github.com/OpenHands/OpenHands) | 75k | 🔜 Experimental | Software development |
-| 💻 [gptme](https://github.com/gptme/gptme) | 4k | 🔜 Experimental | Terminal agent |
-| 🧠 [Claude Code](https://claude.ai/code) | — | 🔜 Coming soon | |
-| 📌 Direct mode | — | ✅ Built-in | No external agent needed |
-
-Run `partner setup` to auto-detect installed agents.
-
----
-
-## Why Partner?
-
-| | LLM | Agent | **Partner** |
-|---|-----|-------|-------------|
-| Needs your input | ✅ Every time | ✅ Every task | ❌ Works on its own |
-| Learns over time | ❌ | ❌ | ✅ Growing knowledge base |
-| Survives restarts | ❌ | ❌ | ✅ Crash recovery |
-| "What have you done?" | ❌ | ❌ | ✅ **Core feature** |
+| Agent | Status | Notes |
+|-------|--------|-------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Full support | Skills + cron + LLM chat |
+| 🦞 [OpenClaw](https://github.com/openclaw/openclaw) | ✅ Supported | Gateway API integration |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | ✅ Supported | CLI integration |
+| 🧠 [Claude Code](https://claude.ai/code) | ✅ Supported | CLI integration |
+| 📌 Direct mode | ✅ Built-in | No external agent needed |
 
 ---
 

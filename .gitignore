@@ -34,7 +34,7 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Partner specific
+# Partner - workspace (user data, not code)
 state/
 knowledge/
 logs/
@@ -42,12 +42,24 @@ ideas/
 design/
 docs/
 scripts/
-templates/
+config/
+
+# Old test & event template files (kept for reference locally)
 tests/
-events/
-partner/openclaw_bridge.py
+templates/
+
+# Partner - old integrations (removed in v0.2.0)
+partner/qq_bridge.py
+partner/qq_napcat.py
+partner/wechat_bridge.py
+partner/wechat_wcf.py
 partner/wechatpad_adapter.py
 partner/wechatpad_bridge.py
+partner/strategy_map.py
+partner/messaging.py
+partner/voice.py
+
+# Build artifacts
 CHANGELOG.md
 AUDIT_REPORT.md
 CONTRIBUTING.md
@@ -56,6 +68,4 @@ release.sh
 releases/
 run_cycle.py
 demo.py
-dist/
-partner_research.egg-info/
 .pytest_cache/

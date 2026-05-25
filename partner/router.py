@@ -29,6 +29,7 @@ class Intent(Enum):
     DETAIL = "detail"
     TASK_ADD = "task_add"
     TASK_CANCEL = "task_cancel"
+    WORKSPACE = "workspace"  # organize workspace
     HELP = "help"
     GENERAL = "general"
 
@@ -46,9 +47,10 @@ class ParsedQuery:
 # Intent classification rules: (pattern, intent, confidence, topic_group)
 # topic_group: regex group index for topic extraction, or None
 INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
-    # Status queries
+    # Status queries - expanded for QQ chat
     (r"(最近|刚才|今天)(在?干|在?做|研究|搞|忙)(了?什么|啥|什么活)", Intent.STATUS, 0.95, None),
     (r"(你在?干什么|你在?做什么|在忙什么|状态|进展如何|进展怎么样|最近在研究什么)", Intent.STATUS, 0.9, None),
+    (r"(干嘛呢|忙啥|干啥|在干嘛|最近在干嘛|在忙啥)", Intent.STATUS, 0.95, None),
     (r"(what (have you|did you|are you)|recent|status|progress)", Intent.STATUS, 0.9, None),
     (r"(汇报|总结一下|最近的?进展)", Intent.STATUS, 0.85, None),
     
@@ -59,6 +61,7 @@ INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
     # Knowledge queries (with topic extraction)
     (r"关于[「『]?(.+?)[」』]?(你)?(知道|了解|学到|发现)了?什么", Intent.KNOWLEDGE, 0.95, 1),
     (r"(什么是|怎么理解|解释一?下?|说说|聊聊)[「『]?(.+?)[」』]?$", Intent.KNOWLEDGE, 0.85, 2),
+    (r"^(知道|了解)(?!最近|一下)\s*(.+?)$", Intent.KNOWLEDGE, 0.7, 2),
     (r"(知道|了解).+?[关于]?(扩散|VAE|scGPT|年龄|衰老|AMP|抗菌肽|鲍曼|因果|批次校正|XGBoost)", Intent.KNOWLEDGE, 0.9, None),
     (r"(know about|what is|tell me about|explain)\s+(.+)", Intent.KNOWLEDGE, 0.9, 2),
     (r"(区别|对比|比较).+?(和|与|vs)", Intent.KNOWLEDGE, 0.8, None),
@@ -73,6 +76,10 @@ INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
     (r"(详细说说|具体讲讲|展开讲讲|深入了解|详细说|具体说|展开说|再说说|多说说)[「『]?(.+?)[」』?？]?$", Intent.DETAIL, 0.95, 2),
     (r"(详细|具体|深入|展开|再多说说|说详细点)[地说一讲聊]?\s*[「『]?(.+?)[」』?？]?$", Intent.DETAIL, 0.9, 2),
     (r"(more about|elaborate|details? on|deep dive)\s+(.+)", Intent.DETAIL, 0.9, 2),
+
+    # Workspace organization (non-destructive)
+    (r"(整理|重组|重构|重新组织|清理|归档)[一二下]?(workspace|工作区|文件|项目|目录|文件夹)", Intent.WORKSPACE, 0.95, None),
+    (r"(organize|restructure|clean up|tidy)\s+(workspace|files|projects)", Intent.WORKSPACE, 0.9, None),
     
     # Task management
     (r"(添加|新建|增加|add)\s*(一个)?\s*任务[：:]?\s*(.+)", Intent.TASK_ADD, 0.95, 3),
@@ -105,6 +112,7 @@ class ConversationRouter:
             Intent.DETAIL: self._handle_detail,
             Intent.TASK_ADD: self._handle_task_add,
             Intent.TASK_CANCEL: self._handle_task_cancel,
+            Intent.WORKSPACE: self._handle_workspace,
             Intent.HELP: self._handle_help,
             Intent.GENERAL: self._handle_general,
         }
@@ -392,4 +400,30 @@ class ConversationRouter:
                 f"  • 「最近在研究什么？」 — 查看进展\n"
                 f"  • 「关于 X 你知道什么？」 — 搜索知识\n"
                 f"  • 「去研究 X」 — 添加新任务\n"
+                f"  • 「整理 workspace」 — 整理工作区文件\n"
                 f"  • 「帮助」 — 查看所有命令")
+
+    def _handle_workspace(self, parsed: ParsedQuery) -> str:
+        """Handle workspace organization request."""
+        try:
+            from .workspace_manager import migrate_workspace, detect_projects
+            ws = self.state.workspace if hasattr(self.state, 'workspace') else None
+            if not ws:
+                return "无法找到工作区路径"
+            projects = detect_projects(ws)
+            actions = migrate_workspace(ws)
+            lines = [f"📁 workspace 整理完成！不删除任何内容。\n"]
+            lines.append(f"发现 {len(projects)} 个项目:")
+            for k in sorted(projects):
+                lines.append(f"  • {k}")
+            if actions:
+                lines.append(f"\n本次操作 ({len(actions)} 项):")
+                for a in actions[:8]:
+                    lines.append(f"  {a}")
+                if len(actions) > 8:
+                    lines.append(f"  ...还有 {len(actions)-8} 项")
+            else:
+                lines.append("\n无需调整，结构已是最新。")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"整理时出错: {e}"

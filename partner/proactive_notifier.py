@@ -51,15 +51,20 @@ class ProactiveNotifier:
     """
 
     def __init__(self, knowledge: KnowledgeBase, journal: Journal,
-                 state: StateManager, workspace: str = "/mnt/e/work/study_room"):
+                 state: StateManager, workspace: str = ""):
         self.knowledge = knowledge
         self.journal = journal
         self.state = state
         self.workspace = workspace
 
-        self.state_dir = os.path.join(workspace, "state")
-        self.config_path = os.path.join(self.state_dir, "notifier_config.json")
-        self.notif_log_path = os.path.join(self.state_dir, "notifications.jsonl")
+        self.state_dir = os.path.join(workspace, "state") if workspace else None
+        if self.state_dir:
+            os.makedirs(self.state_dir, exist_ok=True)
+            self.config_path = os.path.join(self.state_dir, "notifier_config.json")
+            self.notif_log_path = os.path.join(self.state_dir, "notifications.jsonl")
+        else:
+            self.config_path = None
+            self.notif_log_path = None
 
         # User focus areas (inferred from task history and knowledge tags)
         self._focus_areas: List[str] = []
@@ -68,8 +73,28 @@ class ProactiveNotifier:
         # Load or initialize rules
         self.rules = self._load_rules()
 
+    @staticmethod
+    def _make_default_rules() -> List['NotificationRule']:
+        """Create default notification rules."""
+        return [
+            NotificationRule(name="high_confidence_finding",
+                description="Notify when a high-confidence knowledge entry is added",
+                priority="high", cooldown_hours=2.0),
+            NotificationRule(name="research_milestone",
+                description="Notify at task/knowledge count milestones",
+                priority="normal", cooldown_hours=12.0),
+            NotificationRule(name="user_interest_update",
+                description="Notify when new findings match user focus areas",
+                priority="normal", cooldown_hours=4.0),
+            NotificationRule(name="streak_achievement",
+                description="Notify when Partner completes consecutive tasks",
+                priority="low", cooldown_hours=24.0),
+        ]
+
     def _load_rules(self) -> List[NotificationRule]:
         """Load notification rules from config, or create defaults."""
+        if not self.config_path:
+            return self._make_default_rules()
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 data = json.loads(f.read(), strict=False)
@@ -82,38 +107,10 @@ class ProactiveNotifier:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-        # Default rules
-        defaults = [
-            NotificationRule(
-                name="high_confidence_finding",
-                description="Notify when a high-confidence knowledge entry is added",
-                priority="high",
-                cooldown_hours=2.0,
-            ),
-            NotificationRule(
-                name="research_milestone",
-                description="Notify at task/knowledge count milestones",
-                priority="normal",
-                cooldown_hours=12.0,
-            ),
-            NotificationRule(
-                name="user_interest_update",
-                description="Notify when new findings match user focus areas",
-                priority="normal",
-                cooldown_hours=4.0,
-            ),
-            NotificationRule(
-                name="streak_achievement",
-                description="Notify when Partner completes consecutive tasks",
-                priority="low",
-                cooldown_hours=24.0,
-            ),
-        ]
-        self._save_rules(defaults)
-        return defaults
+        return self._make_default_rules()
+
 
     def _save_rules(self, rules: List[NotificationRule] = None):
-        """Persist rule state (including last_fired timestamps)."""
         rules = rules or self.rules
         data = {
             "last_updated": datetime.now().isoformat(),

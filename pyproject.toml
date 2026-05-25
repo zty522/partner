@@ -35,6 +35,8 @@ dependencies = [
 # Messaging platforms
 wechat = ["wcferry>=39.0", "pilk>=0.2"]
 qq = ["websockets>=11.0"]
+qq-official = ["aiohttp>=3.8"]
+wechat-official = []  # 纯标准库，零依赖
 # Voice processing
 voice = ["edge-tts>=6.1"]
 stt-whisper = ["openai-whisper>=20230918"]

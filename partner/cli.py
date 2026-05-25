@@ -61,147 +61,14 @@ C_RED = "\033[31m"
 
 def cmd_status(args):
     """Check Partner status with full detail."""
-    import json as _json
-    
-    workspace = args.workspace or get_workspace()
-    
-    if not workspace:
-        print("❌ Partner not configured. Run 'partner setup' first.")
-        return
-    
-    config_path = os.path.join(workspace, "partner_config.json")
-    if not os.path.exists(config_path):
-        print(f"❌ Config not found: {config_path}")
-        print("Run 'partner setup' to configure.")
-        return
-    
-    with open(config_path) as f:
-        config = _json.load(f)
-    
-    state_dir = os.path.join(workspace, "state")
-    
-    # Header
-    print()
-    print(f"  {C_BOLD}{C_CYAN}🤝 Partner Status{C_RESET}")
-    print(f"  {C_DIM}{'─' * 50}{C_RESET}")
-    print()
-    
-    # Config
-    backend = config.get("backend", config.get("agent", {}).get("backend", "unknown"))
-    print(f"  {C_BOLD}Configuration{C_RESET}")
-    print(f"    Backend:   {backend}")
-    print(f"    Workspace: {config.get('workspace', {}).get('path', workspace) if isinstance(config.get('workspace'), dict) else workspace}")
-    print()
-    
-    # Stats
-    stats_path = os.path.join(state_dir, "stats.json")
-    if os.path.exists(stats_path):
-        with open(stats_path) as f:
-            stats = _json.load(f)
-        print(f"  {C_BOLD}Research Stats{C_RESET}")
-        print(f"    ⏱  Cycles:          {stats.get('total_cycles', 0)}")
-        print(f"    📋 Tasks completed:  {stats.get('total_tasks_completed', 0)}")
-        print(f"    🕐 Last run:         {str(stats.get('last_run', 'never'))[:16]}")
-        print()
-    
-    # Knowledge
-    kb_path = os.path.join(state_dir, "knowledge.json")
-    if os.path.exists(kb_path):
-        with open(kb_path) as f:
-            kb = _json.load(f)
-        entries = kb.get("entries", []) if isinstance(kb, dict) else kb
-        cats = {}
-        for e in entries:
-            c = e.get("category", "other")
-            cats[c] = cats.get(c, 0) + 1
-        print(f"  {C_BOLD}Knowledge Base{C_RESET}")
-        print(f"    📚 Total: {len(entries)} entries")
-        if cats:
-            parts = ", ".join(f"{v} {k}" for k, v in sorted(cats.items(), key=lambda x: -x[1]))
-            print(f"    📂 Types: {parts}")
-        print()
-    
-    # Tasks
-    tq_path = os.path.join(state_dir, "task_queue.json")
-    if os.path.exists(tq_path):
-        with open(tq_path) as f:
-            tasks = _json.load(f)
-        # Filter out malformed entries (e.g. bare strings from buggy cron writes)
-        tasks = [t for t in tasks if isinstance(t, dict)]
-        pending = [t for t in tasks if t.get("status") == "pending"]
-        completed = [t for t in tasks if t.get("status") == "completed"]
-        in_progress = [t for t in tasks if t.get("status") == "in_progress"]
-        pending.sort(key=lambda t: -t.get("priority", 0))
-        
-        print(f"  {C_BOLD}Task Queue{C_RESET}")
-        print(f"    ⏳ Pending:    {len(pending)}")
-        print(f"    ✅ Completed:  {len(completed)}")
-        print()
-        
-        if pending:
-            print(f"  {C_BOLD}Upcoming Tasks{C_RESET} (top 5)")
-            for i, t in enumerate(pending[:5], 1):
-                prio = t.get("priority", 0)
-                title = t.get("title", "")[:55]
-                print(f"    {i}. [{prio:2d}] {title}")
-            print()
-    
-    # Recent activity
-    journal_path = os.path.join(state_dir, "journal.jsonl")
-    if os.path.exists(journal_path):
-        entries_j = []
-        with open(journal_path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    decoder = _json.JSONDecoder()
-                    pos = 0
-                    while pos < len(line):
-                        try:
-                            data, end = decoder.raw_decode(line, pos)
-                            entries_j.append(data)
-                            pos = end
-                        except _json.JSONDecodeError:
-                            break
-        
-        if entries_j:
-            print(f"  {C_BOLD}Recent Activity{C_RESET} (last 5)")
-            for e in entries_j[-5:]:
-                ts = e.get("timestamp", "")[:16].replace("T", " ")
-                title = e.get("task_title", "")[:50]
-                print(f"    [{ts}] {title}")
-            print()
-    
-    # Heartbeat
-    hb_path = os.path.join(state_dir, "heartbeat.json")
-    if os.path.exists(hb_path):
-        with open(hb_path) as f:
-            hb = _json.load(f)
-        status = hb.get("status", "unknown")
-        last_hb = hb.get("last_heartbeat", "never")[:16]
-        emoji = {"idle": "💤", "working": "⚡", "crashed": "💥"}.get(status, "❓")
-        print(f"  {C_BOLD}Health{C_RESET}")
-        print(f"    {emoji} Status:     {status}")
-        print(f"    💓 Last heartbeat: {last_hb}")
-        print()
-    
-    # Log file
-    print(f"  {C_BOLD}Files{C_RESET}")
-    print(f"    📄 Journal:  {journal_path}")
-    print(f"    📄 Knowledge:{kb_path}")
-    print(f"    📄 Tasks:    {tq_path}")
-    print(f"    📄 Config:   {config_path}")
-    print()
-    
-    # Usage hint
-    backend = config.get("backend", config.get("agent", {}).get("backend", "hermes"))
-    print(f"  {C_DIM}Tip: Open {backend} and say 'partner, what have you been doing?'{C_RESET}")
-    print()
+    from .setup import show_status, find_workspace
+    workspace = args.workspace or find_workspace()
+    show_status(workspace)
 
 def cmd_default(args):
     """Default action: guide user to the right place."""
     workspace = get_workspace()
-    
+
     if not workspace:
         print("🤝 欢迎使用 Partner！")
         print()
@@ -209,19 +76,19 @@ def cmd_default(args):
         print("  partner setup")
         print()
         return
-    
+
     # Check config
     config_path = os.path.join(workspace, "partner_config.json")
     if not os.path.exists(config_path):
         print("🤝 Partner 需要配置。")
         print("  partner setup")
         return
-    
+
     with open(config_path) as f:
         config = json.load(f)
-    
+
     backend = config.get('backend', 'hermes')
-    
+
     print("🤝 Partner 已就绪！")
     print()
     if backend == 'hermes':
@@ -244,6 +111,63 @@ def cmd_default(args):
         print(f"Partner 使用 {backend} 后端。")
 
 
+def cmd_bot(args):
+    workspace = args.workspace or get_workspace()
+    if not workspace:
+        print("❌ Partner 未配置")
+        return
+    platform = args.platform
+    action = args.action
+    if action == "start":
+        _bot_start(workspace, platform)
+    elif action == "stop":
+        _bot_stop(workspace, platform)
+
+
+def _bot_stop(workspace, platform):
+    pid_path = os.path.join(workspace, "state", f"{platform}_bot.pid")
+    label = {"qq": "QQ"}.get(platform, platform)
+    if not os.path.exists(pid_path):
+        print(f"  ⚠ {label} 机器人未在运行")
+        return
+    try:
+        with open(pid_path) as f:
+            pid = int(f.read().strip())
+        os.kill(pid, 15)
+        os.remove(pid_path)
+        print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+    except ProcessLookupError:
+        os.remove(pid_path)
+        print(f"  ⚠ {label} 进程已不存在，已清理")
+    except Exception as e:
+        print(f"  ❌ 停止失败: {e}")
+
+
+def _bot_start(workspace, platform):
+    import subprocess
+    label = {"qq": "QQ"}.get(platform, platform)
+    pp = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if platform == "qq":
+        cfg = os.path.join(workspace, "qq_config.json")
+        if not os.path.exists(cfg):
+            print(f"  ❌ QQ 未配置，请先运行: partner setup")
+            return
+        log = os.path.join(workspace, "logs", "qq_bot.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        cmd = [sys.executable, "-c",
+            f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
+        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        pidf = os.path.join(workspace, "state", "qq_bot.pid")
+        os.makedirs(os.path.dirname(pidf), exist_ok=True)
+        with open(pidf, "w") as f:
+            f.write(str(proc.pid))
+        print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
+        print(f"     日志: {log}")
+        print(f"     停止: partner bot stop qq")
+    else:
+        print(f"  ❌ 未知机器人: {platform}（仅支持 qq）")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='partner',
@@ -254,17 +178,26 @@ def main():
     sub = parser.add_subparsers(dest='command')
     
     # setup
-    p_setup = sub.add_parser('setup', help='First-time configuration')
-    p_setup.add_argument('--status', action='store_true', help='Check status')
+    p_setup = sub.add_parser('setup', help='配置 Partner（QQ机器人等）')
+    p_setup.add_argument('--status', action='store_true', help='查看状态')
     p_setup.set_defaults(func=lambda args: cmd_status(args) if args.status else cmd_setup(args))
     
     # status
-    p_status = sub.add_parser('status', help='Check Partner status')
-    p_status.add_argument('--workspace', '-w', help='Workspace path')
+    p_status = sub.add_parser('status', help='查看 Partner 状态')
+    p_status.add_argument('--workspace', '-w', help='工作区路径')
     p_status.set_defaults(func=cmd_status)
+
+    # bot
+    p_bot = sub.add_parser('bot', help='启动/停止机器人')
+    p_bot.add_argument('action', choices=['start', 'stop'], help='操作')
+    p_bot.add_argument('platform', choices=['qq'], help='机器人类型')
+    p_bot.add_argument('--workspace', '-w', help='工作区路径')
+    p_bot.set_defaults(func=cmd_bot)
+
+    # default
+    parser.set_defaults(func=cmd_default)
     
     args = parser.parse_args()
-    
     if hasattr(args, 'func'):
         args.func(args)
     else:

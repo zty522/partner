@@ -46,18 +46,18 @@ class ConversationEngine:
 
     def __init__(self, journal: Journal, knowledge: KnowledgeBase,
                  task_queue: TaskQueue, state: StateManager,
-                 workspace: str = "/mnt/e/work/study_room"):
+                 workspace: str = ""):
         self.journal = journal
         self.knowledge = knowledge
         self.task_queue = task_queue
         self.state = state
 
         import os
-        state_dir = os.path.join(workspace, "state")
-
-        # New V2 components
-        self.dialog_history = DialogHistory(os.path.join(state_dir, "dialog_history.jsonl"))
-        self.context = ContextManager(os.path.join(state_dir, "dialog_history.jsonl"))
+        state_dir = os.path.join(workspace, "state") if workspace else None
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+        self.dialog_history = DialogHistory(os.path.join(state_dir, "dialog_history.jsonl")) if state_dir else None
+        self.context = ContextManager(os.path.join(state_dir, "dialog_history.jsonl")) if state_dir else None
 
         # ResponseGenerator for multi-turn list caching (Phase 2)
         self.response_gen = ResponseGenerator(knowledge)
@@ -66,10 +66,13 @@ class ConversationEngine:
         self.notifier = ProactiveNotifier(knowledge, journal, state, workspace)
 
         # UserPreferenceStore for personalization (Phase 4)
-        self.user_prefs = UserPreferenceStore(
-            os.path.join(state_dir, "user_prefs.json"),
-            dialog_history_path=os.path.join(state_dir, "dialog_history.jsonl"),
-        )
+        if state_dir:
+            self.user_prefs = UserPreferenceStore(
+                os.path.join(state_dir, "user_prefs.json"),
+                dialog_history_path=os.path.join(state_dir, "dialog_history.jsonl"),
+            )
+        else:
+            self.user_prefs = UserPreferenceStore("")
 
         # Keep old router as fallback
         self.router = ConversationRouter(journal, knowledge, task_queue, state)
@@ -83,25 +86,26 @@ class ConversationEngine:
         # Only clear cache for NEW topic queries (not context-references)
         from_context = (parsed.params or {}).get("from_context", False)
         if parsed.topic and not from_context:
-            self.response_gen.clear_cache()  # genuinely new topic → clear old cache
-            # Record topic for preference learning (Phase 4)
+            self.response_gen.clear_cache()
             self.user_prefs.record_topic_query(parsed.topic)
 
         # Track conversation turn for session stats
         self.user_prefs.record_session_turn()
 
         # 2. Record user message in context
-        self.context.add_turn(
-            "user", user_message,
-            intent=parsed.intent.value,
-            topic=parsed.topic,
-        )
+        if self.context:
+            self.context.add_turn(
+                "user", user_message,
+                intent=parsed.intent.value,
+                topic=parsed.topic,
+            )
 
         # 3. Generate response
         response = self._generate_response(parsed)
 
         # 4. Record partner response
-        self.context.add_turn("partner", response)
+        if self.context:
+            self.context.add_turn("partner", response)
 
         return response
 
@@ -131,7 +135,7 @@ class ConversationEngine:
         for pattern, intent, confidence in CONTEXT_AWARE_PATTERNS:
             match = re.match(pattern, query_stripped)
             if match:
-                active_topic = self.context.get_active_topic()
+                active_topic = self.context.get_active_topic() if self.context else None
                 # Check if this is an index reference or continuation
                 index = None
                 continuation = False

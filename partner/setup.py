@@ -72,25 +72,88 @@ def status_info(msg):
 def status_warn(msg):
     print(f"    {C.YELLOW}⚠{C.RESET} {msg}")
 
-
 def prompt_choice(prompt, options, default=0):
-    """Ask user to choose from options."""
-    print(f"\n  {C.BOLD}{prompt}{C.RESET}")
+    """Ask user to choose from options (arrows + enter).
+
+    Pure carriage-return based approach. No cursor save/restore.
+    Ctrl+C to abort.
+    """
+    import sys
+    import termios
+    import tty
+    import os
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    selected = default
+    n = len(options)
+    # Hide cursor during selection
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+
+    print(f"  {C.BOLD}{prompt}{C.RESET}")
+
+    # Print all options
     for i, opt in enumerate(options):
-        marker = f"{C.CYAN}▶{C.RESET}" if i == default else f" {C.DIM}·{C.RESET}"
-        print(f"    {marker} {i + 1}. {opt}")
-    
-    print()
-    choice = input(f"  {C.DIM}选择 [{default + 1}]: {C.RESET}").strip()
-    if not choice:
-        return default
+        cursor = "▶" if i == selected else " "
+        color = C.CYAN if i == selected else C.DIM
+        print(f"    {color}{cursor} {opt}{C.RESET}")
+
+    # Move cursor back to first option line
+    print(f"\033[{n}A", end="", flush=True)
+
     try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(options):
-            return idx
-    except ValueError:
-        pass
-    return default
+        while True:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+            if ch == "\x03":  # Ctrl+C
+                print("\033[J", end="")
+                print("\n    Aborted.")
+                raise KeyboardInterrupt
+
+            if ch == "\x1b":  # ESC [ A/B
+                seq = ch + sys.stdin.read(2)
+                if seq == "\x1b[A":  # Up
+                    selected = (selected - 1) % n
+                elif seq == "\x1b[B":  # Down
+                    selected = (selected + 1) % n
+                else:
+                    continue
+                # Rewrite all options line by line
+                for i, opt in enumerate(options):
+                    cursor = "▶" if i == selected else " "
+                    color = C.CYAN if i == selected else C.DIM
+                    sys.stdout.write(f"\r    {color}{cursor} {opt}{C.RESET}\033[K")
+                    if i < n - 1:
+                        sys.stdout.write("\033[1B")
+                sys.stdout.write(f"\033[{n-1}A")
+                sys.stdout.flush()
+                continue
+
+            if ch == "\r" or ch == "\n":  # Enter
+                print("\033[J", end="")
+                break
+
+            if ch.isdigit():  # Number shortcut (1 = first option)
+                idx = int(ch) - 1
+                if 0 <= idx < n:
+                    selected = idx
+                    print("\033[J", end="")
+                    break
+            # Any other key: ignore
+
+    except KeyboardInterrupt:
+        raise
+    finally:
+        # Show cursor again
+        sys.stdout.write("\033[?25h")
+        sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    print(f"\n    {C.GREEN}▶{C.RESET} {options[selected]}\n")
+    return selected
 
 
 def prompt_input(prompt, default=""):
@@ -313,6 +376,65 @@ def test_napcat_connection(ws_url: str, access_token: str = "") -> dict:
     return result
 
 
+def auto_install_napcat() -> dict:
+    """Auto-download and install NapCat Shell if not present.
+
+    Returns dict with: installed, ws_url, napcat_dir, error
+    """
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
+    
+    result = {"installed": False, "ws_url": "", "napcat_dir": "", "error": ""}
+    
+    # Check if already running
+    probe = _try_ws_connect("ws://127.0.0.1:3001", timeout=2.0)
+    if probe["ok"]:
+        result["installed"] = True
+        result["ws_url"] = "ws://127.0.0.1:3001"
+        return result
+    
+    status_info("NapCat 未运行，尝试自动下载安装...")
+    
+    try:
+        from deploy_napcat import auto_download_napcat, find_napcat_dir, generate_onebot11_config, write_config, launch_napcat
+        
+        # Default install to Windows Downloads
+        default_dir = "/mnt/c/Users/zty12/Downloads/NapCat_Shell"
+        
+        # Try to find existing installation first
+        napcat_dir = find_napcat_dir()
+        if not napcat_dir:
+            status_info("正在下载 NapCat Shell (含 Node.js 运行时)...")
+            napcat_dir = auto_download_napcat(default_dir)
+        
+        if napcat_dir:
+            result["napcat_dir"] = napcat_dir
+            result["installed"] = True
+            result["ws_url"] = "ws://127.0.0.1:3001"
+            status_ok(f"NapCat Shell 已就绪: {napcat_dir}")
+            
+            # Generate config
+            config = generate_onebot11_config(ws_port=3001)
+            
+            # Auto-launch NapCat
+            status_info("正在启动 NapCat Shell...")
+            if launch_napcat(napcat_dir):
+                status_ok("NapCat 已启动，请在弹出的 QQ 窗口扫码登录")
+                status_info("登录后按回车继续测试连接...")
+                input()  # Wait for user to scan QR code
+            else:
+                status_warn("自动启动失败，请手动启动:")
+                status_info(f"  双击 {napcat_dir}/launcher.bat")
+        else:
+            result["error"] = "自动下载失败"
+    except ImportError as e:
+        result["error"] = f"缺少部署脚本: {e}"
+    except Exception as e:
+        result["error"] = f"安装失败: {e}"
+    
+    return result
+
+
 def setup_qq_config(workspace: str) -> dict:
     """Interactive QQ/NapCat configuration wizard.
 
@@ -325,7 +447,15 @@ def setup_qq_config(workspace: str) -> dict:
         status_ok(f"NapCat 服务已检测到  {napcat['ws_url']}  ({napcat['latency_ms']}ms)")
     else:
         status_warn(napcat["error"])
-        status_info("请先安装并启动 NapCat: https://github.com/NapNeko/NapCatQQ")
+        # Auto-install NapCat
+        install_result = auto_install_napcat()
+        if install_result["installed"]:
+            napcat["installed"] = True
+            napcat["ws_url"] = install_result["ws_url"]
+        else:
+            status_fail(f"自动安装失败: {install_result['error']}")
+            status_info("请手动安装 NapCat: https://github.com/NapNeko/NapCatQQ")
+            status_info("或稍后运行 'partner setup' 重新配置")
 
     # ── WebSocket URL ──
     default_ws = napcat["ws_url"] if napcat["installed"] else "ws://127.0.0.1:3001"
@@ -388,6 +518,115 @@ def setup_qq_config(workspace: str) -> dict:
 
     status_ok(f"QQ 配置已保存: ws={ws_url}, group_at_only={group_at_only}, voice={voice_enabled}")
     return qq_config
+
+
+def detect_wcferry() -> dict:
+    """Detect WeChatFerry installation.
+
+    Returns dict: installed (bool), port, error
+    """
+    info = {"installed": False, "port": 10010, "error": ""}
+
+    # Check if wcferry package is installed
+    try:
+        import wcferry
+        info["installed"] = True
+        return info
+    except ImportError:
+        pass
+
+    # Check common WeChatFerry ports
+    import socket
+    for port in [10010, 10086]:
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            sock.close()
+            info["installed"] = True
+            info["port"] = port
+            return info
+        except Exception:
+            pass
+
+    info["error"] = "未检测到 WeChatFerry（需要 Windows + 微信登录）"
+    return info
+
+
+def auto_install_wcferry() -> bool:
+    """Auto-install WeChatFerry via pip if not present.
+
+    Returns True if installed successfully.
+    """
+    # Already installed?
+    try:
+        import wcferry
+        return True
+    except ImportError:
+        pass
+    
+    status_info("正在安装 WeChatFerry...")
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["pip", "install", "wcferry", "pilk"],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            status_ok("WeChatFerry 安装成功")
+            return True
+        else:
+            status_fail(f"安装失败: {result.stderr[:200]}")
+            return False
+    except Exception as e:
+        status_fail(f"安装失败: {e}")
+        return False
+
+
+def setup_wechat_config(workspace: str) -> dict:
+    """Interactive WeChat configuration wizard.
+
+    Returns dict with WeChat config to merge into partner_config.json
+    """
+    section("微信集成配置 (WeChatFerry)", "💬")
+
+    wcf = detect_wcferry()
+    if wcf["installed"]:
+        status_ok(f"WeChatFerry 已检测到  (端口: {wcf['port']})")
+    else:
+        status_warn(wcf["error"])
+        # Auto-install
+        if auto_install_wcferry():
+            wcf["installed"] = True
+        else:
+            status_info("WeChatFerry 需要 Windows 环境 + 微信已登录")
+            status_info("稍后可手动安装: pip install wcferry")
+
+    # ── Enable ──
+    enable_choice = prompt_choice("是否启用微信集成？", [
+        "启用",
+        "不启用"
+    ], default=0 if wcf["installed"] else 1)
+
+    if enable_choice == 1:
+        status_info("微信集成已跳过")
+        return {}
+
+    # ── Voice ──
+    voice_mode = prompt_choice("语音功能：", [
+        "启用语音识别 + 文字回复（推荐）",
+        "启用语音识别 + 语音回复",
+        "禁用语音功能"
+    ], default=0)
+    voice_enabled = voice_mode in (0, 1)
+    voice_reply = (voice_mode == 1)
+
+    wechat_config = {
+        "enabled": True,
+        "voice_enabled": voice_enabled,
+        "voice_reply": voice_reply,
+    }
+
+    status_ok(f"微信配置已保存: voice={voice_enabled}, voice_reply={voice_reply}")
+    return wechat_config
 
 
 # ── Skill Registration ──────────────────────────────────────
@@ -596,6 +835,70 @@ def setup_cron_hermes(workspace: str):
         print(f"    {C.DIM}在 Hermes 中说：'设置 partner 的自动研究 cron'{C.RESET}")
 
 
+def setup_workspace_cron(workspace: str):
+    """Setup a daily cron job for workspace organization (non-destructive)."""
+    import subprocess as _subprocess
+
+    cron_name = "partner-workspace-daily"
+    cron_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "run_workspace_maint.py")
+
+    # Create the maintenance script if it doesn't exist
+    maint_script = f'''#!/usr/bin/env python3
+"""Daily workspace maintenance - organize, journal, notify."""
+import sys, json, os
+sys.path.insert(0, {os.path.dirname(os.path.dirname(os.path.abspath(__file__)))!r})
+from partner.workspace_manager import run_daily_maintenance
+
+ws = {workspace!r}
+result = run_daily_maintenance(ws)
+
+print(f"Workspace: {{len(result['actions'])}} actions")
+for a in result['actions']:
+    print(f"  {{a}}")
+print(f"Summary: {{result['summary']}}")
+
+# Write notification to queue (picked up by running QQ bridge)
+if result['summary']:
+    notif = {{
+        "timestamp": __import__('datetime').datetime.now().isoformat(),
+        "summary": result['summary'],
+        "interesting": result.get('interesting', []),
+    }}
+    notif_dir = os.path.join(ws, "state", "notifications")
+    os.makedirs(notif_dir, exist_ok=True)
+    with open(os.path.join(notif_dir, "daily_summary.json"), "w") as f:
+        json.dump(notif, f, ensure_ascii=False, indent=2)
+    print(f"Notification queued")
+'''
+    with open(cron_script, "w") as f:
+        f.write(maint_script)
+    os.chmod(cron_script, 0o755)
+
+    # Try to setup via hermes cron
+    try:
+        result = _subprocess.run(
+            ["hermes", "cron", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if cron_name not in result.stdout:
+            _subprocess.run(
+                ["hermes", "cron", "create",
+                 "--name", cron_name,
+                 "--schedule", "0 4 * * *",  # Daily at 4am
+                 "--prompt", f"运行 workspace 维护脚本: python3 {cron_script}",
+                 "--workdir", workspace,
+                 ],
+                capture_output=True, text=True, timeout=15,
+            )
+            status_ok(f"已设置每日 workspace 整理 (凌晨4点)")
+        else:
+            status_info(f"每日 workspace 整理已存在")
+    except Exception:
+        status_info(f"每日整理脚本已生成: {cron_script}")
+        status_info(f"需要手动设置 cron: 0 4 * * * python3 {cron_script}")
+
+
 # ── Main Setup Flow ─────────────────────────────────────────
 
 
@@ -717,7 +1020,47 @@ def detect_gptme() -> AgentInfo:
 def interactive_setup():
     """Main setup wizard."""
     banner()
-    
+
+    # ── Load existing config ──
+    old_workspace = find_workspace()
+    old_config = {}
+    old_qq_cfg = {}
+    old_wx_cfg = {}
+    if old_workspace:
+        old_cfg_path = os.path.join(old_workspace, "partner_config.json")
+        if os.path.exists(old_cfg_path):
+            try:
+                with open(old_cfg_path) as f:
+                    old_config = json.load(f)
+            except Exception:
+                pass
+        old_qq_path = os.path.join(old_workspace, "qq_config.json")
+        if os.path.exists(old_qq_path):
+            try:
+                with open(old_qq_path) as f:
+                    old_qq_cfg = json.load(f)
+            except Exception:
+                pass
+        old_wx_path = os.path.join(old_workspace, "wechat_config.json")
+        if os.path.exists(old_wx_path):
+            try:
+                with open(old_wx_path) as f:
+                    old_wx_cfg = json.load(f)
+            except Exception:
+                pass
+        status_info(f"发现已有配置: {old_workspace}")
+        status_info("将以上次配置为基础，可逐项修改")
+        
+        # Run workspace migration (non-destructive restructuring)
+        from .workspace_manager import migrate_workspace
+        migrate_actions = migrate_workspace(old_workspace)
+        for a in migrate_actions[:5]:
+            status_info(a)
+        if len(migrate_actions) > 5:
+            status_info(f"...还有 {len(migrate_actions)-5} 项调整")
+    else:
+        status_info("未发现已有配置，开始全新配置")
+
     # ── Step 1: Detect Agents ──
     section("检测已安装的 Agent", "🔍")
     
@@ -753,13 +1096,21 @@ def interactive_setup():
     
     # ── Step 2: Select Agent ──
     section("选择 Agent 后端", "⚙️")
-    
+
+    old_backend = old_config.get("backend") or old_config.get("agent", {}).get("backend")
+    old_agent_idx = 0
+    if old_backend:
+        for i, a in enumerate(available):
+            if a.name == old_backend:
+                old_agent_idx = i
+                break
+
     if len(available) == 1:
         selected = available[0]
         status_info(f"自动选择: {selected.emoji} {selected.display_name}")
     else:
         options = [f"{a.emoji} {a.display_name}" for a in available]
-        idx = prompt_choice("选择要使用的 Agent：", options)
+        idx = prompt_choice("选择要使用的 Agent：", options, default=old_agent_idx)
         selected = available[idx]
     
     print(f"\n    {C.GREEN}▶{C.RESET} 使用 {C.BOLD}{selected.emoji} {selected.display_name}{C.RESET}")
@@ -787,7 +1138,8 @@ def interactive_setup():
     # ── Step 4: Workspace ──
     section("创建工作区", "📂")
     
-    default_ws = os.path.expanduser("~/partner_workspace")
+    old_ws_path = old_config.get("workspace", {}).get("path", "") if isinstance(old_config.get("workspace"), dict) else ""
+    default_ws = old_ws_path or os.path.expanduser("~/partner_workspace")
     workspace = prompt_input("工作区路径", default_ws)
     workspace = os.path.expanduser(workspace)
     
@@ -903,10 +1255,67 @@ def interactive_setup():
         "每 4 小时（低频，省 API）",
     ]
     interval_values = [15, 30, 60, 120, 240]
-    interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=1)
+    old_interval = old_config.get("scheduler", {}).get("interval_minutes", 30)
+    interval_default = 1  # default: 30 min
+    for i, v in enumerate(interval_values):
+        if v == old_interval:
+            interval_default = i
+            break
+    interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=interval_default)
     interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
     
+    # ── Step 6b: QQ 官方机器人 ──
+    messaging_config = {}
+
+    has_qq = bool(old_qq_cfg.get("app_id"))
+    qq_default = 1 if has_qq else 1  # 有旧配置默认选"保持"，无旧配置默认选"跳过"
+    if has_qq:
+        qq_prompt = f"修改 QQ 机器人配置？（当前: {old_qq_cfg['app_id']}）"
+        qq_options = ["修改配置", "保持现有不变", "删除配置"]
+    else:
+        qq_prompt = "是否连接 QQ 官方机器人？"
+        qq_options = ["连接（需要从 q.qq.com 获取 AppID + AppSecret）", "跳过"]
+
+    qq_enable = prompt_choice(qq_prompt, qq_options, default=0)
+
+    if (has_qq and qq_enable == 0) or (not has_qq and qq_enable == 0):
+        if has_qq and qq_enable == 1:
+            # Keep existing
+            messaging_config["qq"] = {
+                "type": "official",
+                "app_id": old_qq_cfg["app_id"],
+                "app_secret": old_qq_cfg["app_secret"],
+                "is_sandbox": old_qq_cfg.get("is_sandbox", False),
+            }
+            status_ok(f"QQ 配置保持不变: {old_qq_cfg['app_id']}")
+        elif qq_enable == 0:
+            qq_app_id = prompt_input("AppID", old_qq_cfg.get("app_id", ""))
+            old_secret_display = "******" if old_qq_cfg.get("app_secret") else ""
+            qq_app_secret = prompt_input("AppSecret", old_secret_display)
+            if qq_app_secret == "******" and old_qq_cfg.get("app_secret"):
+                qq_app_secret = old_qq_cfg["app_secret"]
+            qq_sandbox_default = 0 if old_qq_cfg.get("is_sandbox", True) else 1
+            qq_sandbox = prompt_choice("环境？", [
+                "沙箱环境（测试用）",
+                "正式环境（需要审核上线）"
+            ], default=qq_sandbox_default)
+            if qq_app_id and qq_app_secret:
+                messaging_config["qq"] = {
+                    "type": "official",
+                    "app_id": qq_app_id,
+                    "app_secret": qq_app_secret,
+                    "is_sandbox": (qq_sandbox == 0),
+                }
+                status_ok(f"QQ 官方机器人已配置: {qq_app_id}")
+            else:
+                status_warn("QQ 机器人配置已跳过")
+    elif has_qq and qq_enable == 2:
+        status_info("QQ 机器人配置已删除")
+
+    # ── Step 6c: 微信（已移除）──
+
+
     # ── Step 7: Save Config ──
     config = {
         "name": "Partner",
@@ -927,10 +1336,59 @@ def interactive_setup():
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }
+    
+    if messaging_config:
+        config["messaging"] = messaging_config
     config_path = os.path.join(workspace, "partner_config.json")
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
     status_ok(f"配置已保存: {config_path}")
+
+    # ── 保存 QQ 机器人独立配置 ──
+    qq_cfg = messaging_config.get("qq", {})
+    if qq_cfg.get("type") == "official":
+        qq_cfg_path = os.path.join(workspace, "qq_config.json")
+        with open(qq_cfg_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "app_id": qq_cfg["app_id"],
+                "app_secret": qq_cfg["app_secret"],
+                "is_sandbox": qq_cfg.get("is_sandbox", False),
+                "auto_reconnect": True,
+            }, f, indent=2, ensure_ascii=False)
+        status_ok(f"QQ 机器人配置已写入: {qq_cfg_path}")
+
+    # ── 自动后台启动机器人 ──
+    if qq_cfg.get("type") == "official":
+        auto_start = prompt_choice("是否现在后台启动 QQ 机器人？", [
+            "启动（推荐）",
+            "稍后手动启动"
+        ], default=0)
+        if auto_start == 0:
+            setup_path = os.path.dirname(os.path.abspath(__file__))
+            partner_pkg = os.path.join(os.path.dirname(setup_path))
+
+            if qq_cfg.get("type") == "official":
+                import subprocess
+                qq_log = os.path.join(workspace, "logs", "qq_bot.log")
+                cmd = [
+                    sys.executable, "-c",
+                    f"import sys; sys.path.insert(0, '{partner_pkg}'); "
+                    f"from partner.qq_official_bridge import QQQfficialBridge; "
+                    f"b = QQQfficialBridge('{workspace}'); "
+                    f"b.load_config_from_file('{qq_cfg_path}'); "
+                    f"b.start()"
+                ]
+                proc = subprocess.Popen(
+                    cmd, stdout=open(qq_log, "w"), stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                pid_path = os.path.join(workspace, "state", "qq_bot.pid")
+                with open(pid_path, "w") as f:
+                    f.write(str(proc.pid))
+                status_ok(f"QQ 机器人已后台启动 (PID: {proc.pid})")
+    else:
+        status_info("未配置 QQ 机器人，跳过自动启动")
     
     # Save pointer for easy discovery
     save_workspace_pointer(workspace)
@@ -938,6 +1396,9 @@ def interactive_setup():
     
     if selected.name == "hermes":
         setup_cron_hermes(workspace)
+    
+    # Daily workspace organization
+    setup_workspace_cron(workspace)
     
     # ── Done ──
     print()
@@ -977,8 +1438,12 @@ def show_status(workspace=None):
         config = json.load(f)
     
     section("配置信息", "⚙️")
-    status_info(f"工作区: {config.get('workspace', workspace)}")
-    status_info(f"后端: {config.get('backend', 'unknown')}")
+    ws_cfg = config.get("workspace", {})
+    ws_path = ws_cfg.get("path", workspace) if isinstance(ws_cfg, dict) else workspace
+    agent_cfg = config.get("agent", {})
+    backend = agent_cfg.get("backend", config.get("backend", "unknown"))
+    status_info(f"工作区: {ws_path}")
+    status_info(f"后端: {backend}")
     
     section("研究统计", "📊")
     
@@ -1018,6 +1483,45 @@ def show_status(workspace=None):
         print(f"    打开 Hermes，说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
     else:
         print(f"    在 {backend} 中说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
+    
+    # ── 机器人状态 ──
+    messaging = config.get("messaging", {})
+    
+    qq_config_path = os.path.join(workspace, "qq_config.json")
+    has_qq_bot = bool(messaging.get("qq")) or os.path.exists(qq_config_path)
+    
+    if has_qq_bot:
+        section("机器人状态", "🤖")
+        for platform, label, cfg_path in [("qq", "QQ", qq_config_path)]:
+            cfg = messaging.get(platform, {})
+            if not cfg and not os.path.exists(cfg_path):
+                continue
+            pid_path = os.path.join(state_dir, f"{platform}_bot.pid")
+            running = False
+            if os.path.exists(pid_path):
+                try:
+                    with open(pid_path) as f:
+                        pid = int(f.read().strip())
+                    try:
+                        os.kill(pid, 0)
+                        running = True
+                    except OSError:
+                        running = False
+                except (ValueError, OSError):
+                    running = False
+            if running:
+                print(f"    {C.GREEN}●{C.RESET} {label} 机器人: 运行中 (PID: {pid})")
+                print(f"      停止: partner bot stop {platform}")
+                log_path = os.path.join(workspace, "logs", f"{platform}_bot.log")
+                if os.path.exists(log_path):
+                    print(f"      日志: {log_path}")
+            else:
+                print(f"    {C.DIM}○{C.RESET} {label} 机器人: 已配置但未运行")
+                log_path = os.path.join(workspace, "logs", f"{platform}_bot.log")
+                if os.path.exists(log_path):
+                    print(f"      日志: {log_path}")
+                if os.path.exists(cfg_path):
+                    print(f"      启动: partner bot start {platform}")
     
     print()
 
