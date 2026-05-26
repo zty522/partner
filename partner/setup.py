@@ -1641,6 +1641,7 @@ def interactive_setup():
     print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
     print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
     print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
+    print(f"    {C.DIM}partner queue clear  Clear task queue{C.RESET}")
     print()
 
 
@@ -1761,6 +1762,7 @@ def show_status(workspace=None):
     print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
     print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
     print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
+    print(f"    {C.DIM}partner queue clear  Clear task queue{C.RESET}")
 
     print()
 

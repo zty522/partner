@@ -277,6 +277,7 @@ def cmd_update(args):
     print(f"    {C_DIM}partner bot start qq Start QQ bot{C_RESET}")
     print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
     print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
+    print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
     print()
 
 
