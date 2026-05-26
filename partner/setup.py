@@ -45,7 +45,7 @@ def line(char="─", width=60, color=C.DIM):
 def banner():
     """Print the Partner banner."""
     print()
-    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.2.0{C.RESET}")
+    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.3.0{C.RESET}")
     print(f"  {C.DIM}Your AI Research Companion{C.RESET}")
     line("━", 50, C.CYAN)
     print()

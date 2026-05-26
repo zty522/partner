@@ -2,18 +2,26 @@
 
 All notable changes to Partner will be documented in this file.
 
+## [v0.3.0] - 2026-05-26
+
+### 🔧 New
+- **一键安装脚本**: Linux (install.sh) + Windows (install.bat / install.ps1) 便捷安装
+- **多后端选择**: 安装时可选 Hermes Agent / OpenClaw / 两者都装 / 自己配置
+- **Windows 原生安装**: 无需 WSL，双击 install.bat 即可，全程鼠标操作
+- **Codex CLI 集成**: Partner 可委托编码任务到 Codex exec
+- **OpenClaw 集成**: 通过 ACP 协议对接 OpenClaw 小龙蝦
+- **README 重写**: 增加安装指引、集成说明、命令列表
+- **install.bat 双击安装**: 下载 ZIP 解压后双击即可安装
+
 ## [v0.2.0] - 2026-05-26
 
-### 🔧 Changed (v0.2.0 update)
+### 🔧 Changed
 - **心跳重构**: 心跳只做维护（QQ通信+健康检查），研究任务独立运行不受心跳约束
 - **每轮必推QQ**: 移除60分钟阈值，每轮心跳自动推送消息到QQ
 - **Bot Watchdog**: 启动QQ机器人时自动启动进程守护，挂了自动重启
 - **Cron prompt精简**: 从144行精简为67行，只包含维护检查逻辑
-- **一键安装脚本**: Linux (install.sh) + Windows (install.ps1) 便捷安装
-- **Codex/OpenClaw集成**: 委托编码任务到Codex，通过ACP对接OpenClaw
-- **README重写**: 增加安装指引、集成说明、命令列表
 
-### ✨ Features (original v0.2.0)
+### ✨ Features
 
 #### Heartbeat Plan Model (Major Rearchitecture)
 - **Continuous event-based execution**: Plans are now multi-phase "push the project forward" events (plan → literature → code → experiment → analysis → next-plan), not isolated single tasks
