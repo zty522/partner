@@ -14,13 +14,13 @@ You don't give it commands. You just check in.**
 
 ---
 
-## 🚀 一键安装
+## 🚀 One-Click Install
 
-### Windows（最简单）
+### Windows (easiest)
 ```
-1. 打开 https://github.com/zty522/partner/releases/tag/v0.3.0
-2. 点击下方的 Source code (zip)
-3. 解压 → 双击 install.bat → 选 1 → 搞定
+1. Go to https://github.com/zty522/partner/releases/tag/v0.3.0
+2. Click "Source code (zip)" to download
+3. Unzip → double-click install.bat → pick backend → done
 ```
 
 ### Linux
@@ -28,11 +28,11 @@ You don't give it commands. You just check in.**
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 ```
 
-安装过程中会问你要哪个 AI 后端：
-- **1** — Hermes Agent（推荐）
-- **2** — OpenClaw（小龙蝦）
-- **3** — 两者都装
-- **4** — 暂不安装，自己配
+During install you'll pick an AI backend:
+- **1** — Hermes Agent (recommended)
+- **2** — OpenClaw
+- **3** — Both
+- **4** — Skip, I'll configure later
 
 ---
 
@@ -40,8 +40,8 @@ curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v0.3.0](https://github.com/zty522/partner/releases/tag/v0.3.0)** | 2026-05-26 | 🎉 **一键安装** · **Codex/OpenClaw集成** · **多后端选择** · **Windows原生安装** |
-| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-26 | 💓 **Heartbeat Plan Model** · **QQ Official Bot** · **LLM-powered chat** · **Watchdog守护** |
+| **[v0.3.0](https://github.com/zty522/partner/releases/tag/v0.3.0)** | 2026-05-26 | 🎉 **One-click install** · **Codex/OpenClaw integration** · **Multi-backend** · **Native Windows** |
+| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-26 | 💓 **Heartbeat Plan Model** · **QQ Official Bot** · **LLM chat** · **Watchdog** |
 | **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | Event system, Conversation V2, Self-Evolution Engine |
 
 [📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
@@ -50,37 +50,37 @@ curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install
 
 ## What's New in v0.3.0
 
-### 🚀 一键安装 (Windows / Linux)
+### 🚀 One-Click Install (Windows / Linux)
 
-| 平台 | 安装方式 |
-|------|----------|
-| **Windows** | 下载 ZIP → 解压 → 双击 `install.bat` → 全程鼠标操作 |
-| **Linux** | `curl ... install.sh \| bash` — 自动检测系统、装Python、装依赖 |
+| Platform | Method |
+|----------|--------|
+| **Windows** | Download ZIP → unzip → double-click `install.bat` → mouse only |
+| **Linux** | `curl ... install.sh \| bash` — auto-detects distro, installs Python/deps |
 
-安装时可选 4 种后端：
-- **Hermes Agent** — pip 安装，功能最完整
-- **OpenClaw** — npm 安装，多渠道 AI 助手
-- **两者都装** — 可切换使用
-- **自己配** — 不强制安装，灵活配置
+Pick from 4 backends at install time:
+- **Hermes Agent** — pip install, full feature set
+- **OpenClaw** — npm install, multi-channel AI assistant
+- **Both** — switch between them
+- **Custom** — no forced install, configure manually
 
-### 🤖 Codex CLI 集成
-Partner 可以直接委托编码任务给 [OpenAI Codex](https://github.com/openai/codex)：
-- `codex exec --full-auto '创建Python模块'` → 自动写代码、git commit
-- 已验证：创建 `partner_helper.py`（fibonacci / is_prime / gcd），代码正确，功能通过测试
+### 🤖 Codex CLI Integration
+Partner can delegate coding tasks to [OpenAI Codex](https://github.com/openai/codex):
+- `codex exec --full-auto 'Create a Python module'` → writes code, git commits
+- Verified: created `partner_helper.py` (fibonacci / is_prime / gcd), all tests passed
 
-### 🦞 OpenClaw 集成
-Partner 通过 [ACP 协议](https://docs.openclaw.ai/cli/acp) 对接 [OpenClaw (小龙蝦)](https://github.com/openclaw/openclaw)：
-- `openclaw acp` — ACP 桥接模式
-- `openclaw agent --agent main -m '任务描述'` — 直接委托
-- 支持多渠道（QQ、微信、Telegram、Discord 等 20+ 平台）
+### 🦞 OpenClaw Integration
+Partner connects to [OpenClaw](https://github.com/openclaw/openclaw) via the [ACP protocol](https://docs.openclaw.ai/cli/acp):
+- `openclaw acp` — ACP bridge mode
+- `openclaw agent --agent main -m 'task'` — direct delegation
+- Multi-channel support (QQ, WeChat, Telegram, Discord, 20+ platforms)
 
-### 📦 安装脚本体系
-| 脚本 | 用途 |
-|------|------|
-| `scripts/install.sh` | Linux 一键安装（自动检测发行版、装Python/Git） |
-| `scripts/install.ps1` | Windows PowerShell 安装（可选创建虚拟环境） |
-| `scripts/install.bat` | Windows 双击安装（最简单，免输命令） |
-| `scripts/uninstall.sh` | Linux 卸载 |
+### 📦 Install Script Suite
+| Script | Purpose |
+|--------|---------|
+| `scripts/install.sh` | Linux one-click (auto-detects distro, installs Python/Git) |
+| `scripts/install.ps1` | Windows PowerShell (optional venv, desktop shortcut) |
+| `scripts/install.bat` | Windows double-click (simplest, no terminal needed) |
+| `scripts/uninstall.sh` | Linux uninstall |
 
 ---
 
@@ -97,17 +97,17 @@ v0.1.0 executed isolated tasks — one literature search OR one code edit per cy
 | Task queue of unrelated items | `active_plan.json` tracking multi-phase progress |
 | Never checks if work is ongoing | Checks: "is a plan active?" → if yes, let it continue |
 
-**v0.2.0 update (心跳维护模式):**
-- 心跳只做维护 + QQ 通信 + 健康检查，研究任务独立运行不受心跳约束
-- Bot Watchdog 进程守护：挂了自动重启
-- 每轮心跳必推 QQ 消息（移除 60 分钟阈值）
+**v0.2.0 update (heartbeat maintenance mode):**
+- Heartbeat is maintenance only: QQ comms + health check. Research tasks run independently.
+- Bot Watchdog: auto-restarts if the QQ bot process dies
+- Every heartbeat pushes a QQ message (removed the 60-minute inactivity threshold)
 
 **How the heartbeat works:**
 ```
 Every 30 minutes (minimum):
 
     1. Check QQ bot status (watchdog auto-restarts if dead)
-    2. Check research tasks for hangs (>2h = stuck)
+    2. Check research tasks for hangs (>2h without progress = stuck)
     3. Send heartbeat report to QQ (always, no timeout)
     4. Update heartbeat.json
 ```
@@ -115,36 +115,36 @@ Every 30 minutes (minimum):
 ### 🐧 QQ Official Bot
 - Integrated with the **QQ Open Platform** official API
 - Supports **private (C2C)** and **group @mentions**
-- Runs natively on Linux — no Windows dependency
+- Native Linux — no Windows dependency needed
 - Auto-start in background: `partner bot start qq`
-- **Every heartbeat pushes a QQ notification** showing current phase, progress, and next step
+- **Every heartbeat pushes a QQ notification** with current phase, progress, next step
 
 ### 🧠 LLM-Powered Conversation
-- QQ chat now uses LLM for natural conversation — no more rigid templates
+- QQ chat uses LLM for natural conversation — no more rigid templates
 - Context-aware (remembers last 5 exchanges)
 - Concise, conversational tone — no data dumps
 - Pending notifications auto-delivered on first message after idle
 
 ### 🛡️ Bot Watchdog
-QQ 机器人进程守护，每 60 秒检查一次：
-- 进程活着 → 跳过
-- 进程死了 → 自动重启
-- `partner bot stop qq` 时自动清理
+QQ bot process guardian, checks every 60 seconds:
+- Process alive → skip
+- Process dead → auto-restart
+- Cleanup on `partner bot stop qq`
 
 ### 📦 Auto-Install Dependencies
-- `partner setup` detects missing `aiohttp` and offers automatic installation
-- `partner bot start qq` also checks deps before starting
-- Scripts (`send_qq_report.py`, etc.) auto-deployed to workspace during setup
+- `partner setup` detects missing `aiohttp`, offers automatic install
+- `partner bot start qq` checks deps before starting
+- Scripts auto-deployed to workspace during setup
 
 ### 🎯 Streamlined CLI
 ```
-partner setup              Configure everything
-partner status             View full status
-partner bot start qq       Start QQ bot
-partner bot stop qq        Stop QQ bot
-partner queue clear        Clear task queue
-partner config set interval N  Change heartbeat interval
-partner update             Pull latest code + reinstall
+partner setup                 Configure everything
+partner status                View full status
+partner bot start qq          Start QQ bot
+partner bot stop qq           Stop QQ bot
+partner queue clear           Clear task queue
+partner config set interval N Change heartbeat interval (minutes)
+partner update                Pull latest code + reinstall
 ```
 
 ---
@@ -248,13 +248,13 @@ The old `task_queue.json` is still supported for backward compatibility, but the
 ## Commands
 
 ```bash
-partner setup              # Configure everything
-partner status             # View full status (research + bot health)
-partner bot start qq       # Start QQ bot in background
-partner bot stop qq        # Stop QQ bot
-partner queue clear        # Clear task queue
-partner config set interval N  # Change heartbeat interval (minutes)
-partner update             # Pull latest code + reinstall
+partner setup                 Configure everything
+partner status                View full status (research + bot health)
+partner bot start qq          Start QQ bot in background
+partner bot stop qq           Stop QQ bot
+partner queue clear           Clear task queue
+partner config set interval N Change heartbeat interval (minutes)
+partner update                Pull latest code + reinstall
 ```
 
 ---
