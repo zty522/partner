@@ -243,7 +243,91 @@ def cmd_update(args):
         print(f"{C_YELLOW}⚠  No CHANGELOG.md found{C_RESET}")
         print()
 
-    # 5. Success message
+    # 5. Auto-restart QQ bot if it was running
+    print(f"{C_YELLOW}➜ Checking QQ bot...{C_RESET}")
+    workspace = None
+    try:
+        from .setup import find_workspace as _fw
+        workspace = _fw()
+    except Exception:
+        pass
+
+    qq_was_running = False
+    if workspace:
+        pid_path = os.path.join(workspace, "state", "qq_bot.pid")
+        if os.path.exists(pid_path):
+            try:
+                with open(pid_path) as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)
+                qq_was_running = True
+            except (OSError, ValueError):
+                pass
+
+    if qq_was_running:
+        print(f"   🤖 QQ 机器人运行中 → 自动重启...")
+        _bot_stop(workspace, "qq")
+        _bot_start(workspace, "qq")
+    else:
+        print(f"   ℹ QQ 机器人未运行（跳过重启）")
+    print()
+
+    # 6. Check and report current work state
+    print(f"{C_YELLOW}➜ Checking work state...{C_RESET}")
+    if workspace:
+        state_dir = os.path.join(workspace, "state")
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        queue_path = os.path.join(state_dir, "task_queue.json")
+
+        # Active plan
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path) as f:
+                    plan = json.load(f)
+                status_map = {"idle": "空闲", "planning": "规划中", "active": "执行中",
+                              "completed": "已完成"}
+                raw = plan.get("status", "idle")
+                disp = status_map.get(raw, raw)
+                title = plan.get("title", "")
+                summary = plan.get("heartbeat_summary", "")
+                hb = plan.get("last_heartbeat", "")[:16]
+                print(f"   📶 状态: {C_BOLD}{disp}{C_RESET}")
+                if hb:
+                    print(f"   💓 心跳: {hb}")
+                if title:
+                    print(f"   📋 计划: {title}")
+                if summary:
+                    print(f"   📝 摘要: {summary}")
+            except Exception:
+                print(f"   ℹ 无法读取 active_plan")
+
+        # Pending tasks
+        if os.path.exists(queue_path):
+            try:
+                with open(queue_path) as f:
+                    tasks = json.load(f)
+                pending = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "pending")
+                if pending > 0:
+                    print(f"   ⏳ 待执行: {C_BOLD}{pending}{C_RESET} 个任务")
+                else:
+                    print(f"   ⏳ 队列: 空")
+            except Exception:
+                pass
+
+        # Cron check
+        try:
+            cr = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
+            if "partner-research" in cr.stdout:
+                print(f"   ⏰ Cron: 已设置")
+            else:
+                print(f"   ⏰ Cron: 未设置（运行 partner setup 创建）")
+        except Exception:
+            pass
+    else:
+        print(f"   ℹ 未找到工作区（运行 partner setup 配置）")
+    print()
+
+    # 7. Success message
     print(f"{C_BOLD}{C_GREEN}✅ Partner is up to date!{C_RESET}")
     print()
     # ── Commands ──
