@@ -109,6 +109,17 @@ def _bot_stop(workspace, platform, quiet=False):
         os.kill(pid, 15)
         os.remove(pid_path)
         print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+
+        # Also kill watchdog for this workspace
+        import subprocess as _sp
+        try:
+            _sp.run(
+                ["pkill", "-f", f"bot_watchdog.py {workspace}"],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
         if not quiet:
             _print_commands()
     except ProcessLookupError:
@@ -163,6 +174,20 @@ def _bot_start(workspace, platform, quiet=False):
         print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
         print(f"     日志: {log}")
         print(f"     停止: partner bot stop qq")
+
+        # Start watchdog (process monitor + auto-restart)
+        watchdog_script = os.path.join(workspace, "scripts", "bot_watchdog.py")
+        if os.path.exists(watchdog_script):
+            watchdog_log = os.path.join(workspace, "logs", "watchdog.log")
+            subprocess.Popen(
+                [sys.executable, watchdog_script, workspace],
+                stdout=open(watchdog_log, "a"), stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, start_new_session=True,
+            )
+            print(f"  🛡️  Watchdog 已启动 (自动守护)")
+        else:
+            print(f"  ⚠ Watchdog 脚本未找到: {watchdog_script}")
+
         if not quiet:
             _print_commands()
     else:

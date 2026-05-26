@@ -817,135 +817,58 @@ def setup_cron_hermes(workspace: str):
         pass
     
     # Create cron job
-    cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
+    cron_prompt = f"""你是 Partner 的心跳维护引擎。在 {workspace} 下工作。
 
-你的核心原则是：
+你的核心原则：心跳只做维护，不做研究执行。
 
-## 心跳模式（不是隔离任务模式）
+## 角色定位
 
-30 分钟是最小心跳间隔，不是执行窗口。每次心跳：
-1. 检查 active_plan.json → 如果有活跃计划且正在执行，不要打断，只更新心跳
-2. 如果没有活跃计划，自己制定完整的多阶段计划，然后立即执行
-3. 每次心跳都向 QQ 汇报当前状态
+心跳 = 系统维护 + QQ 通信 + 健康检查
+研究任务 = 独立运行，不受心跳约束，可以不限时运行
 
-## 计划 = 连续的完整事件
+## 每次心跳执行流程
 
-不要做孤立零散的任务。每个计划应该是一个完整的"推动项目"事件。
-例如"推进年龄预测项目"的完整计划：
-  阶段1: 查阅文献（搜索 + 阅读 + 提取关键方法）
-  阶段2: 修改代码（根据文献发现修改实现）
-  阶段3: 运行实验（执行代码、记录结果）
-  阶段4: 分析结果（对比、评估、总结）
-  阶段5: 下一步计划（根据结果制定后续方向）
+### 第一步：检查 QQ 机器人状态
 
-每个阶段可以跨越多个心跳周期，但必须是有意义的一个环节。
+pid_path = "{workspace}/state/qq_bot.pid"
+if os.path.exists(pid_path):
+    import os as _os
+    try:
+        with open(pid_path) as _f:
+            _pid = int(_f.read().strip())
+        _os.kill(_pid, 0)
+    except (OSError, ProcessLookupError):
+        pass
 
-## 执行流程（每次心跳运行）
+### 第二步：检查研究任务是否卡死
 
-from hermes_tools import terminal, write_file
+检查 active_plan.json：
+- status 为 "active" 且同一阶段超过 2 小时无进展 → 标记为卡死
+- status 为 "idle" → 不管它
 
-### 第一步：读取状态
-active_plan_path = "{workspace}/state/active_plan.json"
-config_path = "{workspace}/partner_config.json"
+### 第三步：发送心跳报告到 QQ
 
-# 读取 active_plan.json
-plan_data = json_load(active_plan_path)
-config_data = json_load(config_path)
-
-### 第二步：决策
-
-如果 plan_data 存在且 status 为 "active" 或 "planning":
-  # 处理 planning 但 phases 为空（由 QQ bridge 的 _force_run 触发）
-  if not plan_data.get('phases') or len(plan_data['phases']) == 0:
-    视为 idle，直接进入"创建新计划"逻辑
-  else:
-    当前阶段 = plan_data['phases'][plan_data['current_phase_index']]
-
-  如果当前阶段的 status 是 "in_progress":
-    该阶段是否已经完成？检查交付物（论文找到了？代码改了？实验跑完了？）
-    - 如果完成了 → 更新该阶段为 "completed"，推进到下一阶段
-    - 如果没完成 → 保持原样，更新心跳摘要，跳过本轮（let it continue）
-
-  如果当前阶段的 status 是 "completed"：
-    → 推进到下一阶段，开始执行
-
-如果 plan_data 不存在 或 status 为 "idle" 或 "completed":
-  基于 task_queue.json 中的 pending 任务制定一个完整的、连续的多阶段计划
-  序列化到 active_plan.json，设置 status="active"
-  开始执行第一个阶段
-
-### 第三步：执行阶段
-
-根据阶段类型执行：
-
-**literature_search**:
-  1. web_search 搜索相关论文
-  2. 阅读摘要，提取 3-5 个关键方法/发现
-  3. 保存结果到 plan 的当前阶段 result 字段
-
-**code_implementation**:
-  1. 读取项目代码文件
-  2. 根据文献/分析结果修改代码
-  3. 验证代码（语法检查、单元测试）
-
-**experiment**:
-  1. 用 terminal 运行实验脚本
-  2. 捕获输出结果
-  3. 保存日志
-
-**analysis**:
-  1. 分析实验结果数据
-  2. 与之前结果对比
-  3. 总结发现
-
-**planning**（制定下一步）:
-  1. 基于当前进展，规划 3-5 个阶段的详细计划
-  2. 写入 active_plan.json
-
-### 第四步：更新状态和通知
-
-1. 用 write_file 更新 active_plan.json：
-   - 更新当前阶段状态
-   - 更新 last_heartbeat
-   - 更新 heartbeat_summary（一段简短的中文摘要，给 QQ 通知用）
-
-2. 记录日志到 journal.jsonl：
-   - 简要描述本轮做了什么
-   - 以 JSONL 格式追加
-
-3. 写 QQ 通知（每轮必做）：
-   通知目录: {workspace}/state/notifications/
-   文件名格式: heartbeat_YYYYMMDD_HHMMSS.json
-   内容格式 (JSON):
-   {{
-     "type": "heartbeat",
-     "summary": "当前状态摘要（简短，100字以内）",
-     "plan_title": "当前计划标题",
-     "details": ["当前阶段", "当前步骤", "下一步"],
-     "pending_count": 0
-   }}
-   用 Python 写这个 JSON 文件，确保中文不转义。
-
-   【注意】写完后在终端检查: cat {workspace}/state/notifications/ 下最新的文件确认内容正确。
-
-### 第五步：调用 QQ 通知脚本（每轮必做）
-# 该脚本会自动检测用户是否在线，在线则直接推送，不在线则存入队列
 import subprocess
 subprocess.run(["python3", "{workspace}/scripts/send_qq_report.py", "{workspace}"],
                capture_output=True, timeout=30)
 
-### 第六步：清理旧通知（最多保留 20 个）
-ls {workspace}/state/notifications/ 检查数量，如果超过 20 删除最旧的
+### 第四步：更新心跳文件
 
-## 重要约束
+更新 state/heartbeat.json：
+- status: "alive"
+- last_heartbeat: 当前时间
+- qq_bot_alive: true/false
+- stuck_tasks: 卡死任务列表（如果有）
 
-- 如果当前阶段是 "in_progress" 且没完成，绝对不要重新开始或覆盖工作
-- 如果网络不可用（curl --connect-timeout 5 超时），跳过 literature_search 等需网络的阶段
-- 每隔 5 次心跳（约 2.5 小时），检查 plan 是否有进展，如果卡住太久（同阶段超过 2 小时），重新评估并调整计划
+## 关键约束
+
+- 绝对不要主动创建新的研究计划或执行研究任务
+- 有活跃计划但阶段未完成 → 不要打断，只检查是否卡死
+- 空闲（idle）→ 只汇报状态，不创建新计划
 - 只在 {workspace} 内写文件
-- 用中文写所有内容（日志、通知、计划描述）
+- 用中文写所有内容
 
-## JSON 读取/写入辅助
+## 辅助函数
 
 def json_load(path):
     r = terminal("cat " + path)
