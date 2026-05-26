@@ -1,7 +1,7 @@
 name: Build Windows Installer
 on:
   push:
-    tags: ['v*']
+    tags: ['v']
 jobs:
   build:
     runs-on: windows-latest
@@ -10,8 +10,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: choco install innosetup --no-progress -y
-      - run: ISCC.exe installer\installer.iss
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'
       - uses: softprops/action-gh-release@v2
         with:
           files: installer/output/*.exe
