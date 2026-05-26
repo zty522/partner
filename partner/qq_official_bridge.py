@@ -637,76 +637,18 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force-run task check failed: {e}")
 
-        # Try to trigger cron immediately
-        import subprocess
+        # Execute research immediately via Hermes agent (no cron wait)
+        import subprocess, shlex
         try:
-            cfg_path = os.path.join(self.workspace, "partner_config.json")
-            with open(cfg_path) as f:
-                cfg = json.load(f)
-            cron_id = cfg.get("scheduler", {}).get("cron_job_id", "")
-            cron_name = cfg.get("scheduler", {}).get("cron_job_name", "partner-research-cycle")
-            interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
-            target = cron_id or cron_name
-
-            # Check if cron job exists
-            list_chk = subprocess.run(
-                ["hermes", "cron", "list"], capture_output=True, text=True, timeout=10
+            subprocess.Popen(
+                ["hermes", "-z",
+                 f"读取 {self.workspace}/state/active_plan.json，执行当前 in_progress 阶段的研究任务。完成后更新 active_plan.json。再调用 python3 {self.workspace}/scripts/send_qq_report.py {self.workspace} 发送通知。",
+                 "--skills", "partner-research"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
-            has_cron = target and target in list_chk.stdout
-
-            if has_cron:
-                # Force immediate execution: set schedule to now + tick
-                subprocess.run(
-                    ["hermes", "cron", "edit", target, "--schedule", "every 1m"],
-                    capture_output=True, timeout=30,
-                )
-                subprocess.run(
-                    ["hermes", "cron", "tick"],
-                    capture_output=True, timeout=300,
-                )
-                # Restore original schedule
-                subprocess.run(
-                    ["hermes", "cron", "edit", target, "--schedule", f"every {interval}m"],
-                    capture_output=True, timeout=30,
-                )
-            else:
-                # Cron job doesn't exist — create it on the fly and run
-                cron_prompt = f"""你是 Partner 的心跳维护引擎。在 {self.workspace} 下工作。
-
-你的核心原则：有活跃计划就执行，空闲只做维护。
-
-读取 active_plan.json：
-- active + in_progress → 执行该阶段
-- idle → 只检查系统健康"""
-
-                create_r = subprocess.run(
-                    ["hermes", "cron", "create",
-                     "--name", cron_name,
-                     "--skill", "partner-research",
-                     f"every {interval}m",
-                     cron_prompt],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if create_r.returncode == 0:
-                    # Extract job ID
-                    import re as _re
-                    m = _re.search(r'\[([a-f0-9-]+)\]', create_r.stdout)
-                    if m:
-                        new_id = m.group(1)
-                        cfg.setdefault("scheduler", {})["cron_job_id"] = new_id
-                        with open(cfg_path, 'w', encoding='utf-8') as f:
-                            json.dump(cfg, f, indent=2, ensure_ascii=False)
-                    # Run immediately
-                    subprocess.run(
-                        ["hermes", "cron", "edit", target, "--schedule", "every 1m"],
-                        capture_output=True, timeout=30,
-                    )
-                    subprocess.run(
-                        ["hermes", "cron", "tick"],
-                        capture_output=True, timeout=300,
-                    )
         except Exception as e:
-            logger.debug(f"Force run cron trigger failed: {e}")
+            logger.debug(f"Force run Hermes exec failed: {e}")
 
         return "收到，已经开始研究了，等会儿给你汇报"
 
