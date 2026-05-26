@@ -160,8 +160,12 @@ def _merge_duplicate_projects(workspace: str, projects_root: str) -> List[str]:
                             sf = os.path.join(s, subfile)
                             df = os.path.join(d, subfile)
                             if not os.path.exists(df):
-                                shutil.copy2(sf, df)
-                                actions.append(f"合并 {dirname}/{item}/{subfile} → {canonical}/{item}/")
+                                if os.path.isdir(sf):
+                                    shutil.copytree(sf, df)
+                                    actions.append(f"合并 {dirname}/{item}/{subfile}/ → {canonical}/{item}/")
+                                else:
+                                    shutil.copy2(sf, df)
+                                    actions.append(f"合并 {dirname}/{item}/{subfile} → {canonical}/{item}/")
                     else:
                         shutil.copytree(s, d)
                         actions.append(f"合并 {dirname}/{item}/ → {canonical}/{item}/")
