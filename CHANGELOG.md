@@ -6,6 +6,19 @@ All notable changes to Partner will be documented in this file.
 
 ### ✨ Features
 
+#### Heartbeat Plan Model (Major Rearchitecture)
+- **Continuous event-based execution**: Plans are now multi-phase "push the project forward" events (plan → literature → code → experiment → analysis → next-plan), not isolated single tasks
+- **30-min heartbeat minimum**: Every cycle checks if a plan is active → if yes, let it continue; if idle, create a new complete plan and start
+- **Long-running plans**: Events can span unlimited cycles; no artificial TTL bound
+- **`active_plan.json`**: New state file tracking multi-phase plans with progress, current phase, and heartbeat summary
+- **5 types of phases**: literature_search, code_implementation, experiment, analysis, planning
+
+#### Heartbeat QQ Notifications
+- Every heartbeat cycle pushes QQ notification via `send_qq_report.py`
+- Report includes: plan status (idle/active/completed), current phase, progress [2/5], current step
+- `send_qq_report.py` now reads `active_plan.json` for richer heartbeat context
+- Automatic user-activity detection: pushes directly if user messaged within 60min, queues otherwise
+
 #### QQ Official Bot Full Support
 - QQ Official Bot integration (NapCat + q.qq.com official bot)
 - QQ bot auto start/stop via `partner bot start qq` / `partner bot stop qq`

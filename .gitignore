@@ -60,11 +60,6 @@ partner/messaging.py
 partner/voice.py
 
 # Build artifacts
-CHANGELOG.md
-AUDIT_REPORT.md
-CONTRIBUTING.md
-MANIFEST.in
-release.sh
 releases/
 run_cycle.py
 demo.py
