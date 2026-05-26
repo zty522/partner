@@ -261,12 +261,13 @@ def _print_commands():
     """Print the standard commands menu."""
     print()
     print(f"  {C_BOLD}Commands:{C_RESET}")
-    print(f"    {C_DIM}partner status       Check Partner status{C_RESET}")
-    print(f"    {C_DIM}partner setup        Reconfigure{C_RESET}")
-    print(f"    {C_DIM}partner bot start qq Start QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
-    print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
+    print(f"    {C_DIM}partner status              Check Partner status{C_RESET}")
+    print(f"    {C_DIM}partner setup               Reconfigure{C_RESET}")
+    print(f"    {C_DIM}partner bot start qq        Start QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner bot stop qq         Stop QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner config set interval N  Change heartbeat interval{C_RESET}")
+    print(f"    {C_DIM}partner queue clear         Clear task queue{C_RESET}")
+    print(f"    {C_DIM}partner update              Update to latest version{C_RESET}")
     print()
 
 
@@ -320,6 +321,45 @@ def _cmd_queue_clear(args):
     print("    partner update       Update to latest version")
 
 
+def _cmd_config_set(args):
+    """Modify runtime configuration."""
+    from .setup import find_workspace
+    workspace = find_workspace()
+    if not workspace:
+        print("❌ Partner 未配置")
+        return
+
+    cfg_path = os.path.join(workspace, "partner_config.json")
+    try:
+        with open(cfg_path, 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取配置失败: {e}")
+        return
+
+    key = args.key
+    value = args.value
+
+    if key == "interval":
+        try:
+            minutes = int(value)
+            if minutes < 1:
+                print("❌ 间隔不能小于 1 分钟")
+                return
+            if "scheduler" not in cfg:
+                cfg["scheduler"] = {}
+            cfg["scheduler"]["interval_minutes"] = minutes
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
+            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron update ...")
+        except ValueError:
+            print("❌ value 必须是数字（分钟数）")
+            return
+
+    _print_commands()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='partner',
@@ -355,6 +395,14 @@ def main():
     q_sub = p_queue.add_subparsers(dest='queue_action')
     p_queue_clear = q_sub.add_parser('clear', help='清空任务队列')
     p_queue_clear.set_defaults(func=lambda args: _cmd_queue_clear(args))
+
+    # config
+    p_config = sub.add_parser('config', help='配置管理')
+    c_sub = p_config.add_subparsers(dest='config_action')
+    p_config_set = c_sub.add_parser('set', help='修改配置')
+    p_config_set.add_argument('key', choices=['interval'], help='配置项')
+    p_config_set.add_argument('value', help='新值')
+    p_config_set.set_defaults(func=_cmd_config_set)
 
     # default
     parser.set_defaults(func=cmd_default)

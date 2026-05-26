@@ -522,6 +522,13 @@ class QQQfficialBridge:
             if p in t:
                 return self._force_run(msg)
 
+        # Change interval: 间隔改成X, 间隔改为X, 设定间隔X, 修改间隔X
+        import re
+        interval_match = re.search(r'(?:间隔|心跳).*?(\d+)\s*分', t)
+        if interval_match:
+            minutes = int(interval_match.group(1))
+            return self._change_interval(minutes, msg)
+
         return None
 
     def _clear_queue(self, msg: QQMessage) -> str:
@@ -633,6 +640,51 @@ class QQQfficialBridge:
             logger.debug(f"Force run cron trigger failed: {e}")
 
         return "🚀 已触发研究循环，正在执行..."
+
+
+    def _change_interval(self, minutes: int, msg: QQMessage) -> str:
+        """Change the heartbeat interval and update the cron job."""
+        import subprocess
+        cfg_path = os.path.join(self.workspace, "partner_config.json")
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            if "scheduler" not in cfg:
+                cfg["scheduler"] = {}
+            cfg["scheduler"]["interval_minutes"] = minutes
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            logger.info(f"Heartbeat interval changed to {minutes}min via QQ")
+        except Exception as e:
+            logger.error(f"Failed to change interval: {e}")
+            return "❌ 修改间隔失败，请稍后重试"
+
+        # Try to update the cron job schedule
+        try:
+            cron_id = cfg.get("scheduler", {}).get("cron_job_id", "")
+            cron_name = cfg.get("scheduler", {}).get("cron_job_name", "partner-research-cycle")
+            target = cron_id or cron_name
+            if target:
+                subprocess.run(
+                    ["hermes", "cron", "update", target, "--schedule", f"every {minutes}m"],
+                    capture_output=True, timeout=30,
+                )
+        except Exception as e:
+            logger.debug(f"Cron schedule update failed: {e}")
+
+        # Log to journal
+        try:
+            self.journal.log(JournalEntry(
+                task_id="set_interval",
+                task_type="system",
+                task_title=f"修改心跳间隔为{minutes}分钟",
+                result_summary=f"来自 {msg.sender_name or 'QQ用户'} 的指令",
+            ))
+        except Exception:
+            pass
+
+        return f"✅ 心跳间隔已改为 {minutes} 分钟，已同步更新 cron 计划"
+
 
     # ── LLM Intent Classification & Task Queuing ───────────────────
 

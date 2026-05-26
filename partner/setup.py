@@ -1699,13 +1699,36 @@ def show_status(workspace=None):
             tasks = json.load(f)
         pending = sum(1 for t in tasks if t.get("status") == "pending")
         print(f"    ⏳ 待执行:   {C.BOLD}{pending}{C.RESET}")
-    
-    hb_path = os.path.join(state_dir, "heartbeat.json")
-    if os.path.exists(hb_path):
-        with open(hb_path) as f:
-            hb = json.load(f)
-        print(f"    💓 最后心跳: {hb.get('last_heartbeat', 'unknown')[:16]}")
-        print(f"    📶 状态:     {hb.get('status', 'unknown')}")
+
+    # ── Active plan (new heartbeat model) ──
+    plan_path = os.path.join(state_dir, "active_plan.json")
+    if os.path.exists(plan_path):
+        with open(plan_path) as f:
+            plan = json.load(f)
+        status_map = {"idle": "空闲", "planning": "规划中", "active": "执行中",
+                      "completed": "已完成", "paused": "已暂停"}
+        raw_status = plan.get("status", "idle")
+        display_status = status_map.get(raw_status, raw_status)
+        hb = plan.get("last_heartbeat", "")
+        summary = plan.get("heartbeat_summary", "")
+        print(f"    💓 心跳:     {hb[:16] if hb else '未知'}")
+        print(f"    📶 状态:     {C.BOLD}{display_status}{C.RESET}")
+        if summary:
+            print(f"    📝 摘要:     {summary[:50]}")
+    else:
+        # Fallback to old heartbeat.json
+        hb_path = os.path.join(state_dir, "heartbeat.json")
+        if os.path.exists(hb_path):
+            with open(hb_path) as f:
+                hb = json.load(f)
+            print(f"    💓 最后心跳: {hb.get('last_heartbeat', 'unknown')[:16]}")
+            s = hb.get('status', 'unknown')
+            print(f"    📶 状态:     {C.BOLD}{s}{C.RESET}")
+
+    # ── Interval ──
+    interval = config.get("scheduler", {}).get("interval_minutes", 30)
+    print(f"    ⏰ 间隔:     {C.BOLD}每 {interval} 分钟{C.RESET}")
+    print(f"    📌 修改:     {C.DIM}partner config set interval N{C.RESET}")
     
     section("使用方法", "💡")
     backend = config.get('backend', 'hermes')
