@@ -2,6 +2,14 @@
 
 All notable changes to Partner will be documented in this file.
 
+## [v0.3.0] - 2026-05-26
+### 🔧 Changed
+- **心跳重构**: 心跳只做维护（QQ通信+健康检查），研究任务独立运行不受心跳约束
+- **每轮必推QQ**: 移除60分钟阈值，每轮心跳自动推送消息到QQ
+- **Bot Watchdog**: 启动QQ机器人时自动启动进程守护，挂了自动重启
+- **Cron prompt精简**: 从144行精简为67行，只包含维护检查逻辑
+- **版本更新**: 0.2.0 → 0.3.0
+
 ## [v0.2.0] - 2026-05-26
 
 ### ✨ Features
