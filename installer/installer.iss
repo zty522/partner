@@ -64,7 +64,7 @@ var
   PythonPage: TInputOptionWizardPage;
   BackendChoice: Integer;
   PyCheckCode: Integer;
-  PyResultCode: Integer;  // 添加这个变量
+  PyResultCode: Integer;
 
 procedure InitializeWizard;
 begin
@@ -95,12 +95,6 @@ begin
   BackendPage.Add('Both');
   BackendPage.Add('Skip, I will configure later');
   BackendPage.Values[0] := True;
-
-  { Detect existing installations }
-  if Exec('python', '-m pip show hermes-agent', '', SW_HIDE, ewWaitUntilTerminated, PyResultCode) then
-    BackendPage.SubCaption.Caption := BackendPage.SubCaption.Caption + #13#10'Hermes Agent is already installed on this system.';
-  if DirExists(ExpandConstant('{userpf}\Partner')) then
-    BackendPage.SubCaption.Caption := BackendPage.SubCaption.Caption + #13#10'Previous Partner installation detected. Setup will upgrade it.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
