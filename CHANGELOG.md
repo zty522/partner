@@ -2,17 +2,15 @@
 
 All notable changes to Partner will be documented in this file.
 
-## [v0.3.0] - 2026-05-26
-### 🔧 Changed
+## [v0.2.0] - 2026-05-26
+
+### 🔧 Changed (v0.2.0 update)
 - **心跳重构**: 心跳只做维护（QQ通信+健康检查），研究任务独立运行不受心跳约束
 - **每轮必推QQ**: 移除60分钟阈值，每轮心跳自动推送消息到QQ
 - **Bot Watchdog**: 启动QQ机器人时自动启动进程守护，挂了自动重启
 - **Cron prompt精简**: 从144行精简为67行，只包含维护检查逻辑
-- **版本更新**: 0.2.0 → 0.3.0
 
-## [v0.2.0] - 2026-05-26
-
-### ✨ Features
+### ✨ Features (original v0.2.0)
 
 #### Heartbeat Plan Model (Major Rearchitecture)
 - **Continuous event-based execution**: Plans are now multi-phase "push the project forward" events (plan → literature → code → experiment → analysis → next-plan), not isolated single tasks
@@ -72,59 +70,39 @@ All notable changes to Partner will be documented in this file.
 
 ### ✨ Features
 
-#### Event System (Autonomous Research)
-- Autonomous research cycles: runs tasks every 15-30 minutes
-- Event templates: 8 predefined research workflows
-- Knowledge gap detection: automatically identifies research gaps
-- Event statistics: tracks completed, spawned, and executed phases
+#### Autonomous Research Cycle
+- Hermes cron-driven research execution loop
+- Task queue system with priority-based scheduling
+- Knowledge base with structured entries
+- Journal for tracking research history
+- Stats tracking for cycles and completions
 
-#### Conversation Engine V2
-- Multi-turn context: remembers conversation history
-- Response generator: supports "show me the 3rd one", "next page"
-- Proactive notifications: alerts about important findings
-- User preference learning: adapts to research style
+#### Research Skills
+- Literature search via arXiv API
+- Code implementation with automated verification
+- Experiment execution and logging
+- Analysis with result comparison
+- Planning for next steps
 
-#### Self-Evolution Engine
-- Strategy learner: learns which task types succeed
-- Memory pruner: cleans outdated knowledge automatically
-- CPE guard: monitors core capabilities, alerts on degradation
+#### Governance & Safety
+- Skill health monitoring (4D scoring)
+- Hoeffding-based retirement system (later replaced)
+- Environment health tracking
+- Capability registry
 
-#### Strategy Map
-- DAG structure: visual research roadmap
-- Fork discovery: finds new research directions automatically
-- Policy selection: 5-factor scoring for next action
-
-#### Quality Assurance
-- 100+ unit tests
-- Knowledge base automatic audit
-- End-to-end integration tests
+#### Skill System
+- Dynamic skill loading with health checks
+- Skill retirement when performance degrades
+- Knowledge-integrated skill execution
+- Multi-cycle research support
 
 ### 🐛 Bug Fixes
-- Fix task_queue string handling (bare strings instead of dicts)
-- Fix task detail printing (don't show internal info)
-- Add tool restriction hook for partner skill
-- Auto-configure Hermes Gateway in setup
+- Fixed Unicode decode errors in JSON parsing
+- Fixed task queue file locking issues
+- Fixed knowledge base entry deduplication
 
 ### 📦 Infrastructure
-- pyproject.toml: support `pip install partner`
-- CHANGELOG.md: version history tracking
-- release.sh: automated release script
-- Auto Gateway setup: automatically installs and starts Hermes Gateway
-
-### 🤖 Supported Agents
-- 🔮 Hermes Agent (Full support)
-- 🦞 OpenClaw (Supported)
-- ⚡ OpenAI Codex (Supported)
-- 👥 CrewAI (Supported)
-- 💻 gptme (Supported)
-
----
-
-## Planned
-
-### v0.3.0
-- [ ] WeChat integration (WeChatPad iPad protocol)
-- [ ] OpenClaw bridge improvements
-- [ ] Research agent adaptation (CytoBridge, etc.)
-- [ ] Partner auto-upgrade mechanism
-- [ ] Multi-bot simultaneous support (QQ + WeChat)
+- Initial version 0.1.0
+- Basic CLI setup wizard
+- Workspace initialization
+- Hermes cron integration
