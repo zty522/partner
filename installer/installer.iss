@@ -63,6 +63,7 @@ var
   BackendPage: TInputOptionWizardPage;
   PythonPage: TInputOptionWizardPage;
   BackendChoice: Integer;
+  PyCheckCode: Integer;
 
 procedure InitializeWizard;
 begin
@@ -76,7 +77,7 @@ begin
   PythonPage.Values[0] := True;
 
   { Check if Python exists }
-  if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, Result) then
+  if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, PyCheckCode) then
     PythonPage.Values[0] := True
   else begin
     PythonPage.Values[0] := False;
