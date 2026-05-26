@@ -41,7 +41,9 @@ logs/
 ideas/
 design/
 docs/
-scripts/
+# Gitignored scripts (only build/deploy artifacts)
+scripts/*.bak
+scripts/__pycache__/
 config/
 
 # Old test & event template files (kept for reference locally)
