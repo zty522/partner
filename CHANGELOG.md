@@ -9,6 +9,9 @@ All notable changes to Partner will be documented in this file.
 - **每轮必推QQ**: 移除60分钟阈值，每轮心跳自动推送消息到QQ
 - **Bot Watchdog**: 启动QQ机器人时自动启动进程守护，挂了自动重启
 - **Cron prompt精简**: 从144行精简为67行，只包含维护检查逻辑
+- **一键安装脚本**: Linux (install.sh) + Windows (install.ps1) 便捷安装
+- **Codex/OpenClaw集成**: 委托编码任务到Codex，通过ACP对接OpenClaw
+- **README重写**: 增加安装指引、集成说明、命令列表
 
 ### ✨ Features (original v0.2.0)
 
