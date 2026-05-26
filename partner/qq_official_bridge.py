@@ -449,6 +449,7 @@ class QQQfficialBridge:
 - 用户让你推进项目 → 直接说"好的，开始推进"然后执行，不要问方向
 - 用户让你继续 → 直接继续，不要确认
 - 不说代码、diff、JSON 这些东西
+- 不要用markdown格式，不要用**加粗**、*斜体*、列表符号、标题等
 
 {ctx_str}
 {notif_str}
@@ -645,7 +646,8 @@ class QQQfficialBridge:
                  "- 完成后：更新 active_plan.json，推进到下一阶段\n"
                  "- 调用 python3 send_qq_report.py 推送进度报告\n"
                  "- 如果所有阶段完成，设置 status=idle\n"
-                 "- 用中文写报告",
+                 "- 用中文写报告\n"
+                 "- 不要使用markdown格式，不要用**加粗**、*斜体*、列表符号等",
                  "--skills", "partner-research"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
