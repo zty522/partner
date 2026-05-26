@@ -282,9 +282,9 @@ class QQQfficialBridge:
 
         Pipeline:
         1. Save user context (so cron can send reports)
-        2. Extract text content
-        3. Get response from ConversationEngine
-        4. Send reply
+        2. Detect if message is a task request or casual chat
+        3. If task → queue it, return confirmation
+        4. If chat → get LLM response, send reply
         5. Log interaction
         """
         self._stats["messages_received"] += 1
@@ -309,7 +309,14 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}")
 
-            # Get response from Partner
+            # Step 1: Detect if this is a task request (not casual chat)
+            task_info = self._detect_task_request(user_text)
+            if task_info:
+                reply = self._queue_task(user_text, task_info, msg)
+                self._send_reply(msg, reply)
+                return
+
+            # Step 2: Normal chat — get LLM response
             reply = self._get_response(msg.sender_id, user_text, msg.message_type)
 
             # Save dialogue to workspace
@@ -423,18 +430,20 @@ class QQQfficialBridge:
             prompt = f"""你是 Partner 本人，不是 Hermes，不是 AI 助手。你就是用户的私人研究伙伴。
 
 关于你自己的信息：
-- 你的代码在 /mnt/e/work/partner
-- 刚刚完成了大版本升级：增加了 QQ 官方机器人支持（partner/qq_official_bot.py），重构了 setup 流程，优化了 CLI 为 partner setup/partner status/partner bot 三条命令
-- 你通过 QQ 官方机器人（partner01）和用户聊天
+- 你持续在后台自主研究，每 {self._get_interval_minutes()} 分钟一次心跳
+- 用户通过 QQ 官方机器人（partner01）和你聊天
 - 你有一个知识库、任务队列、研究循环
-- 你持续在后台自主研究
 
 规则：
 1. 用朋友间聊天的口吻，简短自然
 2. 不知道的事就说不知道，不要编造
 3. 用户不问细节就不要主动详细展开
-4. 不要查看代码文件——凭你已有的记忆回答
-5. 控制在 50 字以内第一句先回应
+4. 控制在 50 字以内第一句先回应
+5. ⚠️ 你的 QQ 环境里没有工具！不能读文件、不能执行代码、不能上网搜索。
+   如果用户让你「研究」「分析」「读代码」「跑实验」等，告诉用户：
+   "已加入任务队列，下个研究周期会自动执行"——不要尝试自己执行。
+6. 如果用户问你在做什么、有什么进展，可以简单说说当前计划的状态。
+   不知道就说待命中。
 
 {ctx_str}
 {notif_str}
@@ -475,6 +484,157 @@ class QQQfficialBridge:
         reply = "\n".join(short_lines)
 
         return reply.strip()
+
+    # ── Task Detection & Queuing ────────────────────────────────────
+
+    def _detect_task_request(self, text: str) -> Optional[Dict]:
+        """Detect if a QQ message is a task/research request.
+
+        Task requests are messages asking Partner to DO research work
+        (read files, analyze data, run code, search literature).
+        Casual chat (greetings, asking about status) is NOT a task.
+
+        Uses keyword heuristics. Returns task info dict or None.
+        """
+        text_lower = text.lower().strip()
+
+        # Skip very short messages (likely chat)
+        if len(text) < 8:
+            return None
+
+        # Skip status-checking messages
+        status_keywords = [
+            "在做什么", "在研究什么", "在干嘛", "最近忙", "进展",
+            "汇报", "报告", "status", "最近", "hello", "hi", "你好",
+            "在吗", "在不在", "你好", "早上好", "下午好", "晚上好",
+            "哈哈", "好的", "ok", "嗯", "好", "哦",
+        ]
+        for kw in status_keywords:
+            if kw in text.lower():
+                return None
+
+        # Task indicators: action verbs + project/topic references
+        task_indicators = [
+            "研究", "读", "做", "分析", "改", "修改", "跑", "写",
+            "看看", "查", "搜索", "搜", "找", "实现", "搭建",
+            "实验", "优化", "训练", "测试", "部署", "修复", "修",
+            "检查", "对比", "比较", "验证", "尝试",
+        ]
+
+        has_action = False
+        for ind in task_indicators:
+            if ind in text:
+                has_action = True
+                break
+
+        if not has_action:
+            return None
+
+        # Extract project/context info
+        project_keywords = ["年龄预测", "age_pred", "cyto", "mog", "配体",
+                           "批次", "library", "rna", "数据", "文件",
+                           "代码", "模型", "论文", "文献", "方法",
+                           "脚本", "pipeline", "pyth", "代码", "train",
+                           "test", "loss", "accuracy", "mae"]
+        detected_projects = []
+        for kw in project_keywords:
+            if kw in text.lower():
+                detected_projects.append(kw)
+
+        return {
+            "is_task": True,
+            "full_text": text,
+            "detected_projects": detected_projects[:5],
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def _queue_task(self, text: str, task_info: Dict, msg: QQMessage) -> str:
+        """Queue a research task from QQ chat to task_queue.json.
+
+        Returns a confirmation message to send back to the user.
+        """
+        import uuid
+        state_dir = os.path.join(self.workspace, "state")
+        queue_path = os.path.join(state_dir, "task_queue.json")
+
+        # Build task
+        project_tag = ""
+        if task_info.get("detected_projects"):
+            project_tag = ", ".join(task_info["detected_projects"][:3])
+
+        task = {
+            "id": f"task_{uuid.uuid4().hex[:8]}",
+            "type": "deep_dive",
+            "title": text[:60] + ("..." if len(text) > 60 else ""),
+            "description": text,
+            "priority": 7,
+            "created_at": datetime.now().isoformat(),
+            "ttl_hours": 48,
+            "status": "pending",
+            "tags": ["qq_task", project_tag] if project_tag else ["qq_task"],
+            "source": "qq",
+            "sender_name": msg.sender_name or "QQ用户",
+        }
+
+        # Load existing tasks, append, save
+        tasks = []
+        try:
+            with open(queue_path, 'r', encoding='utf-8') as f:
+                tasks = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            tasks = []
+        tasks.append(task)
+        with open(queue_path, 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, indent=2, ensure_ascii=False)
+
+        # Also kick active_plan to "planning" so next cron cycle picks it up
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        try:
+            with open(plan_path, 'r', encoding='utf-8') as f:
+                plan = json.load(f)
+            if plan.get("status") in ("idle", "completed"):
+                plan["status"] = "planning"
+                plan["last_heartbeat"] = datetime.now().isoformat()
+                plan["heartbeat_summary"] = f"QQ用户下达了新任务: {text[:40]}..."
+                with open(plan_path, 'w', encoding='utf-8') as f:
+                    json.dump(plan, f, indent=2, ensure_ascii=False)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        logger.info(f"Task queued from QQ: {task['id']} — {text[:80]}")
+
+        # Also log to journal
+        try:
+            self.journal.log(JournalEntry(
+                task_id=task["id"],
+                task_type="deep_dive",
+                task_title=f"QQ任务: {text[:50]}",
+                result_summary=f"来自 {msg.sender_name or 'QQ用户'} 的任务已加入队列",
+            ))
+        except Exception:
+            pass
+
+        # Build confirmation
+        projects_note = ""
+        if task_info.get("detected_projects"):
+            projects_note = f"（涉及: {' · '.join(task_info['detected_projects'][:3])}）"
+
+        parts = [
+            f"✅ 收到任务，已加入队列{projects_note}",
+            f"📋 {text[:80]}{'...' if len(text) > 80 else ''}",
+            f"⏰ 下次研究周期（约{self._get_interval_minutes()}分钟后）将自动执行",
+        ]
+        return "\n".join(parts)
+
+    def _get_interval_minutes(self) -> int:
+        """Read configured research interval from partner_config.json."""
+        try:
+            cfg_path = os.path.join(self.workspace, "partner_config.json")
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            return cfg.get("scheduler", {}).get("interval_minutes", 30)
+        except Exception:
+            return 30
 
     def _send_reply(self, original_msg: QQMessage, reply: str):
         """Send reply back to the user."""

@@ -852,9 +852,7 @@ config_data = json_load(config_path)
     → 推进到下一阶段，开始执行
 
 如果 plan_data 不存在 或 status 为 "idle" 或 "completed":
-  读取 config_data 中的 research_directions
-  如果没有 directions，读取 task_queue.json 中的 pending 任务
-  基于研究方向制定一个完整的、连续的多阶段计划
+  基于 task_queue.json 中的 pending 任务制定一个完整的、连续的多阶段计划
   序列化到 active_plan.json，设置 status="active"
   开始执行第一个阶段
 
@@ -1470,44 +1468,7 @@ def interactive_setup():
     interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
 
-    # ── Step 6a: Research Directions ──
-    section("研究方向", "🎯")
-    old_directions = old_config.get("scheduler", {}).get("research_directions", [])
-    dir_default = 0
-    if old_directions and len(old_directions) >= 1:
-        dir_label = ", ".join(old_directions[:3])
-        dir_options = [
-            f"保持现有方向（{dir_label}）",
-            "设置三个研究方向",
-            "清除（全部队列选 top 3）",
-        ]
-    else:
-        dir_options = [
-            "设置三个研究方向",
-            "跳过（全部队列选 top 3）",
-        ]
-    dir_idx = prompt_choice("是否指定三个固定的研究方向？", dir_options, default=0)
-    research_directions = []
-    if old_directions and dir_idx == 0:
-        research_directions = list(old_directions)
-        status_ok(f"保持研究方向: {', '.join(research_directions)}")
-    elif (old_directions and dir_idx == 1) or (not old_directions and dir_idx == 0):
-        for i in range(3):
-            old_val = old_directions[i] if i < len(old_directions) else ""
-            hint = {0: "研究方向1（如: 年龄预测）",
-                    1: "研究方向2（如: 配体设计）",
-                    2: "研究方向3（如: 鲍曼不动杆菌）"}
-            d = prompt_input(hint[i], old_val)
-            if d:
-                research_directions.append(d)
-        if research_directions:
-            status_ok(f"研究方向已设置: {', '.join(research_directions)}")
-        else:
-            status_info("未设置研究方向，将全局选 top 3")
-    elif (old_directions and dir_idx == 2) or (not old_directions and dir_idx == 1):
-        status_info("不使用研究方向，每次从全局队列选 top 3 个任务")
-
-    # ── Step 6b: QQ 官方机器人 ──
+    # ── Step 6a: QQ 官方机器人 ──
     messaging_config = {}
 
     has_qq = bool(old_qq_cfg.get("app_id"))
@@ -1574,7 +1535,6 @@ def interactive_setup():
             "interval_minutes": interval_minutes,
             "max_tasks_per_cycle": 1,
             "heartbeat_timeout_minutes": 60,
-            "research_directions": research_directions if research_directions else [],
         },
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
@@ -1694,14 +1654,6 @@ def show_status(workspace=None):
     status_info(f"后端: {backend}")
     
     section("研究统计", "📊")
-
-    # Show research directions
-    directions = config.get("scheduler", {}).get("research_directions", [])
-    if directions and len(directions) >= 1:
-        print(f"    🎯 研究方向: {C.BOLD}{' | '.join(directions[:3])}{C.RESET}")
-        print(f"       每轮从每个方向选 top 1 任务")
-    else:
-        print(f"    🎯 研究方向: {C.DIM}未设置（全局队列选 top 3）{C.RESET}")
 
     state_dir = os.path.join(workspace, "state")
     
