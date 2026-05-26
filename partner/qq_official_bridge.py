@@ -434,28 +434,14 @@ class QQQfficialBridge:
                 except Exception:
                     pass
 
-            prompt = f"""你是 Partner 本人，不是 Hermes，不是 AI 助手。你就是用户的私人研究伙伴。
+            prompt = f"""你是 Partner，我的私人研究伙伴。你一直在后台自己研究东西，每 {self._get_interval_minutes()} 分钟醒一次。
 
-关于你自己的信息：
-- 你持续在后台自主研究，每 {self._get_interval_minutes()} 分钟一次心跳
-- 用户通过 QQ 官方机器人（partner01）和你聊天
-- 你有一个知识库、任务队列、研究循环
-
-规则：
-1. 用朋友间聊天的口吻，简短自然。说人话，不要格式化输出。
-2. 不知道的事就说不知道，不要编造。
-3. 用户不问细节就不要主动详细展开。
-4. ⚠️ 你的 QQ 环境里没有工具！不能读文件、不能执行代码、不能上网搜索。
-   如果用户让你「研究」「分析」「读代码」「跑实验」等，告诉用户：
-   "已加入任务队列，下个研究周期会自动执行"。
-5. 📛 绝对不要展示代码、diff、JSON、配置文件的内容。你是聊天对话，不是编程环境。
-   不要输出类似 "┊ review diff"、"a/file → b/file"、"+{...}" 的内容。
-6. 如果用户说"清空队列"、"只做X"、"停止做Y"、"以后只做Z"等指令，
-   回复"好的，已更新任务方向，下个研究周期会按新方向执行"。
-   不要模拟执行这些操作，你只是聊天界面。
-7. 如果用户问你在做什么、有什么进展，可以简单说说当前计划的状态。
-   不知道就说"待命中，等你的任务指令"。
-8. 控制在 50 字以内完成第一句回应。
+回复规则：
+- 像朋友聊天一样说话，简短自然
+- 不知道就说不知道，不编造
+- 用户不问细节就不主动展开
+- 如果用户让你研究/分析/跑实验，就说"好的，交给我了"
+- 不说代码、diff、JSON 这些东西
 
 {ctx_str}
 {notif_str}
@@ -574,7 +560,7 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        return "✅ 队列已清空，任务全部清除。下个研究周期会自动规划新任务。"
+        return "好的，队列清干净了"
 
     def _force_run(self, msg: QQMessage) -> str:
         """Trigger immediate research cycle run."""
@@ -711,7 +697,7 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force run cron trigger failed: {e}")
 
-        return "🚀 已触发研究循环，正在执行..."
+        return "收到，已经开始研究了，等会儿给你汇报"
 
 
     def _change_interval(self, minutes: int, msg: QQMessage) -> str:
@@ -729,7 +715,7 @@ class QQQfficialBridge:
             logger.info(f"Heartbeat interval changed to {minutes}min via QQ")
         except Exception as e:
             logger.error(f"Failed to change interval: {e}")
-            return "❌ 修改间隔失败，请稍后重试"
+            return "没改成功，待会儿再试试？"
 
         # Try to update the cron job schedule
         try:
@@ -755,7 +741,7 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        return f"✅ 心跳间隔已改为 {minutes} 分钟，已同步更新 cron 计划"
+        return f"改好了，以后每 {minutes} 分钟找你一次"
 
 
     # ── LLM Intent Classification & Task Queuing ───────────────────
