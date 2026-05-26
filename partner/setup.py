@@ -872,6 +872,13 @@ subprocess.run(["python3", "{workspace}/scripts/send_qq_report.py", "{workspace}
 - qq_bot_alive: true/false
 - stuck_tasks: 卡死任务列表（如果有）
 
+## 输出规范
+
+所有输出内容（心跳报告、通知等）必须：
+- 纯文本，不使用 markdown 格式
+- 不要用 **加粗**、*斜体*、列表符号、标题等
+- 不要用 emoji 符号
+
 ## 关键约束
 
 - 绝对不要主动创建新的研究计划或执行研究任务
