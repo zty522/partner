@@ -66,49 +66,22 @@ def cmd_status(args):
     show_status(workspace)
 
 def cmd_default(args):
-    """Default action: guide user to the right place."""
-    workspace = get_workspace()
-
-    if not workspace:
-        print("🤝 欢迎使用 Partner！")
-        print()
-        print("首次使用请先配置：")
-        print("  partner setup")
-        print()
-        return
-
-    # Check config
-    config_path = os.path.join(workspace, "partner_config.json")
-    if not os.path.exists(config_path):
-        print("🤝 Partner 需要配置。")
-        print("  partner setup")
-        return
-
-    with open(config_path) as f:
-        config = json.load(f)
-
-    backend = config.get('backend', 'hermes')
-
-    print("🤝 Partner 已就绪！")
+    """Default action: show intro + all commands."""
     print()
-    if backend == 'hermes':
-        print("Partner 通过 Hermes 与你对话。")
-        print("打开 Hermes，然后说：")
-        print()
-        print("  'partner 最近在研究什么？'")
-        print("  '让 partner 去研究 XXX'")
-        print("  'partner 知道关于 XXX 的什么？'")
-        print()
-        print("  hermes")
-    elif backend == 'claude_code':
-        print("Partner 通过 Claude Code 与你对话。")
-        print("打开 Claude Code，然后说：")
-        print()
-        print("  'partner 最近在研究什么？'")
-        print()
-        print("  claude")
-    else:
-        print(f"Partner 使用 {backend} 后端。")
+    print(f"  {C_BOLD}{C_CYAN}🤝 Partner — Your AI Research Companion{C_RESET}")
+    print(f"  {C_DIM}An AI research companion that works independently in the background.{C_RESET}")
+    print(f"  {C_DIM}You don't give it commands. You just check in.{C_RESET}")
+    print()
+    print(f"  {C_BOLD}Commands:{C_RESET}")
+    print(f"    {C_DIM}partner setup        First-time configuration wizard{C_RESET}")
+    print(f"    {C_DIM}partner status       View full status + research stats{C_RESET}")
+    print(f"    {C_DIM}partner bot start qq Start QQ bot (background){C_RESET}")
+    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner queue clear  Clear task queue / reset plan{C_RESET}")
+    print(f"    {C_DIM}partner update       Pull latest code + reinstall{C_RESET}")
+    print()
+    print(f"  {C_DIM}Or just type 'partner' anytime to see this menu.{C_RESET}")
+    print()
 
 
 def cmd_bot(args):
