@@ -793,11 +793,25 @@ def setup_cron_hermes(workspace: str):
         result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
         if "partner" in result.stdout.lower() or "autonomous-researcher" in result.stdout.lower():
             status_ok("Cron job 已存在，跳过创建")
-            # Extract job ID
+            # Extract job ID and save to config
             for line in result.stdout.split("\n"):
                 if "[" in line and "active" in line:
                     job_id = line.split("[")[0].strip()
                     status_info(f"Job ID: {job_id}")
+                    try:
+                        config_path = os.path.join(workspace, "partner_config.json")
+                        if os.path.exists(config_path):
+                            with open(config_path, 'r', encoding='utf-8') as f:
+                                cfg = json.load(f)
+                            if 'scheduler' not in cfg:
+                                cfg['scheduler'] = {}
+                            cfg['scheduler']['cron_job_id'] = job_id
+                            cfg['scheduler']['cron_job_name'] = 'partner-research-cycle'
+                            with open(config_path, 'w', encoding='utf-8') as f:
+                                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                            status_ok(f"Cron job ID 已保存: {job_id}")
+                    except Exception as e:
+                        status_warn(f"无法保存 cron job ID: {e}")
                     return
     except:
         pass
@@ -841,7 +855,11 @@ config_data = json_load(config_path)
 ### 第二步：决策
 
 如果 plan_data 存在且 status 为 "active" 或 "planning":
-  当前阶段 = plan_data['phases'][plan_data['current_phase_index']]
+  # 处理 planning 但 phases 为空（由 QQ bridge 的 _force_run 触发）
+  if not plan_data.get('phases') or len(plan_data['phases']) == 0:
+    视为 idle，直接进入"创建新计划"逻辑
+  else:
+    当前阶段 = plan_data['phases'][plan_data['current_phase_index']]
 
   如果当前阶段的 status 是 "in_progress":
     该阶段是否已经完成？检查交付物（论文找到了？代码改了？实验跑完了？）
@@ -949,6 +967,7 @@ def json_save(path, data):
         result = subprocess.run(
             ["hermes", "cron", "create", 
              "--name", "partner-research-cycle",
+             "--skill", "partner-research",
              f"every {interval_minutes}m",
              cron_prompt],
             capture_output=True, text=True, timeout=30

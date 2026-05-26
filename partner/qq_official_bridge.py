@@ -580,17 +580,17 @@ class QQQfficialBridge:
         """Trigger immediate research cycle run."""
         state_dir = os.path.join(self.workspace, "state")
 
-        # Set active_plan to planning so cron picks it up
+        # Set active_plan to idle so cron will create a new plan
         plan_path = os.path.join(state_dir, "active_plan.json")
         try:
             with open(plan_path, 'r', encoding='utf-8') as f:
                 plan = json.load(f)
-            if plan.get("status") in ("idle", "completed"):
-                plan["status"] = "planning"
-                plan["last_heartbeat"] = datetime.now().isoformat()
-                plan["heartbeat_summary"] = f"QQ用户要求立即执行研究"
-                with open(plan_path, 'w', encoding='utf-8') as f:
-                    json.dump(plan, f, indent=2, ensure_ascii=False)
+            plan["status"] = "idle"
+            plan["phases"] = []
+            plan["last_heartbeat"] = datetime.now().isoformat()
+            plan["heartbeat_summary"] = "QQ用户要求立即执行研究"
+            with open(plan_path, 'w', encoding='utf-8') as f:
+                json.dump(plan, f, indent=2, ensure_ascii=False)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
