@@ -569,8 +569,8 @@ class QQQfficialBridge:
 
         # Create an active plan with phases directly
         task_title = "推进研究项目"
-        if msg.text and len(msg.text) > 10:
-            task_title = msg.text.replace("立即开始执行", "").replace("直接开始", "").strip() or task_title
+        if msg.content and len(msg.content) > 10:
+            task_title = msg.content.replace("立即开始执行", "").replace("直接开始", "").strip() or task_title
 
         plan = {
             "status": "active",

@@ -45,18 +45,16 @@ Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesu
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "post_install.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{userprograms}\Partner"; Filename: "{app}\Partner.exe"
-Name: "{commondesktop}\Partner"; Filename: "{app}\Partner.exe"; Tasks: desktopicon
+Name: "{userdesktop}\Partner"; Filename: "{app}\Partner.exe"; Tasks: desktopicon
 Name: "{userprograms}\Partner Status"; Filename: "powershell.exe"; Parameters: "-NoExit -Command partner status"
 Name: "{userprograms}\Uninstall Partner"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\post_install.bat"; Description: "Complete setup (recommended)"; Flags: postinstall nowait skipifsilent shellexec
-
-[UninstallRun]
-Filename: "{app}\uninstall.bat"; Flags: runhidden
 
 [Code]
 var
