@@ -508,14 +508,16 @@ class QQQfficialBridge:
 
         # Clear queue: 清空队列, 清空, 清除所有任务, 清除队列
         clear_patterns = ["清空队列", "清空", "清除队列", "清除所有任务",
-                          "清空所有", "全部清空", "队列清空"]
+                          "清空所有", "全部清空", "队列清空",
+                          "清空之前的", "清空前面"]
         for p in clear_patterns:
             if p in t:
                 return self._clear_queue(msg)
 
         # Force run: 立即运行, 直接开始, 现在开始, 马上开始, 立即执行
         run_patterns = ["立即运行", "直接开始", "现在开始", "马上开始",
-                        "立即执行", "立刻开始", "立刻运行"]
+                        "立即执行", "立刻开始", "立刻运行",
+                        "开始执行", "立即开始", "不要等", "不用等"]
         for p in run_patterns:
             if p in t:
                 return self._force_run(msg)
