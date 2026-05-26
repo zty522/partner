@@ -446,8 +446,8 @@ class QQQfficialBridge:
 回复规则：
 - 像朋友聊天一样说话，简短自然
 - 不知道就说不知道，不编造
-- 用户不问细节就不主动展开
-- 如果用户让你研究/分析/跑实验，就说"好的，交给我了"
+- 用户让你推进项目 → 直接说"好的，开始推进"然后执行，不要问方向
+- 用户让你继续 → 直接继续，不要确认
 - 不说代码、diff、JSON 这些东西
 
 {ctx_str}
@@ -637,7 +637,15 @@ class QQQfficialBridge:
         try:
             subprocess.Popen(
                 ["hermes", "-z",
-                 f"读取 {self.workspace}/state/active_plan.json，执行当前 in_progress 阶段的研究任务。完成后更新 active_plan.json。调用 python3 {self.workspace}/scripts/send_qq_report.py {self.workspace} 推送结果。",
+                 f"你是自主研究助手。目标是：{task_title}。\n\n"
+                 f"读取 {self.workspace}/state/active_plan.json，执行当前 in_progress 阶段。\n"
+                 "规则：\n"
+                 "- 不要问用户问题，直接执行\n"
+                 "- 分析现状 → 搜索文献 → 修改代码 → 运行实验 → 记录结果\n"
+                 "- 完成后：更新 active_plan.json，推进到下一阶段\n"
+                 "- 调用 python3 send_qq_report.py 推送进度报告\n"
+                 "- 如果所有阶段完成，设置 status=idle\n"
+                 "- 用中文写报告",
                  "--skills", "partner-research"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,

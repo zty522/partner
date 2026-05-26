@@ -48,7 +48,7 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{userprograms}\Partner"; Filename: "{app}\partner.bat"
 Name: "{userdesktop}\Partner"; Filename: "{app}\partner.bat"; Tasks: desktopicon
-Name: "{userprograms}\Partner Status"; Filename: "powershell.exe"; Parameters: "-NoExit -Command partner status"
+Name: "{userprograms}\Partner Status"; Filename: "python"; Parameters: "-m partner.gui"
 Name: "{userprograms}\Uninstall Partner"; Filename: "{uninstallexe}"
 
 [Code]
@@ -111,8 +111,12 @@ begin
   { Create launcher batch file }
   LauncherPath := AppDir + '\Partner.bat';
   SaveStringToFile(LauncherPath, '@echo off' + #13#10 +
-    'python -m partner.cli %*' + #13#10, False);
+    'python -m partner.gui %*' + #13#10, False);
   Log('Created launcher: ' + LauncherPath);
+
+  { Create CLI batch file }
+  SaveStringToFile(AppDir + '\partner.bat', '@echo off' + #13#10 +
+    'python -m partner.cli %*' + #13#10, False);
 end;
 
 { ── Create wizard pages ── }
