@@ -309,10 +309,10 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}")
 
-            # Step 1: Detect if this is a task request (not casual chat)
-            task_info = self._detect_task_request(user_text)
-            if task_info:
-                reply = self._queue_task(user_text, task_info, msg)
+            # Step 1: Use LLM to classify: task request or casual chat?
+            intent = self._classify_intent(user_text, msg.sender_id)
+            if intent == "TASK":
+                reply = self._queue_task(user_text, msg)
                 self._send_reply(msg, reply)
                 return
 
@@ -485,70 +485,49 @@ class QQQfficialBridge:
 
         return reply.strip()
 
-    # ── Task Detection & Queuing ────────────────────────────────────
+    # ── LLM Intent Classification & Task Queuing ───────────────────
 
-    def _detect_task_request(self, text: str) -> Optional[Dict]:
-        """Detect if a QQ message is a task/research request.
+    def _classify_intent(self, text: str, sender: str) -> str:
+        """Use LLM to classify user intent: TASK or CHAT.
 
-        Task requests are messages asking Partner to DO research work
-        (read files, analyze data, run code, search literature).
-        Casual chat (greetings, asking about status) is NOT a task.
-
-        Uses keyword heuristics. Returns task info dict or None.
+        Sends a lightweight classification prompt to the LLM.
+        Returns "TASK" if the user wants research work done,
+        "CHAT" for normal conversation (greetings, status checks, chit-chat).
+        Falls back to "CHAT" on any error.
         """
-        text_lower = text.lower().strip()
+        try:
+            if self._adapter is None:
+                cfg_path = os.path.join(self.workspace, "partner_config.json")
+                if not os.path.exists(cfg_path):
+                    return "CHAT"
+                with open(cfg_path) as f:
+                    cfg = json.load(f)
+                backend = cfg.get("agent", {}).get("backend", cfg.get("backend", "hermes"))
+                from .adapter import create_adapter
+                self._adapter = create_adapter(backend, self.workspace)
 
-        # Skip very short messages (likely chat)
-        if len(text) < 8:
-            return None
+            prompt = f"""你是 Partner 的意图分类器。判断用户的消息是"研究任务"还是"普通聊天"。
 
-        # Skip status-checking messages
-        status_keywords = [
-            "在做什么", "在研究什么", "在干嘛", "最近忙", "进展",
-            "汇报", "报告", "status", "最近", "hello", "hi", "你好",
-            "在吗", "在不在", "你好", "早上好", "下午好", "晚上好",
-            "哈哈", "好的", "ok", "嗯", "好", "哦",
-        ]
-        for kw in status_keywords:
-            if kw in text.lower():
-                return None
+研究任务：用户让你去做研究类工作（读文献、分析数据、改代码、跑实验、查资料等）。
+普通聊天：用户只是打招呼、问你在做什么、闲聊、说"好的"等。
 
-        # Task indicators: action verbs + project/topic references
-        task_indicators = [
-            "研究", "读", "做", "分析", "改", "修改", "跑", "写",
-            "看看", "查", "搜索", "搜", "找", "实现", "搭建",
-            "实验", "优化", "训练", "测试", "部署", "修复", "修",
-            "检查", "对比", "比较", "验证", "尝试",
-        ]
+只回复 TASK 或 CHAT，不要其他内容。
 
-        has_action = False
-        for ind in task_indicators:
-            if ind in text:
-                has_action = True
-                break
+用户消息: {text[:300]}
+分类:"""
 
-        if not has_action:
-            return None
+            result = self._adapter.chat(prompt, max_tokens=10)
+            result_clean = result.strip().upper() if result else ""
+            if "TASK" in result_clean:
+                logger.info(f"Intent classified as TASK: {text[:60]}...")
+                return "TASK"
+            logger.info(f"Intent classified as CHAT: {text[:60]}...")
+            return "CHAT"
+        except Exception as e:
+            logger.warning(f"Intent classification failed: {e}, defaulting to CHAT")
+            return "CHAT"
 
-        # Extract project/context info
-        project_keywords = ["年龄预测", "age_pred", "cyto", "mog", "配体",
-                           "批次", "library", "rna", "数据", "文件",
-                           "代码", "模型", "论文", "文献", "方法",
-                           "脚本", "pipeline", "pyth", "代码", "train",
-                           "test", "loss", "accuracy", "mae"]
-        detected_projects = []
-        for kw in project_keywords:
-            if kw in text.lower():
-                detected_projects.append(kw)
-
-        return {
-            "is_task": True,
-            "full_text": text,
-            "detected_projects": detected_projects[:5],
-            "timestamp": datetime.now().isoformat(),
-        }
-
-    def _queue_task(self, text: str, task_info: Dict, msg: QQMessage) -> str:
+    def _queue_task(self, text: str, msg: QQMessage) -> str:
         """Queue a research task from QQ chat to task_queue.json.
 
         Returns a confirmation message to send back to the user.
@@ -558,10 +537,6 @@ class QQQfficialBridge:
         queue_path = os.path.join(state_dir, "task_queue.json")
 
         # Build task
-        project_tag = ""
-        if task_info.get("detected_projects"):
-            project_tag = ", ".join(task_info["detected_projects"][:3])
-
         task = {
             "id": f"task_{uuid.uuid4().hex[:8]}",
             "type": "deep_dive",
@@ -571,7 +546,7 @@ class QQQfficialBridge:
             "created_at": datetime.now().isoformat(),
             "ttl_hours": 48,
             "status": "pending",
-            "tags": ["qq_task", project_tag] if project_tag else ["qq_task"],
+            "tags": ["qq_task"],
             "source": "qq",
             "sender_name": msg.sender_name or "QQ用户",
         }
@@ -615,12 +590,8 @@ class QQQfficialBridge:
             pass
 
         # Build confirmation
-        projects_note = ""
-        if task_info.get("detected_projects"):
-            projects_note = f"（涉及: {' · '.join(task_info['detected_projects'][:3])}）"
-
         parts = [
-            f"✅ 收到任务，已加入队列{projects_note}",
+            f"✅ 收到任务，已加入队列",
             f"📋 {text[:80]}{'...' if len(text) > 80 else ''}",
             f"⏰ 下次研究周期（约{self._get_interval_minutes()}分钟后）将自动执行",
         ]
