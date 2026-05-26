@@ -577,20 +577,34 @@ class QQQfficialBridge:
         state_dir = os.path.join(self.workspace, "state")
         now = datetime.now().isoformat()
 
-        # Create an active plan with phases directly
+        # Archive existing active plan if any
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        try:
+            with open(plan_path) as f:
+                old_plan = json.load(f)
+            if old_plan.get("status") == "active":
+                archive_path = os.path.join(state_dir, f"plan_archive_{now[:19].replace(':','')}.json")
+                with open(archive_path, 'w', encoding='utf-8') as f:
+                    json.dump(old_plan, f, indent=2, ensure_ascii=False)
+                logger.info(f"Archived previous plan to {archive_path}")
+        except Exception:
+            pass
+
+        # Extract task title from message
         task_title = "推进研究项目"
         if msg.content and len(msg.content) > 10:
-            task_title = msg.content.replace("立即开始执行", "").replace("直接开始", "").strip() or task_title
+            task_title = msg.content.replace("立即开始执行", "").replace("直接开始", "").replace("马上开始", "").strip() or task_title
 
+        # Create new plan
         plan = {
             "status": "active",
             "title": task_title,
-            "goal": "根据用户要求推进研究",
+            "goal": f"用户要求: {task_title}",
             "created_at": now,
             "current_phase_index": 0,
             "phases": [
                 {
-                    "name": "文献调研 - " + task_title,
+                    "name": f"文献调研 - {task_title}",
                     "type": "literature_search",
                     "status": "in_progress",
                     "current_step": "开始搜索相关文献",
@@ -615,44 +629,15 @@ class QQQfficialBridge:
             "last_heartbeat": now,
             "heartbeat_summary": f"QQ用户要求: {task_title}"
         }
-        plan_path = os.path.join(state_dir, "active_plan.json")
         with open(plan_path, 'w', encoding='utf-8') as f:
             json.dump(plan, f, indent=2, ensure_ascii=False)
 
-        # If queue is empty, auto-create a default "continue research" task
-        import uuid
-        queue_path = os.path.join(state_dir, "task_queue.json")
-        try:
-            with open(queue_path, 'r', encoding='utf-8') as f:
-                tasks = json.load(f)
-            pending = [t for t in tasks if isinstance(t, dict) and t.get("status") == "pending"]
-            if not pending:
-                task = {
-                    "id": f"task_{uuid.uuid4().hex[:8]}",
-                    "type": "deep_dive",
-                    "title": "推进研究项目",
-                    "description": "用户要求立即执行研究，自动创建的默认任务",
-                    "priority": 8,
-                    "created_at": datetime.now().isoformat(),
-                    "ttl_hours": 48,
-                    "status": "pending",
-                    "tags": ["auto", "force_run"],
-                    "source": "qq_force",
-                    "sender_name": msg.sender_name or "QQ用户",
-                }
-                tasks.append(task)
-                with open(queue_path, 'w', encoding='utf-8') as f:
-                    json.dump(tasks, f, indent=2, ensure_ascii=False)
-                logger.info("Auto-created default task for force_run (queue was empty)")
-        except Exception as e:
-            logger.debug(f"Force-run task check failed: {e}")
-
-        # Execute research immediately via Hermes agent (no cron wait)
-        import subprocess, shlex
+        # Execute research immediately via Hermes agent (background)
+        import subprocess
         try:
             subprocess.Popen(
                 ["hermes", "-z",
-                 f"读取 {self.workspace}/state/active_plan.json，执行当前 in_progress 阶段的研究任务。完成后更新 active_plan.json。再调用 python3 {self.workspace}/scripts/send_qq_report.py {self.workspace} 发送通知。",
+                 f"读取 {self.workspace}/state/active_plan.json，执行当前 in_progress 阶段的研究任务。完成后更新 active_plan.json。调用 python3 {self.workspace}/scripts/send_qq_report.py {self.workspace} 推送结果。",
                  "--skills", "partner-research"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -660,7 +645,7 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force run Hermes exec failed: {e}")
 
-        return None  # Let LLM generate natural reply
+        return ""  # Let LLM generate natural reply
 
 
     def _change_interval(self, minutes: int, msg: QQMessage) -> str:
