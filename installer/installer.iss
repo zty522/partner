@@ -64,6 +64,7 @@ var
   PythonPage: TInputOptionWizardPage;
   BackendChoice: Integer;
   PyCheckCode: Integer;
+  PyResultCode: Integer;  // 添加这个变量
 
 procedure InitializeWizard;
 begin
@@ -77,7 +78,7 @@ begin
   PythonPage.Values[0] := True;
 
   { Check if Python exists }
-  if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, PyCheckCode) then
+  if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, PyResultCode) then
     PythonPage.Values[0] := True
   else begin
     PythonPage.Values[0] := False;
@@ -96,7 +97,7 @@ begin
   BackendPage.Values[0] := True;
 
   { Detect existing installations }
-  if Exec('python', '-m pip show hermes-agent', '', SW_HIDE, ewWaitUntilTerminated, Result) then
+  if Exec('python', '-m pip show hermes-agent', '', SW_HIDE, ewWaitUntilTerminated, PyResultCode) then
     BackendPage.SubCaption.Caption := BackendPage.SubCaption.Caption + #13#10'Hermes Agent is already installed on this system.';
   if DirExists(ExpandConstant('{userpf}\Partner')) then
     BackendPage.SubCaption.Caption := BackendPage.SubCaption.Caption + #13#10'Previous Partner installation detected. Setup will upgrade it.';
@@ -105,7 +106,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   PythonInstaller: String;
-  ResultCode: Integer;
+  InstallResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -115,30 +116,32 @@ begin
       PythonInstaller := ExpandConstant('{tmp}\python-installer.exe');
       if not FileExists(PythonInstaller) then
         DownloadPage.Download('https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe', 'python-installer.exe');
-      if Exec(ExpandConstant('{tmp}\python-installer.exe'), '/quiet InstallAllUsers=0 PrependPath=1', '', SW_SHOW, ewWaitUntilTerminated, ResultCode) then
+      if Exec(ExpandConstant('{tmp}\python-installer.exe'), '/quiet InstallAllUsers=0 PrependPath=1', '', SW_SHOW, ewWaitUntilTerminated, InstallResultCode) then
         Log('Python installed successfully');
     end;
 
     { Install selected backend }
     case BackendPage.SelectedValueIndex of
       0: { Hermes }
-        Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
       1: { OpenClaw }
-        Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+        Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
       2: { Both }
         begin
-          Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-          Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+          Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
+          Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
         end;
     end;
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  UninstallResultCode: Integer;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
     { Remove PATH entry }
-    Exec('powershell', '-Command "[Environment]::SetEnvironmentVariable(\"Path\", $([Environment]::GetEnvironmentVariable(\"Path\", \"User\") -replace \".*Partner.*\", \"\").Trim(\";\"), \"User\")"', '', SW_HIDE, ewWaitUntilTerminated, Result);
+    Exec('powershell', '-Command "[Environment]::SetEnvironmentVariable(\"Path\", $([Environment]::GetEnvironmentVariable(\"Path\", \"User\") -replace \".*Partner.*\", \"\").Trim(\";\"), \"User\")"', '', SW_HIDE, ewWaitUntilTerminated, UninstallResultCode);
   end;
 end;
