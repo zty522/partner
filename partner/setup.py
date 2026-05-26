@@ -1359,7 +1359,22 @@ def interactive_setup():
         open(journal_path, 'w').close()
     
     status_ok("状态文件已初始化")
-    
+
+    # ── Deploy scripts to workspace ──
+    scripts_src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
+    scripts_dst = os.path.join(workspace, "scripts")
+    os.makedirs(scripts_dst, exist_ok=True)
+    if os.path.exists(scripts_src):
+        for fname in os.listdir(scripts_src):
+            if fname.endswith(".py"):
+                src = os.path.join(scripts_src, fname)
+                dst = os.path.join(scripts_dst, fname)
+                if os.path.isfile(src) and (not os.path.exists(dst) or 
+                    os.path.getmtime(src) > os.path.getmtime(dst)):
+                    import shutil
+                    shutil.copy2(src, dst)
+                    status_info(f"已部署脚本: {fname}")
+
     # ── Step 5: Register Skill ──
     section("注册 Partner 技能", "🧩")
     
