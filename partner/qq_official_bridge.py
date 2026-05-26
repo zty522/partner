@@ -622,7 +622,7 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force-run task check failed: {e}")
 
-        # Try to trigger cron immediately
+        # Try to trigger cron immediately (create it first if needed)
         import subprocess
         try:
             cfg_path = os.path.join(self.workspace, "partner_config.json")
@@ -630,12 +630,55 @@ class QQQfficialBridge:
                 cfg = json.load(f)
             cron_id = cfg.get("scheduler", {}).get("cron_job_id", "")
             cron_name = cfg.get("scheduler", {}).get("cron_job_name", "partner-research-cycle")
+            interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
             target = cron_id or cron_name
-            if target:
+
+            # Check if cron job exists
+            list_chk = subprocess.run(
+                ["hermes", "cron", "list"], capture_output=True, text=True, timeout=10
+            )
+            has_cron = target and target in list_chk.stdout
+
+            if has_cron:
+                # Run existing cron job
                 subprocess.run(
                     ["hermes", "cron", "run", target, "--accept-hooks"],
                     capture_output=True, timeout=120,
                 )
+            else:
+                # Cron job doesn't exist — create it on the fly
+                cron_prompt = f"""你是 Partner 的执行引擎。在 {self.workspace} 下工作。
+
+你的核心原则是：30 分钟是最小心跳间隔，不是执行窗口。
+每次心跳：
+1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
+2. 没有活跃计划则基于 task_queue.json 中的 pending 任务制定完整的多阶段计划
+3. 每次心跳向 QQ 汇报当前状态
+
+用中文。只在 {self.workspace} 内写文件。"""
+
+                create_r = subprocess.run(
+                    ["hermes", "cron", "create",
+                     "--schedule", f"every {interval}m",
+                     "--name", cron_name,
+                     "--prompt", cron_prompt],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if create_r.returncode == 0:
+                    # Extract job ID from output and save it
+                    import re as _re
+                    m = _re.search(r'\[([a-f0-9-]+)\]', create_r.stdout)
+                    if m:
+                        new_id = m.group(1)
+                        cfg.setdefault("scheduler", {})["cron_job_id"] = new_id
+                        with open(cfg_path, 'w', encoding='utf-8') as f:
+                            json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+                    # Run it immediately
+                    subprocess.run(
+                        ["hermes", "cron", "run", cron_name, "--accept-hooks"],
+                        capture_output=True, timeout=120,
+                    )
         except Exception as e:
             logger.debug(f"Force run cron trigger failed: {e}")
 
