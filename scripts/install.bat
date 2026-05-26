@@ -8,70 +8,88 @@ echo.
 
 :: check python
 python --version >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python not found. Download from:
-    echo https://www.python.org/downloads/
-    echo (check "Add Python to PATH" during install)
+if %errorlevel% neq 0 (
+    echo [ERROR] Python is not installed or not in PATH.
+    echo.
+    echo Please install Python 3.10+ from:
+    echo   https://www.python.org/downloads/
+    echo.
+    echo Make sure to check "Add Python to PATH" during install.
+    echo After installing, run this installer again.
+    echo.
     pause
     exit /b
 )
-for /f "tokens=2" %%i in ('python --version 2^>^&1') do echo [OK] Python %%i
 
-:: check git
-git --version >nul 2>&1
-if errorlevel 1 (
-    echo [WARN] Git not found - will use local files
-    set USE_ZIP=1
-) else (
-    echo [OK] Git found
-    set USE_ZIP=0
+for /f "tokens=2 delims= " %%i in ('python --version 2^>^&1') do set PYVER=%%i
+echo [OK] Python %PYVER%
+
+:: check pip
+python -m pip --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [WARN] pip not found. Installing...
+    python -m ensurepip --upgrade
 )
+echo [OK] pip available
 
 :: choose backend
 echo.
-echo Choose AI backend:
+echo Select AI backend (Partner needs one to process tasks):
+echo.
 echo   1 - Hermes Agent (recommended)
 echo   2 - OpenClaw
 echo   3 - Both
-echo   4 - Skip, I'll configure later
+echo   4 - Skip, configure later
 echo.
-set /p agent=Choice [1-4] (default 1): 
-if "%agent%"=="" set agent=1
+set /p AGENT=Choice [1-4] (default 1): 
+if "%AGENT%"=="" set AGENT=1
+if "%AGENT%"=="1" set AGENT=1
+if "%AGENT%"=="2" set AGENT=2
+if "%AGENT%"=="3" set AGENT=3
+if "%AGENT%"=="4" set AGENT=4
 
 :: install backend
-if "%agent%"=="1" (
+if "%AGENT%"=="1" (
     echo.
     echo Installing Hermes Agent...
     python -m pip install hermes-agent -q
-    echo [OK] Hermes Agent installed
+    if %errorlevel% equ 0 (
+        echo [OK] Hermes Agent installed
+    ) else (
+        echo [WARN] Hermes install failed, you can try manually: pip install hermes-agent
+    )
 )
-if "%agent%"=="2" (
+if "%AGENT%"=="2" (
     echo.
-    echo Installing OpenClaw...
+    echo Installing OpenClaw (requires Node.js)...
     where node >nul 2>&1
-    if errorlevel 1 (
-        echo [ERROR] Node.js not found. Get it from:
-        echo https://nodejs.org/
+    if %errorlevel% neq 0 (
+        echo [ERROR] Node.js not found.
+        echo Download from: https://nodejs.org/
         pause
         exit /b
     )
     npm install -g openclaw@latest
     echo [OK] OpenClaw installed
 )
-if "%agent%"=="3" (
+if "%AGENT%"=="3" (
     echo.
     echo Installing Hermes Agent...
     python -m pip install hermes-agent -q
-    echo [OK] Hermes Agent installed
+    if %errorlevel% equ 0 ( echo [OK] Hermes Agent installed ) else ( echo [WARN] Hermes install failed )
     echo.
     echo Installing OpenClaw...
     where node >nul 2>&1
-    if not errorlevel 1 (
+    if %errorlevel% equ 0 (
         npm install -g openclaw@latest
         echo [OK] OpenClaw installed
     ) else (
-        echo [WARN] Node.js not found. Install manually from https://nodejs.org/
+        echo [WARN] Node.js not found. Install from https://nodejs.org/
     )
+)
+if "%AGENT%"=="4" (
+    echo.
+    echo Skipping backend install. You can install one later.
 )
 
 :: install partner
@@ -80,41 +98,66 @@ echo Installing Partner...
 set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
-if "%USE_ZIP%"=="1" (
-    python -m pip install -e . -q
+if exist ".partner" (
+    cd .partner
+    git pull --ff-only >nul 2>&1
+    cd ..
 ) else (
-    if exist ".partner" (
-        cd .partner
-        git pull --ff-only >nul 2>&1
-        cd ..
-    ) else (
+    where git >nul 2>&1
+    if %errorlevel% equ 0 (
         git clone https://github.com/zty522/partner.git .partner >nul 2>&1
+    ) else (
+        echo [WARN] Git not found, using local files
     )
+)
+
+if exist ".partner" (
     cd .partner
     python -m pip install -e . -q
+    if %errorlevel% equ 0 (
+        echo [OK] Partner installed
+    ) else (
+        echo [ERROR] Partner install failed
+        pause
+        exit /b
+    )
+    cd ..
+) else (
+    python -m pip install -e . -q
+    if %errorlevel% equ 0 (
+        echo [OK] Partner installed
+    ) else (
+        echo [ERROR] Partner install failed
+        pause
+        exit /b
+    )
 )
-echo [OK] Partner installed
 
 :: create desktop shortcut
+echo.
 echo Creating desktop shortcut...
 set SHORTCUT=%USERPROFILE%\Desktop\Partner.lnk
-echo Set WshShell = CreateObject("WScript.Shell") > %TEMP%\mklnk.vbs
-echo Set sc = WshShell.CreateShortcut("%SHORTCUT%") >> %TEMP%\mklnk.vbs
-echo sc.TargetPath = "powershell.exe" >> %TEMP%\mklnk.vbs
-echo sc.Arguments = "-NoExit -Command partner status" >> %TEMP%\mklnk.vbs
-echo sc.Description = "Partner AI Research Companion" >> %TEMP%\mklnk.vbs
-echo sc.WorkingDirectory = "%USERPROFILE%" >> %TEMP%\mklnk.vbs
-echo sc.Save >> %TEMP%\mklnk.vbs
+(
+echo Set WshShell = CreateObject("WScript.Shell"^)
+echo Set sc = WshShell.CreateShortcut("%SHORTCUT%"^)
+echo sc.TargetPath = "powershell.exe"
+echo sc.Arguments = "-NoExit -Command partner status"
+echo sc.Description = "Partner AI Research Companion"
+echo sc.WorkingDirectory = "%USERPROFILE%"
+echo sc.Save
+) > %TEMP%\mklnk.vbs
 cscript //nologo %TEMP%\mklnk.vbs >nul
 del %TEMP%\mklnk.vbs
 echo [OK] Desktop shortcut created
 
 echo.
-echo ======================================================
+echo ====================================
 echo  INSTALLATION COMPLETE!
-echo ======================================================
+echo ====================================
 echo.
-echo  Open a NEW command prompt and type: partner status
-echo  Or double-click the Partner shortcut on your desktop.
+echo  Open a new command prompt and type:
+echo    partner status
+echo.
+echo  Or double-click the Partner icon on your desktop.
 echo.
 pause
