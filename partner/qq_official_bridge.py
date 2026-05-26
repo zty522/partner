@@ -308,7 +308,13 @@ class QQQfficialBridge:
             if not user_text.strip():
                 return
 
-            logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}")
+            logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
+
+            # Step 0: Special commands (handled directly, no LLM needed)
+            special_reply = self._handle_special_command(user_text, msg)
+            if special_reply:
+                self._send_reply(msg, special_reply)
+                return
 
             # Step 1: Use LLM to classify: task request or casual chat?
             intent = self._classify_intent(user_text, msg.sender_id)
@@ -490,6 +496,113 @@ class QQQfficialBridge:
         reply = "\n".join(short_lines)
 
         return reply.strip()
+
+    # ── Special Commands (direct, no LLM) ─────────────────────────
+
+    def _handle_special_command(self, text: str, msg: QQMessage) -> Optional[str]:
+        """Handle special action commands directly without LLM.
+
+        Returns a reply string if handled, None to proceed normally.
+        """
+        t = text.strip()
+
+        # Clear queue: 清空队列, 清空, 清除所有任务, 清除队列
+        clear_patterns = ["清空队列", "清空", "清除队列", "清除所有任务",
+                          "清空所有", "全部清空", "队列清空"]
+        for p in clear_patterns:
+            if p in t:
+                return self._clear_queue(msg)
+
+        # Force run: 立即运行, 直接开始, 现在开始, 马上开始, 立即执行
+        run_patterns = ["立即运行", "直接开始", "现在开始", "马上开始",
+                        "立即执行", "立刻开始", "立刻运行"]
+        for p in run_patterns:
+            if p in t:
+                return self._force_run(msg)
+
+        return None
+
+    def _clear_queue(self, msg: QQMessage) -> str:
+        """Clear all tasks from task_queue.json and reset active_plan."""
+        state_dir = os.path.join(self.workspace, "state")
+
+        # Clear task queue
+        queue_path = os.path.join(state_dir, "task_queue.json")
+        try:
+            with open(queue_path, 'w', encoding='utf-8') as f:
+                json.dump([], f, indent=2, ensure_ascii=False)
+            logger.info("Task queue cleared via QQ command")
+        except Exception as e:
+            logger.error(f"Failed to clear queue: {e}")
+
+        # Reset active_plan to idle
+        from datetime import datetime
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        try:
+            plan = {
+                "status": "idle",
+                "title": "",
+                "goal": "",
+                "created_at": datetime.now().isoformat(),
+                "current_phase_index": 0,
+                "phases": [],
+                "last_heartbeat": datetime.now().isoformat(),
+                "heartbeat_summary": "队列已清空，等待新计划",
+            }
+            with open(plan_path, 'w', encoding='utf-8') as f:
+                json.dump(plan, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to reset active_plan: {e}")
+
+        # Log to journal
+        try:
+            self.journal.log(JournalEntry(
+                task_id="clear_queue",
+                task_type="system",
+                task_title="QQ清空队列",
+                result_summary=f"来自 {msg.sender_name or 'QQ用户'} 的指令：队列已清空",
+            ))
+        except Exception:
+            pass
+
+        return "✅ 队列已清空，任务全部清除。下个研究周期会自动规划新任务。"
+
+    def _force_run(self, msg: QQMessage) -> str:
+        """Trigger immediate research cycle run."""
+        state_dir = os.path.join(self.workspace, "state")
+
+        # Set active_plan to planning so cron picks it up
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        try:
+            with open(plan_path, 'r', encoding='utf-8') as f:
+                plan = json.load(f)
+            if plan.get("status") in ("idle", "completed"):
+                plan["status"] = "planning"
+                plan["last_heartbeat"] = datetime.now().isoformat()
+                plan["heartbeat_summary"] = f"QQ用户要求立即执行研究"
+                with open(plan_path, 'w', encoding='utf-8') as f:
+                    json.dump(plan, f, indent=2, ensure_ascii=False)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        # Try to trigger cron immediately
+        import subprocess
+        try:
+            cfg_path = os.path.join(self.workspace, "partner_config.json")
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            cron_id = cfg.get("scheduler", {}).get("cron_job_id", "")
+            cron_name = cfg.get("scheduler", {}).get("cron_job_name", "partner-research-cycle")
+            target = cron_id or cron_name
+            if target:
+                subprocess.run(
+                    ["hermes", "cron", "run", target, "--accept-hooks"],
+                    capture_output=True, timeout=120,
+                )
+        except Exception as e:
+            logger.debug(f"Force run cron trigger failed: {e}")
+
+        return "🚀 已触发研究循环，正在执行..."
 
     # ── LLM Intent Classification & Task Queuing ───────────────────
 

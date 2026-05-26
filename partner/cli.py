@@ -280,6 +280,56 @@ def cmd_update(args):
     print()
 
 
+def _cmd_queue_clear(args):
+    """Clear the task queue."""
+    from .setup import find_workspace
+    workspace = find_workspace()
+    if not workspace:
+        print("❌ Partner 未配置")
+        return
+
+    state_dir = os.path.join(workspace, "state")
+
+    # Clear task queue
+    queue_path = os.path.join(state_dir, "task_queue.json")
+    try:
+        with open(queue_path, 'w', encoding='utf-8') as f:
+            json.dump([], f, indent=2, ensure_ascii=False)
+        print("  ✅ 任务队列已清空")
+    except Exception as e:
+        print(f"  ❌ 清空失败: {e}")
+        return
+
+    # Reset active_plan
+    plan_path = os.path.join(state_dir, "active_plan.json")
+    try:
+        from datetime import datetime
+        plan = {
+            "status": "idle",
+            "title": "",
+            "goal": "",
+            "created_at": datetime.now().isoformat(),
+            "current_phase_index": 0,
+            "phases": [],
+            "last_heartbeat": datetime.now().isoformat(),
+            "heartbeat_summary": "队列已清空，等待新计划",
+        }
+        with open(plan_path, 'w', encoding='utf-8') as f:
+            json.dump(plan, f, indent=2, ensure_ascii=False)
+        print("  ✅ 活跃计划已重置")
+    except Exception as e:
+        print(f"  ⚠ active_plan 重置失败: {e}")
+
+    print()
+    print("  Commands:")
+    print("    partner status       Check Partner status")
+    print("    partner setup        Reconfigure")
+    print("    partner bot start qq Start QQ bot")
+    print("    partner bot stop qq  Stop QQ bot")
+    print("    partner queue clear  Clear task queue")
+    print("    partner update       Update to latest version")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='partner',
@@ -309,6 +359,12 @@ def main():
     # update
     p_update = sub.add_parser('update', help='Update Partner to the latest version')
     p_update.set_defaults(func=cmd_update)
+
+    # queue
+    p_queue = sub.add_parser('queue', help='管理任务队列')
+    q_sub = p_queue.add_subparsers(dest='queue_action')
+    p_queue_clear = q_sub.add_parser('clear', help='清空任务队列')
+    p_queue_clear.set_defaults(func=lambda args: _cmd_queue_clear(args))
 
     # default
     parser.set_defaults(func=cmd_default)
