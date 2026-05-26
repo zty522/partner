@@ -100,8 +100,8 @@ class QQQfficialBridge:
             "messages_received": 0,
             "messages_sent": 0,
             "errors": 0,
-            "start_time": None,
         }
+        self._force_run_triggered = False
 
     # ── Configuration ──────────────────────────────────────────────
 
@@ -312,16 +312,23 @@ class QQQfficialBridge:
 
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
-            if special_reply:
+            if special_reply:  # Has a real reply
                 self._send_reply(msg, special_reply)
                 return
+            if special_reply == "":  # Pattern matched, go to LLM chat
+                self._force_run_triggered = True
+            else:
+                self._force_run_triggered = False
 
             # Step 1: Use LLM to classify: task request or casual chat?
-            intent = self._classify_intent(user_text, msg.sender_id)
-            if intent == "TASK":
-                reply = self._queue_task(user_text, msg)
-                self._send_reply(msg, reply)
-                return
+            # If force_run was just triggered, skip TASK (research already started)
+            if not self._force_run_triggered:
+                intent = self._classify_intent(user_text, msg.sender_id)
+                if intent == "TASK":
+                    reply = self._queue_task(user_text, msg)
+                    self._send_reply(msg, reply)
+                    return
+            self._force_run_triggered = False
 
             # Step 2: Normal chat — get LLM response
             reply = self._get_response(msg.sender_id, user_text, msg.message_type)
@@ -488,7 +495,9 @@ class QQQfficialBridge:
     def _handle_special_command(self, text: str, msg: QQMessage) -> Optional[str]:
         """Handle special action commands directly without LLM.
 
-        Returns a reply string if handled, None to proceed normally.
+        Returns a reply string if handled, None if not matched.
+        If reply is empty string '', the pattern was matched but reply
+        should come from LLM (fall through to normal chat, skip TASK).
         """
         t = text.strip()
 
@@ -506,7 +515,8 @@ class QQQfficialBridge:
                         "开始执行", "立即开始", "不要等", "不用等"]
         for p in run_patterns:
             if p in t:
-                return self._force_run(msg)
+                self._force_run(msg)
+                return ""  # Matched, but let LLM generate reply
 
         # Change interval: 间隔改成X, 间隔改为X, 设定间隔X, 修改间隔X
         import re
@@ -650,7 +660,7 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force run Hermes exec failed: {e}")
 
-        return "收到，已经开始研究了，等会儿给你汇报"
+        return None  # Let LLM generate natural reply
 
 
     def _change_interval(self, minutes: int, msg: QQMessage) -> str:
