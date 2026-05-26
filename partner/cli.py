@@ -269,6 +269,15 @@ def cmd_update(args):
 
     # 5. Success message
     print(f"{C_BOLD}{C_GREEN}✅ Partner is up to date!{C_RESET}")
+    print()
+    # ── Commands ──
+    print(f"  {C_BOLD}Commands:{C_RESET}")
+    print(f"    {C_DIM}partner status       Check Partner status{C_RESET}")
+    print(f"    {C_DIM}partner setup        Reconfigure{C_RESET}")
+    print(f"    {C_DIM}partner bot start qq Start QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
+    print()
 
 
 def main():

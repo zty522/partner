@@ -1636,8 +1636,11 @@ def interactive_setup():
     print(f"    3. Or: {C.CYAN}'partner, research XXX'{C.RESET}")
     print(f"    4. Partner will run autonomously in the background\n")
     print(f"  {C.BOLD}Commands:{C.RESET}")
-    print(f"    {C.DIM}partner status    Check Partner status{C.RESET}")
-    print(f"    {C.DIM}partner setup     Reconfigure{C.RESET}")
+    print(f"    {C.DIM}partner status       Check Partner status{C.RESET}")
+    print(f"    {C.DIM}partner setup        Reconfigure{C.RESET}")
+    print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
+    print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
+    print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
     print()
 
 
@@ -1748,7 +1751,17 @@ def show_status(workspace=None):
                     print(f"      日志: {log_path}")
                 if os.path.exists(cfg_path):
                     print(f"      启动: partner bot start {platform}")
-    
+
+    # ── Commands ──
+    print()
+    line("─", 48, C.DIM)
+    print(f"  {C.BOLD}Commands:{C.RESET}")
+    print(f"    {C.DIM}partner status       Check Partner status{C.RESET}")
+    print(f"    {C.DIM}partner setup        Reconfigure{C.RESET}")
+    print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
+    print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
+    print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
+
     print()
 
 
