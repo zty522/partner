@@ -828,7 +828,19 @@ def setup_cron_hermes(workspace: str):
 
 ## 每次心跳执行流程
 
-### 第一步：检查 QQ 机器人状态
+### 第一步：读取 active_plan
+
+读取 active_plan.json：
+- 如果 status 为 "active" 且有 in_progress 的阶段 → 执行该阶段
+  - literature_search: web_search 搜索 → 阅读摘要 → 保存结果
+  - code_implementation: 读取代码 → 修改 → 验证
+  - experiment: 运行实验脚本 → 捕获输出
+  - analysis: 分析结果 → 对比总结
+  执行完毕后更新 phase 状态为 completed，推进到下一阶段
+- 如果 status 为 "idle" → 只检查系统健康，不创建新计划
+- 如果同一阶段超过 2 小时无进展 → 标记为卡死 (stuck)
+
+### 第二步：检查 QQ 机器人状态
 
 pid_path = "{workspace}/state/qq_bot.pid"
 if os.path.exists(pid_path):

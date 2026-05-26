@@ -579,20 +579,49 @@ class QQQfficialBridge:
     def _force_run(self, msg: QQMessage) -> str:
         """Trigger immediate research cycle run."""
         state_dir = os.path.join(self.workspace, "state")
+        now = datetime.now().isoformat()
 
-        # Set active_plan to idle so cron will create a new plan
+        # Create an active plan with phases directly
+        task_title = "推进研究项目"
+        if msg.text and len(msg.text) > 10:
+            task_title = msg.text.replace("立即开始执行", "").replace("直接开始", "").strip() or task_title
+
+        plan = {
+            "status": "active",
+            "title": task_title,
+            "goal": "根据用户要求推进研究",
+            "created_at": now,
+            "current_phase_index": 0,
+            "phases": [
+                {
+                    "name": "文献调研 - " + task_title,
+                    "type": "literature_search",
+                    "status": "in_progress",
+                    "current_step": "开始搜索相关文献",
+                    "result": "",
+                    "started_at": now
+                },
+                {
+                    "name": "代码实现",
+                    "type": "code_implementation",
+                    "status": "pending",
+                    "current_step": "",
+                    "result": ""
+                },
+                {
+                    "name": "实验与分析",
+                    "type": "experiment",
+                    "status": "pending",
+                    "current_step": "",
+                    "result": ""
+                }
+            ],
+            "last_heartbeat": now,
+            "heartbeat_summary": f"QQ用户要求: {task_title}"
+        }
         plan_path = os.path.join(state_dir, "active_plan.json")
-        try:
-            with open(plan_path, 'r', encoding='utf-8') as f:
-                plan = json.load(f)
-            plan["status"] = "idle"
-            plan["phases"] = []
-            plan["last_heartbeat"] = datetime.now().isoformat()
-            plan["heartbeat_summary"] = "QQ用户要求立即执行研究"
-            with open(plan_path, 'w', encoding='utf-8') as f:
-                json.dump(plan, f, indent=2, ensure_ascii=False)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+        with open(plan_path, 'w', encoding='utf-8') as f:
+            json.dump(plan, f, indent=2, ensure_ascii=False)
 
         # If queue is empty, auto-create a default "continue research" task
         import uuid
