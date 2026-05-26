@@ -15,15 +15,13 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# ── 工具函数 ──
 info()  { echo -e "${GREEN}✓${NC} $1"; }
 warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
 error() { echo -e "${RED}✗${NC} $1"; }
 header(){ echo -e "\n${BOLD}${CYAN}━━━ $1 ━━━${NC}\n"; }
 
-# ── 检查系统 ──
+# ── 检测系统 ──
 header "检查系统环境"
-
 OS=""
 if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -31,61 +29,33 @@ if [ -f /etc/os-release ]; then
 fi
 info "系统: ${OS:-$(uname)} $(uname -m)"
 
-# ── 检查 Python ──
+# ── 检测 Python ──
 check_python() {
-    local py=""
     for p in python3 python; do
         if command -v $p &>/dev/null; then
-            local ver=$($p --version 2>&1 | grep -oP '\d+\.\d+')
+            local ver=$($p --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
             if [ "$(echo -e "$ver\n$PYTHON_MIN" | sort -V | head -1)" = "$PYTHON_MIN" ]; then
-                py=$p
-                break
+                echo "$p"
+                return
             fi
         fi
     done
-    echo "$py"
 }
 
 PY=$(check_python)
 if [ -z "$PY" ]; then
     warn "需要 Python $PYTHON_MIN+，正在安装..."
     case "$OS" in
-        ubuntu|debian)
-            sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip python3-venv
-            PY=python3
-            ;;
-        centos|fedora|rhel)
-            sudo yum install -y python3 python3-pip
-            PY=python3
-            ;;
-        arch)
-            sudo pacman -Sy --noconfirm python python-pip
-            PY=python
-            ;;
-        alpine)
-            sudo apk add python3 py3-pip
-            PY=python3
-            ;;
-        *)
-            error "不支持的发行版: $OS，请手动安装 Python $PYTHON_MIN+"
-            exit 1
-            ;;
+        ubuntu|debian) sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip python3-venv; PY=python3 ;;
+        centos|fedora|rhel) sudo yum install -y python3 python3-pip; PY=python3 ;;
+        arch) sudo pacman -Sy --noconfirm python python-pip; PY=python ;;
+        alpine) sudo apk add python3 py3-pip; PY=python3 ;;
+        *) error "请手动安装 Python $PYTHON_MIN+"; exit 1 ;;
     esac
 fi
-info "Python: $($PY --version)"
+info "Python: $($PY --version 2>&1 | head -1)"
 
-# ── 检查 pip ──
-if ! $PY -m pip --version &>/dev/null; then
-    warn "pip 未安装，正在安装..."
-    case "$OS" in
-        ubuntu|debian) sudo apt-get install -y -qq python3-pip ;;
-        centos|fedora) sudo yum install -y python3-pip ;;
-        *) $PY -m ensurepip --upgrade ;;
-    esac
-fi
-info "pip: $($PY -m pip --version | head -1)"
-
-# ── 检查 git ──
+# ── 检测 git ──
 if ! command -v git &>/dev/null; then
     warn "git 未安装，正在安装..."
     case "$OS" in
@@ -97,21 +67,73 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: $(git --version 2>&1 | head -1)"
 
-# ── 安装 Hermes Agent ──
-header "安装 Hermes Agent"
-if command -v hermes &>/dev/null; then
-    info "Hermes 已安装: $(hermes --version 2>&1 | head -1)"
-else
-    info "正在安装 Hermes Agent..."
-    $PY -m pip install hermes-agent -q
-    if command -v hermes &>/dev/null; then
-        info "Hermes 安装成功"
-    else
-        warn "hermes 命令未在 PATH 中，尝试添加..."
-        export PATH="$HOME/.local/bin:$PATH"
-        $PY -m pip install hermes-agent -q
-    fi
-fi
+# ── 选择后端 Agent ──
+header "选择 AI 后端"
+echo ""
+echo "  Partner 需要一个 AI 后端来处理研究和对话。"
+echo "  选择一个你想使用的后端："
+echo ""
+echo "  ${BOLD}1)${NC} Hermes Agent ${CYAN}(推荐)${NC}  — pip 安装，功能完整"
+echo "  ${BOLD}2)${NC} OpenClaw (小龙蝦)  — npm 安装，多渠道 AI 助手"
+echo "  ${BOLD}3)${NC} 两者都装"
+echo "  ${BOLD}4)${NC} 先不装，我自己配置"
+echo ""
+read -p "  请输入 [1-4] (默认 1): " AGENT_CHOICE
+AGENT_CHOICE=${AGENT_CHOICE:-1}
+echo ""
+
+case "$AGENT_CHOICE" in
+    2|3)
+        # OpenClaw 需要 Node.js
+        if ! command -v node &>/dev/null || [ "$(node --version 2>&1 | grep -oP '\d+' | head -1)" -lt 22 ]; then
+            info "安装 Node.js 22 (OpenClaw 需要)..."
+            if ! command -v n &>/dev/null; then
+                npm install -g n 2>/dev/null || true
+            fi
+            export N_PREFIX="$HOME/.n"
+            export PATH="$N_PREFIX/bin:$PATH"
+            n 22 2>/dev/null || true
+            mkdir -p "$HOME/.npm-global"
+            npm config set prefix "$HOME/.npm-global" 2>/dev/null || true
+            export PATH="$HOME/.npm-global/bin:$PATH"
+        fi
+        info "Node.js: $(node --version 2>&1)"
+        ;;
+esac
+
+case "$AGENT_CHOICE" in
+    1)
+        header "安装 Hermes Agent"
+        $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败，可稍后手动安装"
+        ;;
+    2)
+        header "安装 OpenClaw"
+        npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
+        # 写入 shell 配置
+        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
+            echo "" >> "$rc"
+            echo "# Node.js (for OpenClaw)" >> "$rc"
+            echo 'export N_PREFIX="$HOME/.n"' >> "$rc"
+            echo 'export PATH="$N_PREFIX/bin:$HOME/.npm-global/bin:$PATH"' >> "$rc"
+        done
+        ;;
+    3)
+        header "安装 Hermes Agent + OpenClaw"
+        $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败"
+        npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
+        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
+            echo "" >> "$rc"
+            echo "# Node.js (for OpenClaw)" >> "$rc"
+            echo 'export N_PREFIX="$HOME/.n"' >> "$rc"
+            echo 'export PATH="$N_PREFIX/bin:$HOME/.npm-global/bin:$PATH"' >> "$rc"
+        done
+        ;;
+    4)
+        info "跳过后端安装，你可稍后手动安装"
+        ;;
+esac
 
 # ── 安装 Partner ──
 header "安装 Partner"
@@ -130,46 +152,34 @@ info "Partner 安装完成"
 
 # ── 创建 PATH 链接 ──
 if ! command -v partner &>/dev/null; then
-    warn "partner 命令未在 PATH 中，添加 symlink..."
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$INSTALL_DIR/partner/cli.py" "$HOME/.local/bin/partner" 2>/dev/null || true
+    cat > "$HOME/.local/bin/partner" << 'PYEOF'
+#!/usr/bin/env python3
+import sys, os
+sys.path.insert(0, os.path.expanduser("~/.partner"))
+from partner.cli import main
+main()
+PYEOF
+    chmod +x "$HOME/.local/bin/partner"
     export PATH="$HOME/.local/bin:$PATH"
-    info "已添加 $HOME/.local/bin 到 PATH"
-    # 写入 shell 配置
     for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-        if [ -f "$rc" ] && ! grep -q "PARTNER_HOME" "$rc" 2>/dev/null; then
+        if [ -f "$rc" ] && ! grep -q '\.local/bin' "$rc" 2>/dev/null; then
             echo "" >> "$rc"
-            echo "# Partner" >> "$rc"
-            echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$rc"
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
         fi
     done
 fi
-info "partner: $(partner 2>&1 | head -1)"
-
-# ── 设置 Cron ──
-header "设置自动心跳"
-if command -v hermes &>/dev/null; then
-    info "请运行以下命令完成配置:"
-    echo -e "  ${CYAN}partner setup${NC}"
-    echo ""
-    echo -e "然后启动 QQ 机器人:"
-    echo -e "  ${CYAN}partner bot start qq${NC}"
-    echo ""
-    echo -e "Partner 后台研究循环将自动运行 (每 30 分钟心跳)"
-else
-    warn "Hermes 未安装，跳过 cron 设置"
-    echo "请手动安装 Hermes: pip install hermes-agent"
-fi
+info "partner: $HOME/.local/bin/partner"
 
 # ── 完成 ──
 header "🎉 Partner 安装完成!"
 echo -e "  ${BOLD}安装目录:${NC} $INSTALL_DIR"
-echo -e "  ${BOLD}配置向导:${NC} partner setup"
-echo -e "  ${BOLD}查看状态:${NC} partner status"
-echo -e "  ${BOLD}更新:${NC}     partner update"
 echo ""
-echo -e "  ${CYAN}需要打开新终端或运行: source ~/.bashrc${NC}"
+echo -e "  ${CYAN}接下来:${NC}"
+echo -e "  1. 新开终端或执行: ${BOLD}source ~/.bashrc${NC}"
+echo -e "  2. 运行配置向导:    ${BOLD}partner setup${NC}"
+echo -e "  3. 查看状态:        ${BOLD}partner status${NC}"
+echo -e "  4. 启动 QQ 机器人:  ${BOLD}partner bot start qq${NC}"
 echo ""
 
-# ── 清理 ──
 cd "$HOME"

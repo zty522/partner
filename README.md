@@ -16,17 +16,20 @@ You don't give it commands. You just check in.**
 
 ## 🚀 一键安装
 
-### Linux (bash)
+### Linux
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 ```
+安装过程中会问你：选哪个 AI 后端（Hermes / OpenClaw / 都装 / 自己配）。
 
-### Windows (PowerShell)
+### Windows
 ```powershell
+# 下载并运行安装脚本
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
+同样会问你选哪个后端，Python/Node.js 没有的话会自动下载。
 
-或下载 [最新 Release](https://github.com/zty522/partner/releases/latest) 中的安装包。
+> **无需 WSL** — Hermes、OpenClaw、Codex 都能在 Windows 上原生运行。
 
 ---
 
