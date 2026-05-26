@@ -164,6 +164,9 @@ begin
     RunPostInstall();
 
     WizardForm.StatusLabel.Caption := 'Setup complete!';
+    SuppressibleMsgBox('Partner has been installed successfully!' + #13#10 +
+      'Open a new command prompt and type: partner status',
+      mbInformation, MB_OK, IDOK);
   end;
 end;
 
