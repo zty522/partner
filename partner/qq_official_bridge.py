@@ -587,6 +587,34 @@ class QQQfficialBridge:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
+        # If queue is empty, auto-create a default "continue research" task
+        import uuid
+        queue_path = os.path.join(state_dir, "task_queue.json")
+        try:
+            with open(queue_path, 'r', encoding='utf-8') as f:
+                tasks = json.load(f)
+            pending = [t for t in tasks if isinstance(t, dict) and t.get("status") == "pending"]
+            if not pending:
+                task = {
+                    "id": f"task_{uuid.uuid4().hex[:8]}",
+                    "type": "deep_dive",
+                    "title": "推进研究项目",
+                    "description": "用户要求立即执行研究，自动创建的默认任务",
+                    "priority": 8,
+                    "created_at": datetime.now().isoformat(),
+                    "ttl_hours": 48,
+                    "status": "pending",
+                    "tags": ["auto", "force_run"],
+                    "source": "qq_force",
+                    "sender_name": msg.sender_name or "QQ用户",
+                }
+                tasks.append(task)
+                with open(queue_path, 'w', encoding='utf-8') as f:
+                    json.dump(tasks, f, indent=2, ensure_ascii=False)
+                logger.info("Auto-created default task for force_run (queue was empty)")
+        except Exception as e:
+            logger.debug(f"Force-run task check failed: {e}")
+
         # Try to trigger cron immediately
         import subprocess
         try:

@@ -109,9 +109,11 @@ def _bot_stop(workspace, platform):
         os.kill(pid, 15)
         os.remove(pid_path)
         print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+        _print_commands()
     except ProcessLookupError:
         os.remove(pid_path)
         print(f"  ⚠ {label} 进程已不存在，已清理")
+        _print_commands()
     except Exception as e:
         print(f"  ❌ 停止失败: {e}")
 
@@ -157,6 +159,7 @@ def _bot_start(workspace, platform):
         print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
         print(f"     日志: {log}")
         print(f"     停止: partner bot stop qq")
+        _print_commands()
     else:
         print(f"  ❌ 未知机器人: {platform}（仅支持 qq）")
 
@@ -251,6 +254,19 @@ def cmd_update(args):
     print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
     print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
     print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
+    print()
+
+
+def _print_commands():
+    """Print the standard commands menu."""
+    print()
+    print(f"  {C_BOLD}Commands:{C_RESET}")
+    print(f"    {C_DIM}partner status       Check Partner status{C_RESET}")
+    print(f"    {C_DIM}partner setup        Reconfigure{C_RESET}")
+    print(f"    {C_DIM}partner bot start qq Start QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
+    print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
+    print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
     print()
 
 
