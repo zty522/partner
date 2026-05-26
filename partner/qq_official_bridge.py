@@ -637,7 +637,7 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"Force-run task check failed: {e}")
 
-        # Try to trigger cron immediately (create it first if needed)
+        # Try to trigger cron immediately
         import subprocess
         try:
             cfg_path = os.path.join(self.workspace, "partner_config.json")
@@ -655,32 +655,40 @@ class QQQfficialBridge:
             has_cron = target and target in list_chk.stdout
 
             if has_cron:
-                # Run existing cron job
+                # Force immediate execution: set schedule to now + tick
                 subprocess.run(
-                    ["hermes", "cron", "run", target, "--accept-hooks"],
-                    capture_output=True, timeout=120,
+                    ["hermes", "cron", "edit", target, "--schedule", "every 1m"],
+                    capture_output=True, timeout=30,
+                )
+                subprocess.run(
+                    ["hermes", "cron", "tick"],
+                    capture_output=True, timeout=300,
+                )
+                # Restore original schedule
+                subprocess.run(
+                    ["hermes", "cron", "edit", target, "--schedule", f"every {interval}m"],
+                    capture_output=True, timeout=30,
                 )
             else:
-                # Cron job doesn't exist — create it on the fly
-                cron_prompt = f"""你是 Partner 的执行引擎。在 {self.workspace} 下工作。
+                # Cron job doesn't exist — create it on the fly and run
+                cron_prompt = f"""你是 Partner 的心跳维护引擎。在 {self.workspace} 下工作。
 
-你的核心原则是：30 分钟是最小心跳间隔，不是执行窗口。
-每次心跳：
-1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
-2. 没有活跃计划则基于 task_queue.json 中的 pending 任务制定完整的多阶段计划
-3. 每次心跳向 QQ 汇报当前状态
+你的核心原则：有活跃计划就执行，空闲只做维护。
 
-用中文。只在 {self.workspace} 内写文件。"""
+读取 active_plan.json：
+- active + in_progress → 执行该阶段
+- idle → 只检查系统健康"""
 
                 create_r = subprocess.run(
                     ["hermes", "cron", "create",
                      "--name", cron_name,
+                     "--skill", "partner-research",
                      f"every {interval}m",
                      cron_prompt],
                     capture_output=True, text=True, timeout=30,
                 )
                 if create_r.returncode == 0:
-                    # Extract job ID from output and save it
+                    # Extract job ID
                     import re as _re
                     m = _re.search(r'\[([a-f0-9-]+)\]', create_r.stdout)
                     if m:
@@ -688,11 +696,14 @@ class QQQfficialBridge:
                         cfg.setdefault("scheduler", {})["cron_job_id"] = new_id
                         with open(cfg_path, 'w', encoding='utf-8') as f:
                             json.dump(cfg, f, indent=2, ensure_ascii=False)
-
-                    # Run it immediately
+                    # Run immediately
                     subprocess.run(
-                        ["hermes", "cron", "run", cron_name, "--accept-hooks"],
-                        capture_output=True, timeout=120,
+                        ["hermes", "cron", "edit", target, "--schedule", "every 1m"],
+                        capture_output=True, timeout=30,
+                    )
+                    subprocess.run(
+                        ["hermes", "cron", "tick"],
+                        capture_output=True, timeout=300,
                     )
         except Exception as e:
             logger.debug(f"Force run cron trigger failed: {e}")
