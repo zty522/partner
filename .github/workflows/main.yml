@@ -14,4 +14,4 @@
            - run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'                                                  
            - uses: softprops/action-gh-release@v2                                                                                           
              with:                                                                                                                          
-               files: installer\output\.exe   
+               files: installer\output\*.exe
