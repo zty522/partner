@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-research"
-version = "0.1.0"
+version = "0.2.0"
 description = "Partner - Your AI Research Companion. An autonomous research entity that works independently and talks to you when you ask: 'What have you been doing?'"
 readme = "README.md"
 license = {text = "Apache-2.0"}

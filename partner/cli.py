@@ -152,6 +152,26 @@ def _bot_start(workspace, platform):
         if not os.path.exists(cfg):
             print(f"  ❌ QQ 未配置，请先运行: partner setup")
             return
+        
+        # Check and auto-install dependencies
+        try:
+            import aiohttp
+        except ImportError:
+            print(f"  ⚠ 缺少 QQ 机器人依赖 (aiohttp)")
+            yn = input(f"     自动安装？[Y/n]: ").strip().lower()
+            if yn != "n":
+                print(f"     正在安装 aiohttp...")
+                r = subprocess.run([sys.executable, "-m", "pip", "install", "aiohttp>=3.8"],
+                                   capture_output=True, text=True, timeout=120)
+                if r.returncode == 0:
+                    print(f"     ✅ aiohttp 安装成功")
+                else:
+                    print(f"     ❌ 安装失败: {r.stderr[:100]}")
+                    print(f"     手动安装: pip install aiohttp")
+                    return
+            else:
+                print(f"     跳过，稍后手动安装: pip install aiohttp")
+                return
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
         cmd = [sys.executable, "-c",

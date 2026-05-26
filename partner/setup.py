@@ -45,7 +45,7 @@ def line(char="─", width=60, color=C.DIM):
 def banner():
     """Print the Partner banner."""
     print()
-    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.1.0{C.RESET}")
+    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.2.0{C.RESET}")
     print(f"  {C.DIM}Your AI Research Companion{C.RESET}")
     line("━", 50, C.CYAN)
     print()
@@ -1017,6 +1017,65 @@ def detect_gptme() -> AgentInfo:
 
 
 
+def _ensure_qq_dependencies():
+    """Check and auto-install QQ bot dependencies (aiohttp)."""
+    needed = []
+    try:
+        import aiohttp
+        status_ok("aiohttp 已安装")
+    except ImportError:
+        needed.append("aiohttp>=3.8")
+
+    if not needed:
+        return
+
+    status_warn(f"缺少 QQ 机器人依赖: {', '.join(needed)}")
+    auto = prompt_choice("是否自动安装缺失的依赖？", [
+        "自动安装（推荐）",
+        "跳过（稍后手动安装）"
+    ], default=0)
+
+    if auto == 0:
+        try:
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install"] + needed,
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                status_ok(f"依赖安装成功: {', '.join(needed)}")
+                # Re-import so runtime modules work
+                import aiohttp
+                return
+            else:
+                status_fail(f"安装失败: {result.stderr[:200]}")
+                _install_alternative(needed)
+        except Exception as e:
+            status_fail(f"安装异常: {e}")
+            _install_alternative(needed)
+    else:
+        status_info("请稍后手动安装:")
+        status_info(f"  pip install {' '.join(needed)}")
+
+
+def _install_alternative(needed):
+    """Fallback: try installing via partner-research[qq-official] extra."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "partner-research[qq-official]"],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            status_ok("通过 partner-research[qq-official] 安装成功")
+            return
+        status_fail(f"替代安装也失败: {result.stderr[:200]}")
+    except Exception:
+        pass
+    status_info("请手动运行:")
+    status_info(f"  pip install {' '.join(needed)}")
+
+
 def interactive_setup():
     """Main setup wizard."""
     banner()
@@ -1264,7 +1323,44 @@ def interactive_setup():
     interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=interval_default)
     interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
-    
+
+    # ── Step 6a: Research Directions ──
+    section("研究方向", "🎯")
+    old_directions = old_config.get("scheduler", {}).get("research_directions", [])
+    dir_default = 0
+    if old_directions and len(old_directions) >= 1:
+        dir_label = ", ".join(old_directions[:3])
+        dir_options = [
+            f"保持现有方向（{dir_label}）",
+            "设置三个研究方向",
+            "清除（全部队列选 top 3）",
+        ]
+    else:
+        dir_options = [
+            "设置三个研究方向",
+            "跳过（全部队列选 top 3）",
+        ]
+    dir_idx = prompt_choice("是否指定三个固定的研究方向？", dir_options, default=0)
+    research_directions = []
+    if old_directions and dir_idx == 0:
+        research_directions = list(old_directions)
+        status_ok(f"保持研究方向: {', '.join(research_directions)}")
+    elif (old_directions and dir_idx == 1) or (not old_directions and dir_idx == 0):
+        for i in range(3):
+            old_val = old_directions[i] if i < len(old_directions) else ""
+            hint = {0: "研究方向1（如: 年龄预测）",
+                    1: "研究方向2（如: 配体设计）",
+                    2: "研究方向3（如: 鲍曼不动杆菌）"}
+            d = prompt_input(hint[i], old_val)
+            if d:
+                research_directions.append(d)
+        if research_directions:
+            status_ok(f"研究方向已设置: {', '.join(research_directions)}")
+        else:
+            status_info("未设置研究方向，将全局选 top 3")
+    elif (old_directions and dir_idx == 2) or (not old_directions and dir_idx == 1):
+        status_info("不使用研究方向，每次从全局队列选 top 3 个任务")
+
     # ── Step 6b: QQ 官方机器人 ──
     messaging_config = {}
 
@@ -1332,6 +1428,7 @@ def interactive_setup():
             "interval_minutes": interval_minutes,
             "max_tasks_per_cycle": 1,
             "heartbeat_timeout_minutes": 60,
+            "research_directions": research_directions if research_directions else [],
         },
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
@@ -1357,6 +1454,11 @@ def interactive_setup():
             }, f, indent=2, ensure_ascii=False)
         status_ok(f"QQ 机器人配置已写入: {qq_cfg_path}")
 
+    # ── 安装 QQ 依赖 ──
+    if qq_cfg.get("type") == "official":
+        section("安装 QQ 依赖", "📦")
+        _ensure_qq_dependencies()
+    
     # ── 自动后台启动机器人 ──
     if qq_cfg.get("type") == "official":
         auto_start = prompt_choice("是否现在后台启动 QQ 机器人？", [
@@ -1446,7 +1548,15 @@ def show_status(workspace=None):
     status_info(f"后端: {backend}")
     
     section("研究统计", "📊")
-    
+
+    # Show research directions
+    directions = config.get("scheduler", {}).get("research_directions", [])
+    if directions and len(directions) >= 1:
+        print(f"    🎯 研究方向: {C.BOLD}{' | '.join(directions[:3])}{C.RESET}")
+        print(f"       每轮从每个方向选 top 1 任务")
+    else:
+        print(f"    🎯 研究方向: {C.DIM}未设置（全局队列选 top 3）{C.RESET}")
+
     state_dir = os.path.join(workspace, "state")
     
     stats_path = os.path.join(state_dir, "stats.json")

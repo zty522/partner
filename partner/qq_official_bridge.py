@@ -211,37 +211,53 @@ class QQQfficialBridge:
         import threading
         def poll():
             notif_dir = os.path.join(self.workspace, "state", "notifications")
+            pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
             while self._running:
                 try:
+                    # Load existing pending notifications
+                    pending_notifs = []
+                    if os.path.exists(pending_file):
+                        try:
+                            with open(pending_file) as f:
+                                pending_notifs = json.load(f)
+                        except Exception:
+                            pending_notifs = []
+
+                    # Check new notifications
                     if os.path.exists(notif_dir):
-                        for fname in os.listdir(notif_dir):
+                        for fname in sorted(os.listdir(notif_dir)):
                             if fname.endswith(".json"):
                                 fpath = os.path.join(notif_dir, fname)
                                 try:
                                     with open(fpath) as f:
                                         notif = json.load(f)
-                                    summary = notif.get("summary", "")
-                                    interesting = notif.get("interesting", [])
-                                    # Build message
-                                    msg = f"📋 {summary}"
-                                    if interesting:
-                                        msg += "\n\n🔍 发现:\n" + "\n".join(interesting[:3])
-                                    # Send to last known user
-                                    ctx_path = os.path.join(self.workspace, "state", "qq_contexts.json")
-                                    if os.path.exists(ctx_path):
-                                        with open(ctx_path) as cf:
-                                            ctx = json.load(cf)
-                                        for uid in ctx:
-                                            self.send_proactive(uid, msg)
-                                            break
+                                    # Add to pending queue with timestamp
+                                    pending_notifs.append({
+                                        "timestamp": datetime.now().isoformat(),
+                                        "type": notif.get("type", "daily"),
+                                        "summary": notif.get("summary", ""),
+                                        "details": notif.get("details", []),
+                                        "next_task": notif.get("next_task", ""),
+                                        "pending_count": notif.get("pending_count", 0),
+                                    })
                                     os.remove(fpath)
-                                except Exception as e:
-                                    logger.warning(f"Notification process error: {e}")
-                                    os.remove(fpath)  # Remove bad file
+                                except Exception:
+                                    try:
+                                        os.remove(fpath)
+                                    except Exception:
+                                        pass
+
+                    # Save pending notifications (max 10, keep newest)
+                    if pending_notifs:
+                        pending_notifs = pending_notifs[-10:]
+                        os.makedirs(os.path.dirname(pending_file), exist_ok=True)
+                        with open(pending_file, "w") as f:
+                            json.dump(pending_notifs, f, indent=2, ensure_ascii=False)
+
                 except Exception:
                     pass
                 import time
-                time.sleep(60)  # Check every 60 seconds
+                time.sleep(60)
         t = threading.Thread(target=poll, daemon=True)
         t.start()
 
@@ -265,14 +281,28 @@ class QQQfficialBridge:
         """Handle an incoming QQ message.
 
         Pipeline:
-        1. Extract text content
-        2. Get response from ConversationEngine
-        3. Send reply
-        4. Log interaction
+        1. Save user context (so cron can send reports)
+        2. Extract text content
+        3. Get response from ConversationEngine
+        4. Send reply
+        5. Log interaction
         """
         self._stats["messages_received"] += 1
 
         try:
+            # Save user context for cron report delivery
+            user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
+            try:
+                with open(user_ctx_path, "w") as f:
+                    json.dump({
+                        "openid": msg.sender_id,
+                        "name": msg.sender_name,
+                        "last_message_at": datetime.now().isoformat(),
+                        "last_msg_id": msg.msg_id,
+                        "message_type": msg.message_type.value,
+                    }, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
             user_text = msg.content
             if not user_text.strip():
                 return
@@ -370,6 +400,26 @@ class QQQfficialBridge:
                 )
                 ctx_str = f"\n历史对话:\n{ctx_str}\n"
 
+            # Check for pending notifications
+            notif_str = ""
+            pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
+            if os.path.exists(pending_file):
+                try:
+                    with open(pending_file) as f:
+                        notifs = json.load(f)
+                    if notifs:
+                        items = []
+                        for n in notifs[-3:]:  # Last 3 notifications
+                            summary = n.get("summary", "")
+                            if summary:
+                                items.append(f"- {summary}")
+                        if items:
+                            notif_str = f"\n\n⚠️ 你不在的时候有这些研究进展:\n" + "\n".join(items)
+                        # Clear after showing
+                        os.remove(pending_file)
+                except Exception:
+                    pass
+
             prompt = f"""你是 Partner 本人，不是 Hermes，不是 AI 助手。你就是用户的私人研究伙伴。
 
 关于你自己的信息：
@@ -387,6 +437,7 @@ class QQQfficialBridge:
 5. 控制在 50 字以内第一句先回应
 
 {ctx_str}
+{notif_str}
 用户说: {text}"""
 
             result = self._adapter.chat(prompt)
@@ -502,6 +553,48 @@ class QQQfficialBridge:
         if self._bot:
             return self._bot.send_proactive(to_user, content, msg_type)
         return False
+
+    def send_file_proactive(self, to_user: str, file_data: bytes,
+                             file_type: int = 4,
+                             msg_type: QQMessageType = QQMessageType.PRIVATE,
+                             text_content: str = "") -> bool:
+        """Send a file to a QQ user proactively (not in reply to a message).
+
+        Two-step upload+sends via passive quota-friendly method.
+        """
+        if not self._bot or not self._bot.get_event_loop() or not self._bot.get_event_loop().is_running():
+            logger.error("Bot event loop not running, cannot send file")
+            return False
+        import asyncio
+        future = asyncio.run_coroutine_threadsafe(
+            self._bot.send_file(to_user, file_data, file_type, msg_type, text_content=text_content),
+            self._bot.get_event_loop(),
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"Proactive file send failed: {e}")
+            return False
+
+    def reply_with_file(self, msg: QQMessage, file_data: bytes,
+                         file_type: int = 4, text_content: str = "") -> bool:
+        """Reply to a QQ message with a file attachment.
+
+        Uses msg_id + msg_type=7 for passive-reply file sending.
+        """
+        if not self._bot or not self._bot.get_event_loop() or not self._bot.get_event_loop().is_running():
+            logger.error("Bot event loop not running, cannot reply with file")
+            return False
+        import asyncio
+        future = asyncio.run_coroutine_threadsafe(
+            self._bot.reply_with_file(msg, file_data, file_type, text_content),
+            self._bot.get_event_loop(),
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"Reply with file failed: {e}")
+            return False
 
 
 # Helper: create bridge from config file

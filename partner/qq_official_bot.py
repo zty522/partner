@@ -237,6 +237,7 @@ class QQQfficialBot:
         content: str,
         message_type: QQMessageType = QQMessageType.PRIVATE,
         msg_id: str = "",
+        media: Optional[Dict] = None,
     ) -> bool:
         """Send a message via REST API.
 
@@ -247,6 +248,8 @@ class QQQfficialBot:
             content: Text content to send.
             message_type: Type of message destination.
             msg_id: Optional message ID to reply to.
+            media: Optional media attachment (from upload_file response).
+                   Example: {"file_info": "uuid_string"}
 
         Returns:
             True if sent successfully.
@@ -255,12 +258,18 @@ class QQQfficialBot:
 
         if message_type == QQMessageType.PRIVATE:
             endpoint = f"/v2/users/{target_id}/messages"
-            payload = {"content": content, "msg_type": 0}
+            if media:
+                payload = {"content": content, "msg_type": 7, "media": media}
+            else:
+                payload = {"content": content, "msg_type": 0}
             if msg_id:
                 payload["msg_id"] = msg_id
         elif message_type == QQMessageType.GROUP_AT:
             endpoint = f"/v2/groups/{target_id}/messages"
-            payload = {"content": content, "msg_type": 0}
+            if media:
+                payload = {"content": content, "msg_type": 7, "media": media}
+            else:
+                payload = {"content": content, "msg_type": 0}
             if msg_id:
                 payload["msg_id"] = msg_id
         elif message_type == QQMessageType.GUILD:
@@ -271,6 +280,134 @@ class QQQfficialBot:
             return False
 
         return await self._api_post(endpoint, payload)
+
+    async def upload_file(
+        self,
+        target_id: str,
+        file_data: bytes,
+        file_type: int = 4,
+        message_type: QQMessageType = QQMessageType.PRIVATE,
+        srv_send_msg: bool = False,
+    ) -> Optional[str]:
+        """Upload a file to QQ media server.
+
+        The file is uploaded but NOT auto-sent (srv_send_msg=False).
+        Returns the file_info string for use with send_message(media=...).
+
+        Args:
+            target_id: User's open ID (for PRIVATE) or group's open ID (for GROUP_AT).
+            file_data: Raw bytes of the file.
+            file_type: 1=image, 2=video, 3=voice, 4=file (default).
+            message_type: PRIVATE or GROUP_AT.
+            srv_send_msg: If True, auto-sends as a proactive message (uses monthly quota).
+
+        Returns:
+            file_info string for send_message, or None on failure.
+        """
+        import base64
+        await self._ensure_token()
+
+        if message_type == QQMessageType.PRIVATE:
+            endpoint = f"/v2/users/{target_id}/files"
+        elif message_type == QQMessageType.GROUP_AT:
+            endpoint = f"/v2/groups/{target_id}/files"
+        else:
+            logger.error(f"File upload not supported for {message_type}")
+            return None
+
+        b64_data = base64.b64encode(file_data).decode("ascii")
+
+        try:
+            import aiohttp
+            url = f"{self._api_base}{endpoint}"
+            headers = {
+                "Authorization": self._auth_header(),
+                "Content-Type": "application/json",
+                "X-Union-Appid": self.app_id,
+            }
+            payload = {
+                "file_type": file_type,
+                "file_data": b64_data,
+                "srv_send_msg": srv_send_msg,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status in (200, 201):
+                        result = await resp.json()
+                        file_uuid = result.get("file_uuid", "")
+                        if file_uuid:
+                            logger.info(f"File uploaded: file_uuid={file_uuid}")
+                            return file_uuid
+                        else:
+                            logger.error(f"Upload response missing file_uuid: {result}")
+                            return None
+                    else:
+                        text = await resp.text()
+                        logger.error(f"File upload failed: {resp.status} {text}")
+                        return None
+        except Exception as e:
+            logger.error(f"File upload error: {e}")
+            return None
+
+    async def send_file(
+        self,
+        target_id: str,
+        file_data: bytes,
+        file_type: int = 4,
+        message_type: QQMessageType = QQMessageType.PRIVATE,
+        msg_id: str = "",
+        text_content: str = "",
+    ) -> bool:
+        """Upload and send a file as a media message (two-step).
+
+        Uses the non-proactive two-step approach:
+          1. upload_file(srv_send_msg=False) → file_info
+          2. send_message(msg_type=7, media=file_info)
+
+        This is preferred when replying to a user message (uses passive quota).
+
+        Args:
+            target_id: User or group open ID.
+            file_data: Raw file bytes.
+            file_type: 1=image, 2=video, 3=voice, 4=file.
+            message_type: PRIVATE or GROUP_AT.
+            msg_id: Optional message ID to reply to.
+            text_content: Optional text to accompany the file.
+
+        Returns:
+            True if sent successfully.
+        """
+        file_info = await self.upload_file(
+            target_id, file_data, file_type,
+            message_type, srv_send_msg=False,
+        )
+        if not file_info:
+            logger.error("File upload failed, cannot send")
+            return False
+
+        return await self.send_message(
+            target_id, text_content, message_type,
+            msg_id, media={"file_info": file_info},
+        )
+
+    async def reply_with_file(self, msg: QQMessage, file_data: bytes,
+                               file_type: int = 4, text_content: str = "") -> bool:
+        """Reply to a message with a file attachment (auto-detects type)."""
+        if msg.message_type == QQMessageType.PRIVATE:
+            return await self.send_file(
+                msg.sender_id, file_data, file_type,
+                QQMessageType.PRIVATE, msg.msg_id, text_content,
+            )
+        elif msg.message_type == QQMessageType.GROUP_AT:
+            return await self.send_file(
+                msg.group_id, file_data, file_type,
+                QQMessageType.GROUP_AT, msg.msg_id, text_content,
+            )
+        logger.error(f"reply_with_file not supported for {msg.message_type}")
+        return False
 
     async def reply_message(self, msg: QQMessage, content: str) -> bool:
         """Reply to a message (auto-detects type)."""
