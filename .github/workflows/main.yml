@@ -1,17 +1,17 @@
-     yaml                                                                                                                                   
-     name: Build Windows Installer                                                                                                          
-     on:                                                                                                                                    
-       push:                                                                                                                                
-         tags: ['v']                                                                                                                        
-     jobs:                                                                                                                                  
-       build:                                                                                                                               
-         runs-on: windows-latest                                                                                                            
-         steps:                                                                                                                             
-           - uses: actions/checkout@v4                                                                                                      
-           - uses: actions/setup-python@v5                                                                                                  
-             with: { python-version: '3.12' }                                                                                               
-           - run: choco install innosetup --no-progress -y                                                                                  
-           - run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'                                                  
-           - uses: softprops/action-gh-release@v2                                                                                           
-             with:                                                                                                                          
-               files: installer\output\.exe 
+name: "Build Windows Installer"
+on:
+  push:
+    tags: ['v']
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: choco install innosetup --no-progress -y
+      - run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: installer\output\.exe
