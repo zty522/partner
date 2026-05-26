@@ -101,6 +101,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   PythonInstaller: String;
   InstallResultCode: Integer;
+  DownloadResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -109,9 +110,26 @@ begin
     begin
       PythonInstaller := ExpandConstant('{tmp}\python-installer.exe');
       if not FileExists(PythonInstaller) then
-        DownloadPage.Download('https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe', 'python-installer.exe');
-      if Exec(ExpandConstant('{tmp}\python-installer.exe'), '/quiet InstallAllUsers=0 PrependPath=1', '', SW_SHOW, ewWaitUntilTerminated, InstallResultCode) then
-        Log('Python installed successfully');
+      begin
+        { Download Python installer using PowerShell }
+        if Exec('powershell', '-Command "Invoke-WebRequest -Uri ''https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe'' -OutFile ''"' + PythonInstaller + '"''"', '', SW_HIDE, ewWaitUntilTerminated, DownloadResultCode) then
+        begin
+          if DownloadResultCode <> 0 then
+          begin
+            Log('Failed to download Python installer, error code: ' + IntToStr(DownloadResultCode));
+            Exit;
+          end;
+        end
+        else
+        begin
+          Log('Failed to execute PowerShell for download');
+          Exit;
+        end;
+      end;
+      if Exec(PythonInstaller, '/quiet InstallAllUsers=0 PrependPath=1', '', SW_SHOW, ewWaitUntilTerminated, InstallResultCode) then
+        Log('Python installed successfully')
+      else
+        Log('Python installation failed, error code: ' + IntToStr(InstallResultCode));
     end;
 
     { Install selected backend }
