@@ -66,3 +66,4 @@ releases/
 run_cycle.py
 demo.py
 .pytest_cache/
+.github/workflows/

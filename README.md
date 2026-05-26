@@ -41,7 +41,7 @@ During install you'll pick an AI backend:
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **[v0.3.0](https://github.com/zty522/partner/releases/tag/v0.3.0)** | 2026-05-26 | 🎉 **One-click install** · **Codex/OpenClaw integration** · **Multi-backend** · **Native Windows** |
+| **[v0.3.0](https://github.com/zty522/partner/releases/tag/v0.3.0)** | 2026-05-26 | 🎉 **One-click install** · **Codex/OpenClaw integration** · **Inno Setup installer** · **GitHub Actions auto-build** |
 | **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-26 | 💓 **Heartbeat Plan Model** · **QQ Official Bot** · **LLM chat** · **Watchdog** |
 | **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | Event system, Conversation V2, Self-Evolution Engine |
 
