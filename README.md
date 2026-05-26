@@ -18,10 +18,11 @@ You don't give it commands. You just check in.**
 
 ### Windows (easiest)
 ```
-1. Go to https://github.com/zty522/partner/releases/tag/v0.3.0
-2. Click "Source code (zip)" to download
-3. Unzip → double-click install.bat → pick backend → done
+1. Go to https://github.com/zty522/partner/releases/latest
+2. Download Partner-v0.3.0-Setup.exe
+3. Double-click → follow the wizard → done
 ```
+The installer detects Python (downloads if missing), detects existing Hermes/Partner installations, and lets you choose an AI backend in a proper setup window.
 
 ### Linux
 ```bash
