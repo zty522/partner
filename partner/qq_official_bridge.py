@@ -25,6 +25,7 @@ import time
 import asyncio
 import logging
 import threading
+import subprocess
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -575,6 +576,35 @@ class QQQfficialBridge:
                     json.dump(plan, f, indent=2, ensure_ascii=False)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
+
+        # Immediately trigger the cron job so the task starts processing now
+        try:
+            cfg_path = os.path.join(self.workspace, "partner_config.json")
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            scheduler = cfg.get("scheduler", {})
+            job_id = scheduler.get("cron_job_id")
+            job_name = scheduler.get("cron_job_name")
+
+            if job_id:
+                try:
+                    subprocess.run(
+                        ["hermes", "cron", "run", job_id, "--accept-hooks"],
+                        capture_output=True, timeout=120
+                    )
+                except Exception:
+                    if job_name:
+                        subprocess.run(
+                            ["hermes", "cron", "run", job_name, "--accept-hooks"],
+                            capture_output=True, timeout=120
+                        )
+            elif job_name:
+                subprocess.run(
+                    ["hermes", "cron", "run", job_name, "--accept-hooks"],
+                    capture_output=True, timeout=120
+                )
+        except Exception as e:
+            logger.debug(f"Immediate cron trigger failed (non-blocking): {e}")
 
         logger.info(f"Task queued from QQ: {task['id']} — {text[:80]}")
 

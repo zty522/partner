@@ -188,6 +188,89 @@ def _bot_start(workspace, platform):
         print(f"  ❌ 未知机器人: {platform}（仅支持 qq）")
 
 
+def cmd_update(args):
+    """Update Partner to the latest version."""
+    import subprocess
+
+    # 1. Resolve partner repo directory
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    print(f"{C_BOLD}🔄 Updating Partner...{C_RESET}")
+    print(f"   Repo: {C_CYAN}{repo_dir}{C_RESET}")
+    print()
+
+    # 2. git pull
+    print(f"{C_YELLOW}➜ git pull{C_RESET}")
+    r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, cwd=repo_dir)
+    if r.returncode != 0:
+        print(f"{C_RED}❌ git pull failed:{C_RESET}")
+        print(r.stderr)
+        sys.exit(1)
+    # Print git output (trim trailing newline)
+    out = r.stdout.rstrip("\n")
+    if out:
+        for line in out.split("\n"):
+            print(f"   {line}")
+    print(f"{C_GREEN}   ✅ git pull completed{C_RESET}")
+    print()
+
+    # 3. pip install -e .
+    print(f"{C_YELLOW}➜ pip install -e .{C_RESET}")
+    r = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-e", "."],
+        capture_output=True, text=True, timeout=120, cwd=repo_dir,
+    )
+    if r.returncode != 0:
+        print(f"{C_RED}❌ pip install failed:{C_RESET}")
+        print(r.stderr)
+        sys.exit(1)
+    # Show last line of pip output (usually "Successfully installed ...")
+    pip_lines = r.stdout.rstrip("\n").split("\n")
+    last_line = pip_lines[-1].strip() if pip_lines else ""
+    if last_line:
+        print(f"   {last_line}")
+    print(f"{C_GREEN}   ✅ pip install completed{C_RESET}")
+    print()
+
+    # 4. Read and print latest CHANGELOG.md entry
+    changelog_path = os.path.join(repo_dir, "CHANGELOG.md")
+    if os.path.exists(changelog_path):
+        print(f"{C_BOLD}📋 Latest Changes{C_RESET}")
+        print()
+        with open(changelog_path) as f:
+            lines = f.readlines()
+
+        # Find first ## version header (skip the top # Changelog)
+        in_entry = False
+        entry_lines = []
+        for line in lines:
+            if line.startswith("## ") and not in_entry:
+                in_entry = True
+                entry_lines.append(line)
+            elif line.startswith("## ") and in_entry:
+                # Found next section header — stop
+                break
+            elif in_entry:
+                entry_lines.append(line)
+
+        # Trim trailing blank lines
+        while entry_lines and entry_lines[-1].strip() == "":
+            entry_lines.pop()
+        # Trim leading blank lines (after the header)
+        while len(entry_lines) > 1 and entry_lines[1].strip() == "":
+            entry_lines.pop(1)
+
+        for line in entry_lines:
+            print(line, end="")
+        print()
+    else:
+        print(f"{C_YELLOW}⚠  No CHANGELOG.md found{C_RESET}")
+        print()
+
+    # 5. Success message
+    print(f"{C_BOLD}{C_GREEN}✅ Partner is up to date!{C_RESET}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog='partner',
@@ -213,6 +296,10 @@ def main():
     p_bot.add_argument('platform', choices=['qq'], help='机器人类型')
     p_bot.add_argument('--workspace', '-w', help='工作区路径')
     p_bot.set_defaults(func=cmd_bot)
+
+    # update
+    p_update = sub.add_parser('update', help='Update Partner to the latest version')
+    p_update.set_defaults(func=cmd_update)
 
     # default
     parser.set_defaults(func=cmd_default)

@@ -955,6 +955,24 @@ def json_save(path, data):
         )
         if result.returncode == 0:
             status_ok(f"Cron job 已自动创建 (每 {interval_minutes} 分钟)")
+            # Extract and save cron job ID to partner_config.json
+            import re
+            match = re.search(r'\[([a-f0-9-]+)\]', result.stdout)
+            cron_job_id = match.group(1) if match else 'partner-research-cycle'
+            try:
+                config_path = os.path.join(workspace, "partner_config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        cfg = json.load(f)
+                    if 'scheduler' not in cfg:
+                        cfg['scheduler'] = {}
+                    cfg['scheduler']['cron_job_id'] = cron_job_id
+                    cfg['scheduler']['cron_job_name'] = 'partner-research-cycle'
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(cfg, f, indent=2, ensure_ascii=False)
+                    status_ok(f"Cron job ID 已保存: {cron_job_id}")
+            except Exception as e:
+                status_warn(f"无法保存 cron job ID: {e}")
         else:
             status_warn("Cron 自动创建失败，请手动设置")
             print(f"    {C.DIM}在 Hermes 中说：'设置 partner 的自动研究 cron'{C.RESET}")
