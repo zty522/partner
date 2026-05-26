@@ -948,9 +948,9 @@ def json_save(path, data):
         # Try using hermes CLI to create cron
         result = subprocess.run(
             ["hermes", "cron", "create", 
-             "--schedule", f"every {interval_minutes}m",
              "--name", "partner-research-cycle",
-             "--prompt", cron_prompt],
+             f"every {interval_minutes}m",
+             cron_prompt],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:

@@ -348,9 +348,9 @@ def cmd_update(args):
 
                 cr_create = subprocess.run(
                     ["hermes", "cron", "create",
-                     "--schedule", f"every {interval}m",
                      "--name", "partner-research-cycle",
-                     "--prompt", cron_prompt],
+                     f"every {interval}m",
+                     cron_prompt],
                     capture_output=True, text=True, timeout=30,
                 )
                 if cr_create.returncode == 0:
@@ -490,7 +490,7 @@ def _cmd_config_set(args):
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
             print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
-            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron update ...")
+            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron edit ...")
         except ValueError:
             print("❌ value 必须是数字（分钟数）")
             return

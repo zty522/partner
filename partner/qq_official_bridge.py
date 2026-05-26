@@ -659,9 +659,9 @@ class QQQfficialBridge:
 
                 create_r = subprocess.run(
                     ["hermes", "cron", "create",
-                     "--schedule", f"every {interval}m",
                      "--name", cron_name,
-                     "--prompt", cron_prompt],
+                     f"every {interval}m",
+                     cron_prompt],
                     capture_output=True, text=True, timeout=30,
                 )
                 if create_r.returncode == 0:
@@ -709,7 +709,7 @@ class QQQfficialBridge:
             target = cron_id or cron_name
             if target:
                 subprocess.run(
-                    ["hermes", "cron", "update", target, "--schedule", f"every {minutes}m"],
+                    ["hermes", "cron", "edit", target, "--schedule", f"every {minutes}m"],
                     capture_output=True, timeout=30,
                 )
         except Exception as e:
