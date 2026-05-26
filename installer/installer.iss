@@ -27,7 +27,6 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 CloseApplications=no
-; Handle upgrades
 AppMutex=PartnerMutex
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
@@ -45,43 +44,82 @@ Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesu
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "post_install.bat"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\Partner"; Filename: "{app}\Partner.exe"
-Name: "{userdesktop}\Partner"; Filename: "{app}\Partner.exe"; Tasks: desktopicon
+Name: "{userprograms}\Partner"; Filename: "{app}\partner.bat"
+Name: "{userdesktop}\Partner"; Filename: "{app}\partner.bat"; Tasks: desktopicon
 Name: "{userprograms}\Partner Status"; Filename: "powershell.exe"; Parameters: "-NoExit -Command partner status"
 Name: "{userprograms}\Uninstall Partner"; Filename: "{uninstallexe}"
-
-[Run]
-Filename: "{app}\post_install.bat"; Description: "Complete setup (recommended)"; Flags: postinstall nowait skipifsilent shellexec
 
 [Code]
 var
   BackendPage: TInputOptionWizardPage;
-  PythonPage: TInputOptionWizardPage;
-  BackendChoice: Integer;
-  PyCheckCode: Integer;
-  PyResultCode: Integer;
+  PythonInstalled: Boolean;
+  AppDir: String;
 
+{ ── Detect Python ── }
+function CheckPython(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec('python', '-c "import sys; exit(0) if sys.version_info >= (3,10) else exit(1)"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ ── Install Python if missing ── }
+procedure InstallPython();
+var
+  InstallerPath: String;
+  DownloadCode, InstallCode: Integer;
+begin
+  WizardForm.StatusLabel.Caption := 'Downloading Python 3.12...';
+  InstallerPath := ExpandConstant('{tmp}\python-installer.exe');
+  Exec('powershell',
+    '-Command "Invoke-WebRequest -Uri ''https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe'' -OutFile ''' + InstallerPath + '''' + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, DownloadCode);
+  if DownloadCode <> 0 then
+  begin
+    Log('Python download failed');
+    Exit;
+  end;
+  WizardForm.StatusLabel.Caption := 'Installing Python 3.12...';
+  Exec(InstallerPath, '/quiet InstallAllUsers=0 PrependPath=1',
+    '', SW_SHOW, ewWaitUntilTerminated, InstallCode);
+  if InstallCode = 0 then
+    Log('Python installed successfully')
+  else
+    Log('Python install failed with code: ' + IntToStr(InstallCode));
+end;
+
+{ ── Post-install: install partner package + PATH + launcher ── }
+procedure RunPostInstall();
+var
+  ResultCode: Integer;
+  LauncherPath: String;
+begin
+  WizardForm.StatusLabel.Caption := 'Installing Partner package...';
+  Exec('python', '-m pip install -e "' + AppDir + '" -q',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  WizardForm.StatusLabel.Caption := 'Adding Partner to PATH...';
+  Exec('powershell',
+    '-Command "$p=[Environment]::GetEnvironmentVariable(''Path'',''User''); ' +
+    'if($p -notlike ''*' + AppDir + '*'') ' +
+    '{[Environment]::SetEnvironmentVariable(''Path'',''' + AppDir + ';$p'',''User'')}"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  { Create launcher batch file }
+  LauncherPath := AppDir + '\Partner.bat';
+  SaveStringToFile(LauncherPath, '@echo off' + #13#10 +
+    'python -m partner.cli %*' + #13#10, False);
+  Log('Created launcher: ' + LauncherPath);
+end;
+
+{ ── Create wizard pages ── }
 procedure InitializeWizard;
 begin
-  { Python detection page }
-  PythonPage := CreateInputOptionPage(wpWelcome,
-    'Python Detection', 'Checking your system for Python...',
-    'Partner requires Python 3.10 or later.',
-    False, False);
-  PythonPage.Add('Python 3.10+ is already installed');
-  PythonPage.Add('Python not detected (will install Python 3.12)');
-  PythonPage.Values[0] := True;
-
-  { Check if Python exists }
-  if Exec('python', '--version', '', SW_HIDE, ewWaitUntilTerminated, PyResultCode) then
-    PythonPage.Values[0] := True
-  else begin
-    PythonPage.Values[0] := False;
-    PythonPage.Values[1] := True;
-  end;
+  { Auto-detect Python }
+  PythonInstalled := CheckPython();
 
   { Backend selection page }
   BackendPage := CreateInputOptionPage(wpSelectTasks,
@@ -95,63 +133,50 @@ begin
   BackendPage.Values[0] := True;
 end;
 
+{ ── Run install steps in installer window ── }
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  PythonInstaller: String;
-  InstallResultCode: Integer;
-  DownloadResultCode: Integer;
+  InstallCode: Integer;
 begin
+  if CurStep = ssInstall then
+  begin
+    AppDir := ExpandConstant('{app}');
+  end;
+
   if CurStep = ssPostInstall then
   begin
-    { Install Python if needed }
-    if not PythonPage.Values[0] then
-    begin
-      PythonInstaller := ExpandConstant('{tmp}\python-installer.exe');
-      if not FileExists(PythonInstaller) then
-      begin
-        { Download Python installer using PowerShell }
-        if Exec('powershell', '-Command "Invoke-WebRequest -Uri ''https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe'' -OutFile ''"' + PythonInstaller + '"''"', '', SW_HIDE, ewWaitUntilTerminated, DownloadResultCode) then
-        begin
-          if DownloadResultCode <> 0 then
-          begin
-            Log('Failed to download Python installer, error code: ' + IntToStr(DownloadResultCode));
-            Exit;
-          end;
-        end
-        else
-        begin
-          Log('Failed to execute PowerShell for download');
-          Exit;
-        end;
-      end;
-      if Exec(PythonInstaller, '/quiet InstallAllUsers=0 PrependPath=1', '', SW_SHOW, ewWaitUntilTerminated, InstallResultCode) then
-        Log('Python installed successfully')
-      else
-        Log('Python installation failed, error code: ' + IntToStr(InstallResultCode));
+    { 1. Install Python if missing (auto-detected, no user choice) }
+    if not PythonInstalled then
+      InstallPython();
+
+    { 2. Install selected backend }
+    WizardForm.StatusLabel.Caption := 'Installing AI backend...';
+    case BackendPage.SelectedValueIndex of
+      0: Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallCode);
+      1: Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallCode);
+      2: begin
+           Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallCode);
+           Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallCode);
+         end;
     end;
 
-    { Install selected backend }
-    case BackendPage.SelectedValueIndex of
-      0: { Hermes }
-        Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
-      1: { OpenClaw }
-        Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
-      2: { Both }
-        begin
-          Exec('python', '-m pip install hermes-agent -q', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
-          Exec('npm', 'install -g openclaw@latest', '', SW_HIDE, ewWaitUntilTerminated, InstallResultCode);
-        end;
-    end;
+    { 3. Post-install: pip install + PATH (all inside installer window) }
+    RunPostInstall();
+
+    WizardForm.StatusLabel.Caption := 'Setup complete!';
   end;
 end;
 
+{ ── Uninstall ── }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  UninstallResultCode: Integer;
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    { Remove PATH entry }
-    Exec('powershell', '-Command "[Environment]::SetEnvironmentVariable(\"Path\", $([Environment]::GetEnvironmentVariable(\"Path\", \"User\") -replace \".*Partner.*\", \"\").Trim(\";\"), \"User\")"', '', SW_HIDE, ewWaitUntilTerminated, UninstallResultCode);
+    Exec('powershell',
+      '-Command "[Environment]::SetEnvironmentVariable(''Path'', ' +
+      '$([Environment]::GetEnvironmentVariable(''Path'',''User'') -replace ''.*Partner.*'','''').Trim('';''), ''User'')"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
