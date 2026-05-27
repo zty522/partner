@@ -693,35 +693,39 @@ class PartnerApp:
         self._show_thinking()
 
         def do_reply():
-            conv_path = os.path.join(APP_DIR, "conversation.py")
-            if not os.path.exists(conv_path):
-                self.root.after(0, lambda: self._hide_thinking())
-                self.root.after(0, lambda: self._add_chat_message("bot",
-                    self._tr("chat_unavailable")))
-                return
-
+            # Use the same two-tier approach as QQ bridge:
+            # 1. Try LLM via HermesAdapter
+            # 2. Fall back to ConversationEngine
             script = (
                 "import sys, json, os\n"
                 f"sys.path.insert(0, {PARTNER_DIR!r})\n"
-                "from partner.conversation import ConversationEngine\n"
                 "from partner.journal import Journal\n"
                 "from partner.knowledge import KnowledgeBase\n"
                 "from partner.task_queue import TaskQueue\n"
                 "from partner.state import StateManager\n"
+                "from partner.conversation import ConversationEngine\n"
+                "from partner.adapter import create_adapter\n"
                 f"ws = {self.workspace!r}\n"
-                "j = Journal(os.path.join(ws, 'data', 'journal.jsonl')) if ws and os.path.exists(os.path.join(ws, 'data')) else None\n"
-                "k = KnowledgeBase(os.path.join(ws, 'data', 'knowledge.jsonl')) if ws and os.path.exists(os.path.join(ws, 'data')) else None\n"
+                "j = Journal(os.path.join(ws, 'state', 'journal.jsonl')) if ws else None\n"
+                "k = KnowledgeBase(os.path.join(ws, 'state', 'knowledge.json')) if ws else None\n"
                 "tq = TaskQueue(os.path.join(ws, 'state', 'task_queue.json')) if ws else None\n"
                 "st = StateManager(os.path.join(ws, 'state')) if ws else None\n"
                 "eng = ConversationEngine(j, k, tq, st, ws or '')\n"
-                f"reply = eng.respond({text!r})\n"
-                "print(reply)\n"
+                "adapter = create_adapter('hermes', ws)\n"
+                "# Tier 1: Try LLM\n"
+                "prompt = f'你是Partner，我的私人研究伙伴。用简短自然的口语回复。\\n\\n用户说: {text!r}'\n"
+                "reply = adapter.chat(prompt)\n"
+                "if reply:\n"
+                "    print(reply)\n"
+                "else:\n"
+                "    # Tier 2: ConversationEngine fallback\n"
+                "    print(eng.respond({text!r}))\n"
             )
             script_path = os.path.join(PARTNER_DIR, "_chat_script.py")
             try:
                 with open(script_path, "w", encoding="utf-8") as sf:
                     sf.write(script)
-                out, err, rc = run_silent([sys.executable, script_path], timeout=30)
+                out, err, rc = run_silent([sys.executable, script_path], timeout=30, timeout_ok=True)
             except Exception as e:
                 out, err, rc = "", str(e), 1
             finally:
@@ -735,7 +739,7 @@ class PartnerApp:
             if rc == 0 and out:
                 self.root.after(0, lambda: self._add_chat_message("bot", out))
             else:
-                msg = err[:100] if err else "unknown error"
+                msg = err[:100] if err else (out[:100] if out else "unknown error")
                 self.root.after(0, lambda: self._add_chat_message("bot",
                     self._tr("chat_error", msg=msg)))
 

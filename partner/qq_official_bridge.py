@@ -209,11 +209,12 @@ class QQQfficialBridge:
             self._bot.stop()
 
     def _start_notification_poller(self):
-        """Start a background thread that checks for pending notifications."""
+        """Start a background thread that proactively pushes notifications."""
         import threading
         def poll():
             notif_dir = os.path.join(self.workspace, "state", "notifications")
             pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
+            user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
             while self._running:
                 try:
                     # Load existing pending notifications
@@ -225,7 +226,8 @@ class QQQfficialBridge:
                         except Exception:
                             pending_notifs = []
 
-                    # Check new notifications
+                    # Check new notification files
+                    fresh_notifs = []
                     if os.path.exists(notif_dir):
                         for fname in sorted(os.listdir(notif_dir)):
                             if fname.endswith(".json"):
@@ -233,15 +235,16 @@ class QQQfficialBridge:
                                 try:
                                     with open(fpath) as f:
                                         notif = json.load(f)
-                                    # Add to pending queue with timestamp
-                                    pending_notifs.append({
+                                    entry = {
                                         "timestamp": datetime.now().isoformat(),
                                         "type": notif.get("type", "daily"),
                                         "summary": notif.get("summary", ""),
                                         "details": notif.get("details", []),
                                         "next_task": notif.get("next_task", ""),
                                         "pending_count": notif.get("pending_count", 0),
-                                    })
+                                    }
+                                    pending_notifs.append(entry)
+                                    fresh_notifs.append(entry)
                                     os.remove(fpath)
                                 except Exception:
                                     try:
@@ -256,10 +259,37 @@ class QQQfficialBridge:
                         with open(pending_file, "w") as f:
                             json.dump(pending_notifs, f, indent=2, ensure_ascii=False)
 
+                    # Proactively push fresh notifications to QQ
+                    if fresh_notifs and self._bot and self._bot.get_event_loop():
+                        import asyncio
+                        # Read user context to get the openid
+                        openid = ""
+                        try:
+                            if os.path.exists(user_ctx_path):
+                                with open(user_ctx_path) as f:
+                                    ctx = json.load(f)
+                                openid = ctx.get("openid", "")
+                        except Exception:
+                            pass
+
+                        if openid:
+                            for n in fresh_notifs:
+                                summary = n.get("summary", "").strip()
+                                if not summary:
+                                    continue
+                                # Truncate long summaries for QQ
+                                if len(summary) > 500:
+                                    summary = summary[:497] + "..."
+                                asyncio.run_coroutine_threadsafe(
+                                    self._bot.send_message(openid, summary, QQMessageType.PRIVATE),
+                                    self._bot.get_event_loop(),
+                                )
+                                logger.info(f"Proactive push sent to {openid}: {summary[:80]}")
+
                 except Exception:
                     pass
                 import time
-                time.sleep(60)
+                time.sleep(60)  # Check every 60 seconds
         t = threading.Thread(target=poll, daemon=True)
         t.start()
 
