@@ -323,13 +323,18 @@ class QQQfficialBridge:
 
             # Step 1: Use LLM to classify: task request or casual chat?
             # If force_run was just triggered, skip TASK (research already started)
+            _task_queued = False
             if not self._force_run_triggered:
                 intent = self._classify_intent(user_text, msg.sender_id)
                 if intent == "TASK":
                     reply = self._queue_task(user_text, msg)
-                    self._send_reply(msg, reply)
-                    return
-            self._force_run_triggered = False
+                    if reply:
+                        self._send_reply(msg, reply)
+                        return
+                    # Empty reply → fall through to LLM chat
+                    _task_queued = True
+            if not _task_queued:
+                self._force_run_triggered = False
 
             # Step 2: Normal chat — get LLM response directly (no double-reply)
             reply = self._get_response(msg.sender_id, user_text, msg.message_type)
@@ -528,10 +533,12 @@ class QQQfficialBridge:
             if p in t:
                 return self._clear_queue(msg)
 
-        # Force run: 立即运行, 直接开始, 现在开始, 马上开始, 立即执行
+        # Force run: 立即运行, 直接开始, 现在开始, 马上开始, 立即执行,
+        # 推进, 继续推进, 继续做, 继续+项目名, 跑起来
         run_patterns = ["立即运行", "直接开始", "现在开始", "马上开始",
                         "立即执行", "立刻开始", "立刻运行",
-                        "开始执行", "立即开始", "不要等", "不用等"]
+                        "开始执行", "立即开始", "不要等", "不用等",
+                        "继续推进", "继续做", "推进"]
         for p in run_patterns:
             if p in t:
                 self._force_run(msg)
@@ -871,8 +878,8 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        # Build natural conversational confirmation
-        return f"好，开始推进「{text[:40]}」了，跑完告诉你结果。"
+        # Build natural conversational confirmation — let LLM handle it
+        return ""
 
     def _get_interval_minutes(self) -> int:
         """Read configured research interval from partner_config.json."""
