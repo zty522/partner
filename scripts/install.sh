@@ -23,10 +23,7 @@ header(){ echo -e "\n${BOLD}${CYAN}━━━ $1 ━━━${NC}\n"; }
 # ── 检测系统 ──
 header "检查系统环境"
 OS=""
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    OS=$ID
-fi
+if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; fi
 info "系统: ${OS:-$(uname)} $(uname -m)"
 
 # ── 检测 Python ──
@@ -35,13 +32,11 @@ check_python() {
         if command -v $p &>/dev/null; then
             local ver=$($p --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
             if [ "$(echo -e "$ver\n$PYTHON_MIN" | sort -V | head -1)" = "$PYTHON_MIN" ]; then
-                echo "$p"
-                return
+                echo "$p"; return
             fi
         fi
     done
 }
-
 PY=$(check_python)
 if [ -z "$PY" ]; then
     warn "需要 Python $PYTHON_MIN+，正在安装..."
@@ -67,10 +62,8 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: $(git --version 2>&1 | head -1)"
 
-# ── 检测 Partner 安装状态（优先，不先问后端）──
+# ── 检测 Partner 安装状态 ──
 header "检测 Partner 安装状态"
-
-# 已安装可用 → 直接更新
 if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
     info "Partner 已安装且可用，执行更新..."
     exec partner update </dev/tty
@@ -80,91 +73,21 @@ fi
 _cleaned=false
 if command -v partner &>/dev/null; then
     warn "发现 Partner 旧二进制文件但模块无法加载，自动清理..."
-    rm -f "$(command -v partner)" 2>/dev/null || true
-    _cleaned=true
+    rm -f "$(command -v partner)" 2>/dev/null || true; _cleaned=true
 fi
 if [ -d "$INSTALL_DIR" ] || [ -f "$INSTALL_DIR" ]; then
-    rm -rf "$INSTALL_DIR" 2>/dev/null || true
-    _cleaned=true
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true; _cleaned=true
 fi
-
 if [ "$_cleaned" = true ]; then
     echo -e "${GREEN}  已清理旧安装，继续全新安装...${NC}"
 else
     info "未检测到已有安装"
 fi
 
-# ── 选择后端 Agent（全新安装才问）──
-header "选择 AI 后端"
-echo ""
-echo "  Partner 需要一个 AI 后端来处理研究和对话。"
-echo "  选择一个你想使用的后端："
-echo ""
-echo "  ${BOLD}1)${NC} Hermes Agent ${CYAN}(推荐)${NC}  — pip 安装，功能完整"
-echo "  ${BOLD}2)${NC} OpenClaw (小龙蝦)  — npm 安装，多渠道 AI 助手"
-echo "  ${BOLD}3)${NC} 两者都装"
-echo "  ${BOLD}4)${NC} 先不装，我自己配置"
-echo ""
-read -p "  请输入 [1-4] (默认 1): " AGENT_CHOICE
-AGENT_CHOICE=${AGENT_CHOICE:-1}
-echo ""
-
-case "$AGENT_CHOICE" in
-    2|3)
-        if ! command -v node &>/dev/null || [ "$(node --version 2>&1 | grep -oP '\d+' | head -1)" -lt 22 ]; then
-            info "安装 Node.js 22 (OpenClaw 需要)..."
-            if ! command -v n &>/dev/null; then
-                npm install -g n 2>/dev/null || true
-            fi
-            export N_PREFIX="$HOME/.n"
-            export PATH="$N_PREFIX/bin:$PATH"
-            n 22 2>/dev/null || true
-            mkdir -p "$HOME/.npm-global"
-            npm config set prefix "$HOME/.npm-global" 2>/dev/null || true
-            export PATH="$HOME/.npm-global/bin:$PATH"
-        fi
-        info "Node.js: $(node --version 2>&1)"
-        ;;
-esac
-
-case "$AGENT_CHOICE" in
-    1)
-        header "安装 Hermes Agent"
-        $PY -m pip install hermes-agent -q --break-system-packages 2>/dev/null || $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败，可稍后手动安装"
-        ;;
-    2)
-        header "安装 OpenClaw"
-        npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
-        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-            [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
-            echo "" >> "$rc"
-            echo "# Node.js (for OpenClaw)" >> "$rc"
-            echo 'export N_PREFIX="$HOME/.n"' >> "$rc"
-            echo 'export PATH="$N_PREFIX/bin:$HOME/.npm-global/bin:$PATH"' >> "$rc"
-        done
-        ;;
-    3)
-        header "安装 Hermes Agent + OpenClaw"
-        $PY -m pip install hermes-agent -q --break-system-packages 2>/dev/null || $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败"
-        npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
-        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
-            [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
-            echo "" >> "$rc"
-            echo "# Node.js (for OpenClaw)" >> "$rc"
-            echo 'export N_PREFIX="$HOME/.n"' >> "$rc"
-            echo 'export PATH="$N_PREFIX/bin:$HOME/.npm-global/bin:$PATH"' >> "$rc"
-        done
-        ;;
-    4)
-        info "跳过后端安装，你可稍后手动安装"
-        ;;
-esac
-
 # ── 安装 Partner ──
 header "安装 Partner"
-info "克隆 Partner 仓库..."
+info "克隆仓库..."
 git clone "$REPO_URL" "$INSTALL_DIR"
-
 cd "$INSTALL_DIR"
 $PY -m pip install -e . -q --break-system-packages 2>/dev/null || $PY -m pip install -e . -q
 info "Partner 安装完成"
@@ -188,17 +111,11 @@ PYEOF
         fi
     done
 fi
-info "partner: $HOME/.local/bin/partner"
 
-# ── 检测已有配置，询问是否运行 setup ──
-_has_config=false
-if $PY -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from partner.setup import find_workspace; print(find_workspace() or '')" 2>/dev/null | grep -q .; then
-    _has_config=true
-fi
-
+# ── 配置向导 ──
 header "配置"
-if [ "$_has_config" = true ]; then
-    echo -e "  ${CYAN}检测到已有配置文件，是否运行配置向导修改？${NC}"
+if $PY -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from partner.setup import find_workspace; print(find_workspace() or '')" 2>/dev/null | grep -q .; then
+    echo -e "  ${CYAN}检测到已有配置，是否运行配置向导修改？${NC}"
     read -p "  [Y/n] (默认 Y): " _run_setup
     _run_setup=${_run_setup:-Y}
     case "$_run_setup" in
@@ -208,7 +125,7 @@ if [ "$_has_config" = true ]; then
             exec partner setup </dev/tty
             ;;
         *)
-            info "跳过配置，可随时运行: partner setup"
+            info "跳过，可随时运行: partner setup"
             ;;
     esac
 else
@@ -216,15 +133,5 @@ else
     export PATH="$HOME/.local/bin:$PATH"
     exec partner setup </dev/tty
 fi
-
-# ── 完成（仅当跳过 setup 时到达这里）──
-header "🎉 Partner 安装完成!"
-echo -e "  ${BOLD}安装目录:${NC} $INSTALL_DIR"
-echo ""
-echo -e "  ${CYAN}常用命令:${NC}"
-echo -e "  partner setup        配置向导"
-echo -e "  partner status       查看状态"
-echo -e "  partner bot start qq 启动 QQ 机器人"
-echo ""
 
 cd "$HOME"
