@@ -3,7 +3,7 @@
 # Partner 🤝 — 一键安装脚本 (Linux)
 # 用法: curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 # ──────────────────────────────────────────────────────────────
-set -euo pipefail
+set -euo pipefail 2>/dev/null || set -eu
 
 REPO_URL="https://github.com/zty522/partner.git"
 INSTALL_DIR="${PARTNER_HOME:-$HOME/.partner}"
