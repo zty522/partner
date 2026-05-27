@@ -1,8 +1,11 @@
 <div align="center">
 
-# Partner — An AI Research Companion That Evolves
+# 🤝 Partner
 
-*"Hey Partner, what have you been doing?"*
+## *"Hey Partner, what have you been doing?"*
+
+**An AI research companion that works independently in the background.
+You don't give it commands. You just check in.**
 
 [![Latest Release](https://img.shields.io/github/v/release/zty522/partner?label=Latest&style=flat-square)](https://github.com/zty522/partner/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -11,145 +14,330 @@
 
 ---
 
-## The Core Idea
+## 🚀 One-Click Install
 
-Most AI agents are tools you command. You ask, they answer. You instruct, they execute. Then they wait.
+### Windows (easiest)
+```
+1. Go to https://github.com/zty522/partner/releases/latest
+2. Download Partner-v0.3.0-Setup.exe
+3. Double-click → follow the wizard → done
+```
+The installer detects Python (downloads if missing), detects existing Hermes/Partner installations, and lets you choose an AI backend in a proper setup window.
 
-Partner is different. It's a **self-evolving research companion** — it works independently, learns from every cycle, and gets better at research the longer it runs. The core differentiator, present since v0.1.0, is a **self-evolution engine** that operates on a closed loop:
+### Linux
+```bash
+curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
+```
 
-**Execute → Extract → Optimize**
+During install you'll pick an AI backend:
+- **1** — Hermes Agent (recommended)
+- **2** — OpenClaw
+- **3** — Both
+- **4** — Skip, I'll configure later
 
-1. **Execute**: Partner runs research cycles — reading literature, writing code, running experiments, analyzing results.
-2. **Extract**: After every successful task, it captures the workflow pattern — the methodology, toolchain, and reasoning — and stores it as a reusable skill.
-3. **Optimize**: It applies learned strategies, prunes stale knowledge, and detects capability degradation before it becomes a problem.
+---
 
-Conventional agents follow instructions. RAG pipelines fetch pre-indexed data. Partner does neither — it **grows** a personalized research methodology over time.
+## 📦 Versions
 
-**Concrete example**: When Partner first encountered a batch effect problem in age prediction transcriptomics, it diagnosed the issue, applied ComBat correction, and evaluated the results. That diagnostic methodology — problem identification → correction strategy → evaluation → next steps — was extracted as a reusable pattern. The next time a similar batch issue arises, Partner doesn't start from scratch. It recalls the pattern, adapts it to the new context, and executes faster.
+| Version | Date | Highlights |
+|---------|------|------------|
+| **[v0.4.0](https://github.com/zty522/partner/releases/tag/v0.4.0)** | 2026-05-27 | 🧬 **Instant QQ reply** · **Self-Evolution Engine** · **Cron planner upgrade** · **NapCat support** · **SOUL.md** |
+| **[v0.3.0](https://github.com/zty522/partner/releases/tag/v0.3.0)** | 2026-05-26 | 🎉 **One-click install** · **Codex/OpenClaw integration** · **Windows GUI** · **Inno Setup installer** |
+| **[v0.2.0](https://github.com/zty522/partner/releases/tag/v0.2.0)** | 2026-05-26 | 💓 **Heartbeat Plan Model** · **QQ Official Bot** · **LLM chat** · **Watchdog** |
+| **[v0.1.0](https://github.com/zty522/partner/releases/tag/v0.1.0)** | 2026-05-24 | Event system, Conversation V2, proto Self-Evolution Engine |
+
+[📥 Download Latest](https://github.com/zty522/partner/releases/latest) · [📋 All Releases](https://github.com/zty522/partner/releases)
+
+---
+
+## 🧬 The Self-Evolution Engine
+
+Partner's core differentiator is a **Execute → Extract → Optimize** closed-loop that has been present since v0.1.0 and matures with every version:
+
+```text
+Execute:   Run research cycles — read literature, write code, run experiments
+Extract:   After each successful task, capture the workflow as a reusable pattern
+Optimize:  Apply learned strategies, prune stale knowledge, detect capability degradation
+```
+
+Every time Partner solves a problem — say, diagnosing a batch effect in age prediction transcriptomics — it captures the diagnostic methodology and stores it as a retrievable pattern. Next time a similar issue arises, it doesn't start from scratch.
+
+**The three-layer system** (v0.4.0):
+
+| Layer | Component | What it does |
+|-------|-----------|-------------|
+| 1 | **StrategyLearner** | Analyzes journal → profiles each task type by success rate, value, execution count → auto-adjusts priority boosts |
+| 2 | **MemoryPruner** | Archives low-confidence stale entries, merges duplicates, promotes high-value entries |
+| 3 | **CPEGuard** | Checks all capabilities for degradation trends → auto-increases verification frequency |
+
+See [SOUL.md](SOUL.md) for Partner's behavioral creed, and [ARCHITECTURE.md](ARCHITECTURE.md) for the full evolution log.
+
+---
+
+## What's New in v0.4.0
+
+### 🧬 Self-Evolution Engine (3-Layer)
+Runs every 2 hours via dedicated cron job (`partner-self-evolution`):
+- **StrategyLearner**: profiles task types by success rate, value, and execution count
+- **MemoryPruner**: cleans stale/duplicate knowledge, promotes high-value entries
+- **CPEGuard**: detects capability degradation before it becomes a problem
+
+### ⚡ Instant QQ Reply
+Messages are now processed in two steps:
+1. **Immediately**: "请等待，正在思考..." (instant feedback)
+2. **Background**: full LLM processing, then actual reply replaces the placeholder
+No more long pauses or "请求超时" on QQ.
+
+### 📡 Research Planner (Cron Upgrade)
+Partner is no longer a passive task executor. The cron cycle now has 5 decision branches:
+- **Active plan** → execute current phase
+- **Plan completed** → auto-review results, search latest literature, create continuation plan
+- **Idle + queued tasks** → create plan from queue
+- **Idle + empty** → scan knowledge gaps, generate new research directions
+- **Planning** → create plan from queue
+
+### 🪟 NapCat Support + Windows GUI Rewrite
+- New `napcat_bridge.py`: connects NapCat OneBot (local DLL injection) to Partner's conversation engine
+- GUI rewritten with GitHub Dark theme, i18n (Chinese/English), simplified QQ Bot config
+- Windows CLI: `--foreground` flag for GUI integration, proper PID management
+
+### 🐛 Bug Fixes
+- **active_plan.json dual copies**: consolidated to root; send_qq_report.py now reads the correct file
+- **QQ "消息被去重"**: unique msg_seq added to every outgoing message
+- **Windows path backslashes**: escaped in `-c` strings to prevent Unicode errors
+- **Foreground PID**: --foreground mode now writes PID file for proper bot stop
+- **GUI TimeoutExpired**: treated as success (bot running = good)
+- **GnuTLS install error**: HTTPS retry + SSH fallback in install.sh
+
+---
+
+## What's New in v0.3.0
+
+### 🚀 One-Click Install (Windows / Linux)
+
+| Platform | Method |
+|----------|--------|
+| **Windows** | Download ZIP → unzip → double-click `install.bat` → mouse only |
+| **Linux** | `curl ... install.sh | bash` — auto-detects distro, installs Python/deps |
+
+Pick from 4 backends at install time:
+- **Hermes Agent** — pip install, full feature set
+- **OpenClaw** — npm install, multi-channel AI assistant
+- **Both** — switch between them
+- **Custom** — no forced install, configure manually
+
+### 🤖 Codex CLI Integration
+Partner can delegate coding tasks to [OpenAI Codex](https://github.com/openai/codex):
+- `codex exec --full-auto 'Create a Python module'` → writes code, git commits
+- Verified: created `partner_helper.py` (fibonacci / is_prime / gcd), all tests passed
+
+### 🦞 OpenClaw Integration
+Partner connects to [OpenClaw](https://github.com/openclaw/openclaw) via the [ACP protocol](https://docs.openclaw.ai/cli/acp):
+- `openclaw acp` — ACP bridge mode
+- `openclaw agent --agent main -m 'task'` — direct delegation
+- Multi-channel support (QQ, WeChat, Telegram, Discord, 20+ platforms)
+
+### 📦 Install Script Suite
+| Script | Purpose |
+|--------|---------|
+| `scripts/install.sh` | Linux one-click (auto-detects distro, installs Python/Git) |
+| `scripts/install.ps1` | Windows PowerShell (optional venv, desktop shortcut) |
+| `scripts/install.bat` | Windows double-click (simplest, no terminal needed) |
+| `scripts/uninstall.sh` | Linux uninstall |
+
+---
+
+## What's New in v0.2.0
+
+### 💓 Heartbeat Plan Model (Major Rearchitecture)
+
+v0.1.0 executed isolated tasks — one literature search OR one code edit per cycle. v0.2.0 introduces **continuous multi-phase plans**:
+
+| Before (v0.1) | After (v0.2) |
+|---------------|--------------|
+| Picks one isolated task, runs it, done | Creates a complete plan: literature → code → experiment → analysis → next-plan |
+| 30-min fixed execution window | 30-min **minimum heartbeat** — plans can span unlimited cycles |
+| Task queue of unrelated items | `active_plan.json` tracking multi-phase progress |
+| Never checks if work is ongoing | Checks: "is a plan active?" → if yes, let it continue |
+
+**v0.2.0 update (heartbeat maintenance mode):**
+- Heartbeat is maintenance only: QQ comms + health check. Research tasks run independently.
+- Bot Watchdog: auto-restarts if the QQ bot process dies
+- Every heartbeat pushes a QQ message (removed the 60-minute inactivity threshold)
+
+**How the heartbeat works:**
+```
+Every 30 minutes (minimum):
+
+    1. Check QQ bot status (watchdog auto-restarts if dead)
+    2. Check research tasks for hangs (>2h without progress = stuck)
+    3. Send heartbeat report to QQ (always, no timeout)
+    4. Update heartbeat.json
+```
+
+### 🐧 QQ Official Bot
+- Integrated with the **QQ Open Platform** official API
+- Supports **private (C2C)** and **group @mentions**
+- Native Linux — no Windows dependency needed
+- Auto-start in background: `partner bot start qq`
+- **Every heartbeat pushes a QQ notification** with current phase, progress, next step
+
+### 🧠 LLM-Powered Conversation
+- QQ chat uses LLM for natural conversation — no more rigid templates
+- Context-aware (remembers last 5 exchanges)
+- Concise, conversational tone — no data dumps
+- Pending notifications auto-delivered on first message after idle
+
+### 🛡️ Bot Watchdog
+QQ bot process guardian, checks every 60 seconds:
+- Process alive → skip
+- Process dead → auto-restart
+- Cleanup on `partner bot stop qq`
+
+### 📦 Auto-Install Dependencies
+- `partner setup` detects missing `aiohttp`, offers automatic install
+- `partner bot start qq` checks deps before starting
+- Scripts auto-deployed to workspace during setup
+
+### 🎯 Streamlined CLI
+```
+partner setup                 Configure everything
+partner status                View full status
+partner bot start qq          Start QQ bot
+partner bot stop qq           Stop QQ bot
+partner queue clear           Clear task queue
+partner config set interval N Change heartbeat interval (minutes)
+partner update                Pull latest code + reinstall
+```
+
+---
+
+## The Idea
+
+```
+LLM:     You ask → It answers → Done
+Agent:   You command → It executes → Waits
+Partner: It works on its own → You ask "what have you been doing?" → It reports
+```
+
+Partner is **proactive**. It reads papers, explores your projects, builds a knowledge base, and proposes new ideas — all without you telling it to. When you're ready, you just ask:
+
+> **"Hey Partner, what have you been doing?"**
+
+And it tells you everything it discovered while you were away.
 
 ---
 
 ## Architecture
 
-Partner schedules work across three agent backends, dispatching tasks based on affinity:
-
-| Task Type | Dispatched To |
-|-----------|--------------|
-| Literature search, web queries | Hermes Agent (web / skill system) |
-| Code implementation, experiments | Codex CLI / Direct Python |
-| Windows integration, multi-channel QQ | NapCat / Official QQ Bot |
-
-When a research goal arrives — say, "advance the age prediction project" — the orchestrator decomposes it into subtasks, routes each to the right tool, and tracks progress across heartbeat cycles.
-
 ```
-User (QQ/CLI) → Task Queue → Cron Heartbeat (30min)
-                                   │
-                          ┌────────┴────────┐
-                          │   Task Router   │
-                          └────────┬────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              ▼                    ▼                    ▼
-        Literature           Code/Exp            Self-Evolution
-        Search              Implementation      (every 2h)
-        (Hermes/web)        (Codex/Python)      │
-              │                    │             ├─ StrategyLearner
-              ▼                    ▼             ├─ MemoryPruner
-        Knowledge Base ◄──── Results ◄──────────└─ CPEGuard
-              │
-              ▼
-        Notification → QQ/User
+┌─────────────────────────────────────────────────────┐
+│              🤝 Partner                              │
+│  ┌────────────────┐ ┌────────────────────────┐      │
+│  │  Active Plan    │ │  Heartbeat (30-min)    │      │
+│  │  (multi-phase)  │ │  → QQ bot check       │      │
+│  └────────────────┘ │  → stuck task check    │      │
+│  ┌──────────┐      │  → send QQ report      │      │
+│  │Knowledge │      │  → update heartbeat     │      │
+│  │   Base   │      └────────────────────────┘      │
+│  └──────────┘                                      │
+│  ┌────────────────────────────────────────────┐    │
+│  │      SELF-EVOLUTION ENGINE (v0.4.0)        │    │
+│  │  StrategyLearner · MemoryPruner · CPEGuard │    │
+│  └────────────────────────────────────────────┘    │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────┐   │
+│  │QQ Bridge │ │   CLI    │ │ Agent Integration│   │
+│  │(Official)│ │          │ │ Codex · OpenClaw │   │
+│  │ NapCat   │ │          │ │ Hermes · Direct  │   │
+│  └──────────┘ └──────────┘ └──────────────────┘   │
+└──────────────────┬─────────────────────────────────┘
+                   ↕ LLM-powered chat
+┌──────────────────┴─────────────────────────────────┐
+│  QQ Bot Platform (api.sgroup.qq.com)                │
+│  WebSocket · REST API · Hermes/OpenClaw Backend     │
+└────────────────────────────────────────────────────┘
 ```
 
-The system is **cron-driven** — a heartbeat fires every 30 minutes minimum, checks whether a plan is active, advances it if possible, and pushes a status report to QQ. This architecture means Partner survives crashes naturally (the next cron tick recovers) and never interrupts in-progress work.
+### Plan Lifecycle
+
+A plan is a **continuous multi-phase event** that drives a project forward:
+
+```
+Phase Types:
+  📚 literature_search   — Search, read, extract methods from papers
+  💻 code_implementation — Modify code based on findings
+  🧪 experiment          — Run experiments, capture results
+  📊 analysis            — Compare, evaluate, summarize
+  🗺️ planning            — Formulate next steps
+
+Example Plan: "Push age prediction — solve batch effect"
+  Phase 1 [done]       literature_search: Combat, Harmony, limma
+  Phase 2 [in_progress] code_implementation: modifying data_loader.py
+  Phase 3 [pending]     experiment: run ComBat correction
+  Phase 4 [pending]     analysis: compare MAE before/after
+  Phase 5 [pending]     planning: next steps
+```
+
+Each phase can span multiple 30-min heartbeat cycles. The system advances phases automatically when deliverables are detected, and never interrupts an in-progress phase.
 
 ---
 
-## Features
+## Supported Agents
 
-- **Self-Evolving**: Every execution feeds back into strategy profiles. Partner gets better at prioritizing, pruning, and planning with each cycle.
-- **Autonomous**: Set a direction once — Partner plans and executes multi-phase research programs independently. Literature survey → code → experiment → analysis → next plan, all without human intervention.
-- **Multi-Tool Orchestration**: Integrates Hermes Agent, Codex CLI, and OpenClaw — each dispatched based on task type. A single research plan can span all three in sequence.
-- **Always On**: Cron-driven heartbeat with auto-recovery. Shutdown and restart mid-plan? Partner picks up exactly where it left off.
-- **QQ Native**: Talks to you via QQ (Official Bot or NapCat local proxy). Every heartbeat pushes a status report. You can check in anytime: "What have you been doing?"
-- **Cross-Platform**: Native Windows GUI (tkinter, GitHub Dark theme) + WSL/headless Linux. Same state files, same behavior.
-- **Transparent**: Every cycle produces a heartbeat report with current phase, progress, and next step. You always know what's happening.
+| Agent | Status | Notes |
+|-------|--------|-------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Full support | Skills + cron + LLM chat |
+| 🦞 [OpenClaw](https://github.com/openclaw/openclaw) | ✅ Supported | ACP bridge + agent delegation |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | ✅ Supported | `codex exec --full-auto` |
+| 🧠 [Claude Code](https://claude.ai/code) | ✅ Supported | CLI integration |
+| 📌 Direct mode | ✅ Built-in | No external agent needed |
 
 ---
 
-## Quick Start
+## Events vs Plans (Conceptual Shift)
+
+Partner v0.1 introduced **Events** — structured templates with predefined phases (literature_search → extraction → synthesis). Events were good for one-shot research cycles.
+
+Partner v0.2+ introduces **Plans** — the evolution of Events. A Plan is a continuous, multi-phase push on a single project. Key differences:
+
+| Aspect | Event (v0.1) | Plan (v0.2+) |
+|--------|--------------|-------------|
+| Scope | One complete research cycle | Continuous project drive |
+| Duration | Fixed TTL (48h max) | Unlimited — runs until goal achieved |
+| Phases | Predefined by template | Dynamic, LLM-created per goal |
+| Heartbeat | N/A — run once and done | Every 30-min check — advance or let continue |
+| Interruption | Never checked if already running | Detects active plan → no overwrite |
+| QQ Notification | Only on completion | Every 30-min heartbeat with progress |
+
+The old `task_queue.json` is still supported for backward compatibility, but the primary execution driver is now `active_plan.json` with the heartbeat model.
+
+---
+
+## Commands
 
 ```bash
-git clone https://github.com/zty522/partner
-cd partner
-pip install -e .
-partner setup        # Interactive wizard — pick your AI backend
-partner bot start qq # On Windows with NapCat, or Linux with Official Bot
-partner status       # Check in anytime
+partner setup                 Configure everything
+partner status                View full status (research + bot health)
+partner bot start qq          Start QQ bot in background
+partner bot stop qq           Stop QQ bot
+partner queue clear           Clear task queue
+partner config set interval N Change heartbeat interval (minutes)
+partner update                Pull latest code + reinstall
 ```
-
-**Windows one-click**: Download `Partner-v0.4.0-Setup.exe` from [Releases](https://github.com/zty522/partner/releases/latest), double-click, follow the wizard.
-
-**Linux one-line**:
-```bash
-curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
-```
-
-During setup, choose your backend(s):
-- **1** — Hermes Agent (recommended, full feature set)
-- **2** — OpenClaw (multi-channel AI assistant)
-- **3** — Both (switch between them)
-- **4** — Skip, configure later
 
 ---
 
-## How It Works
+## SOUL.md
 
-Partner runs on a **cron-driven heartbeat loop**. Every 30 minutes, the heartbeat fires and checks: is there an active plan? If yes, let it continue. If the current phase has deliverables, advance to the next phase. If idle, generate a new research plan based on the project's context and the knowledge base.
+Partner's behavioral creed — read it at [SOUL.md](SOUL.md). Seven core principles:
 
-Plans are **multi-phase research programs** stored in `active_plan.json`. A plan can have five phase types:
-
-| Phase | Purpose |
-|-------|---------|
-| 📚 literature_search | Search, read, extract methods from papers |
-| 💻 code_implementation | Modify or write code based on findings |
-| 🧪 experiment | Run experiments, capture results |
-| 📊 analysis | Compare, evaluate, summarize |
-| 🗺️ planning | Formulate next steps |
-
-Each phase can span multiple heartbeat cycles. The system never interrupts running work — it checks for completion signals (new files, updated results) and advances only when ready.
-
-**Real example**: When asked to advance the age prediction project, Partner automatically:
-1. Surveys literature on batch correction methods (ComBat, Harmony, limma)
-2. Implements GSVA pathway features in the data loader
-3. Runs cross-dataset experiments with corrected vs. uncorrected data
-4. Analyzes MAE improvement before and after correction
-5. Proposes the next research round — all autonomously, without a single command.
-
-### The Self-Evolution Engine (3-Layer)
-
-Running alongside the research loop, a full evolution cycle fires every 2 hours:
-
-1. **StrategyLearner** — Analyzes the last 50 journal entries, builds task-type profiles with success rates and value scores. High-success, high-value task types get priority boosts. Low-success types get demoted.
-
-2. **MemoryPruner** — Scans the knowledge base for stale entries (archive after 30 days), duplicate titles (merge), high-frequency references (promote), and orphaned entries (demote). The knowledge base stays lean and relevant.
-
-3. **CPEGuard** (Capability Preservation through Evaluation) — Registers core capabilities with baseline success rates. Each cycle re-evaluates current rates against baselines. Degradation beyond a 15% threshold triggers protective escalation — doubling verification frequency, adding redundant checks.
-
-This three-layer system means Partner doesn't just accumulate knowledge — it **curates** its own methodology, forgets what's no longer useful, and protects against skill regression. It's the difference between a filing cabinet and a working scientist.
-
----
-
-## Evolution
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full evolution log. Key milestones:
-
-| Version | Date | What Changed |
-|---------|------|-------------|
-| v0.1.0 | 2026-05-24 | Core foundation: cron-driven task queue, knowledge base, journal, event engine, self-evolution prototype |
-| v0.2.0 | 2026-05-26 | Heartbeat Plan Model (continuous multi-phase plans), QQ Official Bot, Conversation Engine V2 |
-| v0.3.0 | 2026-05-26 | Windows GUI, Codex/OpenClaw integration, one-click installers, GitHub Actions auto-build |
-| v0.4.0 | 2026-05-27 | Self-evolution engine matured to 3-layer production: StrategyLearner + MemoryPruner + CPEGuard |
+1. **Proactive, Not Reactive** — no idle cycles
+2. **We Remember What Matters** — sustained attention across sessions
+3. **Self-Correction Is a Core Competency** — name failure, pivot fast
+4. **We Learn by Doing** — every execution extracts a pattern
+5. **Depth Over Breadth** — one deep finding > 100 shallow searches
+6. **Honest Communication** — candor over presentation
+7. **Partnership, Not Service** — "Here's what I found. Here's what we should do next."
 
 ---
 
