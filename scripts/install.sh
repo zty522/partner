@@ -63,26 +63,69 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: ${BOLD}$(git --version 2>&1 | head -1)${NC}"
 
-# ── 2. 下载/更新 Partner ──
+# ── 2. 检测残留/损坏的安装 ──
+echo ""
+echo -e "${BOLD}${CYAN}  ▸ 检测已有安装${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
+
+# Test: does 'partner' binary exist AND can it actually load the module?
+_partner_ok=false
+if command -v partner &>/dev/null; then
+    # 直接测试 Python 模块是否能加载（不依赖 partner CLI 是否有 --version 参数）
+    if $PY -c "import partner; print('ok')" 2>/dev/null; then
+        _partner_ok=true
+    else
+        warn "发现 Partner 二进制文件但模块加载失败"
+        echo -e "  ${DIM}  原因: 旧安装可能不完整（pip 可编辑安装链接损坏、${NC}"
+        echo -e "  ${DIM}        仓库目录被删除或文件不完整）${NC}"
+        echo ""
+        echo -e "  ${YELLOW}  自动清理中...${NC}"
+
+        # 清理损坏的二进制
+        _partner_path="$(command -v partner)"
+        rm -f "$_partner_path" 2>/dev/null || true
+        info "已删除损坏的二进制: $_partner_path"
+
+        # 清理损坏的仓库（如果有备份）
+        if [ -d "$INSTALL_DIR" ]; then
+            mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
+            info "已备份旧目录: ${INSTALL_DIR}.bak.$(date +%s)"
+        fi
+
+        echo ""
+        echo -e "  ${GREEN}  已清理完毕，继续全新安装...${NC}"
+    fi
+else
+    info "未检测到已有安装"
+fi
+
+# ── 3. 下载 Partner ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 下载 Partner${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 
-if command -v partner &>/dev/null; then
-    info "Partner 已安装，执行更新..."
+if [ "$_partner_ok" = true ]; then
+    info "Partner 已安装且可用，执行更新..."
     exec partner update
 elif [ -d "$INSTALL_DIR/.git" ]; then
     info "已存在，更新到最新..."
     cd "$INSTALL_DIR"
     git pull --ff-only 2>&1 | head -3 || true
+    cd "$INSTALL_DIR"
+elif [ -d "$INSTALL_DIR" ]; then
+    # Directory exists but not a git repo — backup and re-clone
+    warn "目录存在但不完整，正在重新安装..."
+    mv "$INSTALL_DIR" "${INSTALL_DIR}.bak.$(date +%s)"
+    info "克隆仓库..."
+    git clone "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
 else
-    [ -d "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
     info "克隆仓库..."
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
-# ── 3. 安装 ──
+# ── 4. 安装 ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 安装${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
@@ -90,7 +133,7 @@ echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 $PY -m pip install -e . -q 2>/dev/null
 info "Python 包安装完成"
 
-# PATH 链接
+# PATH 链接（如果 pip 没创建 entry point）
 if ! command -v partner &>/dev/null; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/partner" << 'PYEOF'
@@ -109,7 +152,30 @@ PYEOF
 fi
 info "partner 命令已就绪"
 
-# ── 4. 运行 setup 向导 ──
+# ── 5. 验证安装 ──
+echo ""
+echo -e "${BOLD}${CYAN}  ▸ 验证${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
+
+if ! command -v partner &>/dev/null; then
+    error "partner 命令未在 PATH 中找到"
+    echo -e "  ${YELLOW}请手动运行: export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    echo -e "  ${YELLOW}然后: partner setup${NC}"
+    exit 1
+fi
+
+# 最终验证：模块能加载
+if $PY -c "import partner; print('ok')" 2>/dev/null; then
+    info "Partner 安装成功！"
+else
+    error "Partner 二进制存在但无法加载模块"
+    echo -e "  ${YELLOW}请手动检查:${NC}"
+    echo -e "  ${DIM}    ls -la $INSTALL_DIR/partner/cli.py${NC}"
+    echo -e "  ${DIM}    $PY -m pip list 2>/dev/null | grep partner${NC}"
+    exit 1
+fi
+
+# ── 6. 运行 setup 向导 ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 配置向导${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
