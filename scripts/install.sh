@@ -20,6 +20,7 @@ NC='\033[0m'
 
 info()  { echo -e "  ${GREEN}✓${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}⚠${NC} $1"; }
+skip()  { echo -e "  ${DIM}○${NC} $1"; }
 error() { echo -e "  ${RED}✗${NC} $1"; }
 step()  { echo -e "\n${BOLD}${CYAN}  ▸ $1${NC}"; echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"; }
 
@@ -30,7 +31,7 @@ echo -e "  ${DIM}One-click installer for Linux${NC}"
 echo -e "  ${CYAN}$(printf '%.0s━' {1..46})${NC}"
 echo ""
 
-# ── TTY detection: curl | bash pipes stdin, so read from /dev/tty ──
+# ── TTY detection ──
 INPUT_TTY=""
 if [ -t 0 ]; then
     INPUT_TTY="/dev/stdin"
@@ -38,7 +39,7 @@ elif [ -e /dev/tty ]; then
     INPUT_TTY="/dev/tty"
 fi
 
-# ── Arrow-key selection menu (bash version of prompt_choice) ──
+# ── Arrow-key selection menu ──
 # Usage: prompt_choice "question" "opt1" "opt2" ...
 # Sets global SELECTED_INDEX (0-based)
 prompt_choice() {
@@ -49,18 +50,13 @@ prompt_choice() {
     local selected=0
 
     if [ -z "$INPUT_TTY" ]; then
-        # No TTY available — default to first option
         SELECTED_INDEX=0
         return
     fi
 
-    # Hide cursor
-    printf '\033[?25l' >&2
-
-    # Print prompt
+    printf '\033[?25l'  # hide cursor
     echo -e "  ${BOLD}${prompt}${NC}"
 
-    # Print all options
     for i in "${!options[@]}"; do
         if [ "$i" -eq "$selected" ]; then
             echo -e "    ${CYAN}▶ ${options[$i]}${NC}"
@@ -69,28 +65,23 @@ prompt_choice() {
         fi
     done
 
-    # Move cursor back to first option
-    printf "\033[${n}A" >&2
+    printf "\033[${n}A"  # move cursor back up
 
     while true; do
-        # Read single char (raw mode via stty or read -rsn1)
         local key
         IFS= read -rsn1 key < "$INPUT_TTY" 2>/dev/null || break
 
         if [ "$key" = $'\x1b' ]; then
-            # Escape sequence — read next 2 chars
-            local seq2=""
+            local seq2="" seq3=""
             IFS= read -rsn1 -t 0.1 seq2 < "$INPUT_TTY" 2>/dev/null || true
-            local seq3=""
             IFS= read -rsn1 -t 0.1 seq3 < "$INPUT_TTY" 2>/dev/null || true
             if [ "$seq2" = '[' ]; then
                 case "$seq3" in
-                    A) selected=$(( (selected - 1 + n) % n )) ;;  # Up
-                    B) selected=$(( (selected + 1) % n )) ;;      # Down
+                    A) selected=$(( (selected - 1 + n) % n )) ;;
+                    B) selected=$(( (selected + 1) % n )) ;;
                 esac
             fi
         elif [ "$key" = '' ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
-            # Enter — confirm
             break
         elif [[ "$key" =~ [1-9] ]]; then
             local idx=$(( key - 1 ))
@@ -100,29 +91,48 @@ prompt_choice() {
             fi
         fi
 
-        # Rewrite all options in place
+        # Rewrite options in place
         for i in "${!options[@]}"; do
             if [ "$i" -eq "$selected" ]; then
                 printf "\r    \033[0;36m▶ %s\033[0m\033[K" "${options[$i]}"
             else
                 printf "\r    \033[2m  %s\033[0m\033[K" "${options[$i]}"
             fi
-            if [ "$i" -lt $((n - 1)) ]; then
-                printf "\033[1B"
-            fi
+            [ "$i" -lt $((n - 1)) ] && printf "\033[1B"
         done
         printf "\033[%dA" $((n - 1))
     done
 
-    # Clear below options and show result
-    printf "\033[%dB" "$n"
-    printf "\033[J" >&2
-    # Show cursor again
-    printf '\033[?25h' >&2
-
-    echo -e "    ${GREEN}▶ ${options[$selected]}${NC}"
-    echo ""
+    # Move to after last option, clear rest, show cursor
+    printf "\033[%dB\033[J\033[?25h" "$n"
     SELECTED_INDEX=$selected
+}
+
+# ── Component detection ──
+detect_hermes() {
+    local home="$HOME"
+    local hermes_dir="$home/.hermes"
+    [ -d "$hermes_dir" ] || return 1
+    # Check binary
+    for bin in "$home/.local/bin/hermes" "$hermes_dir/hermes-agent/venv/bin/hermes" /usr/local/bin/hermes; do
+        [ -x "$bin" ] && { echo "$bin"; return 0; }
+    done
+    command -v hermes 2>/dev/null && return 0
+    return 1
+}
+
+detect_openclaw() {
+    command -v openclaw 2>/dev/null
+}
+
+detect_node() {
+    command -v node &>/dev/null && node --version 2>/dev/null | grep -qoP '\d+' && [ "$(node --version 2>/dev/null | grep -oP '\d+' | head -1)" -ge 22 ]
+}
+
+detect_partner() {
+    command -v partner &>/dev/null && return 0
+    [ -d "$INSTALL_DIR" ] && return 0
+    return 1
 }
 
 # ── 检测系统 ──
@@ -172,22 +182,59 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: ${BOLD}$(git --version 2>&1 | head -1)${NC}"
 
+# ── 检测已安装组件 ──
+step "检测已安装组件"
+HERMES_INSTALLED=false
+OPENCLAW_INSTALLED=false
+HERMES_BIN=""
+
+if HERMES_BIN=$(detect_hermes); then
+    info "Hermes Agent: ${BOLD}已安装${NC} (${HERMES_BIN})"
+    HERMES_INSTALLED=true
+else
+    skip "Hermes Agent: 未安装"
+fi
+
+if detect_openclaw; then
+    info "OpenClaw: ${BOLD}已安装${NC} ($(command -v openclaw))"
+    OPENCLAW_INSTALLED=true
+else
+    skip "OpenClaw: 未安装"
+fi
+
+if detect_partner; then
+    info "Partner: ${BOLD}已安装${NC} (${INSTALL_DIR})"
+else
+    skip "Partner: 未安装"
+fi
+
 # ── 选择后端 Agent ──
-step "选择 AI 后端"
-echo ""
+if [ "$HERMES_INSTALLED" = true ] && [ "$OPENCLAW_INSTALLED" = true ]; then
+    # 两者都已装，跳过选择
+    info "两个后端都已安装，跳过选择"
+    AGENT_CHOICE=0
+elif [ "$HERMES_INSTALLED" = true ]; then
+    info "Hermes 已安装，跳过后端安装"
+    AGENT_CHOICE=0
+elif [ "$OPENCLAW_INSTALLED" = true ]; then
+    info "OpenClaw 已安装，跳过后端安装"
+    AGENT_CHOICE=0
+else
+    step "选择 AI 后端"
+    echo ""
 
-prompt_choice "选择 AI 后端:" \
-    "Hermes Agent (推荐)  — pip 安装，功能完整" \
-    "OpenClaw (小龙虾)    — npm 安装，多渠道 AI 助手" \
-    "两者都装" \
-    "先不装，我自己配置"
+    prompt_choice "选择 AI 后端:" \
+        "Hermes Agent (推荐)  — pip 安装，功能完整" \
+        "OpenClaw (小龙虾)    — npm 安装，多渠道 AI 助手" \
+        "两者都装" \
+        "先不装，我自己配置"
 
-AGENT_CHOICE=$((SELECTED_INDEX + 1))
+    AGENT_CHOICE=$((SELECTED_INDEX + 1))
+fi
 
 case "$AGENT_CHOICE" in
     2|3)
-        # OpenClaw 需要 Node.js
-        if ! command -v node &>/dev/null || [ "$(node --version 2>&1 | grep -oP '\d+' | head -1)" -lt 22 ]; then
+        if ! detect_node; then
             info "安装 Node.js 22 (OpenClaw 需要)..."
             if ! command -v n &>/dev/null; then
                 npm install -g n 2>/dev/null || true
@@ -230,9 +277,6 @@ case "$AGENT_CHOICE" in
             echo 'export N_PREFIX="$HOME/.n"' >> "$rc"
             echo 'export PATH="$N_PREFIX/bin:$HOME/.npm-global/bin:$PATH"' >> "$rc"
         done
-        ;;
-    4)
-        info "跳过后端安装，你可稍后手动安装"
         ;;
 esac
 
