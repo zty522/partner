@@ -1760,35 +1760,13 @@ def find_workspace():
     if ws and os.path.exists(ws):
         return ws
     
-    # 2. Check pointers and repo directory
-    partner_home = os.path.expanduser("~/.partner")
-    pointer_file = os.path.expanduser("~/.partner_workspace")
-
-    # 2a. Pointer file ~/.partner_workspace (new, avoids colliding with repo dir)
-    if os.path.isfile(pointer_file):
-        try:
-            with open(pointer_file) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2b. ~/.partner — could be a pointer file (old)
-    if os.path.isfile(partner_home):
-        try:
-            with open(partner_home) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2c. ~/.partner is the repo directory — check for config inside
-    if os.path.isdir(partner_home):
-        config_in_home = os.path.join(partner_home, "partner_config.json")
-        if os.path.exists(config_in_home):
-            return partner_home
+    # 2. Pointer file at ~/.partner
+    pointer = os.path.expanduser("~/.partner")
+    if os.path.exists(pointer):
+        with open(pointer) as f:
+            path = f.read().strip()
+        if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            return path
     
     # 3. Common locations
     candidates = [
@@ -1802,7 +1780,7 @@ def find_workspace():
 
 
 def save_workspace_pointer(workspace: str):
-    """Save workspace path to ~/.partner_workspace for easy discovery."""
-    pointer = os.path.expanduser("~/.partner_workspace")
+    """Save workspace path to ~/.partner for easy discovery."""
+    pointer = os.path.expanduser("~/.partner")
     with open(pointer, 'w') as f:
         f.write(workspace)

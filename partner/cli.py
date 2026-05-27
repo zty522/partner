@@ -363,20 +363,12 @@ def cmd_update(args):
 
                 cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
 
-你的核心原则是：30 分钟是最小心跳间隔，不是执行窗口。断线必须自动续跑。
+你的核心原则是：30 分钟是最小心跳间隔，不是执行窗口。
 每次心跳：
-1. 检查 active_plan.json
-   - active + 有 in_progress 阶段 → 执行该阶段，不要打断
-   - active + 所有阶段 completed → 标记 plan 完成，进入第2步
-   - planning + phases 为空 → 从 task_queue 创建计划，立即执行第1阶段
-   - completed → 进入第2步
-   - idle → 进入第2步
-2. 检查 state/task_queue.json 中的 pending 任务
-   - 有待执行任务 → 创建多阶段研究计划，立即执行第1阶段
-   - 无待执行任务 → 只做系统健康检查
-3. 每次心跳向 QQ 汇报当前状态（用 scripts/send_qq_report.py）
+1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
+2. 没有活跃计划则基于 task_queue.json 中的 pending 任务制定完整的多阶段计划
+3. 每次心跳向 QQ 汇报当前状态
 
-关键：重启/断线后必须自动接续，不要等人下指令。
 用中文。只在 {workspace} 内写文件。"""
 
                 cr_create = subprocess.run(
