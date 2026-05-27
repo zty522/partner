@@ -87,14 +87,14 @@ class HermesAdapter(AgentAdapter):
         return "Task queued for execution by Hermes agent."
     
     def chat(self, message: str, max_tokens: int = None) -> str:
-        """Chat via hermes subprocess."""
+        """Chat via hermes subprocess (fast timeout, fallback on hang)."""
         import subprocess
         import shlex
         try:
             cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=30,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -102,14 +102,15 @@ class HermesAdapter(AgentAdapter):
                 return out
             # Try with explicit provider fallback
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
-            return out or f"Error: {result.stderr[:200]}"
+            return None  # Don't send error text to user
         except subprocess.TimeoutExpired:
-            logger.warning(f"hermes chat timed out (60s) for query: {message[:60]}")
-            return "timeout"
+            logger.warning(f"hermes chat timed out (30s) for query: {message[:60]}")
+            return None  # Fallback to local response
         except FileNotFoundError:
-            return "Hermes agent is not available (not found in PATH)"
+            return None
         except Exception as e:
-            return f"Error: {e}"
+            logger.warning(f"hermes chat error: {e}")
+            return None
 
 
 class DirectAdapter(AgentAdapter):
