@@ -14,7 +14,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
-BLUE='\033[0;34m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
@@ -31,18 +30,100 @@ echo -e "  ${DIM}One-click installer for Linux${NC}"
 echo -e "  ${CYAN}$(printf '%.0s━' {1..46})${NC}"
 echo ""
 
-# ── TTY fix: read from /dev/tty when piped (curl | bash) ──
-_TTY_FD=""
-if [ ! -t 0 ]; then
-    # stdin is not a terminal (piped through curl | bash)
-    if [ -e /dev/tty ] && [ -r /dev/tty ]; then
-        # Try to open /dev/tty to verify it actually works
-        if exec 3< /dev/tty 2>/dev/null; then
-            _TTY_FD="/dev/tty"
-            exec 3<&-
-        fi
-    fi
+# ── TTY detection: curl | bash pipes stdin, so read from /dev/tty ──
+INPUT_TTY=""
+if [ -t 0 ]; then
+    INPUT_TTY="/dev/stdin"
+elif [ -e /dev/tty ]; then
+    INPUT_TTY="/dev/tty"
 fi
+
+# ── Arrow-key selection menu (bash version of prompt_choice) ──
+# Usage: prompt_choice "question" "opt1" "opt2" ...
+# Sets global SELECTED_INDEX (0-based)
+prompt_choice() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    local n=${#options[@]}
+    local selected=0
+
+    if [ -z "$INPUT_TTY" ]; then
+        # No TTY available — default to first option
+        SELECTED_INDEX=0
+        return
+    fi
+
+    # Hide cursor
+    printf '\033[?25l' >&2
+
+    # Print prompt
+    echo -e "  ${BOLD}${prompt}${NC}"
+
+    # Print all options
+    for i in "${!options[@]}"; do
+        if [ "$i" -eq "$selected" ]; then
+            echo -e "    ${CYAN}▶ ${options[$i]}${NC}"
+        else
+            echo -e "    ${DIM}  ${options[$i]}${NC}"
+        fi
+    done
+
+    # Move cursor back to first option
+    printf "\033[${n}A" >&2
+
+    while true; do
+        # Read single char (raw mode via stty or read -rsn1)
+        local key
+        IFS= read -rsn1 key < "$INPUT_TTY" 2>/dev/null || break
+
+        if [ "$key" = $'\x1b' ]; then
+            # Escape sequence — read next 2 chars
+            local seq2=""
+            IFS= read -rsn1 -t 0.1 seq2 < "$INPUT_TTY" 2>/dev/null || true
+            local seq3=""
+            IFS= read -rsn1 -t 0.1 seq3 < "$INPUT_TTY" 2>/dev/null || true
+            if [ "$seq2" = '[' ]; then
+                case "$seq3" in
+                    A) selected=$(( (selected - 1 + n) % n )) ;;  # Up
+                    B) selected=$(( (selected + 1) % n )) ;;      # Down
+                esac
+            fi
+        elif [ "$key" = '' ] || [ "$key" = $'\n' ] || [ "$key" = $'\r' ]; then
+            # Enter — confirm
+            break
+        elif [[ "$key" =~ [1-9] ]]; then
+            local idx=$(( key - 1 ))
+            if [ "$idx" -lt "$n" ]; then
+                selected=$idx
+                break
+            fi
+        fi
+
+        # Rewrite all options in place
+        for i in "${!options[@]}"; do
+            if [ "$i" -eq "$selected" ]; then
+                printf "\r    \033[0;36m▶ %s\033[0m\033[K" "${options[$i]}"
+            else
+                printf "\r    \033[2m  %s\033[0m\033[K" "${options[$i]}"
+            fi
+            if [ "$i" -lt $((n - 1)) ]; then
+                printf "\033[1B"
+            fi
+        done
+        printf "\033[%dA" $((n - 1))
+    done
+
+    # Clear below options and show result
+    printf "\033[%dB" "$n"
+    printf "\033[J" >&2
+    # Show cursor again
+    printf '\033[?25h' >&2
+
+    echo -e "    ${GREEN}▶ ${options[$selected]}${NC}"
+    echo ""
+    SELECTED_INDEX=$selected
+}
 
 # ── 检测系统 ──
 step "检查系统环境"
@@ -94,23 +175,14 @@ info "git: ${BOLD}$(git --version 2>&1 | head -1)${NC}"
 # ── 选择后端 Agent ──
 step "选择 AI 后端"
 echo ""
-echo -e "  Partner 需要一个 AI 后端来处理研究和对话。"
-echo -e "  选择一个你想使用的后端："
-echo ""
-echo -e "    ${BOLD}1)${NC} Hermes Agent ${CYAN}(推荐)${NC}  — pip 安装，功能完整"
-echo -e "    ${BOLD}2)${NC} OpenClaw (小龙虾)   — npm 安装，多渠道 AI 助手"
-echo -e "    ${BOLD}3)${NC} 两者都装"
-echo -e "    ${BOLD}4)${NC} 先不装，我自己配置"
-echo ""
 
-# Read from /dev/tty for curl | bash compatibility
-if [ -n "$_TTY_FD" ]; then
-    read -p "  请输入 [1-4] (默认 1): " AGENT_CHOICE < "$_TTY_FD"
-else
-    read -p "  请输入 [1-4] (默认 1): " AGENT_CHOICE
-fi
-AGENT_CHOICE=${AGENT_CHOICE:-1}
-echo ""
+prompt_choice "选择 AI 后端:" \
+    "Hermes Agent (推荐)  — pip 安装，功能完整" \
+    "OpenClaw (小龙虾)    — npm 安装，多渠道 AI 助手" \
+    "两者都装" \
+    "先不装，我自己配置"
+
+AGENT_CHOICE=$((SELECTED_INDEX + 1))
 
 case "$AGENT_CHOICE" in
     2|3)
@@ -139,7 +211,6 @@ case "$AGENT_CHOICE" in
     2)
         step "安装 OpenClaw"
         npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
-        # 写入 shell 配置
         for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
             [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
             echo "" >> "$rc"
