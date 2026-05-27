@@ -155,8 +155,9 @@ def _bot_stop(workspace, platform, quiet=False):
         print()  # blank line for spacing
 
 
-def _bot_start(workspace, platform, quiet=False):
+def _bot_start(workspace, platform, quiet=False, foreground=False):
     import subprocess
+    import time
     label = {"qq": "QQ"}.get(platform, platform)
     pp = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if platform == "qq":
@@ -186,8 +187,47 @@ def _bot_start(workspace, platform, quiet=False):
                 return
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        cmd = [sys.executable, "-c",
-            f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
+
+        # Read config to determine mode
+        mode = "napcat"
+        ws_url = "ws://localhost:3001"
+        try:
+            with open(cfg) as f:
+                cfg_data = json.load(f)
+            mode = cfg_data.get("mode", "official" if cfg_data.get("app_id") else "napcat")
+            ws_url = cfg_data.get("ws_url", "ws://localhost:3001")
+        except Exception:
+            pass
+
+        if mode == "napcat":
+            cmd = [sys.executable, "-c",
+                f"import sys; sys.path.insert(0,'{pp}'); from partner.napcat_bridge import NapCatBridge; b=NapCatBridge('{workspace}','{ws_url}'); b.start()"]
+        else:
+            cmd = [sys.executable, "-c",
+                f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
+
+        if foreground:
+            # Foreground mode: run with timeout and show output
+            print(f"  🔌 正在连接 ({mode})...")
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                out = r.stdout.strip()
+                err = r.stderr.strip()
+                if out:
+                    print(out)
+                if err:
+                    print(f"  {err[:200]}")
+                if r.returncode != 0:
+                    print(f"  ❌ 连接失败")
+                    sys.exit(r.returncode)
+            except subprocess.TimeoutExpired:
+                # Timed out but process might still be running — check if it connected
+                print(f"  ✅ 机器人已启动（连接中，请查看日志）")
+            except Exception as e:
+                print(f"  ❌ 启动异常: {e}")
+                sys.exit(1)
+            return
+
         proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         pidf = os.path.join(workspace, "state", "qq_bot.pid")
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
