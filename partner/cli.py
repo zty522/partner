@@ -369,11 +369,18 @@ def cmd_update(args):
 
                 cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
 
-你的核心原则是：30 分钟是最小心跳间隔，不是执行窗口。
+你的核心原则：
+1. 30 分钟是最小心跳间隔，不是执行窗口
+2. **不要停下来** — 计划完成后，立即搜索该领域最新前沿文献，
+   看有没有新的改进方向。如果有 → 创建延续计划继续研究。
+   不要等用户下指令才继续。
+
 每次心跳：
 1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
-2. 没有活跃计划则基于 task_queue.json 中的 pending 任务制定完整的多阶段计划
-3. 每次心跳向 QQ 汇报当前状态
+2. 计划已完成 → 读取 goal 和结果 → 搜索该领域前沿文献 →
+   有新方向就创建延续计划，没有就检查队列
+3. 空闲 + 队列有任务 → 自动创建计划
+4. 每次心跳向 QQ 汇报当前状态
 
 用中文。只在 {workspace} 内写文件。"""
 
@@ -410,6 +417,24 @@ def cmd_update(args):
             print(f"   ⚠ Cron 检查失败: {e}")
     else:
         print(f"   ℹ 未找到工作区（运行 partner setup 配置）")
+        # 没工作区 → 询问是否运行 setup
+        _tty = None
+        try:
+            _tty = open("/dev/tty", "r")
+        except OSError:
+            pass
+        if _tty:
+            try:
+                print(f"  {C_CYAN}是否运行配置向导？{C_RESET}[Y/n] ", end="", flush=True)
+                answer = _tty.readline().strip().lower()
+                if answer in ("", "y", "yes"):
+                    print()
+                    from .setup import interactive_setup
+                    interactive_setup()
+            except (EOFError, OSError):
+                pass
+            finally:
+                _tty.close()
     print()
 
     # 7. Success message
