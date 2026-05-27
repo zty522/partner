@@ -73,7 +73,7 @@ header "检测 Partner 安装状态"
 # 已安装可用 → 直接更新
 if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
     info "Partner 已安装且可用，执行更新..."
-    exec partner update
+    exec partner update </dev/tty
 fi
 
 # 清理损坏/残留
@@ -205,7 +205,7 @@ if [ "$_has_config" = true ]; then
         [Yy]*|"")
             info "启动配置向导..."
             export PATH="$HOME/.local/bin:$PATH"
-            exec partner setup
+            exec partner setup </dev/tty
             ;;
         *)
             info "跳过配置，可随时运行: partner setup"
@@ -214,7 +214,7 @@ if [ "$_has_config" = true ]; then
 else
     info "运行配置向导..."
     export PATH="$HOME/.local/bin:$PATH"
-    exec partner setup
+    exec partner setup </dev/tty
 fi
 
 # ── 完成（仅当跳过 setup 时到达这里）──
