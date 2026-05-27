@@ -281,201 +281,37 @@ def detect_codex() -> AgentInfo:
     return AgentInfo("codex", "OpenAI Codex", "⚡", False)
 
 
-# ── NapCat/QQ Detection ───────────────────────────────────────
-
-def _try_ws_connect(ws_url: str, timeout: float = 3.0) -> dict:
-    """Try a minimal TCP connection to check if NapCat is alive.
-
-    Returns dict with keys: ok, latency_ms, error
-    """
-    result = {"ok": False, "latency_ms": 0, "error": ""}
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(ws_url if "://" in ws_url else f"ws://{ws_url}")
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 3001
-        t0 = time.time()
-        sock = socket.create_connection((host, int(port)), timeout=timeout)
-        sock.close()
-        result["ok"] = True
-        result["latency_ms"] = round((time.time() - t0) * 1000)
-    except Exception as e:
-        result["error"] = str(e)
-    return result
-
-
-def detect_napcat() -> dict:
-    """Detect NapCat QQ bot server.
-
-    Returns dict: installed (bool), ws_url, latency_ms, error
-    """
-    info = {"installed": False, "ws_url": "", "latency_ms": 0, "error": ""}
-
-    # Common NapCat WebSocket ports
-    default_ports = [3001, 6700, 8080]
-
-    for port in default_ports:
-        ws_url = f"ws://127.0.0.1:{port}"
-        probe = _try_ws_connect(ws_url, timeout=2.0)
-        if probe["ok"]:
-            info["installed"] = True
-            info["ws_url"] = ws_url
-            info["latency_ms"] = probe["latency_ms"]
-            return info
-
-    info["error"] = "未检测到 NapCat 服务（尝试了端口 3001, 6700, 8080）"
-    return info
-
-
-def test_napcat_connection(ws_url: str, access_token: str = "") -> dict:
-    """Test NapCat connection and retrieve bot info via OneBot 11 HTTP API.
-
-    Returns dict: ok, bot_id, bot_name, latency_ms, error
-    """
-    result = {"ok": False, "bot_id": "", "bot_name": "", "latency_ms": 0, "error": ""}
-
-    # Try TCP connection first
-    ws_probe = _try_ws_connect(ws_url, timeout=5.0)
-    if not ws_probe["ok"]:
-        result["error"] = f"无法连接到 {ws_url}: {ws_probe['error']}"
-        return result
-    result["latency_ms"] = ws_probe["latency_ms"]
-
-    # Try HTTP API to get login info
-    try:
-        import urllib.request
-        from urllib.parse import urlparse
-        parsed = urlparse(ws_url if "://" in ws_url else f"ws://{ws_url}")
-        http_base = f"http://{parsed.hostname}:{parsed.port}"
-
-        headers = {"Content-Type": "application/json"}
-        if access_token:
-            headers["Authorization"] = f"Bearer {access_token}"
-
-        req = urllib.request.Request(
-            f"{http_base}/get_login_info",
-            headers=headers,
-            method="GET",
-        )
-        resp = urllib.request.urlopen(req, timeout=5)
-        data = json.loads(resp.read().decode(), strict=False)
-        if data.get("retcode") == 0:
-            result["ok"] = True
-            result["bot_id"] = str(data.get("data", {}).get("user_id", ""))
-            result["bot_name"] = data.get("data", {}).get("nickname", "")
-        else:
-            result["ok"] = True
-            result["bot_id"] = "unknown"
-            result["bot_name"] = "(HTTP API 不可用，但连接正常)"
-    except Exception:
-        # WS works, HTTP doesn't - still OK
-        result["ok"] = True
-        result["bot_id"] = "unknown"
-        result["bot_name"] = "(HTTP API 不可用，但连接正常)"
-
-    return result
-
-
-def auto_install_napcat() -> dict:
-    """Auto-download and install NapCat Shell if not present.
-
-    Returns dict with: installed, ws_url, napcat_dir, error
-    """
-    import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
-    
-    result = {"installed": False, "ws_url": "", "napcat_dir": "", "error": ""}
-    
-    # Check if already running
-    probe = _try_ws_connect("ws://127.0.0.1:3001", timeout=2.0)
-    if probe["ok"]:
-        result["installed"] = True
-        result["ws_url"] = "ws://127.0.0.1:3001"
-        return result
-    
-    status_info("NapCat 未运行，尝试自动下载安装...")
-    
-    try:
-        from deploy_napcat import auto_download_napcat, find_napcat_dir, generate_onebot11_config, write_config, launch_napcat
-        
-        # Default install to user's Downloads
-        import pathlib
-        home = pathlib.Path.home()
-        default_dir = str(home / "Downloads" / "NapCat_Shell")
-        
-        # Try to find existing installation first
-        napcat_dir = find_napcat_dir()
-        if not napcat_dir:
-            status_info("正在下载 NapCat Shell (含 Node.js 运行时)...")
-            napcat_dir = auto_download_napcat(default_dir)
-        
-        if napcat_dir:
-            result["napcat_dir"] = napcat_dir
-            result["installed"] = True
-            result["ws_url"] = "ws://127.0.0.1:3001"
-            status_ok(f"NapCat Shell 已就绪: {napcat_dir}")
-            
-            # Generate config
-            config = generate_onebot11_config(ws_port=3001)
-            
-            # Auto-launch NapCat
-            status_info("正在启动 NapCat Shell...")
-            if launch_napcat(napcat_dir):
-                status_ok("NapCat 已启动，请在弹出的 QQ 窗口扫码登录")
-                status_info("登录后按回车继续测试连接...")
-                input()  # Wait for user to scan QR code
-            else:
-                status_warn("自动启动失败，请手动启动:")
-                status_info(f"  双击 {napcat_dir}/launcher.bat")
-        else:
-            result["error"] = "自动下载失败"
-    except ImportError as e:
-        result["error"] = f"缺少部署脚本: {e}"
-    except Exception as e:
-        result["error"] = f"安装失败: {e}"
-    
-    return result
-
+# ── QQ Official Bot Configuration ─────────────────────────────
 
 def setup_qq_config(workspace: str) -> dict:
-    """Interactive QQ/NapCat configuration wizard.
+    """Interactive QQ Official Bot configuration wizard.
 
+    Uses QQ Open Platform Bot API (no NapCat required).
     Returns dict with QQ config to merge into partner_config.json
     """
-    section("QQ 集成配置 (NapCat)", "🐧")
+    section("QQ 官方机器人配置", "🐧")
+    status_info("需要 QQ 开放平台机器人 (https://q.qq.com)")
+    status_info("需要 AppID 和 AppSecret，在机器人控制台获取")
+    status_info("")
 
-    napcat = detect_napcat()
-    if napcat["installed"]:
-        status_ok(f"NapCat 服务已检测到  {napcat['ws_url']}  ({napcat['latency_ms']}ms)")
-    else:
-        status_warn(napcat["error"])
-        # Auto-install NapCat
-        install_result = auto_install_napcat()
-        if install_result["installed"]:
-            napcat["installed"] = True
-            napcat["ws_url"] = install_result["ws_url"]
-        else:
-            status_fail(f"自动安装失败: {install_result['error']}")
-            status_info("请手动安装 NapCat: https://github.com/NapNeko/NapCatQQ")
-            status_info("或稍后运行 'partner setup' 重新配置")
+    app_id = prompt_input("AppID", "")
+    if not app_id:
+        status_warn("AppID 为空，跳过 QQ 配置")
+        return {}
 
-    # ── WebSocket URL ──
-    default_ws = napcat["ws_url"] if napcat["installed"] else "ws://127.0.0.1:3001"
-    ws_url = prompt_input("NapCat WebSocket 地址", default_ws)
-    if not ws_url.startswith(("ws://", "wss://")):
-        ws_url = f"ws://{ws_url}"
+    app_secret = prompt_input("AppSecret", "")
+    if not app_secret:
+        status_warn("AppSecret 为空，跳过 QQ 配置")
+        return {}
 
-    # ── Access Token ──
-    access_token = prompt_input("Access Token (可选，直接回车跳过)", "")
-
-    # ── Test Connection ──
+    # ── Test connection ──
     status_info("正在测试连接...")
-    test_result = test_napcat_connection(ws_url, access_token)
-    if test_result["ok"]:
-        status_ok(f"连接成功! Bot: {test_result['bot_name']} (QQ: {test_result['bot_id']})  延迟: {test_result['latency_ms']}ms")
+    test_ok = _test_qq_official_connection(app_id, app_secret)
+    if test_ok:
+        status_ok("连接测试通过！")
     else:
-        status_fail(f"连接失败: {test_result['error']}")
-        retry = prompt_choice("连接失败，是否仍要保存配置？", [
+        status_fail("连接测试失败，请检查 AppID 和 AppSecret")
+        retry = prompt_choice("是否仍要保存配置？", [
             "保存配置（稍后手动检查）",
             "取消配置"
         ], default=0)
@@ -490,36 +326,39 @@ def setup_qq_config(workspace: str) -> dict:
     ], default=0)
     group_at_only = (group_mode == 0)
 
-    # ── Voice ──
-    voice_mode = prompt_choice("语音功能：", [
-        "启用语音识别 + 文字回复（推荐）",
-        "启用语音识别 + 语音回复",
-        "禁用语音功能"
-    ], default=0)
-    voice_enabled = voice_mode in (0, 1)
-    voice_reply = (voice_mode == 1)
-
-    # ── Friend requests ──
-    friend_mode = prompt_choice("好友请求处理：", [
-        "手动审核（推荐）",
-        "自动通过"
-    ], default=0)
-    auto_approve_friend = (friend_mode == 1)
-
     qq_config = {
+        "mode": "official",
         "enabled": True,
-        "ws_url": ws_url,
-        "access_token": access_token,
+        "app_id": app_id,
+        "app_secret": app_secret,
         "group_at_only": group_at_only,
-        "voice_enabled": voice_enabled,
-        "voice_reply": voice_reply,
-        "auto_approve_friend": auto_approve_friend,
-        "bot_id": test_result.get("bot_id", ""),
-        "bot_name": test_result.get("bot_name", ""),
+        "auto_approve_friend": True,
     }
 
-    status_ok(f"QQ 配置已保存: ws={ws_url}, group_at_only={group_at_only}, voice={voice_enabled}")
+    status_ok(f"QQ 官方机器人配置已保存")
     return qq_config
+
+
+def _test_qq_official_connection(app_id: str, app_secret: str) -> bool:
+    """Test QQ Official Bot connection by getting access token."""
+    try:
+        import urllib.request
+        import json as _json
+        data = _json.dumps({
+            "appId": app_id,
+            "clientSecret": app_secret,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.sgroup.qq.com/v2/apps/access_token",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode())
+            return "access_token" in result
+    except Exception:
+        return False
 
 
 def detect_wcferry() -> dict:
@@ -1325,8 +1164,8 @@ def interactive_setup():
         "每 4 小时（低频，省 API）",
     ]
     interval_values = [15, 30, 60, 120, 240]
-    old_interval = old_config.get("scheduler", {}).get("interval_minutes", 30)
-    interval_default = 1  # default: 30 min
+    old_interval = old_config.get("scheduler", {}).get("interval_minutes", 15)
+    interval_default = 0  # default: 15 min
     for i, v in enumerate(interval_values):
         if v == old_interval:
             interval_default = i
@@ -1588,7 +1427,7 @@ def show_status(workspace=None):
             print(f"    📶 状态:     {C.BOLD}{s}{C.RESET}")
 
     # ── Interval ──
-    interval = config.get("scheduler", {}).get("interval_minutes", 30)
+    interval = config.get("scheduler", {}).get("interval_minutes", 15)
     print(f"    ⏰ 间隔:     {C.BOLD}每 {interval} 分钟{C.RESET}")
     print(f"    📌 修改:     {C.DIM}partner config set interval N{C.RESET}")
     
