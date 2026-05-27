@@ -62,26 +62,48 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: ${BOLD}$(git --version 2>&1 | head -1)${NC}"
 
-# ── 2. 下载/更新 Partner ──
+# ── 2. 检测已有安装 ──
+echo ""
+echo -e "${BOLD}${CYAN}  ▸ 检测已有安装${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
+
+# 优先走更新路径：二进制存在 + 模块可加载
+if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
+    info "Partner 已安装且可用，执行更新..."
+    exec partner update
+fi
+
+# 清理损坏/残留
+_cleaned=false
+if command -v partner &>/dev/null; then
+    warn "发现 Partner 二进制文件但模块无法加载，自动清理..."
+    rm -f "$(command -v partner)" 2>/dev/null || true
+    _cleaned=true
+fi
+if [ -d "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
+    _cleaned=true
+elif [ -f "$INSTALL_DIR" ]; then
+    rm -f "$INSTALL_DIR" 2>/dev/null || true
+    _cleaned=true
+fi
+
+if [ "$_cleaned" = true ]; then
+    echo -e "  ${GREEN}  已清理完毕，继续全新安装...${NC}"
+else
+    info "未检测到已有安装"
+fi
+
+# ── 3. 下载 Partner ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 下载 Partner${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 
-if command -v partner &>/dev/null; then
-    info "Partner 已安装，执行更新..."
-    exec partner update
-elif [ -d "$INSTALL_DIR/.git" ]; then
-    info "已存在，更新到最新..."
-    cd "$INSTALL_DIR"
-    git pull --ff-only 2>&1 | head -3 || true
-else
-    [ -d "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
-    info "克隆仓库..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
-fi
+info "克隆仓库..."
+git clone "$REPO_URL" "$INSTALL_DIR"
+cd "$INSTALL_DIR"
 
-# ── 3. 安装 ──
+# ── 4. 安装 ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 安装${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
@@ -89,7 +111,6 @@ echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 $PY -m pip install -e . -q 2>/dev/null
 info "Python 包安装完成"
 
-# PATH 链接（如果 pip 没创建 entry point）
 if ! command -v partner &>/dev/null; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/partner" << 'PYEOF'
@@ -108,7 +129,7 @@ PYEOF
 fi
 info "partner 命令已就绪"
 
-# ── 4. 运行 setup 向导 ──
+# ── 5. 运行 setup 向导 ──
 echo ""
 echo -e "${BOLD}${CYAN}  ▸ 配置向导${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
