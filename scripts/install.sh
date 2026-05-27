@@ -67,7 +67,34 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: $(git --version 2>&1 | head -1)"
 
-# ── 选择后端 Agent ──
+# ── 检测 Partner 安装状态（优先，不先问后端）──
+header "检测 Partner 安装状态"
+
+# 已安装可用 → 直接更新
+if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
+    info "Partner 已安装且可用，执行更新..."
+    exec partner update
+fi
+
+# 清理损坏/残留
+_cleaned=false
+if command -v partner &>/dev/null; then
+    warn "发现 Partner 旧二进制文件但模块无法加载，自动清理..."
+    rm -f "$(command -v partner)" 2>/dev/null || true
+    _cleaned=true
+fi
+if [ -d "$INSTALL_DIR" ] || [ -f "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
+    _cleaned=true
+fi
+
+if [ "$_cleaned" = true ]; then
+    echo -e "${GREEN}  已清理旧安装，继续全新安装...${NC}"
+else
+    info "未检测到已有安装"
+fi
+
+# ── 选择后端 Agent（全新安装才问）──
 header "选择 AI 后端"
 echo ""
 echo "  Partner 需要一个 AI 后端来处理研究和对话。"
@@ -84,7 +111,6 @@ echo ""
 
 case "$AGENT_CHOICE" in
     2|3)
-        # OpenClaw 需要 Node.js
         if ! command -v node &>/dev/null || [ "$(node --version 2>&1 | grep -oP '\d+' | head -1)" -lt 22 ]; then
             info "安装 Node.js 22 (OpenClaw 需要)..."
             if ! command -v n &>/dev/null; then
@@ -109,7 +135,6 @@ case "$AGENT_CHOICE" in
     2)
         header "安装 OpenClaw"
         npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
-        # 写入 shell 配置
         for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
             [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
             echo "" >> "$rc"
@@ -134,33 +159,6 @@ case "$AGENT_CHOICE" in
         info "跳过后端安装，你可稍后手动安装"
         ;;
 esac
-
-# ── 检测 Partner 安装状态 ──
-header "检测 Partner 安装状态"
-
-# 优先走更新路径：二进制存在 + 模块可加载
-if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
-    info "Partner 已安装且可用，执行更新..."
-    exec partner update
-fi
-
-# 清理损坏/残留
-_cleaned=false
-if command -v partner &>/dev/null; then
-    warn "发现 Partner 旧二进制文件但模块无法加载，自动清理..."
-    rm -f "$(command -v partner)" 2>/dev/null || true
-    _cleaned=true
-fi
-if [ -d "$INSTALL_DIR" ] || [ -f "$INSTALL_DIR" ]; then
-    rm -rf "$INSTALL_DIR" 2>/dev/null || true
-    _cleaned=true
-fi
-
-if [ "$_cleaned" = true ]; then
-    echo -e "${GREEN}  已清理旧安装，继续全新安装...${NC}"
-else
-    info "未检测到已有安装"
-fi
 
 # ── 安装 Partner ──
 header "安装 Partner"
@@ -192,15 +190,41 @@ PYEOF
 fi
 info "partner: $HOME/.local/bin/partner"
 
-# ── 完成 ──
+# ── 检测已有配置，询问是否运行 setup ──
+_has_config=false
+if $PY -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); from partner.setup import find_workspace; print(find_workspace() or '')" 2>/dev/null | grep -q .; then
+    _has_config=true
+fi
+
+header "配置"
+if [ "$_has_config" = true ]; then
+    echo -e "  ${CYAN}检测到已有配置文件，是否运行配置向导修改？${NC}"
+    read -p "  [Y/n] (默认 Y): " _run_setup
+    _run_setup=${_run_setup:-Y}
+    case "$_run_setup" in
+        [Yy]*|"")
+            info "启动配置向导..."
+            export PATH="$HOME/.local/bin:$PATH"
+            exec partner setup
+            ;;
+        *)
+            info "跳过配置，可随时运行: partner setup"
+            ;;
+    esac
+else
+    info "运行配置向导..."
+    export PATH="$HOME/.local/bin:$PATH"
+    exec partner setup
+fi
+
+# ── 完成（仅当跳过 setup 时到达这里）──
 header "🎉 Partner 安装完成!"
 echo -e "  ${BOLD}安装目录:${NC} $INSTALL_DIR"
 echo ""
-echo -e "  ${CYAN}接下来:${NC}"
-echo -e "  1. 新开终端或执行: ${BOLD}source ~/.bashrc${NC}"
-echo -e "  2. 运行配置向导:    ${BOLD}partner setup${NC}"
-echo -e "  3. 查看状态:        ${BOLD}partner status${NC}"
-echo -e "  4. 启动 QQ 机器人:  ${BOLD}partner bot start qq${NC}"
+echo -e "  ${CYAN}常用命令:${NC}"
+echo -e "  partner setup        配置向导"
+echo -e "  partner status       查看状态"
+echo -e "  partner bot start qq 启动 QQ 机器人"
 echo ""
 
 cd "$HOME"
