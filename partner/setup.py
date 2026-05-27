@@ -398,8 +398,10 @@ def auto_install_napcat() -> dict:
     try:
         from deploy_napcat import auto_download_napcat, find_napcat_dir, generate_onebot11_config, write_config, launch_napcat
         
-        # Default install to Windows Downloads
-        default_dir = "/mnt/c/Users/zty12/Downloads/NapCat_Shell"
+        # Default install to user's Downloads
+        import pathlib
+        home = pathlib.Path.home()
+        default_dir = str(home / "Downloads" / "NapCat_Shell")
         
         # Try to find existing installation first
         napcat_dir = find_napcat_dir()

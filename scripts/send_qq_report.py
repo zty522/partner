@@ -2,7 +2,7 @@
 """Send QQ notification for Partner cycle report.
 
 Usage:
-    python3 scripts/send_qq_report.py /mnt/e/work/partner_workspace
+    python3 scripts/send_qq_report.py /path/to/partner_workspace
 
 This script:
 1. Reads cycle results from state files
@@ -18,10 +18,46 @@ import sys
 import time
 from datetime import datetime, timezone
 
-# QQ Bot credentials
-APP_ID = "1904072984"
-APP_SECRET = "JXWGm8HCsLabPAoS"
-IS_SANDBOX = True  # sandbox environment
+
+def load_qq_credentials(workspace: str) -> tuple:
+    """Load QQ bot credentials from workspace config files.
+
+    Tries qq_config.json first, then partner_config.json messaging.qq section.
+    Returns (app_id, app_secret, is_sandbox).
+    """
+    # Try qq_config.json
+    qq_cfg_path = os.path.join(workspace, "qq_config.json")
+    if os.path.exists(qq_cfg_path):
+        with open(qq_cfg_path) as f:
+            cfg = json.load(f)
+        app_id = cfg.get("app_id", "")
+        app_secret = cfg.get("app_secret", "")
+        is_sandbox = cfg.get("is_sandbox", True)
+        if app_id and app_secret:
+            return app_id, app_secret, is_sandbox
+
+    # Try partner_config.json
+    pcfg_path = os.path.join(workspace, "partner_config.json")
+    if os.path.exists(pcfg_path):
+        with open(pcfg_path) as f:
+            cfg = json.load(f)
+        qq = cfg.get("messaging", {}).get("qq", {})
+        app_id = qq.get("app_id", "")
+        app_secret = qq.get("app_secret", "")
+        is_sandbox = qq.get("is_sandbox", True)
+        if app_id and app_secret:
+            return app_id, app_secret, is_sandbox
+
+    raise RuntimeError(
+        f"QQ credentials not found. Configure via 'partner setup' or create {qq_cfg_path} "
+        f"with app_id and app_secret fields."
+    )
+
+
+# Globals set in main()
+APP_ID = ""
+APP_SECRET = ""
+IS_SANDBOX = True
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 API_BASE = "https://sandbox.api.sgroup.qq.com" if IS_SANDBOX else "https://api.sgroup.qq.com"
@@ -214,12 +250,22 @@ def save_notification(workspace: str, summary: str):
 
 
 def main():
+    global APP_ID, APP_SECRET, IS_SANDBOX, API_BASE
+
     if len(sys.argv) < 2:
         print("Usage: send_qq_report.py <workspace_path>")
         sys.exit(1)
 
     workspace = sys.argv[1]
     state_dir = os.path.join(workspace, "state")
+
+    # 0. Load QQ credentials from config
+    try:
+        APP_ID, APP_SECRET, IS_SANDBOX = load_qq_credentials(workspace)
+        API_BASE = "https://sandbox.api.sgroup.qq.com" if IS_SANDBOX else "https://api.sgroup.qq.com"
+    except RuntimeError as e:
+        log(f"⚠️ {e}")
+        sys.exit(1)
 
     # 1. Build report
     report = build_report(workspace)
@@ -229,6 +275,21 @@ def main():
     save_notification(workspace, report)
 
     # 3. Check if user sent message within 60 minutes
+    # Check heartbeat suppression flag (set when a task was just queued)
+    flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
+    if os.path.exists(flag_path):
+        try:
+            with open(flag_path) as f:
+                flag_time = float(f.read().strip())
+            if time.time() - flag_time < 180:  # 3 minutes
+                log("Heartbeat suppressed — task was just queued, skipping push")
+                os.remove(flag_path)
+                return
+            else:
+                os.remove(flag_path)  # stale flag
+        except Exception:
+            pass
+
     ctx_path = os.path.join(state_dir, "qq_user_context.json")
     if not os.path.exists(ctx_path):
         log("No QQ user context found — skipping passive send, notification saved")

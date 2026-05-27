@@ -184,7 +184,7 @@ print("\\n---\\nExecuting via Hermes Agent session...")
             f.write(f"# Pending Task\n\n{prompt}\n\n---\nWaiting for Hermes agent to pick up.\n")
         return "Task written to file. Waiting for Hermes agent to execute."
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via Hermes."""
         mode = self._check_hermes()
         
@@ -195,10 +195,12 @@ print("\\n---\\nExecuting via Hermes Agent session...")
             try:
                 result = subprocess.run(
                     ["hermes", "chat", "--message", message],
-                    capture_output=True, text=True, timeout=60,
+                    capture_output=True, text=True, timeout=300,
                     cwd=self.workspace,
                 )
                 return result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
+            except subprocess.TimeoutExpired:
+                return "请求超时，请稍后再试"
             except Exception as e:
                 return f"Hermes chat error: {e}"
         else:

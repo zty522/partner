@@ -46,7 +46,7 @@ class AgentAdapter(ABC):
         pass
     
     @abstractmethod
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         """Have a conversation (used for the check-in interface)."""
         pass
 
@@ -86,14 +86,15 @@ class HermesAdapter(AgentAdapter):
         # For MVP, return a placeholder - in production this would invoke hermes
         return "Task queued for execution by Hermes agent."
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via hermes subprocess."""
         import subprocess
         import shlex
         try:
+            cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
-                ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""],
-                capture_output=True, text=True, timeout=120,
+                cmd,
+                capture_output=True, text=True, timeout=300,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -151,7 +152,7 @@ class DirectAdapter(AgentAdapter):
         # For MVP, just return the prompt for the cron job to handle
         return f"Task recorded: {prompt}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         return "Direct mode: I can only work through scheduled tasks."
 
 

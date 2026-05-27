@@ -48,7 +48,7 @@ class AutoGPTAdapter(AgentAdapter):
         except Exception as e:
             return f"AutoGPT error: {e}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         return self.execute_task(message)
 
 
@@ -87,7 +87,7 @@ class OpenHandsAdapter(AgentAdapter):
         except Exception as e:
             return f"OpenHands error: {e}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         return self.execute_task(message)
 
 
@@ -134,7 +134,7 @@ class CrewAIAdapter(AgentAdapter):
         except Exception as e:
             return f"CrewAI error: {e}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         return self.execute_task(message)
 
 
@@ -168,5 +168,5 @@ class GptmeAdapter(AgentAdapter):
         except Exception as e:
             return f"gptme error: {e}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         return self.execute_task(message)

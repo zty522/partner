@@ -137,6 +137,6 @@ class OpenClawAdapter(AgentAdapter):
         except Exception as e:
             return f"OpenClaw adapter error: {e}"
     
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via OpenClaw."""
         return self.execute_task(message, timeout=120)

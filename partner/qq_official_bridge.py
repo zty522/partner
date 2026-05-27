@@ -102,6 +102,7 @@ class QQQfficialBridge:
             "errors": 0,
         }
         self._force_run_triggered = False
+        self._last_task_queued_at = 0  # timestamp of last task queue (suppress heartbeat double-report)
 
     # ── Configuration ──────────────────────────────────────────────
 
@@ -330,7 +331,7 @@ class QQQfficialBridge:
                     return
             self._force_run_triggered = False
 
-            # Step 2: Normal chat — get LLM response
+            # Step 2: Normal chat — get LLM response directly (no double-reply)
             reply = self._get_response(msg.sender_id, user_text, msg.message_type)
 
             # Save dialogue to workspace
@@ -443,13 +444,15 @@ class QQQfficialBridge:
 
             prompt = f"""你是 Partner，我的私人研究伙伴。你一直在后台自己研究东西，每 {self._get_interval_minutes()} 分钟醒一次。
 
-回复规则：
-- 像朋友聊天一样说话，简短自然
+回复规则（严格遵守）：
+- 像好朋友聊天一样说话，自然口语化，像真人
+- 不要用emoji开头每一句（一个👌😊✅偶尔点缀可以）
+- 不说代码、diff、JSON、文件路径、配置文件内容
+- 绝对不要用markdown格式：不用**加粗**、*斜体*、`代码`、#标题、-列表、>引用
+- 不用"收到"、"好的"、"明白了"这类机械回复开头
+- 用户让你推进项目 → 直接说"好，开始弄"然后执行，别问方向
+- 用户让你继续 → 直接继续，不用确认
 - 不知道就说不知道，不编造
-- 用户让你推进项目 → 直接说"好的，开始推进"然后执行，不要问方向
-- 用户让你继续 → 直接继续，不要确认
-- 不说代码、diff、JSON 这些东西
-- 不要用markdown格式，不要用**加粗**、*斜体*、列表符号、标题等
 
 {ctx_str}
 {notif_str}
@@ -464,27 +467,42 @@ class QQQfficialBridge:
 
     @staticmethod
     def _simplify_response(reply: str) -> str:
-        """Post-process response to be concise and conversational."""
+        """Post-process response to be concise and conversational.
+
+        Strips all markdown formatting so QQ receives clean text.
+        """
+        import re
+
+        # Strip markdown thoroughly (both single and double asterisks)
+        reply = re.sub(r'\*{1,2}(.+?)\*{1,2}', r'\1', reply)       # **bold** and *italic* → plain
+        reply = re.sub(r'__(\S.*?\S)__', r'\1', reply)             # __underline__
+        reply = re.sub(r'~~(.+?)~~', r'\1', reply)                 # ~~strikethrough~~
+        reply = re.sub(r'`{1,3}[^`]*?`{1,3}', '', reply)           # `code` and ```code``` → remove
+        reply = re.sub(r'^#{1,6}\s+', '', reply, flags=re.MULTILINE)  # # heading → remove heading marker
+        reply = re.sub(r'^>\s?', '', reply, flags=re.MULTILINE)    # > blockquote → remove
+        reply = re.sub(r'^(\s*[-*+])\s+', '  ', reply, flags=re.MULTILINE)  # - list → indent only
+        reply = re.sub(r'\n{3,}', '\n\n', reply)                   # Collapse excessive newlines
+
         # Hard cap at 500 chars for QQ
         max_len = 500
         if len(reply) > max_len:
-            # Try to find a natural break point
             break_at = reply.rfind("。", 0, max_len - 20)
             if break_at > max_len // 2:
                 reply = reply[:break_at + 1]
             else:
                 reply = reply[:max_len - 10] + "……"
 
-        # Remove very long markdown-style list items (more than 3 items)
+        # Limit list items to at most 3
         lines = reply.split("\n")
         short_lines = []
         list_count = 0
         for line in lines:
-            if line.strip().startswith(("•", "-", "  ", "1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9.")):
+            stripped = line.strip()
+            if stripped and stripped[0] in ("•", "-", "·", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"):
                 list_count += 1
                 if list_count > 3:
                     if list_count == 4:
-                        short_lines.append("  ……还有其他内容")
+                        short_lines.append("  ……")
                     continue
             short_lines.append(line)
         reply = "\n".join(short_lines)
@@ -801,6 +819,16 @@ class QQQfficialBridge:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
+        # Mark task queued timestamp to suppress heartbeat double-report
+        self._last_task_queued_at = time.time()
+        # Also write flag file so external scripts (send_qq_report.py) can check
+        try:
+            flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
+            with open(flag_path, "w") as f:
+                f.write(str(self._last_task_queued_at))
+        except Exception:
+            pass
+
         # Immediately trigger the cron job so the task starts processing now
         try:
             cfg_path = os.path.join(self.workspace, "partner_config.json")
@@ -843,13 +871,8 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        # Build confirmation
-        parts = [
-            f"✅ 收到任务，已加入队列",
-            f"📋 {text[:80]}{'...' if len(text) > 80 else ''}",
-            f"⏰ 下次研究周期（约{self._get_interval_minutes()}分钟后）将自动执行",
-        ]
-        return "\n".join(parts)
+        # Build natural conversational confirmation
+        return f"好，开始推进「{text[:40]}」了，跑完告诉你结果。"
 
     def _get_interval_minutes(self) -> int:
         """Read configured research interval from partner_config.json."""
