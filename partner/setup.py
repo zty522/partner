@@ -1697,6 +1697,22 @@ def find_workspace():
     for c in candidates:
         if os.path.exists(os.path.join(c, "partner_config.json")):
             return c
+
+    # 4. Partner app directory itself (has config.json and partner/__init__.py)
+    partner_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.isfile(os.path.join(partner_dir, "partner", "__init__.py")):
+        return partner_dir
+    cfg_in_partner = os.path.join(partner_dir, "config.json")
+    if os.path.exists(cfg_in_partner):
+        try:
+            with open(cfg_in_partner) as f:
+                data = json.load(f)
+            ws = data.get("workspace", "")
+            if ws and os.path.isfile(os.path.join(ws, "partner", "__init__.py")):
+                return ws
+        except Exception:
+            pass
+
     return None
 
 

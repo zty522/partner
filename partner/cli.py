@@ -14,70 +14,9 @@ from pathlib import Path
 
 
 def get_workspace() -> str:
-    """Get configured workspace path."""
-    import json as _json
-    
-    # 1. Environment variable
-    ws = os.environ.get("PARTNER_WORKSPACE")
-    if ws and os.path.exists(ws):
-        return ws
-    
-    # 2. Check pointers and repo directory
-    partner_home = os.path.expanduser("~/.partner")
-    pointer_file = os.path.expanduser("~/.partner_workspace")
-
-    # 2a. Pointer file ~/.partner_workspace (new)
-    if os.path.isfile(pointer_file):
-        try:
-            with open(pointer_file) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2b. ~/.partner — could be a pointer file (old)
-    if os.path.isfile(partner_home):
-        try:
-            with open(partner_home) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2c. ~/.partner is the repo directory — check for config inside
-    if os.path.isdir(partner_home):
-        config_in_home = os.path.join(partner_home, "partner_config.json")
-        if os.path.exists(config_in_home):
-            return partner_home
-    
-    # 3. Common locations
-    candidates = [
-        os.path.expanduser("~/partner_workspace"),
-        os.path.expanduser("~/.partner_workspace"),
-    ]
-    for c in candidates:
-        config = os.path.join(c, "partner_config.json")
-        if os.path.exists(config):
-            return c
-
-    # 4. Partner app directory itself (has config.json and partner/__init__.py)
-    partner_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.isfile(os.path.join(partner_dir, "partner", "__init__.py")):
-        return partner_dir
-    cfg_in_partner = os.path.join(partner_dir, "config.json")
-    if os.path.exists(cfg_in_partner):
-        try:
-            with open(cfg_in_partner) as f:
-                data = _json.load(f)
-            ws = data.get("workspace", "")
-            if ws and os.path.isfile(os.path.join(ws, "partner", "__init__.py")):
-                return ws
-        except Exception:
-            pass
-
-    return None
+    """Get configured workspace path (delegates to setup.find_workspace)."""
+    from .setup import find_workspace as _fw
+    return _fw()
 
 
 def cmd_setup(args):
