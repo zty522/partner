@@ -184,10 +184,11 @@ $DesktopPath = [Environment]::GetFolderPath("Desktop")
 $ShortcutPath = "$DesktopPath\Partner.lnk"
 $WScriptShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = "powershell.exe"
-$Shortcut.Arguments = "-NoExit -Command partner status"
+$Shortcut.TargetPath = "wscript.exe"
+$Shortcut.Arguments = "$PartnerDir\Partner.vbs"
 $Shortcut.Description = "Partner - Your AI Research Companion"
-$Shortcut.WorkingDirectory = "%USERPROFILE%"
+$Shortcut.WorkingDirectory = "$PartnerDir"
+$Shortcut.IconLocation = "$PartnerDir\Partner.exe, 0"
 $Shortcut.Save()
 Write-Info "桌面快捷方式已创建"
 
@@ -209,21 +210,20 @@ if ($yn -ne "n") {
     # 更新 bat 指向系统 Python
     @"
 @echo off
-python -m partner.cli %*
+set PYTHONPATH=%~dp0;%PYTHONPATH%
+if "%1"=="" (
+    pythonw.exe -m partner.gui
+) else (
+    python -m partner.cli %*
+)
 "@ | Out-File -FilePath $BatchPath -Encoding ASCII
 }
 
 # ── 完成 ──
-Write-Header "🎉 Partner 安装完成!"
+Write-Header "Partner 安装完成!"
 Write-Host ""
 Write-Host "  安装目录: $PartnerDir" -ForegroundColor $Cyan
 Write-Host ""
-Write-Host "  ${Cyan}接下来:${NC}"
-Write-Host "  1. 新开命令行窗口（或重启 PowerShell）"
-Write-Host "  2. 直接输入 partner 即可使用"
-Write-Host "  3. 配置向导: partner setup"
-Write-Host "  4. 查看状态: partner status"
-Write-Host "  5. 启动 QQ:  partner bot start qq"
+Write-Host "  双击桌面上的 Partner 快捷方式启动" -ForegroundColor $Green
 Write-Host ""
-Write-Host "  或双击桌面上的 Partner 快捷方式" -ForegroundColor $Green
 Write-Host ""

@@ -140,10 +140,11 @@ set SHORTCUT=%USERPROFILE%\Desktop\Partner.lnk
 (
 echo Set WshShell = CreateObject("WScript.Shell"^)
 echo Set sc = WshShell.CreateShortcut("%SHORTCUT%"^)
-echo sc.TargetPath = "powershell.exe"
-echo sc.Arguments = "-NoExit -Command partner status"
+echo sc.TargetPath = "wscript.exe"
+echo sc.Arguments = "%~dp0Partner.vbs"
 echo sc.Description = "Partner AI Research Companion"
-echo sc.WorkingDirectory = "%USERPROFILE%"
+echo sc.WorkingDirectory = "%~dp0"
+echo sc.IconLocation = "%~dp0Partner.exe, 0"
 echo sc.Save
 ) > %TEMP%\mklnk.vbs
 cscript //nologo %TEMP%\mklnk.vbs >nul
@@ -155,9 +156,5 @@ echo ====================================
 echo  INSTALLATION COMPLETE!
 echo ====================================
 echo.
-echo  Open a new command prompt and type:
-echo    partner status
+echo  Double-click the Partner icon on your desktop to launch.
 echo.
-echo  Or double-click the Partner icon on your desktop.
-echo.
-pause
