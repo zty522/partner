@@ -1,6 +1,35 @@
 # Changelog
 
-## [0.4.0] - 2026-05-27
+## [0.4.0] - 2026-05-28
+
+### 🏗️ 架构重构
+- **代码瘦身 33%**：从 13,715 行减至 9,158 行，删除 10 个冗余文件
+- **新三层架构**：Shell(CLI/GUI/QQ) → State JSON → Engine(Hermes cron)，移除旧 Python 内核编排器
+- **Event Bus 推送系统**：`event_bus.jsonl` 统一管理所有推送事件（研究突破/卡死/自检发现）
+- **轻量自检引擎**：替代 603 行理论自进化引擎，每次心跳做 3 步自检（知识冲突、卡死、数据泄漏）
+- **统一 QQ 桥接**：删除 NapCat 模式，只保留 QQ Official Bot
+- **单点事实源**：`find_workspace()` 三合一，统一由 `setup.py` 提供
+- **cron 频率升级**：30 分钟→15 分钟，响应更快
+
+### 🔥 删除的模块
+- `event.py` + `event_engine.py` + `event_templates.py` — 被 active_plan 取代
+- `self_evolution.py` — 被轻量 `self_check.py` 取代
+- `napcat_bridge.py` + `napcat_onebot.py` + `napcat_proxy.py` — 统一为官方 Bot
+- `hermes_adapter.py` + `other_adapters.py` + `openclaw_adapter.py` + `openclaw_bridge.py` — 重复适配器
+- `idea_generator.py` — 未连接任何模块
+- `wsl_bridge.py` — 从未使用
+- `cycle_runner.py` + `heartbeat.py` + `test_qq_bot.py` + 三个迁移脚本 — 一次性/测试代码
+
+### 新增模块
+- `event_bus.py` — 基于 jsonl 的推送事件系统（push/pop/peek/clear）
+- `self_check.py` — 轻量自检（知识冲突 + 卡死 + 数据泄漏检测）
+- `ARCHITECTURE-v2.md` — 新架构设计文档
+- `proactive_notifier.py` — 精简为 Event Bus 阅读器（419→70 行）
+
+### 配置变更
+- cron 默认间隔从 30 分钟改为 15 分钟
+- QQ 设置向导改为官方 Bot 模式（AppID + AppSecret）
+- 移除 OpenClaw/CrewAI/AutoGPT/OpenHands/gptme Agent 检测
 
 ### 🚀 新增功能
 - **即时 QQ 回复**：用户发消息时立即回复"请等待，正在思考..."，然后后台处理后再发送实际回复（解决"回消息太慢"问题）
