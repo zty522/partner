@@ -57,17 +57,9 @@ L = {
         "chat_unavailable": "对话模块暂不可用。\n\n请先运行设置向导配置 Partner。",
         "chat_error": "暂时无法处理这条消息。\n\n({msg})",
         "qq_banner": "  💬  通过 QQ 与 Partner 对话！",
-        "qq_banner_sub": "NapCat（本地注入）或 QQ 开放平台（官方机器人），选择一种模式。",
         "qq_config_title": "连接配置",
-        "qq_mode_label": "模式",
-        "qq_mode_napcat": "NapCat（本地）",
-        "qq_mode_official": "官方机器人",
-        "qq_id_label": "QQ 号",
-        "qq_pw_label": "密码",
-        "qq_ws_url": "WS 地址",
         "qq_appid": "AppID",
         "qq_secret": "AppSecret",
-        "qq_test": "  测试  ",
         "qq_save": "  💾  保存  ",
         "qq_load": "  📂  载入  ",
         "qq_status_title": "机器人状态",
@@ -80,8 +72,6 @@ L = {
         "qq_stopped": "已停止",
         "qq_saved": "QQ 配置已保存",
         "qq_no_ws": "未配置工作区",
-        "qq_napcat_found": "NapCat 已检测到 (端口 {port})",
-        "qq_napcat_missing": "未检测到 NapCat，请确认 QQ + NapCat 正在运行",
         "logs_title": "日志查看",
         "btn_reload": "  ⟳  刷新日志  ",
         "logs_no_ws": "未配置工作区。",
@@ -130,17 +120,9 @@ L = {
         "chat_unavailable": "Conversation module unavailable.\n\nRun Setup Wizard to configure Partner.",
         "chat_error": "Couldn't process that.\n\n({msg})",
         "qq_banner": "  💬  Chat with Partner via QQ!",
-        "qq_banner_sub": "NapCat (local injection) or QQ Official Bot platform. Select a mode.",
         "qq_config_title": "Connection",
-        "qq_mode_label": "Mode",
-        "qq_mode_napcat": "NapCat (local)",
-        "qq_mode_official": "Official Bot",
-        "qq_id_label": "QQ ID",
-        "qq_pw_label": "Password",
-        "qq_ws_url": "WS URL",
         "qq_appid": "AppID",
         "qq_secret": "AppSecret",
-        "qq_test": "  Test  ",
         "qq_save": "  💾  Save  ",
         "qq_load": "  📂  Load  ",
         "qq_status_title": "Bot Status",
@@ -153,8 +135,6 @@ L = {
         "qq_stopped": "Stopped",
         "qq_saved": "QQ config saved",
         "qq_no_ws": "No workspace configured",
-        "qq_napcat_found": "NapCat detected (port {port})",
-        "qq_napcat_missing": "NapCat not found — ensure QQ + NapCat are running",
         "logs_title": "Log Viewer",
         "btn_reload": "  ⟳  Reload Logs  ",
         "logs_no_ws": "No workspace configured.",
@@ -222,9 +202,33 @@ FONT_MONO = ("Cascadia Code", "Cascadia Mono", "Consolas", "monospace")
 
 
 def find_workspace():
+    """Find existing Partner workspace, checking multiple locations.
+
+    Returns workspace path or None.
+    """
+    # 1. Pointer files (from previous setup)
+    pointer_files = [
+        os.path.expanduser("~/.partner_workspace"),
+        os.path.expanduser("~/.partner"),
+    ]
+    for pf in pointer_files:
+        if os.path.isfile(pf):
+            try:
+                with open(pf) as f:
+                    path = f.read().strip()
+                if path and os.path.exists(os.path.join(path, "partner_config.json")):
+                    return path
+            except OSError:
+                pass
+
+    # 2. Candidate directories (check for repo or config)
     for p in WORKSPACE_CANDIDATES:
+        # Either the repo code exists or a config file exists
         if os.path.exists(os.path.join(p, "partner", "__init__.py")):
             return p
+        if os.path.exists(os.path.join(p, "partner_config.json")):
+            return p
+
     return None
 
 
@@ -437,7 +441,7 @@ class PartnerApp:
         rf.pack(side=tk.RIGHT)
 
         # Language toggle button
-        lang_text = tr("lang_toggle", "en" if self._lang == "zh" else "zh")
+        lang_text = tr("lang_toggle", self._lang)
         self.lang_btn = tk.Label(rf, text=lang_text, bg=T["bg3"], fg=T["txt2"],
                                  font=(FONT[0], 9), cursor="hand2", padx=10, pady=3)
         self.lang_btn.pack(side=tk.RIGHT, padx=(8, 0))
@@ -738,7 +742,7 @@ class PartnerApp:
         threading.Thread(target=do_reply, daemon=True).start()
 
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
-    #  QQ Bot Tab — Support NapCat + QQ Official Bot, with connection check
+    #  QQ Bot Tab — Official QQ Bot only
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     def _build_tab_qq(self):
         f = self._tab_contents[2]
@@ -751,71 +755,27 @@ class PartnerApp:
         tk.Label(info, text=self._tr("qq_banner"),
                  bg=T["bg3"], fg=T["blue"], font=(FONT[0], 10, "bold"),
                  anchor=tk.W).pack(fill=tk.X, padx=16, pady=(8, 2))
-        tk.Label(info, text=self._tr("qq_banner_sub"),
-                 bg=T["bg3"], fg=T["txt2"], font=(FONT[0], 9),
-                 anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 8))
 
         # ── Connection card ──
         cc = AccentCard(f, title=self._tr("qq_config_title"),
                         accent_color=T["accent"])
         cc.pack(fill=tk.X, padx=0, pady=(0, 10))
 
-        # Mode selector
-        mode_row = tk.Frame(cc.body, bg=T["card"])
-        mode_row.pack(fill=tk.X, padx=18, pady=(6, 0))
-        tk.Label(mode_row, text=self._tr("qq_mode_label"), bg=T["card"], fg=T["txt2"],
-                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
-        self.qq_mode_var = tk.StringVar(value="napcat")
-        for val, label in [("napcat", self._tr("qq_mode_napcat")),
-                           ("official", self._tr("qq_mode_official"))]:
-            rb = tk.Radiobutton(mode_row, text=label, variable=self.qq_mode_var, value=val,
-                                bg=T["card"], fg=T["txt"], selectcolor=T["input_bg"],
-                                activebackground=T["card"], activeforeground=T["accent2"],
-                                font=(FONT[0], 9), command=self._toggle_qq_mode)
-            rb.pack(side=tk.LEFT, padx=(0, 16))
-
-        # ── NapCat fields ──
-        self.qq_napcat_frame = tk.Frame(cc.body, bg=T["card"])
-        self.qq_napcat_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
-        # WS URL
-        ws_row = tk.Frame(self.qq_napcat_frame, bg=T["card"])
-        ws_row.pack(fill=tk.X)
-        tk.Label(ws_row, text=self._tr("qq_ws_url"), bg=T["card"], fg=T["txt2"],
-                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
-        self.qq_wsurl = Input(ws_row)
-        self.qq_wsurl.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
-        self.qq_wsurl.insert(0, "ws://localhost:3001")
-        # Test button
-        self.qq_test_btn = Btn(ws_row, text=self._tr("qq_test"),
-                               command=self._test_napcat)
-        self.qq_test_btn.pack(side=tk.LEFT, padx=(8, 0))
-        # QQ ID (informational for NapCat)
-        nc_id_row = tk.Frame(self.qq_napcat_frame, bg=T["card"])
-        nc_id_row.pack(fill=tk.X, pady=(8, 10))
-        tk.Label(nc_id_row, text=self._tr("qq_id_label"), bg=T["card"], fg=T["txt2"],
-                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
-        self.qq_napcat_id = Input(nc_id_row)
-        self.qq_napcat_id.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
-
-        # ── Official Bot fields ──
-        self.qq_official_frame = tk.Frame(cc.body, bg=T["card"])
         # AppID
-        aid_row = tk.Frame(self.qq_official_frame, bg=T["card"])
-        aid_row.pack(fill=tk.X, pady=(0, 10))
+        aid_row = tk.Frame(cc.body, bg=T["card"])
+        aid_row.pack(fill=tk.X, padx=18, pady=(10, 10))
         tk.Label(aid_row, text=self._tr("qq_appid"), bg=T["card"], fg=T["txt2"],
                  font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
         self.qq_appid = Input(aid_row)
         self.qq_appid.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+
         # AppSecret
-        sec_row = tk.Frame(self.qq_official_frame, bg=T["card"])
-        sec_row.pack(fill=tk.X, pady=(0, 10))
+        sec_row = tk.Frame(cc.body, bg=T["card"])
+        sec_row.pack(fill=tk.X, padx=18, pady=(0, 10))
         tk.Label(sec_row, text=self._tr("qq_secret"), bg=T["card"], fg=T["txt2"],
                  font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
         self.qq_secret = Input(sec_row, show="*")
         self.qq_secret.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
-
-        # Initially hide official frame
-        self.qq_official_frame.pack_forget()
 
         # Save/Load
         btn_row = tk.Frame(cc.body, bg=T["card"])
@@ -847,101 +807,41 @@ class PartnerApp:
 
         self.root.after(300, self._load_qq_config)
 
-    def _toggle_qq_mode(self):
-        """Show/hide fields based on selected mode and pre-check NapCat."""
-        if self.qq_mode_var.get() == "napcat":
-            self.qq_official_frame.pack_forget()
-            self.qq_napcat_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
-            # Auto-detect NapCat
-            self._auto_detect_napcat()
-        else:
-            self.qq_napcat_frame.pack_forget()
-            self.qq_official_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
-
-    def _auto_detect_napcat(self):
-        """Check common ports for NapCat and update WS URL field."""
-        import socket
-        for port in [3001, 6700, 8080]:
-            try:
-                s = socket.create_connection(("127.0.0.1", port), timeout=1)
-                s.close()
-                self.qq_wsurl.delete(0, tk.END)
-                self.qq_wsurl.insert(0, f"ws://localhost:{port}")
-                self.qq_status_label.config(
-                    text=self._tr("qq_napcat_found", port=port),
-                    fg=T["green"])
-                return
-            except Exception:
-                continue
-        self.qq_status_label.config(
-            text=self._tr("qq_napcat_missing"),
-            fg=T["yellow"])
-
-    def _test_napcat(self):
-        """Test NapCat WebSocket connection."""
-        import socket, re
-        ws_url = self.qq_wsurl.get().strip()
-        m = re.search(r"(?:ws://)?([^:]+)(?::(\d+))?", ws_url)
-        host = m.group(1) if m else "127.0.0.1"
-        port = int(m.group(2)) if m and m.group(2) else 3001
-        try:
-            s = socket.create_connection((host, port), timeout=3)
-            s.close()
-            messagebox.showinfo("OK", f"NapCat 已连接 ({host}:{port})")
-        except Exception as e:
-            messagebox.showerror("Error", f"NapCat 未运行: {e}")
-
     def _qq_config_path(self):
         if not self.workspace:
             return None
         return os.path.join(self.workspace, "qq_config.json")
 
     def _save_qq_config(self):
+        """Save QQ Bot config as official mode only."""
         path = self._qq_config_path()
         if not path:
             messagebox.showerror("Error", self._tr("qq_no_ws"))
             return
-        mode = self.qq_mode_var.get()
-        if mode == "napcat":
-            cfg = {
-                "mode": "napcat",
-                "ws_url": self.qq_wsurl.get().strip(),
-                "qq_id": self.qq_napcat_id.get().strip(),
-            }
-        else:
-            cfg = {
-                "mode": "official",
-                "app_id": self.qq_appid.get().strip(),
-                "app_secret": self.qq_secret.get().strip(),
-            }
+        cfg = {
+            "mode": "official",
+            "app_id": self.qq_appid.get().strip(),
+            "app_secret": self.qq_secret.get().strip(),
+        }
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
         messagebox.showinfo("Saved", self._tr("qq_saved"))
 
     def _load_qq_config(self):
+        """Load QQ Bot config and populate fields."""
         path = self._qq_config_path()
         if not path or not os.path.exists(path):
-            self._auto_detect_napcat()
             return
         try:
             with open(path) as f:
                 cfg = json.load(f)
-            mode = cfg.get("mode", "official" if cfg.get("app_id") else "napcat")
-            self.qq_mode_var.set(mode)
-            self._toggle_qq_mode()
-            if mode == "napcat":
-                self.qq_wsurl.delete(0, tk.END)
-                self.qq_wsurl.insert(0, cfg.get("ws_url", "ws://localhost:3001"))
-                self.qq_napcat_id.delete(0, tk.END)
-                self.qq_napcat_id.insert(0, cfg.get("qq_id", ""))
-            else:
-                self.qq_appid.delete(0, tk.END)
-                self.qq_appid.insert(0, cfg.get("app_id", ""))
-                self.qq_secret.delete(0, tk.END)
-                self.qq_secret.insert(0, cfg.get("app_secret", ""))
+            self.qq_appid.delete(0, tk.END)
+            self.qq_appid.insert(0, cfg.get("app_id", ""))
+            self.qq_secret.delete(0, tk.END)
+            self.qq_secret.insert(0, cfg.get("app_secret", ""))
         except Exception:
-            self._auto_detect_napcat()
+            pass
 
     def _start_qq_bot(self):
         if not self.workspace:
@@ -1229,7 +1129,7 @@ class PartnerApp:
             qq_id = setup_qq_id.get().strip()
             qq_pw = setup_qq_pw.get().strip()
             if qq_id:
-                qq_cfg = {"mode": "napcat", "qq_id": qq_id, "qq_password": qq_pw}
+                qq_cfg = {"mode": "official", "app_id": qq_id, "app_secret": qq_pw}
                 with open(os.path.join(ws, "qq_config.json"), "w") as fh:
                     json.dump(qq_cfg, fh, indent=2)
 

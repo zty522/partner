@@ -113,8 +113,9 @@ def cmd_bot(args):
         return
     platform = args.platform
     action = args.action
+    foreground = getattr(args, 'foreground', False)
     if action == "start":
-        _bot_start(workspace, platform)
+        _bot_start(workspace, platform, foreground=foreground)
     elif action == "stop":
         _bot_stop(workspace, platform)
 
@@ -674,6 +675,7 @@ def main():
     p_bot.add_argument('action', choices=['start', 'stop'], help='操作')
     p_bot.add_argument('platform', choices=['qq'], help='机器人类型')
     p_bot.add_argument('--workspace', '-w', help='工作区路径')
+    p_bot.add_argument('--foreground', action='store_true', help='前台模式（供GUI调用）')
     p_bot.set_defaults(func=cmd_bot)
 
     # update

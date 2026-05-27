@@ -94,7 +94,7 @@ class HermesAdapter(AgentAdapter):
             cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=60,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -104,7 +104,8 @@ class HermesAdapter(AgentAdapter):
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
             return out or f"Error: {result.stderr[:200]}"
         except subprocess.TimeoutExpired:
-            return "请求超时，请稍后再试"
+            logger.warning(f"hermes chat timed out (60s) for query: {message[:60]}")
+            return "timeout"
         except FileNotFoundError:
             return "Hermes agent is not available (not found in PATH)"
         except Exception as e:

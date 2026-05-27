@@ -490,7 +490,7 @@ class QQQfficialBridge:
 用户说: {text}"""
 
             result = self._adapter.chat(prompt)
-            if result and not result.startswith("Error"):
+            if result and not result.startswith("Error") and result != "timeout":
                 return result
         except Exception as e:
             logger.warning(f"LLM chat failed: {e}")
