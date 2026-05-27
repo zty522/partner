@@ -38,6 +38,7 @@ Usage:
 import asyncio
 import json
 import logging
+import random
 import time
 import threading
 from dataclasses import dataclass, field
@@ -264,6 +265,8 @@ class QQQfficialBot:
                 payload = {"content": content, "msg_type": 0}
             if msg_id:
                 payload["msg_id"] = msg_id
+            # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
+            payload["msg_seq"] = random.randint(1, 999999999)
         elif message_type == QQMessageType.GROUP_AT:
             endpoint = f"/v2/groups/{target_id}/messages"
             if media:
@@ -272,6 +275,8 @@ class QQQfficialBot:
                 payload = {"content": content, "msg_type": 0}
             if msg_id:
                 payload["msg_id"] = msg_id
+            # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
+            payload["msg_seq"] = random.randint(1, 999999999)
         elif message_type == QQMessageType.GUILD:
             endpoint = f"/channels/{target_id}/messages"
             payload = {"content": content, "msg_id": msg_id} if msg_id else {"content": content}

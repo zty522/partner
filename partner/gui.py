@@ -228,7 +228,14 @@ def find_workspace():
     return None
 
 
-def run_silent(cmd, cwd=None, timeout=30):
+def run_silent(cmd, cwd=None, timeout=30, timeout_ok=False):
+    """Run command silently, return (stdout, stderr, returncode).
+
+    Args:
+        timeout_ok: If True, TimeoutExpired is treated as success (rc=0).
+                    Use for long-running processes (bots, servers) where
+                    the command runs indefinitely and timeout means it started OK.
+    """
     try:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
@@ -239,6 +246,8 @@ def run_silent(cmd, cwd=None, timeout=30):
         )
         return result.stdout.strip(), result.stderr.strip(), result.returncode
     except subprocess.TimeoutExpired:
+        if timeout_ok:
+            return "", "", 0  # timeout = process still running = success
         return "", "Command timed out", 1
     except Exception as e:
         return "", str(e), 1

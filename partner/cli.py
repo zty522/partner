@@ -206,23 +206,33 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
             cmd = [sys.executable, "-c",
                 f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
 
+        # Escape backslashes in paths for -c strings (Windows: C:\Users → C:/Users)
+        # Without this, \U, \P etc. get interpreted as Unicode escapes by Python -c
+        cmd[2] = cmd[2].replace("\\", "/")
+
         if foreground:
-            # Foreground mode: run with timeout and show output
+            # Foreground mode: start bot, wait, write PID if alive
             print(f"  🔌 正在连接 ({mode})...")
             try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                out = r.stdout.strip()
-                err = r.stderr.strip()
-                if out:
-                    print(out)
-                if err:
-                    print(f"  {err[:200]}")
-                if r.returncode != 0:
-                    print(f"  ❌ 连接失败")
-                    sys.exit(r.returncode)
-            except subprocess.TimeoutExpired:
-                # Timed out but process might still be running — check if it connected
-                print(f"  ✅ 机器人已启动（连接中，请查看日志）")
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL, start_new_session=True,
+                )
+                # Wait up to 6s for connection, then check if alive
+                import time as _t
+                _t.sleep(6)
+                if proc.poll() is None:
+                    # Process is still running = connected successfully
+                    pidf = os.path.join(workspace, "state", "qq_bot.pid")
+                    os.makedirs(os.path.dirname(pidf), exist_ok=True)
+                    with open(pidf, "w") as f:
+                        f.write(str(proc.pid))
+                    print(f"  ✅ 机器人已启动 (PID: {proc.pid})")
+                else:
+                    # Process exited — get output for error
+                    out = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
+                    print(out[:500] if out else "  ❌ 机器人连接失败（进程已退出）")
+                    sys.exit(1)
             except Exception as e:
                 print(f"  ❌ 启动异常: {e}")
                 sys.exit(1)
