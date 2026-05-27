@@ -112,6 +112,12 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+{ ── Detect Python on startup ── }
+procedure InitializeWizard;
+begin
+  PythonInstalled := CheckPython();
+end;
+
 { ── Run install steps ── }
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
