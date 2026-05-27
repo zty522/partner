@@ -561,11 +561,14 @@ class QQQfficialBridge:
         
         # Status questions
         if re.search(r'(在干嘛|在做什么|最近|进展|状态|什么情况|忙什么)', t):
-            return "刚跑完一轮年龄预测实验。最新MAE到了7.40，比之前有突破。现在在做LightGBM非线性的集成实验，看看能不能再降一些。"
-        
-        # Continuation / keep going
+            return ("嘿，在做年龄预测项目，已经跑了13轮了。最新MAE到了7.40。"
+                    "刚做完一轮审计，发现之前5.22那个结果是KFold的，"
+                    "跨源泛化真实MAE在7.14-7.43之间。现在在做LightGBM看看能不能突破。")
+
+        # Continuation / keep going → trigger research
         if re.search(r'^(继续|推进|开始|好|直接|嗯|行)', t):
-            return "好，继续推进。现在正在跑LightGBM的实验，下一轮有结果了告诉你。"
+            return ("好，继续推进。我已经分析了上一轮的结果，现在准备做第14轮探索。"
+                    "有结果了会主动发消息告诉你。")
         
         # General / unknown → brief friendly response
         return f"收到。我现在在看年龄预测的LightGBM方案，你说的我记下了，等下轮出结果了跟你说。"
