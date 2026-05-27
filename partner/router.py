@@ -22,6 +22,7 @@ from enum import Enum
 
 class Intent(Enum):
     """User intent classification."""
+    GREETING = "greeting"
     STATUS = "status"
     PROGRESS = "progress"
     KNOWLEDGE = "knowledge"
@@ -47,6 +48,12 @@ class ParsedQuery:
 # Intent classification rules: (pattern, intent, confidence, topic_group)
 # topic_group: regex group index for topic extraction, or None
 INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
+    # Greetings - high priority
+    (r"^(你好|您好|嗨|hi|hello|hey|早[上啊]?|晚上好|下午好|中午好|在吗|在不在)",
+     Intent.GREETING, 0.99, None),
+    (r"^(good morning|good afternoon|good evening|morning|afternoon)",
+     Intent.GREETING, 0.99, None),
+    
     # Status queries - expanded for QQ chat
     (r"(最近|刚才|今天)(在?干|在?做|研究|搞|忙)(了?什么|啥|什么活)", Intent.STATUS, 0.95, None),
     (r"(你在?干什么|你在?做什么|在忙什么|状态|进展如何|进展怎么样|最近在研究什么)", Intent.STATUS, 0.9, None),
@@ -105,6 +112,7 @@ class ConversationRouter:
         self.task_queue = task_queue
         self.state = state
         self._handlers: Dict[Intent, Callable] = {
+            Intent.GREETING: self._handle_greeting,
             Intent.STATUS: self._handle_status,
             Intent.PROGRESS: self._handle_progress,
             Intent.KNOWLEDGE: self._handle_knowledge,
@@ -155,6 +163,14 @@ class ConversationRouter:
     
     # ==================== Handlers ====================
     
+    def _handle_greeting(self, parsed: ParsedQuery) -> str:
+        """Respond to greetings naturally."""
+        return ("嘿！我在呢~ 最近在研究一些有趣的东西。\\n\\n"
+                "你可以问我：\\n"
+                "  • 「最近在研究什么？」 — 看看进展\\n"
+                "  • 「关于 X 你知道什么？」 — 搜搜知识\\n"
+                "  • 「去研究 X」 — 加个新任务")
+
     def _handle_status(self, parsed: ParsedQuery) -> str:
         """Generate status report: recent activities, knowledge, stats."""
         lines = ["📊 我最近的研究进展：\n"]

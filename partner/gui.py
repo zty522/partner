@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Partner — Modern Windows Desktop Application (v5)
+"""Partner — Modern Desktop Application (v6)
 
-A polished GUI for managing Partner on Windows.
-Features: Dashboard, Chat, QQ Bot Config, Logs
+Features: Dashboard, Chat, QQ Bot, Logs
 All backend commands run silently without terminal windows.
+Language: Chinese / English toggle.
 """
 
 import json
@@ -30,31 +30,195 @@ CHAT_HISTORY_LIMIT = 30
 LOG_FILE_LIMIT = 5
 LOG_BYTE_LIMIT = 4000
 
-# ── Theme ──
-T = {
-    "bg":        "#0c0c1a",
-    "bg2":       "#13132a",
-    "bg3":       "#181838",
-    "card":      "#191938",
-    "card_hl":   "#252550",
-    "accent":    "#7c5cfc",
-    "accent2":   "#a78bfa",
-    "accent3":   "#5b41d4",
-    "accent_h":  "#9480f5",
-    "green":     "#34d399",
-    "yellow":    "#fbbf24",
-    "red":       "#f87171",
-    "blue":      "#60a5fa",
-    "pink":      "#e879f9",
-    "txt":       "#e2e8f0",
-    "txt2":      "#94a3b8",
-    "txt3":      "#5b6b8f",
-    "border":    "#1e1e44",
-    "input_bg":  "#0e0e24",
-    "chat_user": "#2a1f60",
-    "chat_bot":  "#1a2238",
-    "glow":      "#1a1a50",
+# ── i18n ──
+LANGUAGES = {"zh": "中文", "en": "English"}
+
+L = {
+    "zh": {
+        "app_title": "Partner",
+        "ver": "v0.4.0",
+        "tab_dashboard": "仪表盘",
+        "tab_chat": "对话",
+        "tab_qq": "QQ 机器人",
+        "tab_logs": "日志",
+        "status_loading": "加载中…",
+        "status_no_workspace": "尚未配置工作区\n\n点击「设置向导」开始",
+        "status_workspace": "工作区",
+        "status_ready": "就绪",
+        "status_no_ws_short": "未配置工作区",
+        "btn_refresh": "  ⟳  刷新  ",
+        "btn_open_ws": "  📂  打开工作区  ",
+        "btn_setup": "  ⚙  设置向导  ",
+        "btn_send": "  ➡  发送  ",
+        "thinking": "  💬  Partner 思考中…",
+        "chat_welcome": "嗨！我是 Partner，你的 AI 研究伙伴。\n\n你可以在这里和我聊天，或者通过 QQ 机器人联系我。\n在下方输入消息开始吧！",
+        "chat_you": "你",
+        "chat_partner": "Partner",
+        "chat_unavailable": "对话模块暂不可用。\n\n请先运行设置向导配置 Partner。",
+        "chat_error": "暂时无法处理这条消息。\n\n({msg})",
+        "qq_banner": "  💬  通过 QQ 与 Partner 对话！",
+        "qq_banner_sub": "NapCat（本地注入）或 QQ 开放平台（官方机器人），选择一种模式。",
+        "qq_config_title": "连接配置",
+        "qq_mode_label": "模式",
+        "qq_mode_napcat": "NapCat（本地）",
+        "qq_mode_official": "官方机器人",
+        "qq_id_label": "QQ 号",
+        "qq_pw_label": "密码",
+        "qq_ws_url": "WS 地址",
+        "qq_appid": "AppID",
+        "qq_secret": "AppSecret",
+        "qq_test": "  测试  ",
+        "qq_save": "  💾  保存  ",
+        "qq_load": "  📂  载入  ",
+        "qq_status_title": "机器人状态",
+        "qq_not_running": "未运行",
+        "qq_start": "  ▶  启动  ",
+        "qq_stop": "  ■  停止  ",
+        "qq_starting": "启动中…",
+        "qq_started": "机器人已启动",
+        "qq_failed": "启动失败: {msg}",
+        "qq_stopped": "已停止",
+        "qq_saved": "QQ 配置已保存",
+        "qq_no_ws": "未配置工作区",
+        "qq_napcat_found": "NapCat 已检测到 (端口 {port})",
+        "qq_napcat_missing": "未检测到 NapCat，请确认 QQ + NapCat 正在运行",
+        "logs_title": "日志查看",
+        "btn_reload": "  ⟳  刷新日志  ",
+        "logs_no_ws": "未配置工作区。",
+        "logs_no_dir": "未找到日志目录。",
+        "setup_title": "Partner 设置",
+        "setup_sub": "配置你的 AI 研究伙伴",
+        "setup_step1": "1. 选择工作区文件夹",
+        "setup_step2": "2. AI 后端",
+        "setup_step3": "3. QQ 机器人（可选）",
+        "setup_browse": "  浏览  ",
+        "setup_hermes": "  🤖  Hermes Agent（推荐）",
+        "setup_openclaw": "  🧠  OpenClaw",
+        "setup_skip": "  ⏳  暂不设置",
+        "setup_qq_hint": "填入 QQ 号与密码，也可稍后配置。",
+        "setup_qq_id": "QQ 号",
+        "setup_qq_pw": "密码",
+        "setup_ready": "准备就绪",
+        "setup_start": "  🚀  开始设置  ",
+        "setup_select_ws": "请选择工作区文件夹",
+        "setup_creating": "正在创建工作区…",
+        "setup_installing": "正在安装 Hermes Agent…",
+        "setup_complete": "设置完成！",
+        "lang_toggle": "English",
+        "last_update": "最后更新: {time}",
+    },
+    "en": {
+        "app_title": "Partner",
+        "ver": "v0.4.0",
+        "tab_dashboard": "Dashboard",
+        "tab_chat": "Chat",
+        "tab_qq": "QQ Bot",
+        "tab_logs": "Logs",
+        "status_loading": "Loading…",
+        "status_no_workspace": "Workspace not configured.\n\nClick 'Setup Wizard' to get started.",
+        "status_workspace": "Workspace",
+        "status_ready": "Ready",
+        "status_no_ws_short": "No workspace",
+        "btn_refresh": "  ⟳  Refresh  ",
+        "btn_open_ws": "  📂  Open Workspace  ",
+        "btn_setup": "  ⚙  Setup Wizard  ",
+        "btn_send": "  ➡  Send  ",
+        "thinking": "  💬  Partner is thinking…",
+        "chat_welcome": "Hi! I'm Partner, your AI research companion.\n\nChat with me here or through QQ Bot.\nType a message below to get started!",
+        "chat_you": "You",
+        "chat_partner": "Partner",
+        "chat_unavailable": "Conversation module unavailable.\n\nRun Setup Wizard to configure Partner.",
+        "chat_error": "Couldn't process that.\n\n({msg})",
+        "qq_banner": "  💬  Chat with Partner via QQ!",
+        "qq_banner_sub": "NapCat (local injection) or QQ Official Bot platform. Select a mode.",
+        "qq_config_title": "Connection",
+        "qq_mode_label": "Mode",
+        "qq_mode_napcat": "NapCat (local)",
+        "qq_mode_official": "Official Bot",
+        "qq_id_label": "QQ ID",
+        "qq_pw_label": "Password",
+        "qq_ws_url": "WS URL",
+        "qq_appid": "AppID",
+        "qq_secret": "AppSecret",
+        "qq_test": "  Test  ",
+        "qq_save": "  💾  Save  ",
+        "qq_load": "  📂  Load  ",
+        "qq_status_title": "Bot Status",
+        "qq_not_running": "Not running",
+        "qq_start": "  ▶  Start  ",
+        "qq_stop": "  ■  Stop  ",
+        "qq_starting": "Starting…",
+        "qq_started": "Bot started",
+        "qq_failed": "Failed: {msg}",
+        "qq_stopped": "Stopped",
+        "qq_saved": "QQ config saved",
+        "qq_no_ws": "No workspace configured",
+        "qq_napcat_found": "NapCat detected (port {port})",
+        "qq_napcat_missing": "NapCat not found — ensure QQ + NapCat are running",
+        "logs_title": "Log Viewer",
+        "btn_reload": "  ⟳  Reload Logs  ",
+        "logs_no_ws": "No workspace configured.",
+        "logs_no_dir": "No logs directory found.",
+        "setup_title": "Partner Setup",
+        "setup_sub": "Configure your AI Research Companion",
+        "setup_step1": "1. Choose Workspace Folder",
+        "setup_step2": "2. AI Backend",
+        "setup_step3": "3. QQ Bot (optional)",
+        "setup_browse": "  Browse  ",
+        "setup_hermes": "  🤖  Hermes Agent (recommended)",
+        "setup_openclaw": "  🧠  OpenClaw",
+        "setup_skip": "  ⏳  Skip for now",
+        "setup_qq_hint": "Enter QQ ID and password, or configure later.",
+        "setup_qq_id": "QQ ID",
+        "setup_qq_pw": "Password",
+        "setup_ready": "Ready to configure",
+        "setup_start": "  🚀  Start Setup  ",
+        "setup_select_ws": "Please select a workspace folder.",
+        "setup_creating": "Creating workspace…",
+        "setup_installing": "Installing Hermes Agent…",
+        "setup_complete": "Setup complete!",
+        "lang_toggle": "中文",
+        "last_update": "Last updated: {time}",
+    },
 }
+
+
+def tr(key, lang="zh", **kw):
+    """Translate a key, optionally formatting with kwargs."""
+    val = L.get(lang, L["zh"]).get(key, key)
+    if kw:
+        return val.format(**kw)
+    return val
+
+
+# ── Modern Theme (inspired by VS Code / Linear dark) ──
+T = {
+    "bg":        "#0d1117",   # GitHub dark
+    "bg2":       "#161b22",
+    "bg3":       "#21262d",
+    "card":      "#161b22",
+    "card_hl":   "#30363d",
+    "accent":    "#58a6ff",   # Blue accent
+    "accent2":   "#79c0ff",
+    "accent3":   "#1f6feb",
+    "accent_h":  "#79c0ff",
+    "green":     "#3fb950",
+    "yellow":    "#d29922",
+    "red":       "#f85149",
+    "blue":      "#58a6ff",
+    "pink":      "#f778ba",
+    "txt":       "#c9d1d9",
+    "txt2":      "#8b949e",
+    "txt3":      "#484f58",
+    "border":    "#21262d",
+    "input_bg":  "#0d1117",
+    "chat_user": "#1f6feb",
+    "chat_bot":  "#21262d",
+    "glow":      "#0d1117",
+}
+
+FONT = ("Segoe UI Variable", "Segoe UI", "TkDefaultFont")
+FONT_MONO = ("Cascadia Code", "Cascadia Mono", "Consolas", "monospace")
 
 
 def find_workspace():
@@ -107,38 +271,35 @@ def center_window(win, w, h):
     win.geometry(f"{w}x{h}+{x}+{y}")
 
 
-    # Remove ttk style configuration — using custom tab bar
-
-
 # ════════════════════════════════════════════════════════════════
 #  UI Components
 # ════════════════════════════════════════════════════════════════
 
 class AccentCard(tk.Frame):
-    """Card with subtle accent-colored top border line."""
+    """Card with accent top border + subtle shadow effect."""
     def __init__(self, parent, title=None, accent_color=None, **kw):
         super().__init__(parent, bg=T["card"], highlightthickness=0, **kw)
-        # Subtle accent line at top
+        # Thin accent line
         line = tk.Frame(self, bg=accent_color or T["accent"], height=2)
         line.pack(fill=tk.X)
         line.pack_propagate(False)
-        # Body with generous internal padding
         body = tk.Frame(self, bg=T["card"])
         body.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
         if title:
             h = tk.Frame(body, bg=T["card"])
-            h.pack(fill=tk.X, padx=18, pady=(16, 2))
-            tk.Label(h, text=title, bg=T["card"], fg=T["accent2"],
-                     font=("Segoe UI", 12, "bold"), anchor=tk.W).pack(side=tk.LEFT)
+            h.pack(fill=tk.X, padx=18, pady=(14, 2))
+            tk.Label(h, text=title, bg=T["card"], fg=accent_color or T["accent2"],
+                     font=(FONT[0], 11, "bold"), anchor=tk.W).pack(side=tk.LEFT)
         self.body = body
 
 
 class Input(tk.Entry):
+    """Clean input field with focus glow."""
     def __init__(self, parent, **kw):
         kw.setdefault("bg", T["input_bg"])
         kw.setdefault("fg", T["txt"])
-        kw.setdefault("insertbackground", T["accent2"])
-        kw.setdefault("font", ("Cascadia Code", 10))
+        kw.setdefault("insertbackground", T["accent"])
+        kw.setdefault("font", (FONT_MONO[0], 10))
         kw.setdefault("relief", tk.FLAT)
         kw.setdefault("highlightbackground", T["border"])
         kw.setdefault("highlightthickness", 1)
@@ -149,23 +310,24 @@ class Input(tk.Entry):
 
 
 class Btn(tk.Frame):
-    """Custom button with hover animation and optional icon."""
-    def __init__(self, parent, text="", icon=None, command=None,
-                 bg=None, fg=None, hover=None, **kw):
+    """Modern flat button with hover state."""
+    def __init__(self, parent, text="", command=None,
+                 bg=None, fg=None, hover_bg=None, hover_fg=None, **kw):
         self._cmd = command
         bg = bg or T["card_hl"]
         fg = fg or T["txt"]
-        hover = hover or T["accent"]
+        hover_bg = hover_bg or T["accent3"]
+        hover_fg = hover_fg or "#ffffff"
         super().__init__(parent, bg=bg, **kw)
 
         self._label = tk.Label(self, text=text, bg=bg, fg=fg,
-                               font=("Segoe UI", 10), cursor="hand2",
+                               font=(FONT[0], 10), cursor="hand2",
                                padx=16, pady=7)
         self._label.pack()
         self._bg = bg
         self._fg = fg
-        self._hover_bg = hover
-        self._hover_fg = "white" if hover != bg else fg
+        self._hover_bg = hover_bg
+        self._hover_fg = hover_fg
 
         self._label.bind("<Button-1>", lambda e: self._cmd() if self._cmd else None)
         self.bind("<Button-1>", lambda e: self._cmd() if self._cmd else None)
@@ -190,7 +352,8 @@ class Btn(tk.Frame):
 class PartnerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Partner")
+        self._lang = "zh"  # default language
+        self.root.title(tr("app_title", self._lang))
         self.root.minsize(820, 620)
         self.root.configure(bg=T["bg"])
         center_window(self.root, 1000, 720)
@@ -200,84 +363,116 @@ class PartnerApp:
         self._build_ui()
 
         if not self.workspace:
-            self._set_status(
-                "Workspace not configured.\n\nClick 'Setup Wizard' to get started.",
-                T["yellow"])
+            self._set_status(tr("status_no_workspace", self._lang), T["yellow"])
             self.root.after(500, self._show_setup)
         else:
             self._refresh_status()
             self._load_chat_history()
             self._start_auto_refresh()
 
+    def _tr(self, key, **kw):
+        return tr(key, self._lang, **kw)
+
+    def _toggle_lang(self):
+        """Switch between Chinese and English."""
+        self._lang = "en" if self._lang == "zh" else "zh"
+        self._rebuild_ui()
+
+    def _rebuild_ui(self):
+        """Rebuild the entire UI with current language."""
+        self.root.title(self._tr("app_title"))
+        self._active_tab = 0
+        # Destroy old tab contents
+        for child in self._tab_frame.winfo_children():
+            child.destroy()
+        for i, content in enumerate(self._tab_contents):
+            content.destroy()
+        self._tab_contents = []
+        self._tab_buttons = []
+        self._build_ui_parts()
+
     # ──────────── UI Layout ────────────
     def _build_ui(self):
         main = tk.Frame(self.root, bg=T["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=24, pady=(16, 20))
+        self._main = main
+        self._build_ui_parts()
+
+    def _build_ui_parts(self):
+        main = self._main
+        # Clear everything except main frame
+        for w in main.winfo_children():
+            w.destroy()
 
         # ── Header ──
         hdr = tk.Frame(main, bg=T["bg"])
-        hdr.pack(fill=tk.X, pady=(0, 10))
+        hdr.pack(fill=tk.X, pady=(0, 12))
 
         lf = tk.Frame(hdr, bg=T["bg"])
         lf.pack(side=tk.LEFT)
         # App icon badge
-        badge = tk.Canvas(lf, width=34, height=34, bg=T["accent3"],
+        badge = tk.Canvas(lf, width=32, height=32, bg=T["accent3"],
                           highlightthickness=0)
         badge.pack(side=tk.LEFT, padx=(0, 10))
-        badge.create_oval(4, 4, 30, 30, fill=T["accent"], outline="")
-        badge.create_text(17, 17, text="P", fill="white",
-                          font=("Segoe UI", 16, "bold"))
+        badge.create_oval(3, 3, 29, 29, fill=T["accent"], outline="")
+        badge.create_text(16, 16, text="P", fill="white",
+                          font=(FONT[0], 15, "bold"))
 
         tk.Label(lf, text="Partner", bg=T["bg"], fg=T["txt"],
-                 font=("Segoe UI", 24, "bold")).pack(side=tk.LEFT)
-        tk.Label(lf, text="v0.3.0", bg=T["bg"], fg=T["txt3"],
-                 font=("Segoe UI", 10)).pack(side=tk.LEFT, padx=(8, 0), pady=(6, 0))
+                 font=(FONT[0], 22, "bold")).pack(side=tk.LEFT)
+        tk.Label(lf, text=self._tr("ver"), bg=T["bg"], fg=T["txt3"],
+                 font=(FONT[0], 10)).pack(side=tk.LEFT, padx=(8, 0), pady=(5, 0))
 
-        # Right: status dot only (cleaner)
+        # Right: language toggle + status dot
         rf = tk.Frame(hdr, bg=T["bg"])
         rf.pack(side=tk.RIGHT)
-        # Glowing status dot
-        self.dot_canvas = tk.Canvas(rf, width=14, height=14, bg=T["bg"],
-                                    highlightthickness=0)
-        self.dot_canvas.pack(side=tk.LEFT, padx=(0, 6))
-        self.dot_id_outer = self.dot_canvas.create_oval(2, 2, 12, 12,
-            fill=T["txt3"], outline=T["border"], width=1)
-        self.dot_id_inner = self.dot_canvas.create_oval(5, 5, 9, 9,
-            fill=T["txt3"], outline="", width=0)
-        self.hdr_status = tk.Label(rf, text="", bg=T["bg"], fg=T["txt3"],
-                                   font=("Segoe UI", 9))
-        self.hdr_status.pack(side=tk.LEFT)
 
-        # ── Custom Tab Bar (replaces ttk Notebook for full control) ──
+        # Language toggle button
+        lang_text = tr("lang_toggle", "en" if self._lang == "zh" else "zh")
+        self.lang_btn = tk.Label(rf, text=lang_text, bg=T["bg3"], fg=T["txt2"],
+                                 font=(FONT[0], 9), cursor="hand2", padx=10, pady=3)
+        self.lang_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.lang_btn.bind("<Button-1>", lambda e: self._toggle_lang())
+        self.lang_btn.bind("<Enter>", lambda e: self.lang_btn.configure(bg=T["card_hl"]))
+        self.lang_btn.bind("<Leave>", lambda e: self.lang_btn.configure(bg=T["bg3"]))
+
+        # Status dot
+        self.dot_canvas = tk.Canvas(rf, width=12, height=12, bg=T["bg"],
+                                    highlightthickness=0)
+        self.dot_canvas.pack(side=tk.RIGHT, padx=(0, 6))
+        self.dot_id = self.dot_canvas.create_oval(1, 1, 11, 11,
+            fill=T["txt3"], outline="", width=0)
+
+        self.hdr_status = tk.Label(rf, text="", bg=T["bg"], fg=T["txt3"],
+                                   font=(FONT[0], 9))
+        self.hdr_status.pack(side=tk.RIGHT)
+
+        # ── Custom Tab Bar ──
         self._tab_frame = tk.Frame(main, bg=T["bg"])
         self._tab_frame.pack(fill=tk.X, pady=(0, 0))
 
-        # Tab bar background
-        tab_bar = tk.Frame(self._tab_frame, bg=T["bg2"], height=42)
+        tab_bar = tk.Frame(self._tab_frame, bg=T["bg2"], height=40)
         tab_bar.pack(fill=tk.X)
         tab_bar.pack_propagate(False)
 
-        # Tab definitions: (label, icon_emoji)
         self._tabs = [
-            ("Dashboard", "\U0001f4ca"),
-            ("Chat",      "\U0001f4ac"),
-            ("QQ Bot",    "\U0001f916"),
-            ("Logs",      "\U0001f4c4"),
+            (self._tr("tab_dashboard"), "\U0001f4ca"),
+            (self._tr("tab_chat"),      "\U0001f4ac"),
+            (self._tr("tab_qq"),        "\U0001f916"),
+            (self._tr("tab_logs"),      "\U0001f4c4"),
         ]
         self._tab_buttons = []
-        self._tab_indicators = []
         self._tab_contents = []
 
         for idx, (name, icon) in enumerate(self._tabs):
-            # Tab button
             is_active = (idx == 0)
-            tab_bg = T["card_hl"] if is_active else T["bg3"]
+            tab_bg = T["card"] if is_active else T["bg2"]
             tab_fg = T["txt"] if is_active else T["txt3"]
             btn = tk.Frame(tab_bar, bg=tab_bg, cursor="hand2")
-            btn.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 1))
+            btn.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
             label = tk.Label(btn, text=f"  {icon}  {name}  ",
                              bg=tab_bg, fg=tab_fg,
-                             font=("Segoe UI", 10), padx=10)
+                             font=(FONT[0], 10), padx=12)
             label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
             def make_handler(i):
@@ -285,20 +480,19 @@ class PartnerApp:
             btn.bind("<Button-1>", make_handler(idx))
             label.bind("<Button-1>", make_handler(idx))
 
-            # Hover effect
             def make_hover(i):
                 def on_enter(e):
                     if i != self._active_tab:
                         for c in e.widget.winfo_children():
                             if isinstance(c, tk.Label):
-                                c.configure(bg=T["card_hl"])
-                        e.widget.configure(bg=T["card_hl"])
+                                c.configure(bg=T["card"])
+                        e.widget.configure(bg=T["card"])
                 def on_leave(e):
                     if i != self._active_tab:
                         for c in e.widget.winfo_children():
                             if isinstance(c, tk.Label):
-                                c.configure(bg=T["bg3"])
-                        e.widget.configure(bg=T["bg3"])
+                                c.configure(bg=T["bg2"])
+                        e.widget.configure(bg=T["bg2"])
                 return on_enter, on_leave
             enter_fn, leave_fn = make_hover(idx)
             btn.bind("<Enter>", enter_fn)
@@ -308,7 +502,6 @@ class PartnerApp:
 
             self._tab_buttons.append(btn)
 
-            # Content frame (hidden initially)
             content = tk.Frame(main, bg=T["bg"])
             if idx != 0:
                 content.pack_forget()
@@ -316,42 +509,37 @@ class PartnerApp:
                 content.pack(fill=tk.BOTH, expand=True)
             self._tab_contents.append(content)
 
-        # Active tab bottom accent line
         self._active_tab = 0
 
-        # Build all tab contents
+        # Build tab contents
         self._build_tab_dashboard()
         self._build_tab_chat()
         self._build_tab_qq()
         self._build_tab_logs()
 
+        # ── Bottom status bar ──
+        bar_frame = tk.Frame(main, bg=T["bg2"])
+        bar_frame.pack(fill=tk.X, pady=(10, 0))
+        self.status_bar = tk.Label(bar_frame, text=self._tr("status_ready"),
+                                   bg=T["bg2"], fg=T["txt3"],
+                                   font=(FONT[0], 9), anchor=tk.W, padx=14, pady=5)
+        self.status_bar.pack(fill=tk.X)
+
     def _switch_tab(self, idx):
-        """Switch to tab at given index."""
         if idx == self._active_tab:
             return
-        # Hide old content
         self._tab_contents[self._active_tab].pack_forget()
-        # Show new content
         self._tab_contents[idx].pack(fill=tk.BOTH, expand=True)
-        # Update button styles
         for i, btn in enumerate(self._tab_buttons):
-            bg = T["card_hl"] if i == idx else T["bg3"]
+            bg = T["card"] if i == idx else T["bg2"]
             fg = T["txt"] if i == idx else T["txt3"]
             for child in btn.winfo_children():
                 if isinstance(child, tk.Label):
                     child.configure(bg=bg, fg=fg)
             btn.configure(bg=bg)
         self._active_tab = idx
-        # Refresh if switching to dashboard
         if idx == 0:
             self._refresh_status()
-
-        # ── Bottom status bar ──
-        bar_frame = tk.Frame(main, bg=T["bg2"])
-        bar_frame.pack(fill=tk.X, pady=(8, 0))
-        self.status_bar = tk.Label(bar_frame, text="Ready", bg=T["bg2"], fg=T["txt3"],
-                                    font=("Segoe UI", 9), anchor=tk.W, padx=14, pady=5)
-        self.status_bar.pack(fill=tk.X)
 
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     #  Dashboard Tab
@@ -360,25 +548,31 @@ class PartnerApp:
         f = self._tab_contents[0]
         f.configure(bg=T["bg"])
 
-        sc = AccentCard(f, title="Status", accent_color=T["blue"])
+        sc = AccentCard(f, title=self._tr("tab_dashboard"),
+                        accent_color=T["blue"])
         sc.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 10))
 
-        self.status_text = tk.Text(sc.body, height=12, font=("Cascadia Code", 10),
+        self.status_text = tk.Text(sc.body, height=12,
+                                   font=(FONT_MONO[0], 10),
                                    bg=T["bg2"], fg=T["txt"], relief=tk.FLAT,
                                    padx=18, pady=14, wrap=tk.WORD,
                                    insertbackground=T["txt"],
-                                   selectbackground=T["accent"], selectforeground="white",
-                                   highlightbackground=T["border"], highlightthickness=1,
+                                   selectbackground=T["accent"],
+                                   selectforeground="white",
+                                   highlightbackground=T["border"],
+                                   highlightthickness=1,
                                    borderwidth=0)
         self.status_text.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 14))
-        self._set_status("Loading...")
+        self._set_status(self._tr("status_loading"))
 
         bf = tk.Frame(f, bg=T["bg"])
         bf.pack(fill=tk.X, padx=0, pady=(0, 0))
-        Btn(bf, text="  \U0001f504  Refresh  ", command=self._refresh_status).pack(side=tk.LEFT, padx=(0, 8))
-        Btn(bf, text="  \U0001f4c2  Open Workspace  ", command=self._open_workspace).pack(side=tk.LEFT, padx=(0, 8))
-        Btn(bf, text="  \u2699\ufe0f  Setup Wizard  ", bg=T["accent"], fg="white",
-            hover=T["accent_h"], command=self._show_setup).pack(side=tk.RIGHT)
+        Btn(bf, text=self._tr("btn_refresh"),
+            command=self._refresh_status).pack(side=tk.LEFT, padx=(0, 8))
+        Btn(bf, text=self._tr("btn_open_ws"),
+            command=self._open_workspace).pack(side=tk.LEFT, padx=(0, 8))
+        Btn(bf, text=self._tr("btn_setup"), bg=T["accent3"], fg="white",
+            hover_bg=T["accent"], command=self._show_setup).pack(side=tk.RIGHT)
 
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     #  Chat Tab
@@ -387,7 +581,6 @@ class PartnerApp:
         f = self._tab_contents[1]
         f.configure(bg=T["bg"])
 
-        # Chat display
         chat_frame = tk.Frame(f, bg=T["bg2"], highlightbackground=T["border"],
                               highlightthickness=1)
         chat_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
@@ -404,40 +597,32 @@ class PartnerApp:
         self.chat_canvas.pack(fill=tk.BOTH, expand=True, padx=(0, 0), pady=0)
         self.chat_canvas.bind("<Configure>", self._on_chat_resize)
 
-        # Mousewheel
         def _on_mousewheel(event):
             self.chat_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self.chat_canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+")
 
-        # Welcome
         self._add_chat_welcome()
 
-        # "Thinking..." indicator
         think_bg = tk.Frame(f, bg=T["bg"])
-        self.thinking_label = tk.Label(think_bg, text="  \U0001f4ad  Partner is thinking...",
+        self.thinking_label = tk.Label(think_bg, text=self._tr("thinking"),
                                        bg=T["bg"], fg=T["txt3"],
-                                       font=("Segoe UI", 9, "italic"))
+                                       font=(FONT[0], 9, "italic"))
         self.thinking_label.pack()
-        # Not packed in main layout; shown on send
 
-        # Input bar
         ib = tk.Frame(f, bg=T["bg"])
         ib.pack(fill=tk.X, padx=0, pady=(6, 0))
         self.chat_input = Input(ib)
         self.chat_input.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
         self.chat_input.bind("<Return>", self._send_chat)
-        Btn(ib, text="  \u27a1  Send  ", bg=T["accent"], fg="white",
-            hover=T["accent_h"],
+        Btn(ib, text=self._tr("btn_send"), bg=T["accent3"], fg="white",
+            hover_bg=T["accent"],
             command=lambda: self._send_chat(None)).pack(side=tk.LEFT, padx=(10, 0))
 
     def _on_chat_resize(self, event):
         self.chat_canvas.itemconfig("inner", width=event.width - 4)
 
     def _add_chat_welcome(self):
-        self._add_chat_message("bot",
-            "Hi! I'm Partner, your AI research companion.\n\n"
-            "You can chat with me here or through QQ Bot.\n"
-            "Just type a message below to get started!")
+        self._add_chat_message("bot", self._tr("chat_welcome"))
 
     def _add_chat_message(self, role, text):
         is_user = (role == "user")
@@ -453,20 +638,18 @@ class PartnerApp:
                           highlightbackground=T["glow"], highlightthickness=0)
         bubble.pack(anchor=anchor, padx=(p_left, p_right))
 
-        # Header row
         hdr = tk.Frame(bubble, bg=bg)
         hdr.pack(fill=tk.X, padx=14, pady=(10, 2))
         role_color = T["pink"] if is_user else T["accent2"]
-        tk.Label(hdr, text="You" if is_user else "Partner", bg=bg, fg=role_color,
-                 font=("Segoe UI", 9, "bold"), anchor=tk.W).pack(side=tk.LEFT)
-        # Timestamp
+        tk.Label(hdr, text=self._tr("chat_you" if is_user else "chat_partner"),
+                 bg=bg, fg=role_color,
+                 font=(FONT[0], 9, "bold"), anchor=tk.W).pack(side=tk.LEFT)
         now = datetime.now().strftime("%H:%M")
         tk.Label(hdr, text=now, bg=bg, fg=T["txt3"],
-                 font=("Segoe UI", 8), anchor=tk.E).pack(side=tk.RIGHT)
+                 font=(FONT[0], 8), anchor=tk.E).pack(side=tk.RIGHT)
 
-        # Body text
         tk.Label(bubble, text=text, bg=bg, fg=T["txt"],
-                 font=("Segoe UI", 10), wraplength=480, justify=tk.LEFT,
+                 font=(FONT[0], 10), wraplength=480, justify=tk.LEFT,
                  anchor=tk.W).pack(anchor=tk.W, padx=14, pady=(2, 10))
 
         self.chat_canvas.update_idletasks()
@@ -501,8 +684,7 @@ class PartnerApp:
             if not os.path.exists(conv_path):
                 self.root.after(0, lambda: self._hide_thinking())
                 self.root.after(0, lambda: self._add_chat_message("bot",
-                    "Sorry, the conversation module isn't available yet.\n\n"
-                    "Run the Setup Wizard to configure Partner properly."))
+                    self._tr("chat_unavailable")))
                 return
 
             script = (
@@ -542,66 +724,163 @@ class PartnerApp:
             else:
                 msg = err[:100] if err else "unknown error"
                 self.root.after(0, lambda: self._add_chat_message("bot",
-                    f"I couldn't process that right now.\n\n({msg})"))
+                    self._tr("chat_error", msg=msg)))
 
         threading.Thread(target=do_reply, daemon=True).start()
 
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
-    #  QQ Bot Tab
+    #  QQ Bot Tab — Support NapCat + QQ Official Bot, with connection check
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     def _build_tab_qq(self):
         f = self._tab_contents[2]
         f.configure(bg=T["bg"])
 
         # Info banner
-        info = tk.Frame(f, bg="#141433", highlightbackground=T["border"],
+        info = tk.Frame(f, bg=T["bg3"], highlightbackground=T["border"],
                         highlightthickness=1)
-        info.pack(fill=tk.X, padx=0, pady=(0, 8))
-        tk.Label(info, text="  \U0001f514  You can also chat with Partner through QQ Bot!",
-                 bg="#141433", fg=T["blue"], font=("Segoe UI", 10, "bold"),
-                 anchor=tk.W).pack(fill=tk.X, padx=16, pady=(10, 2))
-        tk.Label(info, text="Configure your QQ Official Bot below. Get AppID/Secret from https://q.qq.com/",
-                 bg="#141433", fg=T["txt2"], font=("Segoe UI", 9),
-                 anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 10))
+        info.pack(fill=tk.X, padx=0, pady=(0, 10))
+        tk.Label(info, text=self._tr("qq_banner"),
+                 bg=T["bg3"], fg=T["blue"], font=(FONT[0], 10, "bold"),
+                 anchor=tk.W).pack(fill=tk.X, padx=16, pady=(8, 2))
+        tk.Label(info, text=self._tr("qq_banner_sub"),
+                 bg=T["bg3"], fg=T["txt2"], font=(FONT[0], 9),
+                 anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 8))
 
-        # Config card
-        cc = AccentCard(f, title="Configuration", accent_color=T["accent"])
-        cc.pack(fill=tk.X, padx=0, pady=(0, 8))
+        # ── Connection card ──
+        cc = AccentCard(f, title=self._tr("qq_config_title"),
+                        accent_color=T["accent"])
+        cc.pack(fill=tk.X, padx=0, pady=(0, 10))
 
-        # Form
-        for label, attr, show in [("AppID", "qq_appid", False),
-                                    ("AppSecret", "qq_secret", True),
-                                    ("Token", "qq_token", False)]:
-            row = tk.Frame(cc.body, bg=T["card"])
-            row.pack(fill=tk.X, padx=18, pady=(0, 10))
-            tk.Label(row, text=label, bg=T["card"], fg=T["txt2"],
-                     font=("Segoe UI", 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
-            inp = Input(row, show="*" if show else "")
-            inp.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
-            setattr(self, attr, inp)
+        # Mode selector
+        mode_row = tk.Frame(cc.body, bg=T["card"])
+        mode_row.pack(fill=tk.X, padx=18, pady=(6, 0))
+        tk.Label(mode_row, text=self._tr("qq_mode_label"), bg=T["card"], fg=T["txt2"],
+                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
+        self.qq_mode_var = tk.StringVar(value="napcat")
+        for val, label in [("napcat", self._tr("qq_mode_napcat")),
+                           ("official", self._tr("qq_mode_official"))]:
+            rb = tk.Radiobutton(mode_row, text=label, variable=self.qq_mode_var, value=val,
+                                bg=T["card"], fg=T["txt"], selectcolor=T["input_bg"],
+                                activebackground=T["card"], activeforeground=T["accent2"],
+                                font=(FONT[0], 9), command=self._toggle_qq_mode)
+            rb.pack(side=tk.LEFT, padx=(0, 16))
 
+        # ── NapCat fields ──
+        self.qq_napcat_frame = tk.Frame(cc.body, bg=T["card"])
+        self.qq_napcat_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
+        # WS URL
+        ws_row = tk.Frame(self.qq_napcat_frame, bg=T["card"])
+        ws_row.pack(fill=tk.X)
+        tk.Label(ws_row, text=self._tr("qq_ws_url"), bg=T["card"], fg=T["txt2"],
+                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
+        self.qq_wsurl = Input(ws_row)
+        self.qq_wsurl.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+        self.qq_wsurl.insert(0, "ws://localhost:3001")
+        # Test button
+        self.qq_test_btn = Btn(ws_row, text=self._tr("qq_test"),
+                               command=self._test_napcat)
+        self.qq_test_btn.pack(side=tk.LEFT, padx=(8, 0))
+        # QQ ID (informational for NapCat)
+        nc_id_row = tk.Frame(self.qq_napcat_frame, bg=T["card"])
+        nc_id_row.pack(fill=tk.X, pady=(8, 10))
+        tk.Label(nc_id_row, text=self._tr("qq_id_label"), bg=T["card"], fg=T["txt2"],
+                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
+        self.qq_napcat_id = Input(nc_id_row)
+        self.qq_napcat_id.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+
+        # ── Official Bot fields ──
+        self.qq_official_frame = tk.Frame(cc.body, bg=T["card"])
+        # AppID
+        aid_row = tk.Frame(self.qq_official_frame, bg=T["card"])
+        aid_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(aid_row, text=self._tr("qq_appid"), bg=T["card"], fg=T["txt2"],
+                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
+        self.qq_appid = Input(aid_row)
+        self.qq_appid.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+        # AppSecret
+        sec_row = tk.Frame(self.qq_official_frame, bg=T["card"])
+        sec_row.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(sec_row, text=self._tr("qq_secret"), bg=T["card"], fg=T["txt2"],
+                 font=(FONT[0], 10), width=10, anchor=tk.W).pack(side=tk.LEFT)
+        self.qq_secret = Input(sec_row, show="*")
+        self.qq_secret.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+
+        # Initially hide official frame
+        self.qq_official_frame.pack_forget()
+
+        # Save/Load
         btn_row = tk.Frame(cc.body, bg=T["card"])
-        btn_row.pack(fill=tk.X, padx=18, pady=(4, 16))
-        Btn(btn_row, text="  \U0001f4be  Save Config  ", bg=T["accent"], fg="white",
-            hover=T["accent_h"], command=self._save_qq_config).pack(side=tk.LEFT, padx=(0, 8))
-        Btn(btn_row, text="  \U0001f4c2  Load Config  ", command=self._load_qq_config).pack(side=tk.LEFT)
+        btn_row.pack(fill=tk.X, padx=18, pady=(4, 14))
+        Btn(btn_row, text=self._tr("qq_save"), bg=T["accent3"], fg="white",
+            hover_bg=T["accent"],
+            command=self._save_qq_config).pack(side=tk.LEFT, padx=(0, 8))
+        Btn(btn_row, text=self._tr("qq_load"),
+            command=self._load_qq_config).pack(side=tk.LEFT)
 
-        # Status card
-        st = AccentCard(f, title="Bot Status", accent_color=T["green"])
+        # ── Bot Status card ──
+        st = AccentCard(f, title=self._tr("qq_status_title"),
+                        accent_color=T["green"])
         st.pack(fill=tk.X, padx=0, pady=(0, 0))
 
-        self.qq_status_label = tk.Label(st.body, text="Not running", bg=T["card"],
-                                        fg=T["txt3"], font=("Segoe UI", 10))
+        self.qq_status_label = tk.Label(st.body, text=self._tr("qq_not_running"),
+                                        bg=T["card"], fg=T["txt3"],
+                                        font=(FONT[0], 10))
         self.qq_status_label.pack(anchor=tk.W, padx=18, pady=(6, 8))
 
         sbf = tk.Frame(st.body, bg=T["card"])
         sbf.pack(fill=tk.X, padx=18, pady=(0, 14))
-        Btn(sbf, text="  \u25b6  Start Bot  ", bg=T["green"], fg="#0c0c1a",
-            hover="#6ee7b0", command=self._start_qq_bot).pack(side=tk.LEFT, padx=(0, 8))
-        Btn(sbf, text="  \u25a0  Stop Bot  ", bg=T["red"], fg="white",
-            hover="#fca5a5", command=self._stop_qq_bot).pack(side=tk.LEFT)
+        Btn(sbf, text=self._tr("qq_start"), bg=T["green"], fg="#0d1117",
+            hover_bg="#2ea043",
+            command=self._start_qq_bot).pack(side=tk.LEFT, padx=(0, 8))
+        Btn(sbf, text=self._tr("qq_stop"), bg=T["red"], fg="white",
+            hover_bg="#da3633",
+            command=self._stop_qq_bot).pack(side=tk.LEFT)
 
         self.root.after(300, self._load_qq_config)
+
+    def _toggle_qq_mode(self):
+        """Show/hide fields based on selected mode and pre-check NapCat."""
+        if self.qq_mode_var.get() == "napcat":
+            self.qq_official_frame.pack_forget()
+            self.qq_napcat_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
+            # Auto-detect NapCat
+            self._auto_detect_napcat()
+        else:
+            self.qq_napcat_frame.pack_forget()
+            self.qq_official_frame.pack(fill=tk.X, padx=18, pady=(6, 0))
+
+    def _auto_detect_napcat(self):
+        """Check common ports for NapCat and update WS URL field."""
+        import socket
+        for port in [3001, 6700, 8080]:
+            try:
+                s = socket.create_connection(("127.0.0.1", port), timeout=1)
+                s.close()
+                self.qq_wsurl.delete(0, tk.END)
+                self.qq_wsurl.insert(0, f"ws://localhost:{port}")
+                self.qq_status_label.config(
+                    text=self._tr("qq_napcat_found", port=port),
+                    fg=T["green"])
+                return
+            except Exception:
+                continue
+        self.qq_status_label.config(
+            text=self._tr("qq_napcat_missing"),
+            fg=T["yellow"])
+
+    def _test_napcat(self):
+        """Test NapCat WebSocket connection."""
+        import socket, re
+        ws_url = self.qq_wsurl.get().strip()
+        m = re.search(r"(?:ws://)?([^:]+)(?::(\d+))?", ws_url)
+        host = m.group(1) if m else "127.0.0.1"
+        port = int(m.group(2)) if m and m.group(2) else 3001
+        try:
+            s = socket.create_connection((host, port), timeout=3)
+            s.close()
+            messagebox.showinfo("OK", f"NapCat 已连接 ({host}:{port})")
+        except Exception as e:
+            messagebox.showerror("Error", f"NapCat 未运行: {e}")
 
     def _qq_config_path(self):
         if not self.workspace:
@@ -611,47 +890,77 @@ class PartnerApp:
     def _save_qq_config(self):
         path = self._qq_config_path()
         if not path:
-            messagebox.showerror("Error", "No workspace configured.")
+            messagebox.showerror("Error", self._tr("qq_no_ws"))
             return
-        cfg = {
-            "app_id": self.qq_appid.get().strip(),
-            "app_secret": self.qq_secret.get().strip(),
-            "token": self.qq_token.get().strip(),
-        }
+        mode = self.qq_mode_var.get()
+        if mode == "napcat":
+            cfg = {
+                "mode": "napcat",
+                "ws_url": self.qq_wsurl.get().strip(),
+                "qq_id": self.qq_napcat_id.get().strip(),
+            }
+        else:
+            cfg = {
+                "mode": "official",
+                "app_id": self.qq_appid.get().strip(),
+                "app_secret": self.qq_secret.get().strip(),
+            }
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             json.dump(cfg, f, indent=2)
-        messagebox.showinfo("Saved", "QQ Bot configuration saved.")
+        messagebox.showinfo("Saved", self._tr("qq_saved"))
 
     def _load_qq_config(self):
         path = self._qq_config_path()
         if not path or not os.path.exists(path):
+            self._auto_detect_napcat()
             return
         try:
             with open(path) as f:
                 cfg = json.load(f)
-            self.qq_appid.delete(0, tk.END)
-            self.qq_appid.insert(0, cfg.get("app_id", ""))
-            self.qq_secret.delete(0, tk.END)
-            self.qq_secret.insert(0, cfg.get("app_secret", ""))
-            self.qq_token.delete(0, tk.END)
-            self.qq_token.insert(0, cfg.get("token", ""))
+            mode = cfg.get("mode", "official" if cfg.get("app_id") else "napcat")
+            self.qq_mode_var.set(mode)
+            self._toggle_qq_mode()
+            if mode == "napcat":
+                self.qq_wsurl.delete(0, tk.END)
+                self.qq_wsurl.insert(0, cfg.get("ws_url", "ws://localhost:3001"))
+                self.qq_napcat_id.delete(0, tk.END)
+                self.qq_napcat_id.insert(0, cfg.get("qq_id", ""))
+            else:
+                self.qq_appid.delete(0, tk.END)
+                self.qq_appid.insert(0, cfg.get("app_id", ""))
+                self.qq_secret.delete(0, tk.END)
+                self.qq_secret.insert(0, cfg.get("app_secret", ""))
         except Exception:
-            pass
+            self._auto_detect_napcat()
 
     def _start_qq_bot(self):
         if not self.workspace:
-            messagebox.showerror("Error", "No workspace configured.")
+            messagebox.showerror("Error", self._tr("qq_no_ws"))
             return
+
+        # Save config first
+        self._save_qq_config()
+
         def do_start():
+            # Run bot start in foreground so we can see the output
             out, err, rc = run_silent(
-                [sys.executable, "-m", "partner.cli", "bot", "start", "qq"],
-                timeout=60
+                [sys.executable, "-m", "partner.cli", "bot", "start", "qq", "--foreground"],
+                timeout=15  # Wait up to 15s for connection
             )
-            msg = "Bot started" if rc == 0 else f"Failed: {err[:60]}"
-            self.root.after(0, lambda: self.qq_status_label.config(
-                text=msg, fg=T["green"] if rc == 0 else T["red"]))
-        self.qq_status_label.config(text="Starting...", fg=T["yellow"])
+            if rc == 0:
+                # Check if there's useful output
+                if "✅" in out or "连接" in out:
+                    msg = out.split("\n")[-1].strip()[:80]
+                else:
+                    msg = self._tr("qq_started")
+                self.root.after(0, lambda: self.qq_status_label.config(
+                    text=msg, fg=T["green"]))
+            else:
+                err_msg = err[:80] if err else (out[-80:] if out else "?")
+                self.root.after(0, lambda: self.qq_status_label.config(
+                    text=self._tr("qq_failed", msg=err_msg), fg=T["red"]))
+        self.qq_status_label.config(text=self._tr("qq_starting"), fg=T["yellow"])
         threading.Thread(target=do_start, daemon=True).start()
 
     def _stop_qq_bot(self):
@@ -662,7 +971,8 @@ class PartnerApp:
                 [sys.executable, "-m", "partner.cli", "bot", "stop", "qq"],
                 timeout=10
             )
-            self.root.after(0, lambda: self.qq_status_label.config(text="Stopped", fg=T["txt3"]))
+            self.root.after(0, lambda: self.qq_status_label.config(
+                text=self._tr("qq_stopped"), fg=T["txt3"]))
         threading.Thread(target=do_stop, daemon=True).start()
 
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
@@ -672,11 +982,12 @@ class PartnerApp:
         f = self._tab_contents[3]
         f.configure(bg=T["bg"])
 
-        log_card = AccentCard(f, title="Log Viewer", accent_color=T["yellow"])
+        log_card = AccentCard(f, title=self._tr("logs_title"),
+                              accent_color=T["yellow"])
         log_card.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 8))
 
         self.log_text = scrolledtext.ScrolledText(log_card.body,
-            font=("Cascadia Code", 9), bg=T["bg2"], fg=T["txt"],
+            font=(FONT_MONO[0], 9), bg=T["bg2"], fg=T["txt"],
             relief=tk.FLAT, padx=14, pady=12, borderwidth=0,
             highlightbackground=T["border"], highlightthickness=1,
             insertbackground=T["txt"],
@@ -685,16 +996,17 @@ class PartnerApp:
 
         bf = tk.Frame(f, bg=T["bg"])
         bf.pack(fill=tk.X, padx=0, pady=(0, 0))
-        Btn(bf, text="  \U0001f504  Reload Logs  ", command=self._reload_logs).pack(side=tk.LEFT)
+        Btn(bf, text=self._tr("btn_reload"),
+            command=self._reload_logs).pack(side=tk.LEFT)
 
     def _reload_logs(self):
         self.log_text.delete(1.0, tk.END)
         if not self.workspace:
-            self.log_text.insert(tk.END, "No workspace configured.")
+            self.log_text.insert(tk.END, self._tr("logs_no_ws"))
             return
         log_dir = os.path.join(self.workspace, "logs")
         if not os.path.exists(log_dir):
-            self.log_text.insert(tk.END, "No logs directory found.")
+            self.log_text.insert(tk.END, self._tr("logs_no_dir"))
             return
         files = sorted([f for f in os.listdir(log_dir)
                        if os.path.isfile(os.path.join(log_dir, f))])
@@ -714,18 +1026,16 @@ class PartnerApp:
     #  Shared Helpers
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     def _set_dot(self, color):
-        self.dot_canvas.itemconfig(self.dot_id_outer, fill=color, outline=color)
-        self.dot_canvas.itemconfig(self.dot_id_inner, fill="white", outline="")
+        self.dot_canvas.itemconfig(self.dot_id, fill=color)
 
     def _set_status(self, text, color=None):
         self.status_text.config(state=tk.NORMAL)
         self.status_text.delete(1.0, tk.END)
-        # Add colored tags for status indicators
+        color = color or T["txt3"]
         self.status_text.tag_configure("ok", foreground=T["green"])
         self.status_text.tag_configure("fail", foreground=T["red"])
         self.status_text.tag_configure("highlight", foreground=T["accent2"])
         self.status_text.tag_configure("dim", foreground=T["txt3"])
-        # Insert with color markers
         lines = text.split("\n")
         for i, line in enumerate(lines):
             is_last = (i == len(lines) - 1)
@@ -739,10 +1049,10 @@ class PartnerApp:
                 self.status_text.insert(tk.END, before)
                 self.status_text.insert(tk.END, "[--]", "fail")
                 self.status_text.insert(tk.END, rest)
-            elif "Workspace:" in line:
-                self.status_text.insert(tk.END, "Workspace: ", "dim")
-                ws_path = line.split("Workspace:", 1)[1].strip()
-                self.status_text.insert(tk.END, ws_path, "highlight")
+            elif self._tr("status_workspace") in line and ":" in line:
+                parts = line.split(":", 1)
+                self.status_text.insert(tk.END, f"{parts[0]}: ", "dim")
+                self.status_text.insert(tk.END, parts[1].strip(), "highlight")
             elif "Active Plan:" in line or "Status:" in line or "Goal:" in line:
                 label, val = line.split(":", 1)
                 self.status_text.insert(tk.END, f"{label}:", "dim")
@@ -752,25 +1062,24 @@ class PartnerApp:
             if not is_last:
                 self.status_text.insert(tk.END, "\n")
         self.status_text.config(state=tk.DISABLED)
-        color = color or T["txt3"]
         self._set_dot(color)
-        self.hdr_status.config(text="", fg=color)
+        self.hdr_status.config(text="")
 
     def _set_status_bar(self, text):
         self.status_bar.config(text=text)
 
     def _refresh_status(self):
-        self._set_status("Loading...", T["yellow"])
+        self._set_status(self._tr("status_loading"), T["yellow"])
         threading.Thread(target=self._do_refresh, daemon=True).start()
 
     def _do_refresh(self):
         if not self.workspace:
             self.root.after(0, lambda: self._set_status(
-                "Workspace not configured.\n\nClick 'Setup Wizard' to get started.",
-                T["yellow"]))
+                self._tr("status_no_workspace"), T["yellow"]))
             return
 
-        lines = [f"Workspace: {self.workspace}", ""]
+        ws_label = self._tr("status_workspace")
+        lines = [f"{ws_label}: {self.workspace}", ""]
         for sub in ["state", "logs", "data"]:
             p = os.path.join(self.workspace, sub)
             lines.append(f"[{'OK' if os.path.exists(p) else '--'}] {sub}/")
@@ -811,7 +1120,7 @@ class PartnerApp:
         now = datetime.now().strftime("%H:%M:%S")
         self.root.after(0, lambda: self._set_status("\n".join(lines), color))
         self.root.after(0, lambda: self._set_status_bar(
-            f"Last updated: {now}  |  Workspace: {self.workspace}"))
+            self._tr("last_update", time=now)))
 
     def _start_auto_refresh(self):
         if self._auto_refresh_id:
@@ -832,70 +1141,72 @@ class PartnerApp:
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     def _show_setup(self):
         win = tk.Toplevel(self.root)
-        win.title("Partner Setup")
+        win.title(self._tr("setup_title"))
         win.configure(bg=T["bg"])
-        win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
-        center_window(win, 600, 580)
+        win.resizable(True, True)
+        center_window(win, 600, 680)
 
-        tk.Label(win, text="Partner Setup", bg=T["bg"], fg=T["accent2"],
-                 font=("Segoe UI", 22, "bold")).pack(pady=(28, 2))
-        tk.Label(win, text="Configure your AI Research Companion", bg=T["bg"],
-                 fg=T["txt3"], font=("Segoe UI", 10)).pack(pady=(0, 24))
+        tk.Label(win, text=self._tr("setup_title"), bg=T["bg"], fg=T["accent2"],
+                 font=(FONT[0], 20, "bold")).pack(pady=(20, 2))
+        tk.Label(win, text=self._tr("setup_sub"), bg=T["bg"],
+                 fg=T["txt3"], font=(FONT[0], 10)).pack(pady=(0, 20))
 
         # Step 1: Workspace
-        s1 = AccentCard(win, title="1. Choose Workspace Folder", accent_color=T["green"])
-        s1.pack(fill=tk.X, padx=28, pady=(0, 14))
+        s1 = AccentCard(win, title=self._tr("setup_step1"), accent_color=T["green"])
+        s1.pack(fill=tk.X, padx=28, pady=(0, 12))
         ws_var = tk.StringVar(value=self.workspace or os.path.expanduser("~/partner_workspace"))
         ws_row = tk.Frame(s1.body, bg=T["card"])
-        ws_row.pack(fill=tk.X, padx=18, pady=(4, 16))
+        ws_row.pack(fill=tk.X, padx=18, pady=(4, 14))
         ws_entry = Input(ws_row, textvariable=ws_var)
         ws_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=8)
-        Btn(ws_row, text="  Browse  ", command=lambda: ws_var.set(
-            filedialog.askdirectory(title="Select Workspace") or ws_var.get())
+        Btn(ws_row, text=self._tr("setup_browse"), command=lambda: ws_var.set(
+            filedialog.askdirectory(title=self._tr("setup_title")) or ws_var.get())
             ).pack(side=tk.LEFT, padx=(10, 0))
 
         # Step 2: Backend
-        s2 = AccentCard(win, title="2. AI Backend", accent_color=T["blue"])
-        s2.pack(fill=tk.X, padx=28, pady=(0, 14))
+        s2 = AccentCard(win, title=self._tr("setup_step2"), accent_color=T["blue"])
+        s2.pack(fill=tk.X, padx=28, pady=(0, 12))
         backend_var = tk.StringVar(value="hermes")
-        for val, label in [("hermes", "  \U0001f916  Hermes Agent (recommended)"),
-                          ("openclaw", "  \U0001f9e0  OpenClaw"),
-                          ("skip", "  \u23f3  Skip for now")]:
+        for val, label in [("hermes", self._tr("setup_hermes")),
+                          ("openclaw", self._tr("setup_openclaw")),
+                          ("skip", self._tr("setup_skip"))]:
             tk.Radiobutton(s2.body, text=label, variable=backend_var, value=val,
                           bg=T["card"], fg=T["txt"], selectcolor=T["input_bg"],
                           activebackground=T["card"], activeforeground=T["accent2"],
-                          font=("Segoe UI", 10)).pack(anchor=tk.W, padx=24, pady=3)
+                          font=(FONT[0], 10)).pack(anchor=tk.W, padx=24, pady=3)
 
         # Step 3: QQ Bot
-        s3 = AccentCard(win, title="3. QQ Bot (optional)", accent_color=T["pink"])
-        s3.pack(fill=tk.X, padx=28, pady=(0, 14))
-        tk.Label(s3.body, text="Add your QQ Bot credentials now or later.",
-                 bg=T["card"], fg=T["txt3"], font=("Segoe UI", 9)).pack(anchor=tk.W, padx=18)
+        s3 = AccentCard(win, title=self._tr("setup_step3"), accent_color=T["pink"])
+        s3.pack(fill=tk.X, padx=28, pady=(0, 12))
+        tk.Label(s3.body, text=self._tr("setup_qq_hint"),
+                 bg=T["card"], fg=T["txt3"], font=(FONT[0], 9)).pack(anchor=tk.W, padx=18)
         qf = tk.Frame(s3.body, bg=T["card"])
-        qf.pack(fill=tk.X, padx=18, pady=(8, 8))
-        tk.Label(qf, text="AppID:", bg=T["card"], fg=T["txt2"], width=8, anchor=tk.W).pack(side=tk.LEFT)
-        setup_appid = Input(qf)
-        setup_appid.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        qf.pack(fill=tk.X, padx=18, pady=(8, 6))
+        tk.Label(qf, text=self._tr("setup_qq_id"), bg=T["card"], fg=T["txt2"],
+                 width=8, anchor=tk.W).pack(side=tk.LEFT)
+        setup_qq_id = Input(qf)
+        setup_qq_id.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
         qf2 = tk.Frame(s3.body, bg=T["card"])
         qf2.pack(fill=tk.X, padx=18, pady=(0, 14))
-        tk.Label(qf2, text="Secret:", bg=T["card"], fg=T["txt2"], width=8, anchor=tk.W).pack(side=tk.LEFT)
-        setup_secret = Input(qf2)
-        setup_secret.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        tk.Label(qf2, text=self._tr("setup_qq_pw"), bg=T["card"], fg=T["txt2"],
+                 width=8, anchor=tk.W).pack(side=tk.LEFT)
+        setup_qq_pw = Input(qf2)
+        setup_qq_pw.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
 
         # Status
-        status_var = tk.StringVar(value="Ready to configure")
+        status_var = tk.StringVar(value=self._tr("setup_ready"))
         tk.Label(win, textvariable=status_var, bg=T["bg"], fg=T["txt3"],
-                 font=("Segoe UI", 10)).pack(pady=(4, 0))
+                 font=(FONT[0], 10)).pack(pady=(4, 0))
 
         def do_setup():
             ws = ws_var.get().strip()
             if not ws:
-                messagebox.showerror("Error", "Please select a workspace folder.")
+                messagebox.showerror("Error", self._tr("setup_select_ws"))
                 return
             os.makedirs(ws, exist_ok=True)
-            status_var.set("Creating workspace...")
+            status_var.set(self._tr("setup_creating"))
             win.update()
 
             for sub in ["state", "logs", "data"]:
@@ -906,27 +1217,25 @@ class PartnerApp:
             with open(os.path.join(ws, "config.json"), "w") as fh:
                 json.dump(config, fh, indent=2)
 
-            appid = setup_appid.get().strip()
-            secret = setup_secret.get().strip()
-            if appid and secret:
-                qq_cfg = {"app_id": appid, "app_secret": secret, "token": ""}
+            qq_id = setup_qq_id.get().strip()
+            qq_pw = setup_qq_pw.get().strip()
+            if qq_id:
+                qq_cfg = {"mode": "napcat", "qq_id": qq_id, "qq_password": qq_pw}
                 with open(os.path.join(ws, "qq_config.json"), "w") as fh:
                     json.dump(qq_cfg, fh, indent=2)
 
             if backend_var.get() == "hermes":
-                status_var.set("Installing Hermes Agent...")
+                status_var.set(self._tr("setup_installing"))
                 win.update()
                 run_silent([sys.executable, "-m", "pip", "install", "hermes-agent"], timeout=120)
 
-            status_var.set("Setup complete!")
+            status_var.set(self._tr("setup_complete"))
             self.workspace = ws
             win.after(600, win.destroy)
-            self._refresh_status()
-            self._load_chat_history()
-            self._start_auto_refresh()
+            self._rebuild_ui()
 
-        Btn(win, text="  \U0001f680  Start Setup  ", bg=T["accent"], fg="white",
-            hover=T["accent_h"], command=do_setup).pack(pady=22)
+        Btn(win, text=self._tr("setup_start"), bg=T["accent3"], fg="white",
+            hover_bg=T["accent"], command=do_setup).pack(pady=22)
 
     def run(self):
         self.root.mainloop()
