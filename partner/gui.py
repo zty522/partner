@@ -202,34 +202,9 @@ FONT_MONO = ("Cascadia Code", "Cascadia Mono", "Consolas", "monospace")
 
 
 def find_workspace():
-    """Find existing Partner workspace, checking multiple locations.
-
-    Returns workspace path or None.
-    """
-    # 1. Pointer files (from previous setup)
-    pointer_files = [
-        os.path.expanduser("~/.partner_workspace"),
-        os.path.expanduser("~/.partner"),
-    ]
-    for pf in pointer_files:
-        if os.path.isfile(pf):
-            try:
-                with open(pf) as f:
-                    path = f.read().strip()
-                if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                    return path
-            except OSError:
-                pass
-
-    # 2. Candidate directories (check for repo or config)
-    for p in WORKSPACE_CANDIDATES:
-        # Either the repo code exists or a config file exists
-        if os.path.exists(os.path.join(p, "partner", "__init__.py")):
-            return p
-        if os.path.exists(os.path.join(p, "partner_config.json")):
-            return p
-
-    return None
+    """Find existing Partner workspace (delegates to setup.find_workspace)."""
+    from .setup import find_workspace as _fw
+    return _fw()
 
 
 def run_silent(cmd, cwd=None, timeout=30, timeout_ok=False):
@@ -1070,7 +1045,6 @@ class PartnerApp:
         s2.pack(fill=tk.X, padx=28, pady=(0, 12))
         backend_var = tk.StringVar(value="hermes")
         for val, label in [("hermes", self._tr("setup_hermes")),
-                          ("openclaw", self._tr("setup_openclaw")),
                           ("skip", self._tr("setup_skip"))]:
             tk.Radiobutton(s2.body, text=label, variable=backend_var, value=val,
                           bg=T["card"], fg=T["txt"], selectcolor=T["input_bg"],

@@ -14,70 +14,9 @@ from pathlib import Path
 
 
 def get_workspace() -> str:
-    """Get configured workspace path."""
-    import json as _json
-    
-    # 1. Environment variable
-    ws = os.environ.get("PARTNER_WORKSPACE")
-    if ws and os.path.exists(ws):
-        return ws
-    
-    # 2. Check pointers and repo directory
-    partner_home = os.path.expanduser("~/.partner")
-    pointer_file = os.path.expanduser("~/.partner_workspace")
-
-    # 2a. Pointer file ~/.partner_workspace (new)
-    if os.path.isfile(pointer_file):
-        try:
-            with open(pointer_file) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2b. ~/.partner — could be a pointer file (old)
-    if os.path.isfile(partner_home):
-        try:
-            with open(partner_home) as f:
-                path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
-                return path
-        except OSError:
-            pass
-
-    # 2c. ~/.partner is the repo directory — check for config inside
-    if os.path.isdir(partner_home):
-        config_in_home = os.path.join(partner_home, "partner_config.json")
-        if os.path.exists(config_in_home):
-            return partner_home
-    
-    # 3. Common locations
-    candidates = [
-        os.path.expanduser("~/partner_workspace"),
-        os.path.expanduser("~/.partner_workspace"),
-    ]
-    for c in candidates:
-        config = os.path.join(c, "partner_config.json")
-        if os.path.exists(config):
-            return c
-
-    # 4. Partner app directory itself (has config.json and partner/__init__.py)
-    partner_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.isfile(os.path.join(partner_dir, "partner", "__init__.py")):
-        return partner_dir
-    cfg_in_partner = os.path.join(partner_dir, "config.json")
-    if os.path.exists(cfg_in_partner):
-        try:
-            with open(cfg_in_partner) as f:
-                data = _json.load(f)
-            ws = data.get("workspace", "")
-            if ws and os.path.isfile(os.path.join(ws, "partner", "__init__.py")):
-                return ws
-        except Exception:
-            pass
-
-    return None
+    """Get configured workspace path (delegates to setup.find_workspace)."""
+    from .setup import find_workspace as _fw
+    return _fw()
 
 
 def cmd_setup(args):
@@ -204,23 +143,8 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
 
-        # Read config to determine mode
-        mode = "napcat"
-        ws_url = "ws://localhost:3001"
-        try:
-            with open(cfg) as f:
-                cfg_data = json.load(f)
-            mode = cfg_data.get("mode", "official" if cfg_data.get("app_id") else "napcat")
-            ws_url = cfg_data.get("ws_url", "ws://localhost:3001")
-        except Exception:
-            pass
-
-        if mode == "napcat":
-            cmd = [sys.executable, "-c",
-                f"import sys; sys.path.insert(0,'{pp}'); from partner.napcat_bridge import NapCatBridge; b=NapCatBridge('{workspace}','{ws_url}'); b.start()"]
-        else:
-            cmd = [sys.executable, "-c",
-                f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
+        cmd = [sys.executable, "-c",
+            f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
 
         # Escape backslashes in paths for -c strings (Windows: C:\Users → C:/Users)
         # Without this, \U, \P etc. get interpreted as Unicode escapes by Python -c
@@ -228,7 +152,7 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
 
         if foreground:
             # Foreground mode: start bot, wait, write PID if alive
-            print(f"  🔌 正在连接 ({mode})...")
+            print(f"  🔌 正在连接 QQ 机器人...")
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -450,28 +374,32 @@ def cmd_update(args):
                 print(f"   ⏰ Cron: 未设置 → 自动创建...")
                 # Read config for interval
                 cfg_path = os.path.join(workspace, "partner_config.json")
-                interval = 30
+                interval = 15
                 try:
                     with open(cfg_path) as f:
                         cfg = json.load(f)
-                    interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
+                    interval = cfg.get("scheduler", {}).get("interval_minutes", 15)
                 except Exception:
                     pass
 
                 cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
 
 你的核心原则：
-1. 30 分钟是最小心跳间隔，不是执行窗口
+1. 15 分钟是最小心跳间隔，不是执行窗口
 2. **不要停下来** — 计划完成后，立即搜索该领域最新前沿文献，
    看有没有新的改进方向。如果有 → 创建延续计划继续研究。
    不要等用户下指令才继续。
+3. **使用 Event Bus 推送重要发现** — 实验指标提升>5%、卡死、
+   数据泄漏等要写入 state/event_bus.jsonl（追加 jsonl 格式）
+4. **每次心跳执行轻量自检** — 检查知识冲突、卡死、数据泄漏
 
 每次心跳：
 1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
 2. 计划已完成 → 读取 goal 和结果 → 搜索该领域前沿文献 →
    有新方向就创建延续计划，没有就检查队列
 3. 空闲 + 队列有任务 → 自动创建计划
-4. 每次心跳向 QQ 汇报当前状态
+4. 检查 event_bus.jsonl 中的未推送事件，高优先级(>=8)立即推送
+5. 每次心跳向 QQ 汇报当前状态
 
 用中文。只在 {workspace} 内写文件。"""
 
