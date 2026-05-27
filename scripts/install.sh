@@ -87,7 +87,53 @@ fi
 # ── 安装 Partner ──
 header "安装 Partner"
 info "克隆仓库..."
-git clone "$REPO_URL" "$INSTALL_DIR"
+
+# 针对 GnuTLS 连接问题的修复: 重试 + SSH 降级
+_clone_with_retry() {
+    local url="$1"
+    local dir="$2"
+    local max_attempts=3
+    local attempt=1
+
+    # 尝试配置 Git 使用更稳定的 TLS 后端
+    git config --global http.version HTTP/1.1 2>/dev/null || true
+    git config --global http.postBuffer 524288000 2>/dev/null || true
+
+    while [ $attempt -le $max_attempts ]; do
+        if git clone "$url" "$dir" 2>/dev/null; then
+            return 0
+        fi
+        local exit_code=$?
+        if [ $attempt -lt $max_attempts ]; then
+            warn "克隆失败 (尝试 $attempt/$max_attempts)，等待 3 秒后重试..."
+            sleep 3
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    # HTTPS 全部失败 → 尝试 SSH
+    warn "HTTPS 克隆失败，尝试 SSH 方式..."
+    local ssh_url=$(echo "$url" | sed 's|https://github.com/|git@github.com:|')
+    attempt=1
+    while [ $attempt -le 2 ]; do
+        if git clone "$ssh_url" "$dir" 2>/dev/null; then
+            info "SSH 克隆成功"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+
+    return 1
+}
+
+if ! _clone_with_retry "$REPO_URL" "$INSTALL_DIR"; then
+    error "克隆仓库失败，请检查网络连接:"
+    error "  HTTPS 或 SSH 都无法连接到 GitHub"
+    error "  尝试手动克隆: git clone $REPO_URL $INSTALL_DIR"
+    error "  或设置代理: export ALL_PROXY=socks5://127.0.0.1:1080"
+    exit 1
+fi
 cd "$INSTALL_DIR"
 $PY -m pip install -e . -q --break-system-packages 2>/dev/null || $PY -m pip install -e . -q
 info "Partner 安装完成"
