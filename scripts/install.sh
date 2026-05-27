@@ -135,16 +135,37 @@ case "$AGENT_CHOICE" in
         ;;
 esac
 
+# ── 检测 Partner 安装状态 ──
+header "检测 Partner 安装状态"
+
+# 优先走更新路径：二进制存在 + 模块可加载
+if command -v partner &>/dev/null && $PY -c "import partner; print('ok')" 2>/dev/null; then
+    info "Partner 已安装且可用，执行更新..."
+    exec partner update
+fi
+
+# 清理损坏/残留
+_cleaned=false
+if command -v partner &>/dev/null; then
+    warn "发现 Partner 旧二进制文件但模块无法加载，自动清理..."
+    rm -f "$(command -v partner)" 2>/dev/null || true
+    _cleaned=true
+fi
+if [ -d "$INSTALL_DIR" ] || [ -f "$INSTALL_DIR" ]; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
+    _cleaned=true
+fi
+
+if [ "$_cleaned" = true ]; then
+    echo -e "${GREEN}  已清理旧安装，继续全新安装...${NC}"
+else
+    info "未检测到已有安装"
+fi
+
 # ── 安装 Partner ──
 header "安装 Partner"
-if [ -d "$INSTALL_DIR" ]; then
-    info "Partner 目录已存在: $INSTALL_DIR"
-    cd "$INSTALL_DIR"
-    git pull --ff-only 2>/dev/null || true
-else
-    info "克隆 Partner 仓库..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
-fi
+info "克隆 Partner 仓库..."
+git clone "$REPO_URL" "$INSTALL_DIR"
 
 cd "$INSTALL_DIR"
 $PY -m pip install -e . -q
