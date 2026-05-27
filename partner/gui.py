@@ -693,55 +693,42 @@ class PartnerApp:
         self._show_thinking()
 
         def do_reply():
-            # Use the same two-tier approach as QQ bridge:
-            # 1. Try LLM via HermesAdapter
-            # 2. Fall back to ConversationEngine
-            script = (
-                "import sys, json, os\n"
-                f"sys.path.insert(0, {PARTNER_DIR!r})\n"
-                "from partner.journal import Journal\n"
-                "from partner.knowledge import KnowledgeBase\n"
-                "from partner.task_queue import TaskQueue\n"
-                "from partner.state import StateManager\n"
-                "from partner.conversation import ConversationEngine\n"
-                "from partner.adapter import create_adapter\n"
-                f"ws = {self.workspace!r}\n"
-                "j = Journal(os.path.join(ws, 'state', 'journal.jsonl')) if ws else None\n"
-                "k = KnowledgeBase(os.path.join(ws, 'state', 'knowledge.json')) if ws else None\n"
-                "tq = TaskQueue(os.path.join(ws, 'state', 'task_queue.json')) if ws else None\n"
-                "st = StateManager(os.path.join(ws, 'state')) if ws else None\n"
-                "eng = ConversationEngine(j, k, tq, st, ws or '')\n"
-                "adapter = create_adapter('hermes', ws)\n"
-                "# Tier 1: Try LLM\n"
-                "prompt = f'你是Partner，我的私人研究伙伴。用简短自然的口语回复。\\n\\n用户说: {text!r}'\n"
-                "reply = adapter.chat(prompt)\n"
-                "if reply:\n"
-                "    print(reply)\n"
-                "else:\n"
-                "    # Tier 2: ConversationEngine fallback\n"
-                "    print(eng.respond({text!r}))\n"
-            )
-            script_path = os.path.join(PARTNER_DIR, "_chat_script.py")
+            # Direct import + call (no temp script file - avoids quoting bugs)
             try:
-                with open(script_path, "w", encoding="utf-8") as sf:
-                    sf.write(script)
-                out, err, rc = run_silent([sys.executable, script_path], timeout=30, timeout_ok=True)
-            except Exception as e:
-                out, err, rc = "", str(e), 1
-            finally:
-                if os.path.exists(script_path):
-                    try:
-                        os.remove(script_path)
-                    except Exception:
-                        pass
+                import sys as _sys
+                _sys.path.insert(0, PARTNER_DIR)
+                from partner.journal import Journal as _J
+                from partner.knowledge import KnowledgeBase as _K
+                from partner.task_queue import TaskQueue as _TQ
+                from partner.state import StateManager as _SM
+                from partner.conversation import ConversationEngine as _CE
+                from partner.adapter import create_adapter as _ca
 
-            self.root.after(0, lambda: self._hide_thinking())
-            if rc == 0 and out:
-                self.root.after(0, lambda: self._add_chat_message("bot", out))
-            else:
-                msg = err[:100] if err else (out[:100] if out else "unknown error")
+                ws = self.workspace
+                j = _J(os.path.join(ws, 'state', 'journal.jsonl')) if ws else None
+                k = _K(os.path.join(ws, 'state', 'knowledge.json')) if ws else None
+                tq = _TQ(os.path.join(ws, 'state', 'task_queue.json')) if ws else None
+                st = _SM(os.path.join(ws, 'state')) if ws else None
+                eng = _CE(j, k, tq, st, ws or '')
+                adapter = _ca('hermes', ws) if ws else None
+
+                # Tier 1: Try LLM
+                if adapter:
+                    prompt = f"你是Partner，我的私人研究伙伴。用简短自然的口语回复。\n\n用户说: {text}"
+                    reply = adapter.chat(prompt)
+                    if reply:
+                        self.root.after(0, lambda r=reply: self._add_chat_message("bot", r))
+                        self.root.after(0, self._hide_thinking)
+                        return
+
+                # Tier 2: ConversationEngine fallback
+                reply = eng.respond(text)
+                self.root.after(0, lambda r=reply: self._add_chat_message("bot", r))
+            except Exception as e:
                 self.root.after(0, lambda: self._add_chat_message("bot",
-                    self._tr("chat_error", msg=msg)))
+                    self._tr("chat_error", msg=str(e)[:100])))
+            finally:
+                self.root.after(0, self._hide_thinking)
 
         threading.Thread(target=do_reply, daemon=True).start()
 
