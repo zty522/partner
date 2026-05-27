@@ -165,52 +165,5 @@ def create_adapter(backend: str, workspace_path: str) -> AgentAdapter:
         "direct": DirectAdapter,
     }
     
-    # Try to import optional adapters
-    try:
-        from .openclaw_adapter import OpenClawAdapter
-        adapters["openclaw"] = OpenClawAdapter
-    except ImportError:
-        pass
-    
-    try:
-        from .other_adapters import AutoGPTAdapter, OpenHandsAdapter, CrewAIAdapter, GptmeAdapter
-        adapters["autogpt"] = AutoGPTAdapter
-        adapters["openhands"] = OpenHandsAdapter
-        adapters["crewai"] = CrewAIAdapter
-        adapters["gptme"] = GptmeAdapter
-    except ImportError:
-        pass
-    
     adapter_class = adapters.get(backend, DirectAdapter)
     return adapter_class(workspace_path)
-
-
-def list_available_adapters(workspace_path: str) -> list:
-    """List all available agent adapters."""
-    all_adapters = [
-        ("hermes", "Hermes Agent", "🔮"),
-        ("openclaw", "OpenClaw (小龙虾)", "🦞"),
-        ("crewai", "CrewAI", "👥"),
-        ("autogpt", "AutoGPT", "🤖"),
-        ("openhands", "OpenHands", "👐"),
-        ("gptme", "gptme", "💻"),
-        ("codex", "OpenAI Codex", "⚡"),
-        ("claude_code", "Claude Code", "🧠"),
-        ("direct", "Direct (no agent)", "📌"),
-    ]
-    
-    result = []
-    for name, display, emoji in all_adapters:
-        try:
-            adapter = create_adapter(name, workspace_path)
-            available = adapter.is_available() if hasattr(adapter, 'is_available') else True
-        except:
-            available = False
-        result.append({
-            "name": name,
-            "display": display,
-            "emoji": emoji,
-            "available": available,
-        })
-    
-    return result

@@ -1070,7 +1070,6 @@ class PartnerApp:
         s2.pack(fill=tk.X, padx=28, pady=(0, 12))
         backend_var = tk.StringVar(value="hermes")
         for val, label in [("hermes", self._tr("setup_hermes")),
-                          ("openclaw", self._tr("setup_openclaw")),
                           ("skip", self._tr("setup_skip"))]:
             tk.Radiobutton(s2.body, text=label, variable=backend_var, value=val,
                           bg=T["card"], fg=T["txt"], selectcolor=T["input_bg"],
