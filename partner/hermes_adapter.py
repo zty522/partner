@@ -162,7 +162,7 @@ print("\\n---\\nExecuting via Hermes Agent session...")
                 f.write(prompt)
             
             result = subprocess.run(
-                ["hermes", "chat", "--message", prompt],
+                ["hermes", "chat", "-q", prompt],
                 capture_output=True, text=True, timeout=300,
                 cwd=self.workspace,
             )
@@ -194,7 +194,7 @@ print("\\n---\\nExecuting via Hermes Agent session...")
         elif mode == "cli":
             try:
                 result = subprocess.run(
-                    ["hermes", "chat", "--message", message],
+                    ["hermes", "chat", "-q", message],
                     capture_output=True, text=True, timeout=300,
                     cwd=self.workspace,
                 )
