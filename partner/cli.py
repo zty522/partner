@@ -223,9 +223,15 @@ def cmd_update(args):
     # 3. pip install -e .
     print(f"{C_YELLOW}➜ pip install -e .{C_RESET}")
     r = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", "."],
+        [sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages"],
         capture_output=True, text=True, timeout=120, cwd=repo_dir,
     )
+    if r.returncode != 0:
+        # Retry without --break-system-packages (older pip versions)
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-e", "."],
+            capture_output=True, text=True, timeout=120, cwd=repo_dir,
+        )
     if r.returncode != 0:
         print(f"{C_RED}❌ pip install failed:{C_RESET}")
         print(r.stderr)
