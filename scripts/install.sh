@@ -9,30 +9,22 @@ REPO_URL="https://github.com/zty522/partner.git"
 INSTALL_DIR="${PARTNER_HOME:-$HOME/.partner}"
 PYTHON_MIN="3.10"
 
-# ── ANSI ──
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
 info()  { echo -e "  ${GREEN}✓${NC} $1"; }
 warn()  { echo -e "  ${YELLOW}⚠${NC} $1"; }
-skip()  { echo -e "  ${DIM}○${NC} $1"; }
 error() { echo -e "  ${RED}✗${NC} $1"; }
-step()  { echo -e "\n${BOLD}${CYAN}  ▸ $1${NC}"; echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"; }
 
-# ── Banner ──
 echo ""
 echo -e "  ${BOLD}${CYAN}🤝 Partner${NC} ${DIM}— AI Research Companion${NC}"
-echo -e "  ${DIM}One-click installer for Linux${NC}"
 echo -e "  ${CYAN}$(printf '%.0s━' {1..46})${NC}"
 echo ""
 
-# ── 检测系统 ──
-step "检查系统环境"
-OS=""
-[ -f /etc/os-release ] && . /etc/os-release
-info "系统: ${BOLD}${OS:-$(uname)}${NC} $(uname -m)"
+# ── 1. 检测 Python ──
+echo -e "${BOLD}${CYAN}  ▸ 环境检查${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 
-# ── Python ──
 check_python() {
     for p in python3 python; do
         if command -v $p &>/dev/null; then
@@ -46,6 +38,8 @@ check_python() {
 
 PY=$(check_python)
 if [ -z "$PY" ]; then
+    OS=""
+    [ -f /etc/os-release ] && . /etc/os-release
     warn "需要 Python ${PYTHON_MIN}+，正在安装..."
     case "$OS" in
         ubuntu|debian) sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip python3-venv; PY=python3 ;;
@@ -57,8 +51,8 @@ if [ -z "$PY" ]; then
 fi
 info "Python: ${BOLD}$($PY --version 2>&1 | head -1)${NC}"
 
-# ── git ──
 if ! command -v git &>/dev/null; then
+    OS=""; [ -f /etc/os-release ] && . /etc/os-release
     warn "git 未安装，正在安装..."
     case "$OS" in
         ubuntu|debian) sudo apt-get install -y -qq git ;;
@@ -69,22 +63,31 @@ if ! command -v git &>/dev/null; then
 fi
 info "git: ${BOLD}$(git --version 2>&1 | head -1)${NC}"
 
-# ── 安装 Partner ──
-step "安装 Partner"
-if [ -d "$INSTALL_DIR" ]; then
-    info "Partner 目录已存在，更新中..."
+# ── 2. 下载/更新 Partner ──
+echo ""
+echo -e "${BOLD}${CYAN}  ▸ 下载 Partner${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    info "已存在，更新到最新..."
     cd "$INSTALL_DIR"
     git pull --ff-only 2>&1 | head -3 || true
 else
-    info "克隆 Partner 仓库..."
+    [ -d "$INSTALL_DIR" ] && rm -rf "$INSTALL_DIR"
+    info "克隆仓库..."
     git clone "$REPO_URL" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
-$PY -m pip install -e . -q 2>/dev/null
-info "Partner 安装完成"
+# ── 3. 安装 ──
+echo ""
+echo -e "${BOLD}${CYAN}  ▸ 安装${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 
-# ── PATH 链接 ──
+$PY -m pip install -e . -q 2>/dev/null
+info "Python 包安装完成"
+
+# PATH 链接
 if ! command -v partner &>/dev/null; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/partner" << 'PYEOF'
@@ -101,17 +104,14 @@ PYEOF
         fi
     done
 fi
-info "partner 命令: ${BOLD}$HOME/.local/bin/partner${NC}"
+info "partner 命令已就绪"
 
-# ── 完成 ──
+# ── 4. 运行 setup 向导 ──
 echo ""
-echo -e "  ${GREEN}${BOLD}━━━ 🎉 安装完成! ━━━${NC}"
+echo -e "${BOLD}${CYAN}  ▸ 配置向导${NC}"
+echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 echo ""
-echo -e "  ${BOLD}安装目录:${NC} ${INSTALL_DIR}"
-echo ""
-echo -e "  ${CYAN}接下来:${NC}"
-echo -e "    ${BOLD}partner setup${NC}           首次配置向导"
-echo -e "    ${BOLD}partner status${NC}          查看状态"
-echo -e "    ${BOLD}partner bot start qq${NC}    启动 QQ 机器人"
-echo -e "    ${BOLD}partner update${NC}          更新到最新版本"
-echo ""
+
+# 确保 PATH 包含 ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+exec partner setup
