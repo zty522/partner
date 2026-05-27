@@ -2,7 +2,7 @@
 
 All notable changes to Partner will be documented in this file.
 
-## [v0.3.0] - 2026-05-26
+## [v0.3.0] - 2026-05-27
 
 ### 🔧 New
 - **一键安装脚本**: Linux (install.sh) + Windows (install.bat / install.ps1) 便捷安装
@@ -12,6 +12,26 @@ All notable changes to Partner will be documented in this file.
 - **OpenClaw 集成**: 通过 ACP 协议对接 OpenClaw 小龙蝦
 - **README 重写**: 增加安装指引、集成说明、命令列表
 - **install.bat 双击安装**: 下载 ZIP 解压后双击即可安装
+- **python -m partner 支持**: 新建 __main__.py，跨平台命令行入口
+
+### 🐛 Bug Fixes
+- **QQ 回复修复**:
+  - 移除"请等待..."双重回复 → 每次消息只发一次
+  - 全面清除 markdown 符号（**加粗**, *斜体*, `代码`, ~~删除线~~ 等）
+  - LLM prompt 增加语气规则：禁止"收到""好的"等机械开头
+- **路由器机械回复**:
+  - _handle_help 从 13 行 emoji 目录压缩为 6 行自然文本
+- **适配器超时**:
+  - hermes chat timeout 从 60s 提升到 300s
+  - 增加 TimeoutExpired 处理
+- **加密硬编码移除**:
+  - send_qq_report.py 从硬编码凭据改为读 config 文件
+- **setup 路径修复**:
+  - 移除硬编码 /mnt/c/Users/zty12/Downloads，改用 pathlib.Path.home()
+- **心跳抑制**:
+  - 任务刚刚入列时跳过即时心跳推送
+- **编码修复**:
+  - 添加 PYTHONIOENCODING=utf-8 环境变量
 
 ## [v0.2.0] - 2026-05-26
 
