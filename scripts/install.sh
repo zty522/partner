@@ -68,7 +68,10 @@ echo ""
 echo -e "${BOLD}${CYAN}  ▸ 下载 Partner${NC}"
 echo -e "  ${DIM}$(printf '%.0s─' {1..46})${NC}"
 
-if [ -d "$INSTALL_DIR/.git" ]; then
+if command -v partner &>/dev/null; then
+    info "Partner 已安装，执行更新..."
+    exec partner update
+elif [ -d "$INSTALL_DIR/.git" ]; then
     info "已存在，更新到最新..."
     cd "$INSTALL_DIR"
     git pull --ff-only 2>&1 | head -3 || true
