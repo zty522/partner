@@ -8,5 +8,5 @@ It reads papers, explores projects, builds knowledge, and proposes ideas
 - all on its own. You just check in when you want.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "Partner Team"

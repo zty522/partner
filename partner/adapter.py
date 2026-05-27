@@ -94,7 +94,7 @@ class HermesAdapter(AgentAdapter):
             cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, timeout=600,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()

@@ -280,14 +280,13 @@ class QQQfficialBridge:
         logger.error(f"QQ Bot error: {error}")
 
     def _handle_message(self, msg: QQMessage):
-        """Handle an incoming QQ message.
+        """Handle an incoming QQ message (two-step async pipeline).
 
         Pipeline:
-        1. Save user context (so cron can send reports)
-        2. Detect if message is a task request or casual chat
-        3. If task → queue it, return confirmation
-        4. If chat → get LLM response, send reply
-        5. Log interaction
+        1. SAVE user context (fast, synchronous)
+        2. SEND "请等待..." IMMEDIATELY (so user gets instant feedback)
+        3. Process message in BACKGROUND THREAD (doesn't block QQ bot loop)
+        4. Send actual reply when ready
         """
         self._stats["messages_received"] += 1
 
@@ -311,51 +310,17 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
-            # Step 0: Special commands (handled directly, no LLM needed)
-            special_reply = self._handle_special_command(user_text, msg)
-            if special_reply:  # Has a real reply
-                self._send_reply(msg, special_reply)
-                return
-            if special_reply == "":  # Pattern matched, go to LLM chat
-                self._force_run_triggered = True
-            else:
-                self._force_run_triggered = False
+            # --- TWO-STEP REPLY: First send "请等待..." immediately ---
+            self._send_reply(msg, "请等待，正在思考...")
 
-            # Step 1: Use LLM to classify: task request or casual chat?
-            # If force_run was just triggered, skip TASK (research already started)
-            _task_queued = False
-            if not self._force_run_triggered:
-                intent = self._classify_intent(user_text, msg.sender_id)
-                if intent == "TASK":
-                    reply = self._queue_task(user_text, msg)
-                    if reply:
-                        self._send_reply(msg, reply)
-                        return
-                    # Empty reply → fall through to LLM chat
-                    _task_queued = True
-            if not _task_queued:
-                self._force_run_triggered = False
-
-            # Step 2: Normal chat — get LLM response directly (no double-reply)
-            reply = self._get_response(msg.sender_id, user_text, msg.message_type)
-
-            # Save dialogue to workspace
-            try:
-                from .workspace_manager import append_dialogue
-                append_dialogue(self.workspace, msg.sender_name, user_text, reply, platform="qq")
-            except Exception:
-                pass
-
-            # Send reply
-            self._send_reply(msg, reply)
-
-            # Log interaction
-            self.journal.log(JournalEntry(
-                task_id=f"qq_{msg.msg_id}",
-                task_type="conversation",
-                task_title=f"QQ对话: {msg.sender_name}({msg.sender_id})",
-                result_summary=f"Q: {user_text[:100]} → A: {reply[:100]}",
-            ))
+            # --- Then process in background thread ---
+            import threading
+            thread = threading.Thread(
+                target=self._process_message_async,
+                args=(msg, user_text),
+                daemon=True,
+            )
+            thread.start()
 
         except Exception as e:
             logger.error(f"Message handling error: {e}", exc_info=True)
@@ -374,7 +339,68 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-    # ── Response Generation ───────────────────────────────────────
+    def _process_message_async(self, msg: QQMessage, user_text: str):
+        """Process message in background thread (called after '请等待...' sent).
+
+        This runs in a background thread so the QQ bot event loop
+        is free to send the initial "请等待..." reply immediately.
+        """
+        try:
+            # Step 0: Special commands (handled directly, no LLM needed)
+            special_reply = self._handle_special_command(user_text, msg)
+            if special_reply:  # Has a real reply
+                # Overwrite the "请等待" with actual reply
+                self._send_reply(msg, special_reply)
+                return
+            if special_reply == "":  # Pattern matched, go to LLM chat
+                self._force_run_triggered = True
+            else:
+                self._force_run_triggered = False
+
+            # Step 1: Use LLM to classify: task request or casual chat?
+            _task_queued = False
+            if not self._force_run_triggered:
+                intent = self._classify_intent(user_text, msg.sender_id)
+                if intent == "TASK":
+                    reply = self._queue_task(user_text, msg)
+                    if reply:
+                        self._send_reply(msg, reply)
+                        return
+                    _task_queued = True
+            if not _task_queued:
+                self._force_run_triggered = False
+            else:
+                self._force_run_triggered = False
+
+            # Step 2: Normal chat — get LLM response
+            reply = self._get_response(msg.sender_id, user_text, msg.message_type)
+
+            # Save dialogue to workspace
+            try:
+                from .workspace_manager import append_dialogue
+                append_dialogue(self.workspace, msg.sender_name, user_text, reply, platform="qq")
+            except Exception:
+                pass
+
+            # Send actual reply (overwrites the "请等待..." placeholder)
+            self._send_reply(msg, reply)
+
+            # Log interaction
+            self.journal.log(JournalEntry(
+                task_id=f"qq_{msg.msg_id}",
+                task_type="conversation",
+                task_title=f"QQ对话: {msg.sender_name}({msg.sender_id})",
+                result_summary=f"Q: {user_text[:100]} → A: {reply[:100]}",
+            ))
+
+        except Exception as e:
+            logger.error(f"Background message processing error: {e}", exc_info=True)
+            self._stats["errors"] += 1
+            try:
+                error_text = "抱歉，思考太久出了点问题，再跟我说一次？"
+                self._send_reply(msg, error_text)
+            except Exception:
+                pass
 
     def _get_response(self, sender: str, text: str, msg_type: QQMessageType) -> str:
         """Get a response using LLM via agent adapter.
