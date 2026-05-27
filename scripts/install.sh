@@ -104,7 +104,7 @@ esac
 case "$AGENT_CHOICE" in
     1)
         header "安装 Hermes Agent"
-        $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败，可稍后手动安装"
+        $PY -m pip install hermes-agent -q --break-system-packages 2>/dev/null || $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败，可稍后手动安装"
         ;;
     2)
         header "安装 OpenClaw"
@@ -120,7 +120,7 @@ case "$AGENT_CHOICE" in
         ;;
     3)
         header "安装 Hermes Agent + OpenClaw"
-        $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败"
+        $PY -m pip install hermes-agent -q --break-system-packages 2>/dev/null || $PY -m pip install hermes-agent -q 2>/dev/null && info "Hermes 安装成功" || warn "Hermes 安装失败"
         npm install -g openclaw@latest 2>&1 | tail -1 && info "OpenClaw 安装成功" || warn "OpenClaw 安装失败"
         for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
             [ -f "$rc" ] && grep -q "N_PREFIX" "$rc" 2>/dev/null && continue
@@ -168,7 +168,7 @@ info "克隆 Partner 仓库..."
 git clone "$REPO_URL" "$INSTALL_DIR"
 
 cd "$INSTALL_DIR"
-$PY -m pip install -e . -q
+$PY -m pip install -e . -q --break-system-packages 2>/dev/null || $PY -m pip install -e . -q
 info "Partner 安装完成"
 
 # ── 创建 PATH 链接 ──
