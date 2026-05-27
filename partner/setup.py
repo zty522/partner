@@ -1559,12 +1559,15 @@ def interactive_setup():
             if qq_cfg.get("type") == "official":
                 import subprocess
                 qq_log = os.path.join(workspace, "logs", "qq_bot.log")
+                # Escape backslashes in paths for -c string (Windows)
+                _pp = partner_pkg.replace("\\", "/")
+                _ws = workspace.replace("\\", "/")
                 cmd = [
                     sys.executable, "-c",
-                    f"import sys; sys.path.insert(0, '{partner_pkg}'); "
+                    f"import sys; sys.path.insert(0, '{_pp}'); "
                     f"from partner.qq_official_bridge import QQQfficialBridge; "
-                    f"b = QQQfficialBridge('{workspace}'); "
-                    f"b.load_config_from_file('{qq_cfg_path}'); "
+                    f"b = QQQfficialBridge('{_ws}'); "
+                    f"b.load_config_from_file('{qq_cfg_path}'.replace('\\\\','/')); "
                     f"b.start()"
                 ]
                 proc = subprocess.Popen(
@@ -1585,6 +1588,16 @@ def interactive_setup():
     
     if selected.name == "hermes":
         setup_cron_hermes(workspace)
+        # Trigger immediate first run so Partner starts working now
+        try:
+            import subprocess as _sp
+            _sp.run(
+                ["hermes", "cron", "run", "partner-research-cycle", "--accept-hooks"],
+                capture_output=True, timeout=120,
+            )
+            status_ok("✅ 首次研究周期已触发，Partner 开始后台工作！")
+        except Exception:
+            status_info("ℹ Cron 将在下一分钟自动运行")
     
     # Daily workspace organization
     setup_workspace_cron(workspace)

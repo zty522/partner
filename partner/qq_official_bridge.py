@@ -274,6 +274,16 @@ class QQQfficialBridge:
             task_title="QQ 机器人就绪",
             result_summary=f"机器人: {bot_info.name} ({bot_info.id})",
         ))
+        # Mark startup time for welcome message detection
+        import time as _time
+        self._startup_time = _time.time()
+
+    def _should_welcome(self) -> bool:
+        """Check if we should send a welcome message (first connection / restart)."""
+        import time as _time
+        startup = getattr(self, '_startup_time', 0)
+        # Send welcome if bridge just started (within 120s)
+        return _time.time() - startup < 120
 
     def _handle_error(self, error: Exception):
         """Called when an error occurs."""
@@ -309,6 +319,15 @@ class QQQfficialBridge:
                 return
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
+
+            # Check for welcome message (sent on first interaction after bot restart)
+            if self._should_welcome():
+                welcome = ("嘿！Partner 刚重启好，已经开始在后台跑了。\n\n"
+                          "你直接问我「最近在研究什么」就能看到进展，"
+                          "或者跟我说「推进年龄预测」我就继续干活。")
+                # Send welcome as the instant reply instead of "请等待"
+                self._send_reply(msg, welcome)
+                return
 
             # --- TWO-STEP REPLY: First send "请等待..." immediately ---
             self._send_reply(msg, "请等待，正在思考...")
