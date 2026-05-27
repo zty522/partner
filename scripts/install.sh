@@ -135,6 +135,19 @@ if ! _clone_with_retry "$REPO_URL" "$INSTALL_DIR"; then
     exit 1
 fi
 cd "$INSTALL_DIR"
+
+# 确保 pip 已安装
+if ! $PY -m pip --version &>/dev/null; then
+    warn "pip 未安装，正在安装..."
+    case "$OS" in
+        ubuntu|debian) sudo apt-get install -y -qq python3-pip ;;
+        centos|fedora|rhel) sudo yum install -y python3-pip ;;
+        arch) sudo pacman -Sy --noconfirm python-pip ;;
+        alpine) sudo apk add py3-pip ;;
+        *) warn "请手动安装 pip: sudo apt install python3-pip" ;;
+    esac
+fi
+
 $PY -m pip install -e . -q --break-system-packages 2>/dev/null || $PY -m pip install -e . -q
 info "Partner 安装完成"
 
