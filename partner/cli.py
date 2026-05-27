@@ -419,6 +419,17 @@ def cmd_update(args):
     print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
     print()
 
+    # 8. Ask if user wants to reconfigure
+    if workspace:
+        try:
+            answer = input(f"\n  {C_CYAN}检测到已有配置，是否运行配置向导修改？{C_RESET}[Y/n] ")
+            if answer.lower() in ("", "y", "yes"):
+                print()
+                from .setup import interactive_setup
+                interactive_setup()
+        except (EOFError, KeyboardInterrupt):
+            print()
+
 
 def _print_commands():
     """Print the standard commands menu."""
