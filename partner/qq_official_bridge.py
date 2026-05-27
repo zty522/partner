@@ -359,10 +359,7 @@ class QQQfficialBridge:
                 self._send_reply(msg, welcome)
                 return
 
-            # --- TWO-STEP REPLY: First send "请等待..." immediately ---
-            self._send_reply(msg, "请等待，正在思考...")
-
-            # --- Then process in background thread ---
+            # Process message in background thread
             import threading
             thread = threading.Thread(
                 target=self._process_message_async,
@@ -485,6 +482,8 @@ class QQQfficialBridge:
             if self._adapter is None:
                 # Read backend from config
                 cfg_path = os.path.join(self.workspace, "partner_config.json")
+                if not os.path.exists(cfg_path):
+                    cfg_path = os.path.join(self.workspace, "config.json")
                 if not os.path.exists(cfg_path):
                     return None
                 with open(cfg_path) as f:
@@ -843,6 +842,8 @@ class QQQfficialBridge:
         try:
             if self._adapter is None:
                 cfg_path = os.path.join(self.workspace, "partner_config.json")
+                if not os.path.exists(cfg_path):
+                    cfg_path = os.path.join(self.workspace, "config.json")
                 if not os.path.exists(cfg_path):
                     return "CHAT"
                 with open(cfg_path) as f:

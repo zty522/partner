@@ -165,11 +165,10 @@ class ConversationRouter:
     
     def _handle_greeting(self, parsed: ParsedQuery) -> str:
         """Respond to greetings naturally."""
-        return ("嘿！我在呢~ 最近在研究一些有趣的东西。\\n\\n"
-                "你可以问我：\\n"
-                "  • 「最近在研究什么？」 — 看看进展\\n"
-                "  • 「关于 X 你知道什么？」 — 搜搜知识\\n"
-                "  • 「去研究 X」 — 加个新任务")
+        return ("嘿！我在呢~ 刚在跑实验。\n\n"
+                "你可以问我：\n"
+                "  • 「最近在研究什么」 — 看看进展\n"
+                "  • 「推进项目」 — 继续干活")
 
     def _handle_status(self, parsed: ParsedQuery) -> str:
         """Generate status report: recent activities, knowledge, stats."""
@@ -388,13 +387,13 @@ class ConversationRouter:
     
     def _handle_general(self, parsed: ParsedQuery) -> str:
         """Handle general/unrecognized queries."""
-        return (f"收到。我会把「{parsed.query[:50]}」纳入考虑。\n\n"
+        query = parsed.query[:50]
+        if len(query) < 10:
+            return f"行，我知道了。"
+        return (f"收到。我会看看「{query}」这个方向。\n\n"
                 f"你可以问我：\n"
-                f"  • 「最近在研究什么？」 — 查看进展\n"
-                f"  • 「关于 X 你知道什么？」 — 搜索知识\n"
-                f"  • 「去研究 X」 — 添加新任务\n"
-                f"  • 「整理 workspace」 — 整理工作区文件\n"
-                f"  • 「帮助」 — 查看所有命令")
+                f"  • 「最近在研究什么」 — 看看进展\n"
+                f"  • 「推进项目」 — 继续干活")
 
     def _handle_workspace(self, parsed: ParsedQuery) -> str:
         """Handle workspace organization request."""

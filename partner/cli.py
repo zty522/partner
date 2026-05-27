@@ -61,7 +61,22 @@ def get_workspace() -> str:
         config = os.path.join(c, "partner_config.json")
         if os.path.exists(config):
             return c
-    
+
+    # 4. Partner app directory itself (has config.json and partner/__init__.py)
+    partner_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.isfile(os.path.join(partner_dir, "partner", "__init__.py")):
+        return partner_dir
+    cfg_in_partner = os.path.join(partner_dir, "config.json")
+    if os.path.exists(cfg_in_partner):
+        try:
+            with open(cfg_in_partner) as f:
+                data = _json.load(f)
+            ws = data.get("workspace", "")
+            if ws and os.path.isfile(os.path.join(ws, "partner", "__init__.py")):
+                return ws
+        except Exception:
+            pass
+
     return None
 
 
@@ -218,6 +233,7 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, start_new_session=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                 )
                 # Wait up to 6s for connection, then check if alive
                 import time as _t
@@ -239,7 +255,8 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                 sys.exit(1)
             return
 
-        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,)
         pidf = os.path.join(workspace, "state", "qq_bot.pid")
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
         with open(pidf, "w") as f:
@@ -256,6 +273,7 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                 [sys.executable, watchdog_script, workspace],
                 stdout=open(watchdog_log, "a"), stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
             print(f"  🛡️  Watchdog 已启动 (自动守护)")
         else:
