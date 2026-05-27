@@ -1,3 +1,7 @@
 @echo off
 set PYTHONPATH=%~dp0;%PYTHONPATH%
-python -m partner.cli %*
+if "%1"=="" (
+    start "" pythonw.exe -m partner.gui
+) else (
+    python -m partner.cli %*
+)
