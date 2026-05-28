@@ -364,8 +364,13 @@ class QQQfficialBridge:
                                 openid = f.read().strip()
 
                     if openid and self._bot and self._bot.get_event_loop():
+                        # 去除 markdown（QQ API 不接受 **bold**）
+                        clean = content
+                        import re
+                        clean = re.sub(r'\*{1,2}(.+?)\*{1,2}', r'\1', clean)
+                        clean = re.sub(r'`([^`]+)`', r'\1', clean)
                         # Truncate long messages
-                        text = content[:500] if len(content) > 500 else content
+                        text = clean[:500] if len(clean) > 500 else clean
                         asyncio.run_coroutine_threadsafe(
                             self._bot.send_message(openid, text, QQMessageType.PRIVATE),
                             self._bot.get_event_loop(),

@@ -239,19 +239,24 @@ async def _handle_cron_tick(event: MindEvent):
 
     # 0. 检查是否有活跃计划 → CRON_TICK 应该围绕计划主题探索
     active_topic = ""
-    active_plan_path = os.path.join(_workspace, "state", "active_plan.json") if _workspace else ""
-    if active_plan_path and os.path.exists(active_plan_path):
-        try:
-            with open(active_plan_path, "r", encoding="utf-8") as f:
-                plan = json.load(f)
-            plan_status = plan.get("status", "idle")
-            plan_title = plan.get("title", "")
-            plan_goal = plan.get("goal", "")
-            if plan_status in ("planning", "active") and plan_title:
-                active_topic = plan_title
-                logger.info(f"[CRON] Active plan detected: '{plan_title}'")
-        except Exception as e:
-            logger.warning(f"[CRON] Failed to read active_plan: {e}")
+    # 优先读根目录 active_plan.json（hermes cron 写的），再读 state/ 下的
+    plan_candidates = []
+    if _workspace:
+        plan_candidates.append(os.path.join(_workspace, "active_plan.json"))
+        plan_candidates.append(os.path.join(_workspace, "state", "active_plan.json"))
+    for plan_path in plan_candidates:
+        if plan_path and os.path.exists(plan_path):
+            try:
+                with open(plan_path, "r", encoding="utf-8") as f:
+                    plan = json.load(f)
+                plan_status = plan.get("status", "idle")
+                plan_title = plan.get("title", "")
+                if plan_status in ("planning", "active") and plan_title:
+                    active_topic = plan_title
+                    logger.info(f"[CRON] Active plan detected: '{plan_title[:60]}' (from {plan_path})")
+                    break
+            except Exception as e:
+                logger.warning(f"[CRON] Failed to read {plan_path}: {e}")
 
     # 1. 探索：如果有活跃计划就探索相关主题，否则探索知识空白
     if active_topic:
