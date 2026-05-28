@@ -69,16 +69,10 @@ class HermesAdapter(AgentAdapter):
         return [SearchResult(title="Search Result", url="", snippet=result)]
     
     def execute_task(self, prompt: str) -> str:
-        """Execute a research task via Hermes CLI chat.
-
-        Writes prompt to state file for reference, then invokes hermes chat
-        to get a response. If hermes is unavailable, returns empty string
-        (caller handles this gracefully).
-        """
+        """Execute a research task via Hermes CLI chat."""
         import subprocess
         import os
 
-        # Write prompt to state file for reference
         prompt_file = os.path.join(self.workspace, "state", "current_task.md")
         try:
             os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
@@ -87,11 +81,10 @@ class HermesAdapter(AgentAdapter):
         except Exception:
             pass
 
-        # Try hermes chat to execute the task
         try:
             cmd = ["hermes", "chat", "--query", prompt, "--quiet", "--toolsets", ""]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
+                cmd, capture_output=True, text=True, timeout=None,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -99,24 +92,23 @@ class HermesAdapter(AgentAdapter):
                 return out
             logger.warning(f"hermes execute_task returned {result.returncode}: {result.stderr[:200]}")
         except subprocess.TimeoutExpired:
-            logger.warning(f"hermes execute_task timed out (60s)")
+            logger.warning(f"hermes execute_task timed out")
         except FileNotFoundError:
             logger.warning(f"hermes CLI not found")
         except Exception as e:
             logger.warning(f"hermes execute_task error: {e}")
 
-        # No result — return empty, caller handles it
         return ""
     
     def chat(self, message: str, max_tokens: int = None) -> str:
-        """Chat via hermes subprocess (fast timeout, fallback on hang)."""
+        """Chat via hermes subprocess."""
         import subprocess
         import shlex
         try:
             cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=120,
+                capture_output=True, text=True, timeout=None,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -125,7 +117,7 @@ class HermesAdapter(AgentAdapter):
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
             return None
         except subprocess.TimeoutExpired:
-            logger.warning(f"hermes chat timed out (120s) for query: {message[:60]}")
+            logger.warning(f"hermes chat timed out for query: {message[:60]}")
             return None
         except FileNotFoundError:
             return None

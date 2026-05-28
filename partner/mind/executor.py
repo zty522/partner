@@ -153,33 +153,34 @@ async def _handle_curiosity(event: MindEvent):
         except Exception as e:
             logger.warning(f"[CURIOSITY] Web search failed: {e}")
 
-    # 3. 用 LLM 生成自然语言报告（如果 adapter 可用）
+    # 3. 用 LLM 生成自然语言报告
     report_content = ""
-    if _adapter and (kb_entries or web_result_text):
-        try:
-            data_json = json.dumps({
-                "topic": topic,
-                "knowledge_entries": kb_entries,
-                "web_search_result": web_result_text[:1000],
-            }, ensure_ascii=False)
-            llm_prompt = (
-                f"你刚刚探索了 '{topic}' 这个主题。以下是你收集到的数据。"
-                f"请用 2-3 句话自然地告诉用户你发现了什么。不要用模板开头，"
-                f"就像聊天一样。\n\n结构化数据：\n{data_json}"
-            )
-            report_content = _adapter.chat(llm_prompt) or ""
-        except Exception as e:
-            logger.warning(f"[CURIOSITY] LLM report generation failed: {e}")
+    if kb_entries or web_result_text:
+        if _adapter:
+            try:
+                data_json = json.dumps({
+                    "topic": topic,
+                    "knowledge_entries": kb_entries,
+                    "web_search_result": web_result_text[:1000],
+                }, ensure_ascii=False)
+                llm_prompt = (
+                    f"你刚刚探索了 '{topic}' 这个主题。以下是你收集到的数据。"
+                    f"请用 2-3 句话自然地告诉用户你发现了什么。不要用模板开头，"
+                    f"就像聊天一样。\n\n结构化数据：\n{data_json}"
+                )
+                report_content = _adapter.chat(llm_prompt) or ""
+            except Exception as e:
+                logger.warning(f"[CURIOSITY] LLM report generation failed: {e}")
 
-    # 4. 如果 LLM 生成失败，用结构化 JSON（无模板，无硬编码）
+    # 4. 如果没有实质内容或 LLM 生成失败，不发 report（不发 raw JSON）
+    if not report_content and not kb_entries and not web_result_text:
+        logger.info(f"[CURIOSITY] Nothing to report for '{topic}' — skipping")
+        logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (skipped)")
+        return
     if not report_content:
-        report_content = json.dumps({
-            "type": "curiosity_result",
-            "topic": topic,
-            "knowledge_entries": kb_entries,
-            "web_search": web_result_text[:500] if web_result_text else "",
-        }, ensure_ascii=False)
-        logger.info(f"[CURIOSITY] LLM unavailable, sending structured data instead")
+        logger.info(f"[CURIOSITY] LLM unavailable for '{topic}' — skipping report")
+        logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (skipped)")
+        return
 
     # 5. 生成 Report 念头
     pool = await ensure_pool()

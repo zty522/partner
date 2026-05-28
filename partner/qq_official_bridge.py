@@ -340,6 +340,13 @@ class QQQfficialBridge:
             def _push_to_qq(content: str):
                 """将 Report 内容推送到 QQ 用户。"""
                 try:
+                    # 安全检测：不发 raw JSON
+                    content_stripped = content.strip()
+                    if content_stripped.startswith('{') and content_stripped.endswith('}'):
+                        logger.warning(f"[Mind] Skipping JSON push: {content[:60]}...")
+                        return
+                    if not content_stripped:
+                        return
                     # 读取用户 openid
                     user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
                     openid = ""
