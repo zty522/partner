@@ -239,8 +239,33 @@ async def _handle_cron_tick(event: MindEvent):
     logger.info(f"[CRON] Tick received, scheduling periodic tasks. "
                 f"Pool size: {pool.qsize()}")
 
-    # 1. 如果知识库非空 → 随机产生一个好奇念头
-    if _knowledge and len(_knowledge.entries) > 0:
+    # 0. 检查是否有活跃计划 → CRON_TICK 应该围绕计划主题探索
+    active_topic = ""
+    active_plan_path = os.path.join(_workspace, "state", "active_plan.json") if _workspace else ""
+    if active_plan_path and os.path.exists(active_plan_path):
+        try:
+            with open(active_plan_path, "r", encoding="utf-8") as f:
+                plan = json.load(f)
+            plan_status = plan.get("status", "idle")
+            plan_title = plan.get("title", "")
+            plan_goal = plan.get("goal", "")
+            if plan_status in ("planning", "active") and plan_title:
+                active_topic = plan_title
+                logger.info(f"[CRON] Active plan detected: '{plan_title}'")
+        except Exception as e:
+            logger.warning(f"[CRON] Failed to read active_plan: {e}")
+
+    # 1. 探索：如果有活跃计划就探索相关主题，否则探索知识空白
+    if active_topic:
+        # 围绕活跃计划探索
+        await pool.put(curiosity(
+            topic=active_topic,
+            priority=7,
+            source="cron_tick:plan_related",
+        ))
+        logger.info(f"[CRON] Generated curiosity for active plan: '{active_topic}'")
+    elif _knowledge and len(_knowledge.entries) > 0:
+        # 无活跃计划 → 自由探索知识空白
         categories = _knowledge.stats().get("by_category", {})
         if categories:
             topic = min(categories, key=categories.get)
@@ -252,7 +277,7 @@ async def _handle_cron_tick(event: MindEvent):
             priority=7,
             source="cron_tick:random_curiosity",
         ))
-        logger.info(f"[CRON] Generated curiosity for: '{topic}'")
+        logger.info(f"[CRON] Generated curiosity for knowledge gap: '{topic}'")
 
     # 2. 每偶数小时自省一次
     hour = now.hour
