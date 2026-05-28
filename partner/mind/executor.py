@@ -140,18 +140,16 @@ async def _handle_curiosity(event: MindEvent):
                 "confidence": e.confidence,
             })
 
-    # 2. 用 adapter 搜索网络 → 收集原始结果
-    web_result_text = ""
-    if _adapter:
-        try:
-            prompt = (
-                f"搜索关于 '{topic}' 的最新研究进展。返回关键发现和结论。"
-                f"用中文。\n\n已有知识：\n"
-                + ("\n".join(f"- [{e['category']}] {e['title']}" for e in kb_entries) if kb_entries else "无")
-            )
-            web_result_text = _adapter.execute_task(prompt) or ""
-        except Exception as e:
-            logger.warning(f"[CURIOSITY] Web search failed: {e}")
+    # 2. 搜索网络 → 用 searcher 模块直接调学术 API
+    web_results = []
+    try:
+        from ..searcher import search as _search, format_results
+        web_results = _search(topic, max_results=5)
+        web_result_text = format_results(web_results, max_items=3)
+        logger.info(f"[CURIOSITY] Web search returned {len(web_results)} results for '{topic}'")
+    except Exception as e:
+        logger.warning(f"[CURIOSITY] Web search failed (non-fatal): {e}")
+        web_result_text = ""
 
     # 3. 用 LLM 生成自然语言报告
     report_content = ""
