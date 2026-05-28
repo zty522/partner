@@ -279,23 +279,6 @@ def collect_state_data(workspace: str) -> dict:
     return data
 
 
-def save_notification(workspace: str, state_data: dict):
-    """Save structured notification for next user interaction."""
-    notif_dir = os.path.join(workspace, "state", "notifications")
-    os.makedirs(notif_dir, exist_ok=True)
-
-    notif = {
-        "timestamp": state_data["timestamp"],
-        "type": "cycle_complete",
-        "state_data": state_data,
-    }
-
-    path = os.path.join(notif_dir, f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(notif, f, ensure_ascii=False, indent=2)
-    log(f"Notification saved: {path}")
-
-
 def main():
     global APP_ID, APP_SECRET, IS_SANDBOX, API_BASE
 
@@ -319,10 +302,7 @@ def main():
     log(f"Collected state data: plan={state_data.get('plan', {}).get('status', 'N/A')}, "
         f"queue_pending={state_data['queue']['pending']}")
 
-    # 2. Save notification file (structured JSON, no hardcoded text)
-    save_notification(workspace, state_data)
-
-    # 3. Check QQ user context for push eligibility
+    # 2. Check QQ user context for push eligibility
     flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
     if os.path.exists(flag_path):
         try:

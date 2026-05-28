@@ -789,7 +789,7 @@ def setup_workspace_cron(workspace: str):
 
     cron_name = "partner-workspace-daily"
     cron_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "run_workspace_maint.py")
+                                "scripts", "run_workspace_maint.py")
 
     # Create the maintenance script if it doesn't exist
     maint_script = f'''#!/usr/bin/env python3

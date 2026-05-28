@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤝 Partner v0.4.0
+# 🤝 Partner
 
 ## *"Hey Partner, what have you been doing?"*
 
@@ -14,124 +14,66 @@ You don't give it commands. You just check in.**
 
 ---
 
-## 🧠 v0.4.0: The Mind Pool — Spontaneous Thought, Not Scheduled Tasks
-
-**Previous versions treated Partner as a "task executor" — cron kicks, it does one thing, reports back.**
-
-**v0.4.0 introduces the Mind Pool: an internal stream of consciousness. Partner doesn't wait for instructions. It generates its own impulses — curiosity, inspiration, self-correction, the urge to write a diary entry — and acts on them immediately.**
-
-### The Core Idea
-
-Every autonomous action starts as a **Mind Event** — an atomic "I want to do this" impulse. Events are not scheduled; they *spontaneously arise* from Partner's internal state:
+## The Idea
 
 ```
-┌──────────────────────────────────────────────────┐
-│              🧠 Mind Pool                        │
-│  (asyncio.PriorityQueue — global singleton)      │
-│                                                   │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │CURIOSITY │  │ REPORT   │  │ SELF_REFLECT  │  │
-│  │"I wonder │  │"Found    │  │"Let me check  │  │
-│  │ about X" │  │ result Y"│  │ my health"    │  │
-│  └──────────┘  └──────────┘  └───────────────┘  │
-│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │CRON_TICK │  │DIARY     │  │USER_MESSAGE   │  │
-│  │(pulse)   │  │WRITE     │  │(from QQ)      │  │
-│  └──────────┘  └──────────┘  └───────────────┘  │
-└──────────────────────┬───────────────────────────┘
-                       │
-              ┌────────▼────────┐
-              │   mind_loop()   │
-              │  (async daemon) │
-              └────────┬────────┘
-                       │
-    ┌──────────────────┼──────────────────┐
-    ▼                  ▼                  ▼
-┌────────┐       ┌────────┐       ┌──────────┐
-│Search  │       │Push to │       │Self-Check│
-│+Summarize│     │QQ Bot  │       │+ Logging │
-└────────┘       └────────┘       └──────────┘
+LLM:     You ask → It answers → Done
+Agent:   You command → It executes → Waits
+Partner: It works on its own → You ask "what have you been doing?" → It reports
 ```
 
-### Event Types (10 types, all spontaneous)
+Three models of AI interaction, and Partner lives in the third.
 
-| Type | Priority | Trigger | What Happens |
-|------|----------|---------|-------------|
-| **CURIOSITY** | 5 (default) | Cron tick, user question, knowledge gap | Searches knowledge base + web, generates REPORT |
-| **REPORT** | 3 (urgent) | Curiosity result, self-check finding | Pushes directly to QQ via callback (bypasses file polling) |
-| **CRON_TICK** | 10 (lowest) | External cron pulse | Injects periodic impulses: curiosity, diary, self-reflection |
-| **USER_MESSAGE** | 1 (highest) | QQ message received | Derives CURIOSITY from questions, recorded in journal |
-| **SELF_REFLECTION** | 7 | Cron tick (every 2h) | Runs SelfChecker (knowledge conflicts, stuck tasks, data leakage) |
-| **DIARY_WRITE** | 8 | Cron tick (23:00) | Writes daily summary to journal |
-| **CORRECTION** | 2 | Executor failure | Logs error, future: auto-retry with adjusted strategy |
-| **INSPIRATION** | 5 | Knowledge gap detected | (Reserved) generates new research directions |
-| **PROJECT** | 5 | User instruction | Multi-step long-running task (replaces ActivePlan) |
-| **EVOLUTION** | 7 | Schedule | (Reserved) self-modification of prompts/strategies |
+**Partner is proactive.** It reads papers, explores your projects, builds a knowledge base, and proposes new ideas — all without you telling it to. When you're ready, you just ask:
 
-### What Changed from v0.3
+> **"Hey Partner, what have you been doing?"**
 
-#### Removed
-- **Cron-driven execution**: No more `partner-research` cron job controlling what Partner does
-- **notification file polling**: Report events push directly to QQ via registered callback
-- **ActivePlan as primary driver**: Plans are now just one type of event (PROJECT), not the entire system
-- `partner mind` CLI command: Mind system auto-starts with the QQ bridge
-
-#### Added
-- **`partner/mind/` package** (5 files): event_types, pool, scheduler, executor
-- **Global MindPool singleton**: Thread-safe, cross-thread `asyncio.PriorityQueue`
-- **Push callback**: Report events call `bot.send_message()` directly — no more duplicate messages
-- **State bootstrap**: Mind reads `active_plan.json` and `task_queue.json` on startup, knows what was happening
-- **Automatic mind start**: Mind loop starts in background thread when QQ bridge connects
-
-#### Fixed
-- **Duplicate QQ messages**: Report events now push via callback, not file polling + poller
-- **"空闲中" misreport**: Mind reads existing state on init, continues unfinished work
-- **Cron no longer drives research**: Cron only injects `CRON_TICK` — the mind decides what to do
+And it tells you everything it discovered while you were away.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### Windows
 ```bash
-partner setup              # Configure QQ bot credentials
-partner bot start qq       # Start QQ bot + Mind system (automatic)
-```
-
-### Linux
-```bash
+# Linux
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
-partner setup
-partner bot start qq
+
+# Windows — download the installer from GitHub Releases
 ```
 
-**Mind starts automatically** when the QQ bot connects. No separate command needed.
+### Commands
+
+```bash
+partner setup                 Configure everything
+partner status                View full status (research + bot health)
+partner bot start qq          Start QQ bot + autonomous mind system
+partner bot stop qq           Stop QQ bot
+partner queue clear           Clear task queue
+partner update                Pull latest code + reinstall
+```
 
 ---
 
-## Architecture
+## Core Architecture
+
+Partner is built on a **Mind Pool** — an internal stream of consciousness that drives all autonomous behavior.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    🤝 Partner v0.4                       │
+│                    🤝 Partner                             │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │           🧠 Mind Pool + mind_loop()             │   │
+│  │         🧠 Mind Pool + mind_loop()               │   │
+│  │  PriorityQueue of spontaneous "thought impulses" │   │
 │  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐  │   │
-│  │  │Cur.  │ │Rpt   │ │Refl  │ │Cron  │ │User  │  │   │
-│  │  │iosity│ │ort   │ │ect   │ │Tick  │ │Msg   │  │   │
+│  │  │Cur.  │ │Rpt   │ │Refl  │ │Diary │ │User  │  │   │
+│  │  │iosity│ │ort   │ │ect   │ │Write │ │Msg   │  │   │
 │  │  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘  │   │
 │  └──────────────────────┬──────────────────────────┘   │
 │                         │                              │
 │  ┌──────────────────────┴──────────────────────────┐   │
-│  │              Executor (dispatch)                 │   │
-│  │  search → summarize → push / check / log         │   │
-│  └──────────────────────┬──────────────────────────┘   │
-│                         │                              │
-│  ┌──────────────────────┴──────────────────────────┐   │
-│  │  Knowledge Base  │  Journal  │  Task Queue       │   │
-│  │  (knowledge.json)│(journal. │  (task_queue.json) │   │
-│  │                  │ jsonl)   │                    │   │
+│  │   Knowledge Base  │  Journal  │  Task Queue      │   │
+│  │   Self-Checker    │  Event Bus│  Active Plan     │   │
 │  └─────────────────────────────────────────────────┘   │
 │                                                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
@@ -141,51 +83,45 @@ partner bot start qq
 └─────────────────────────────────────────────────────────┘
 ```
 
-### File Structure (post-merge)
+### How It Works
 
-```
-partner/
-├── mind/                  # NEW: Mind Pool system
-│   ├── __init__.py
-│   ├── event_types.py     # 10 event types + factory functions
-│   ├── pool.py            # Global PriorityQueue singleton
-│   ├── scheduler.py       # Async mind_loop()
-│   └── executor.py        # Event dispatcher + push callback
-├── dialog.py              # Merged: dialog_history + context
-├── autocheck.py           # Merged: event_bus + self_check + notifier
-├── conversation.py        # Absorbed: response_generator
-├── core.py                # Partner class (Mind integration)
-├── qq_official_bridge.py  # Auto-starts Mind on bot connect
-├── cli.py                 # No more 'partner mind' command
-├── config.py
-├── router.py
-├── active_plan.py
-├── state.py / task_queue.py / knowledge.py / journal.py
-├── adapter.py
-├── user_prefs.py
-├── workspace_manager.py
-└── ... (22 .py files total, down from 26)
-```
+1. **Events are spontaneous impulses** — Curiosity, Report, Self-Reflection, Diary Write, and more. They arise from internal state, not external cron.
+2. **Mind Pool** — an `asyncio.PriorityQueue` that collects all events. Priority determines execution order (user messages first, background tasks last).
+3. **mind_loop()** — a permanent async daemon that pulls the highest-priority event and spawns an execution task.
+4. **Self-pulse** — every 15 minutes the system injects a `CRON_TICK` event, which triggers Curiosity (explore knowledge gaps), Self-Reflection (health check), and Diary Write (log summary).
+5. **Reports push instantly** — when a Curiosity event finishes exploring, it creates a Report event that pushes directly to QQ via callback — no file polling, no duplicates.
+
+### Event Types
+
+| Type | Priority | When | What Happens |
+|------|----------|------|-------------|
+| **Curiosity** | 5 | Cron tick, user question, knowledge gap | Searches knowledge base, generates Report |
+| **Report** | 3 | Curiosity result, self-check finding | Pushes to QQ immediately via direct callback |
+| **Cron Tick** | 10 | Every 15 minutes (self-pulse) | Injects periodic impulses |
+| **User Message** | 1 | QQ message received | Derives Curiosity from questions |
+| **Self-Reflection** | 7 | Every 2 hours | Runs SelfChecker (conflicts, stuck tasks, data leaks) |
+| **Diary Write** | 8 | Daily at 23:00 | Logs daily summary |
+| **Correction** | 2 | Executor failure | Logs error for future improvement |
+| **Inspiration** | 5 | Knowledge gap detected | Generates new research directions |
+| **Project** | 5 | User instruction | Long-running multi-step task |
 
 ---
 
-## Commands
+## Supported Agents
 
-```bash
-partner setup                 Configure everything
-partner status                View full status (research + bot health)
-partner bot start qq          Start QQ bot + Mind (auto-start)
-partner bot stop qq           Stop QQ bot + Mind
-partner queue clear           Clear task queue
-partner config set interval N Change cron tick interval (minutes)
-partner update                Pull latest code + reinstall
-```
+| Agent | Status | Notes |
+|-------|--------|-------|
+| 🔮 [Hermes Agent](https://hermes-agent.nousresearch.com) | ✅ Full support | Skills + cron + LLM chat |
+| 🦞 [OpenClaw](https://github.com/openclaw/openclaw) | ✅ Supported | ACP bridge + agent delegation |
+| ⚡ [OpenAI Codex](https://openai.com/codex) | ✅ Supported | `codex exec --full-auto` |
+| 🧠 [Claude Code](https://claude.ai/code) | ✅ Supported | CLI integration |
+| 📌 Direct mode | ✅ Built-in | No external agent needed |
 
 ---
 
 ## SOUL.md
 
-Partner's behavioral creed — read it at [SOUL.md](SOUL.md). Seven core principles:
+Partner's behavioral creed — read it at [docs/SOUL.md](docs/SOUL.md). Seven core principles:
 
 1. **Proactive, Not Reactive** — no idle cycles
 2. **We Remember What Matters** — sustained attention across sessions
@@ -194,6 +130,38 @@ Partner's behavioral creed — read it at [SOUL.md](SOUL.md). Seven core princip
 5. **Depth Over Breadth** — one deep finding > 100 shallow searches
 6. **Honest Communication** — candor over presentation
 7. **Partnership, Not Service** — "Here's what I found. Here's what we should do next."
+
+---
+
+## Project Layout
+
+```
+partner/
+├── mind/                  # Mind Pool system (event_types, pool, scheduler, executor)
+├── partner/               # Core modules (22 Python files)
+│   ├── dialog.py          # Merged: dialog_history + context
+│   ├── autocheck.py       # Merged: event_bus + self_check + notifier
+│   ├── conversation.py    # Absorbed: response_generator
+│   ├── core.py            # Partner class + Mind integration
+│   ├── qq_official_bridge.py  # QQ bot + auto-starts Mind
+│   ├── events/            # Event template definitions (archived)
+│   └── ...
+├── scripts/               # Install/uninstall scripts
+│   ├── install.sh / install.ps1 / uninstall.sh
+│   ├── send_qq_report.py  # State data collector (no notification writes)
+│   └── release.sh         # Release script
+├── installer/             # Windows Inno Setup installer
+│   ├── installer.iss
+│   └── post_install.bat
+├── docs/                  # Documentation
+│   ├── ARCHITECTURE.md    # Architecture evolution log
+│   ├── SOUL.md            # Behavioral creed
+│   └── ...
+├── README.md
+├── CHANGELOG.md
+├── pyproject.toml
+└── LICENSE
+```
 
 ---
 

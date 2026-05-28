@@ -1,10 +1,11 @@
 """Mind Scheduler — 念头调度器。
 
 核心循环 `mind_loop()`：
-1. 不断从念头池中取出优先级最高的念头
-2. 创建 asyncio.Task 去执行（不阻塞循环）
-3. 当池为空时短暂休眠（0.1 秒）
-4. 捕获异常，保证循环不崩溃
+1. 内置 15 分钟自脉冲（无需外部 cron）
+2. 不断从念头池中取出优先级最高的念头
+3. 创建 asyncio.Task 去执行（不阻塞循环）
+4. 当池为空时短暂休眠（0.1 秒）
+5. 捕获异常，保证循环不崩溃
 
 启动方式：asyncio.run(mind_loop())
 """
@@ -15,12 +16,14 @@ from typing import Optional
 
 from .pool import MindPool
 from .executor import execute_event
-from .event_types import MindEvent
+from .event_types import MindEvent, EventType
 
 logger = logging.getLogger(__name__)
 
 # 最大并发执行数，防止念头溢出
 MAX_CONCURRENT = 10
+# 自脉冲间隔（秒）
+SELF_PULSE_INTERVAL = 15 * 60  # 15 分钟
 
 
 async def mind_loop(pool: MindPool = None):
@@ -28,6 +31,7 @@ async def mind_loop(pool: MindPool = None):
 
     永久运行，不断从池中取念头、创建 Task 执行。
     当池为空时短暂休眠避免 CPU 空转。
+    内置自脉冲定时器，无需外部 cron 注入 CRON_TICK。
 
     Args:
         pool: MindPool 实例。为 None 时自动获取单例。
@@ -38,10 +42,25 @@ async def mind_loop(pool: MindPool = None):
     pending_tasks: set[asyncio.Task] = set()
     logger.info("🧠 Mind Loop 启动")
 
+    # 内置自脉冲定时器（15 分钟间隔自动注入 CRON_TICK）
+    last_pulse = 0.0
+
     try:
         while True:
             # 清理已完成的 task
             pending_tasks = {t for t in pending_tasks if not t.done()}
+
+            # ── 自脉冲：每 15 分钟自动注入 CRON_TICK ──
+            now = asyncio.get_event_loop().time()
+            if now - last_pulse >= SELF_PULSE_INTERVAL:
+                last_pulse = now
+                await pool.put(MindEvent(
+                    type=EventType.CRON_TICK,
+                    priority=10,
+                    payload={},
+                    source="self_pulse",
+                ))
+                logger.info("[调度] 自脉冲 CRON_TICK 已注入")
 
             # 如果池为空，短暂休眠
             if pool.qsize() == 0:
@@ -69,7 +88,6 @@ async def mind_loop(pool: MindPool = None):
 
     except asyncio.CancelledError:
         logger.info("🧠 Mind Loop 被取消")
-        # 取消所有正在执行的 task
         for t in pending_tasks:
             t.cancel()
         if pending_tasks:

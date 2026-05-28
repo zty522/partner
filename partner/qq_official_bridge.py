@@ -218,6 +218,8 @@ class QQQfficialBridge:
             notif_dir = os.path.join(self.workspace, "state", "notifications")
             pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
             user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
+            # 去重缓存：{content_hash: timestamp}，避免同一内容重复推送
+            _recent_sent: dict = {}
             while self._running:
                 try:
                     # Load existing pending notifications
@@ -286,6 +288,18 @@ class QQQfficialBridge:
                                 summary = n.get("summary", "").strip()
                                 if not summary:
                                     continue
+                                # 去重：检查内容 hash
+                                import hashlib
+                                h = hashlib.md5(summary.encode()).hexdigest()
+                                now_ts = time.time()
+                                # 清理超过 5 分钟的旧缓存
+                                stale = [k for k, v in _recent_sent.items() if now_ts - v > 300]
+                                for k in stale:
+                                    del _recent_sent[k]
+                                if h in _recent_sent:
+                                    logger.debug(f"[去重] 跳过重复推送: {summary[:40]}...")
+                                    continue
+                                _recent_sent[h] = now_ts
                                 # Truncate long summaries for QQ
                                 if len(summary) > 500:
                                     summary = summary[:497] + "..."
