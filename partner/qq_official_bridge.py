@@ -84,8 +84,8 @@ class QQQfficialBridge:
             workspace=workspace,
         )
 
-        # Wire up LLM response generation: router uses bridge's _llm_chat
-        self.conversation.router.llm_fn = lambda prompt: self._llm_chat("system", prompt)
+        # Wire up LLM response generation: router uses adapter directly
+        self._wire_router_llm()
 
         # Agent adapter for LLM-powered conversation
         self._adapter = None
@@ -429,12 +429,13 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
-            # Check for welcome message (sent on first interaction after bot restart)
+            # Welcome message (LLM-generated, not hardcoded)
             if self._should_welcome():
-                welcome = ("嘿！Partner 刚重启好，已经开始在后台跑了。\n\n"
-                          "你直接问我「最近在研究什么」就能看到进展，"
-                          "或者跟我说「推进年龄预测」我就继续干活。")
-                # Send welcome as the instant reply instead of "请等待"
+                welcome = self._llm_chat("system",
+                    "你刚重启完。用户发了第一条消息。用 1-2 句话简单打招呼，"
+                    "告诉用户你已重启、正在后台跑。自然点，别像模板。")
+                if not welcome:
+                    welcome = "刚重启完，正在后台跑。有什么需要？"
                 self._send_reply(msg, welcome)
                 return
 
@@ -643,35 +644,41 @@ class QQQfficialBridge:
                 return result
         except Exception as e:
             logger.warning(f"LLM chat failed: {e}")
-        # Fallback: generate a quick local response instead of hanging
-        return self._quick_fallback_response(text)
+        # Fallback: let caller handle (conversation.respond or router fallback)
+        return None
 
     def _quick_fallback_response(self, text: str) -> str:
-        """Generate a fast local response when LLM is unavailable/slow.
-        
-        Uses intent keyword matching only - no external calls.
-        Ensures user never waits more than a few seconds for *some* reply.
-        """
-        import re
-        t = text.strip().lower()
-        
-        # Greetings
-        if re.search(r'^(你好|您好|嗨|hi|hello|hey|在吗|在不在)', t):
-            return "嘿！在呢。最近一直在研究年龄预测项目，有些进展了想跟你聊聊。你直接问我「最近在研究什么」就行。"
-        
-        # Status questions
-        if re.search(r'(在干嘛|在做什么|最近|进展|状态|什么情况|忙什么)', t):
-            return ("嘿，在做年龄预测项目，已经跑了13轮了。最新MAE到了7.40。"
-                    "刚做完一轮审计，发现之前5.22那个结果是KFold的，"
-                    "跨源泛化真实MAE在7.14-7.43之间。现在在做LightGBM看看能不能突破。")
+        """1-line fallback when LLM is unavailable. Not a multi-line template."""
+        return "让我想想再回你。"
 
-        # Continuation / keep going → trigger research
-        if re.search(r'^(继续|推进|开始|好|直接|嗯|行)', t):
-            return ("好，继续推进。我已经分析了上一轮的结果，现在准备做第14轮探索。"
-                    "有结果了会主动发消息告诉你。")
-        
-        # General / unknown → brief friendly response
-        return f"收到。我现在在看年龄预测的LightGBM方案，你说的我记下了，等下轮出结果了跟你说。"
+    def _wire_router_llm(self):
+        """Wire up router.llm_fn to use the agent adapter directly.
+
+        This is called once during __init__. The adapter is lazily initialized
+        on first use (may not exist at init time).
+        """
+        def _llm_call(prompt: str) -> Optional[str]:
+            try:
+                if self._adapter is None:
+                    cfg_path = os.path.join(self.workspace, "partner_config.json")
+                    if not os.path.exists(cfg_path):
+                        cfg_path = os.path.join(self.workspace, "config.json")
+                    if not os.path.exists(cfg_path):
+                        return None
+                    with open(cfg_path) as f:
+                        cfg = json.load(f)
+                    backend = cfg.get("agent", {}).get("backend", cfg.get("backend", "hermes"))
+                    from .adapter import create_adapter
+                    self._adapter = create_adapter(backend, self.workspace)
+
+                system_msg = "你是 Partner，一个自主研究的 AI 伙伴。用中文简短自然地回复。不要用markdown格式。"
+                full_prompt = f"{system_msg}\n\n{prompt}"
+                result = self._adapter.chat(full_prompt)
+                return result if result else None
+            except Exception:
+                return None
+
+        self.conversation.router.llm_fn = _llm_call
 
     @staticmethod
     def _simplify_response(reply: str) -> str:
