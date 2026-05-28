@@ -62,15 +62,15 @@ class MindPool:
         """放入一个念头（async 环境）。"""
         await self._queue.put(event)
         self._total_put += 1
-        logger.debug(f"[池] async放入 {event.type.value} "
-                     f"(#{event.id[:8]}) pri={event.priority}")
+        logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
+                    f"pri={event.priority}")
 
     def put_threadsafe(self, event: MindEvent):
         """从非 async 线程安全地放入一个念头。"""
         self._thread_queue.put(event)
         self._total_put += 1
-        logger.debug(f"[池] thr放入 {event.type.value} "
-                     f"(#{event.id[:8]}) pri={event.priority}")
+        logger.info(f"[MIND] PUT(event_type={event.type.value}, id={event.id[:8]}, "
+                    f"pri={event.priority})  [threadsafe]")
 
     async def _drain_thread_queue(self):
         """将跨线程队列中的念头全部搬到 async 队列中。"""
@@ -88,8 +88,8 @@ class MindPool:
         await self._drain_thread_queue()
         event = await self._queue.get()
         self._total_get += 1
-        logger.info(f"[池] 取出 {event.type.value} (#{event.id[:8]}) "
-                    f"pri={event.priority}")
+        logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
+                    f"pri={event.priority}, topic={event.payload.get('topic', '')}")
         return event
 
     def qsize(self) -> int:

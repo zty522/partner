@@ -40,7 +40,7 @@ def set_push_callback(callback):
     """
     global _push_callback
     _push_callback = callback
-    logger.info("[执行] 推送回调已注册")
+    logger.info(f"[MIND] Push callback registered: {callback}")
 
 
 def init(workspace: str, adapter=None, knowledge=None,
@@ -120,16 +120,13 @@ def _get_handler(event_type: EventType):
 
 
 async def _handle_curiosity(event: MindEvent):
-    """好奇念头：检索知识库 + 搜索，生成报告。
-
-    这是系统的"主动学习"冲动。
-    """
+    """好奇念头：检索知识库 + 搜索，生成报告。"""
     topic = event.payload.get("topic", "")
     if not topic:
-        logger.warning("[好奇] 无 topic，跳过")
+        logger.warning(f"[CURIOSITY] No topic, skipping event {event.id[:8]}")
         return
 
-    logger.info(f"[好奇] 探索: {topic}")
+    logger.info(f"[CURIOSITY] Searching for: '{topic}'")
 
     # 1. 搜索知识库
     knowledge_text = ""
@@ -152,7 +149,7 @@ async def _handle_curiosity(event: MindEvent):
             )
             web_results = _adapter.execute_task(search_prompt)
         except Exception as e:
-            logger.warning(f"[好奇] 网络搜索失败: {e}")
+            logger.warning(f"[CURIOSITY] Web search failed: {e}")
 
     # 3. 构建报告内容
     parts = [f"💡 关于「{topic}」的探索结果："]
@@ -174,29 +171,28 @@ async def _handle_curiosity(event: MindEvent):
         parent_id=event.id,
     ))
 
-    logger.info(f"[好奇] 完成: {topic}")
+    logger.info(f"[CURIOSITY] Summary generated for '{topic}' ({len(content)} chars)")
+
+    # 5. 记录 DONE
+    logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}'")
 
 
 async def _handle_report(event: MindEvent):
-    """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接）。
-
-    Report 念头一旦产生就立即处理，不等 cron。
-    """
+    """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接）。"""
     content = event.payload.get("content", "")
     if not content:
-        logger.warning("[汇报] 无内容")
+        logger.warning(f"[REPORT] Empty content, skipping {event.id[:8]}")
         return
 
-    logger.info(f"[汇报] 推送内容 ({len(content)} chars): {content[:80]}...")
+    logger.info(f"[REPORT] Sending to QQ: {content[:80]}...")
 
     # 优先使用推送回调（QQ bridge 注册的直接推送到用户）
-    # 这样绕过文件轮询，消除重复推送
     if _push_callback is not None:
         try:
             _push_callback(content)
-            logger.info(f"[汇报] 已通过回调推送")
+            logger.info(f"[REPORT] Sent via callback ({len(content)} chars)")
         except Exception as e:
-            logger.warning(f"[汇报] 回调推送失败: {e}")
+            logger.warning(f"[REPORT] Callback push failed: {e}")
     else:
         # 降级：写入 notification 文件（由 QQ bridge 的 poller 读取）
         if _workspace:
@@ -211,26 +207,24 @@ async def _handle_report(event: MindEvent):
                     "summary": content,
                     "mind_event_id": event.id,
                 }, f, ensure_ascii=False, indent=2)
-            logger.info(f"[汇报] 通知文件已写入: {notif_path}")
+            logger.warning(f"[REPORT] Fallback to notification file: {notif_path}")
 
-    # 记录到日志
-    print(f"\n[Mind Report] {content[:200]}...\n")
+    # DONE
+    logger.info(f"[MIND] DONE event_type=report, id={event.id[:8]}")
 
 
 async def _handle_cron_tick(event: MindEvent):
-    """心跳念头：检查状态，根据需要生成周期性念头。
-
-    cron 不再直接驱动研究流程，只做："唤醒检查"。
-    """
+    """心跳念头：检查状态，根据需要生成周期性念头。"""
     pool = await ensure_pool()
     now = datetime.now()
 
+    logger.info(f"[CRON] Tick received, scheduling periodic tasks. "
+                f"Pool size: {pool.qsize()}")
+
     # 1. 如果知识库非空 → 随机产生一个好奇念头
     if _knowledge and len(_knowledge.entries) > 0:
-        # 随机选一个主题（如果知识库有分类）
         categories = _knowledge.stats().get("by_category", {})
         if categories:
-            # 挑一个条目较少的类别去探索
             topic = min(categories, key=categories.get)
         else:
             topic = "最近的研究发现"
@@ -240,9 +234,9 @@ async def _handle_cron_tick(event: MindEvent):
             priority=7,
             source="cron_tick:random_curiosity",
         ))
-        logger.info(f"[心跳] 生成了好奇念头: {topic}")
+        logger.info(f"[CRON] Generated curiosity for: '{topic}'")
 
-    # 2. 每 6 次心跳（约 90 分钟）自省一次
+    # 2. 每偶数小时自省一次
     hour = now.hour
     if hour % 2 == 0 and now.minute < 5:
         await pool.put(MindEvent(
@@ -251,7 +245,7 @@ async def _handle_cron_tick(event: MindEvent):
             payload={},
             source="cron_tick",
         ))
-        logger.info("[心跳] 生成了自省念头")
+        logger.info(f"[CRON] Generated self_reflection at hour={hour}")
 
     # 3. 每天 23:00 写日记
     if hour == 23 and now.minute < 10:
@@ -261,9 +255,10 @@ async def _handle_cron_tick(event: MindEvent):
             payload={},
             source="cron_tick",
         ))
-        logger.info("[心跳] 生成了日记念头")
+        logger.info(f"[CRON] Generated diary_write at hour={hour}")
 
-    logger.info(f"[心跳] #cron_tick 处理完毕，池中 {pool.qsize()} 个念头")
+    logger.info(f"[MIND] DONE event_type=cron_tick, id={event.id[:8]}")
+    logger.info(f"[CRON] Tick complete. Pool size: {pool.qsize()}")
 
 
 async def _handle_user_message(event: MindEvent):
@@ -306,7 +301,7 @@ async def _handle_diary_write(event: MindEvent):
 
 async def _handle_self_reflection(event: MindEvent):
     """自省念头：自我评估。"""
-    logger.info("[自省] 开始自检")
+    logger.info(f"[SELFCHECK] Starting check... (event_id={event.id[:8]})")
 
     # 委托给 SelfChecker
     if _state:
@@ -315,7 +310,6 @@ async def _handle_self_reflection(event: MindEvent):
             from ..autocheck import SelfChecker
             checker = SelfChecker(state_dir)
             try:
-                # 读取 active_plan
                 plan_path = os.path.join(state_dir, "active_plan.json")
                 plan = None
                 if os.path.exists(plan_path):
@@ -323,18 +317,21 @@ async def _handle_self_reflection(event: MindEvent):
                         plan = json.load(f)
                 check_events = checker.run_all(active_plan=plan)
                 if check_events:
+                    logger.info(f"[SELFCHECK] Found {len(check_events)} issue(s):")
                     for ev in check_events:
+                        logger.info(f"[SELFCHECK]   [{ev.subtype}] {ev.title}")
                         pool = await ensure_pool()
                         await pool.put(report(
                             content=f"[自检][{ev.subtype}] {ev.title}",
                             priority=4,
                             source="self_reflection",
                         ))
-                    logger.info(f"[自省] 发现 {len(check_events)} 个问题")
                 else:
-                    logger.info("[自省] 无问题")
+                    logger.info(f"[SELFCHECK] No issues found")
             except Exception as e:
-                logger.warning(f"[自省] 自检失败: {e}")
+                logger.warning(f"[SELFCHECK] Check failed: {e}")
+
+    logger.info(f"[MIND] DONE event_type=self_reflection, id={event.id[:8]}")
 
 
 async def _handle_correction(event: MindEvent):
