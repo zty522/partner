@@ -4,7 +4,7 @@
 
 包含：
 - CachedListResult / ResponseGenerator: 多轮对话列表缓存与索引引用
-- ConversationEngine: 上下文感知对话引擎，基于 ConversationRouter
+- ConversationEngine: 上下文感知对话引擎，基于 ConversationRouter（LLM 响应，无硬编码）
 """
 
 import re
@@ -97,7 +97,6 @@ class ResponseGenerator:
         return self._format_list_page(results, topic, page_start=0)
 
     def resolve_index_from_query(self, query: str) -> Optional[int]:
-        """Try to extract an index number from a query string."""
         query_stripped = query.strip()
         for pattern, fmt in self.INDEX_PATTERNS:
             match = re.match(pattern, query_stripped, re.IGNORECASE)
@@ -115,19 +114,15 @@ class ResponseGenerator:
         return None
 
     def is_continuation(self, query: str) -> bool:
-        query_stripped = query.strip()
-        return any(re.match(p, query_stripped, re.IGNORECASE)
+        return any(re.match(p, query.strip(), re.IGNORECASE)
                    for p in self.CONTINUATION_PATTERNS)
 
     def is_elaborate_request(self, query: str) -> bool:
-        query_stripped = query.strip()
-        return any(re.match(p, query_stripped, re.IGNORECASE)
+        return any(re.match(p, query.strip(), re.IGNORECASE)
                    for p in self.ELABORATE_PATTERNS)
 
     def get_cached_topic(self) -> Optional[str]:
-        if self._cached_list:
-            return self._cached_list.topic
-        return None
+        return self._cached_list.topic if self._cached_list else None
 
     def has_cached_results(self) -> bool:
         return self._cached_list is not None and len(self._cached_list.entries) > 0
@@ -158,21 +153,16 @@ class ResponseGenerator:
                     f"你可以说「第一个」「第二个」来查看详情。")
         self._continuation_offset = offset
         remaining = entries[offset:offset + self.PAGE_SIZE]
-        return self._format_list_page(
-            remaining, self._cached_list.topic,
-            page_start=offset, total=len(entries),
-        )
+        return self._format_list_page(remaining, self._cached_list.topic,
+                                       page_start=offset, total=len(entries))
 
-    def _format_list_page(self, entries: List[KnowledgeEntry],
-                          topic: str, page_start: int = 0,
-                          total: int = None) -> str:
+    def _format_list_page(self, entries, topic, page_start=0, total=None):
         total = total or len(entries)
         lines = [f"🔍 关于「{topic}」的详细信息：\n"]
         for i, entry in enumerate(entries, start=page_start + 1):
             lines.append(f"  {i}. 【{entry.category}】{entry.title}")
             lines.append(f"     置信度: {entry.confidence}")
-            content_preview = (entry.content[:200] + "..."
-                               if len(entry.content) > 200 else entry.content)
+            content_preview = (entry.content[:200] + "..." if len(entry.content) > 200 else entry.content)
             lines.append(f"     {content_preview}")
             lines.append("")
         if total > page_start + len(entries):
@@ -181,8 +171,7 @@ class ResponseGenerator:
         lines.append("💡 你可以说「第一个」「第二个」来查看某条的详情。")
         return "\n".join(lines)
 
-    def _format_single_entry(self, entry: KnowledgeEntry,
-                             index: int, total: int) -> str:
+    def _format_single_entry(self, entry, index, total):
         lines = [f"📖 [{index}/{total}] 【{entry.category}】{entry.title}\n"]
         lines.append(f"来源: {entry.source}")
         lines.append(f"置信度: {entry.confidence}")
@@ -202,13 +191,9 @@ class ResponseGenerator:
 
     def _show_cached_list_hint(self) -> str:
         if not self._cached_list:
-            return ("你想详细了解什么？请告诉我具体的话题。\n"
-                    "比如：「详细说说 单细胞衰老」")
-        count = len(self._cached_list.entries)
-        topic = self._cached_list.topic
-        return (f"上次查询的是「{topic}」（共 {count} 条结果）。\n"
-                f"你可以说「第一个」「第二个」来查看详情，\n"
-                f"或者告诉我一个新的话题。")
+            return "你想详细了解什么？请告诉我具体的话题。\n比如：「详细说说 单细胞衰老」"
+        return (f"上次查询的是「{self._cached_list.topic}」（共 {len(self._cached_list.entries)} 条结果）。\n"
+                f"你可以说「第一个」「第二个」来查看详情，或者告诉我一个新的话题。")
 
     @staticmethod
     def _now_iso() -> str:
@@ -216,10 +201,9 @@ class ResponseGenerator:
 
 
 # ════════════════════════════════════════════════════════════════
-# ConversationEngine（来自 conversation.py）
+# ConversationEngine
 # ════════════════════════════════════════════════════════════════
 
-# Context-sensitive intent patterns: short phrases that need context
 CONTEXT_AWARE_PATTERNS = [
     (r"^(详细说说|展开讲讲|具体说说|深入了解|再说说|多说说|说详细点)$", Intent.DETAIL, 0.95),
     (r"^第([一二两三四五六七八九十]+)个?$", Intent.DETAIL, 0.9),
@@ -230,7 +214,11 @@ CONTEXT_AWARE_PATTERNS = [
 
 
 class ConversationEngine:
-    """Context-aware conversation engine with dialog history."""
+    """Context-aware conversation engine with dialog history.
+
+    Response generation uses router.route() which calls LLM.
+    No hardcoded response templates.
+    """
 
     def __init__(self, journal: Journal, knowledge: KnowledgeBase,
                  task_queue: TaskQueue, state: StateManager,
@@ -261,7 +249,11 @@ class ConversationEngine:
         self.router = ConversationRouter(journal, knowledge, task_queue, state)
 
     def respond(self, user_message: str) -> str:
-        """Main entry point: context-aware conversation response."""
+        """Main entry point: context-aware conversation response.
+
+        Uses router.route() which calls LLM for response generation.
+        No hardcoded templates.
+        """
         parsed = self._parse_with_context(user_message)
 
         from_context = (parsed.params or {}).get("from_context", False)
@@ -272,11 +264,8 @@ class ConversationEngine:
         self.user_prefs.record_session_turn()
 
         if self.context:
-            self.context.add_turn(
-                "user", user_message,
-                intent=parsed.intent.value,
-                topic=parsed.topic,
-            )
+            self.context.add_turn("user", user_message,
+                                  intent=parsed.intent.value, topic=parsed.topic)
 
         response = self._generate_response(parsed)
 
@@ -286,7 +275,6 @@ class ConversationEngine:
         return response
 
     def check_proactive(self) -> List[str]:
-        """Check if proactive notifications should be sent."""
         notifications = self.notifier.check_and_notify()
         if not notifications:
             return []
@@ -296,7 +284,6 @@ class ConversationEngine:
         """Parse intent with context awareness."""
         query_stripped = query.strip()
 
-        # Layer 1: Context-sensitive patterns
         for pattern, intent, confidence in CONTEXT_AWARE_PATTERNS:
             match = re.match(pattern, query_stripped)
             if match:
@@ -315,24 +302,15 @@ class ConversationEngine:
                     continuation = True
 
                 if active_topic or self.response_gen.has_cached_results():
-                    return ParsedQuery(
-                        intent=intent,
-                        confidence=confidence,
-                        query=query,
-                        topic=active_topic,
-                        params={
-                            "from_context": True,
-                            "index": index,
-                            "continuation": continuation,
-                        },
-                    )
+                    return ParsedQuery(intent=intent, confidence=confidence, query=query,
+                                       topic=active_topic,
+                                       params={"from_context": True, "index": index,
+                                               "continuation": continuation})
 
-        # Layer 2: Standard router parsing
         parsed = self.router.parse_intent(query)
         if parsed.confidence >= 0.8:
             return parsed
 
-        # Layer 3: Fuzzy keyword matching
         fuzzy = self._fuzzy_classify(query)
         if fuzzy:
             return fuzzy
@@ -340,7 +318,6 @@ class ConversationEngine:
         return parsed
 
     def _fuzzy_classify(self, query: str) -> Optional[ParsedQuery]:
-        """Fallback: keyword-based fuzzy intent classification."""
         intent_keywords = {
             Intent.STATUS: ["状态", "进展", "做了什么", "研究了什么", "最近"],
             Intent.KNOWLEDGE: ["知道", "了解", "什么是", "解释", "区别"],
@@ -358,41 +335,34 @@ class ConversationEngine:
         return None
 
     def _generate_response(self, parsed: ParsedQuery) -> str:
-        """Generate response based on parsed intent."""
+        """Generate response via LLM (router.route)."""
         if parsed.intent == Intent.DETAIL:
             return self._handle_detail(parsed)
-        handler = self.router._handlers.get(parsed.intent, self.router._handle_general)
-        return handler(parsed)
+        # Router uses LLM (no hardcoded templates)
+        return self.router.route(parsed.query)
 
     def _handle_detail(self, parsed: ParsedQuery) -> str:
-        """Handle detail/elaborate queries with context and index support."""
         topic = parsed.topic
         index = parsed.params.get("index") if parsed.params else None
         continuation = (parsed.params or {}).get("continuation", False)
         return self.response_gen.handle_detail(topic, index=index, continuation=continuation)
 
-    # ── Legacy methods ──
+    # ── Legacy methods (all go through router.route → LLM) ──
 
     def _handle_status(self) -> str:
-        parsed = ParsedQuery(intent=Intent.STATUS, confidence=1.0, query="")
-        return self.router._handle_status(parsed)
+        return self.router.route("最近在研究什么？")
 
     def _handle_progress(self) -> str:
-        parsed = ParsedQuery(intent=Intent.PROGRESS, confidence=1.0, query="")
-        return self.router._handle_progress(parsed)
+        return self.router.route("任务进展如何？")
 
     def _handle_knowledge(self, query: str) -> str:
-        parsed = ParsedQuery(intent=Intent.KNOWLEDGE, confidence=1.0, query=query, topic=query)
-        return self.router._handle_knowledge(parsed)
+        return self.router.route(f"关于{query}你知道什么？")
 
     def _handle_direction(self, message: str) -> str:
-        parsed = ParsedQuery(intent=Intent.DIRECTION, confidence=1.0, query=message)
-        return self.router._handle_direction(parsed)
+        return self.router.route(message)
 
     def _handle_help(self) -> str:
-        parsed = ParsedQuery(intent=Intent.HELP, confidence=1.0, query="")
-        return self.router._handle_help(parsed)
+        return self.router.route("帮助")
 
     def _handle_general(self, message: str) -> str:
-        parsed = ParsedQuery(intent=Intent.GENERAL, confidence=0.5, query=message)
-        return self.router._handle_general(parsed)
+        return self.router.route(message)

@@ -84,6 +84,9 @@ class QQQfficialBridge:
             workspace=workspace,
         )
 
+        # Wire up LLM response generation: router uses bridge's _llm_chat
+        self.conversation.router.llm_fn = lambda prompt: self._llm_chat("system", prompt)
+
         # Agent adapter for LLM-powered conversation
         self._adapter = None
 
