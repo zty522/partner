@@ -441,21 +441,11 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
-            # SEND "思考中，请等待..." IMMEDIATELY (so user gets instant feedback)
-            # This will be overwritten by the actual reply when ready
+            # 1. SEND "思考中，请等待..." IMMEDIATELY (non-blocking, async)
             self._send_reply(msg, "思考中，请等待...")
 
-            # Welcome message (LLM-generated, not hardcoded)
-            if self._should_welcome():
-                welcome = self._llm_chat("system",
-                    "你刚重启完。用户发了第一条消息。用 1-2 句话简单打招呼，"
-                    "告诉用户你已重启、正在后台跑。自然点，别像模板。")
-                if not welcome:
-                    welcome = "刚重启完，正在后台跑。有什么需要？"
-                self._send_reply(msg, welcome)
-                return
-
-            # Process message in background thread
+            # 2. Process message in BACKGROUND THREAD (doesn't block QQ bot loop)
+            #    Welcome message is handled inside the background thread.
             import threading
             thread = threading.Thread(
                 target=self._process_message_async,
@@ -490,6 +480,13 @@ class QQQfficialBridge:
         # Feed user message into Mind Pool (cross-thread safe, non-blocking)
         self._feed_mind_pool(user_text, msg)
         try:
+            # Welcome check: do this inside the background thread so the
+            # handler never blocks waiting for LLM
+            if self._should_welcome():
+                welcome = "刚重启完，正在后台跑。有什么需要？"
+                self._send_reply(msg, welcome)
+                return
+
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
             if special_reply:  # Has a real reply
