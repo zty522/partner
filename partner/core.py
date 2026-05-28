@@ -1,15 +1,17 @@
-"""Core — Partner 编排器（精简版）。
+"""Core — Partner 编排器（集成 Mind 系统版）。
 
-Partner 的实际执行引擎是 Hermes cron 驱动的 partner-research skill。
-此模块仅保留最小的 Python 接口用于状态管理和 CLI 交互。
-
-执行逻辑（已迁移到 Hermes cron）：
-  每 15 分钟 cron 读取 state/ → 5 分支决策树 → 执行 → 推送 QQ
+Mind 系统接管了原来的 cron 驱动架构：
+- 念头池 asyncio.PriorityQueue 作为执行引擎
+- mind_loop() 永久运行，不断处理念头
+- cron 心跳只做"注入唤醒脉冲"
+- 所有自主行为通过念头产生+执行
 """
 
 import os
 import json
+import asyncio
 import logging
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -20,18 +22,32 @@ from .task_queue import TaskQueue, Task
 from .knowledge import KnowledgeBase
 from .journal import Journal, JournalEntry
 from .state import StateManager
-from .event_bus import EventBus, PushEvent
-from .self_check import SelfChecker
+from .autocheck import EventBus, SelfChecker, PushEvent
 from .conversation import ConversationEngine
+
+from .mind import (
+    MindPool, mind_loop, init_executor,
+    curiosity, report, cron_tick, user_message as user_msg_event,
+)
 
 
 class Partner:
-    """Partner — 自主研究伙伴。
+    """Partner — 自主研究伙伴 + Mind 系统。
 
-    职责范围：
-    - 初始化组件（task_queue, knowledge, journal, state）
-    - 提供 run_cycle() 接口（为 cron 调用保留，逻辑已迁移到 skill）
-    - 对话接口（通过 QQ/conversation）
+    运行时架构：
+    ┌──────────────────────────────────┐
+    │  mind_loop() (asyncio 主循环)    │
+    │  ├─ 从池取念头 → 创建 Task 执行  │
+    │  ├─ 休眠 0.1s（池空时）          │
+    │  └─ 捕获异常不崩溃              │
+    ├──────────────────────────────────┤
+    │  QQ Bridge (独立线程/进程)        │
+    │  ├─ 收到消息 → 直接回复          │
+    │  └─ 同时放入 user_message 念头    │
+    ├──────────────────────────────────┤
+    │  Cron 心跳 (hermes cron)         │
+    │  └─ 只做一件事: 放入 cron_tick   │
+    └──────────────────────────────────┘
     """
 
     def __init__(self, config: PartnerConfig):
@@ -49,7 +65,7 @@ class Partner:
         self.journal = Journal(os.path.join(state_dir, "journal.jsonl"))
         self.state = StateManager(state_dir)
 
-        # 新增：Event Bus + Self Check
+        # Event Bus + Self Check
         self.event_bus = EventBus(state_dir)
         self.self_checker = SelfChecker(state_dir)
 
@@ -59,7 +75,73 @@ class Partner:
             workspace=self.workspace,
         )
 
+        # Mind 系统
+        self._pool: Optional[MindPool] = None
+        self._mind_thread: Optional[threading.Thread] = None
+        self._mind_loop: Optional[asyncio.AbstractEventLoop] = None
+
         self._cycle_count = 0
+
+    # ── Mind 系统控制 ──────────────────────────────────────────
+
+    async def _init_mind(self):
+        """初始化 Mind 系统（异步）。"""
+        self._pool = await MindPool.get_instance()
+
+        # 从 adapter 获取后端
+        from .adapter import create_adapter
+        adapter = create_adapter(self.config.agent.backend, self.workspace)
+
+        # 初始化 executor 上下文
+        init_executor(
+            workspace=self.workspace,
+            adapter=adapter,
+            knowledge=self.knowledge,
+            journal=self.journal,
+            state=self.state,
+        )
+
+    def start_mind(self):
+        """在后台线程启动 mind_loop。"""
+        if self._mind_thread and self._mind_thread.is_alive():
+            logger.warning("Mind loop 已在运行")
+            return
+
+        def _run():
+            self._mind_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._mind_loop)
+            try:
+                # 初始化
+                self._mind_loop.run_until_complete(self._init_mind())
+                # 启动 mind_loop
+                self._mind_loop.run_until_complete(mind_loop())
+            except Exception as e:
+                logger.error(f"Mind loop 异常退出: {e}")
+
+        self._mind_thread = threading.Thread(target=_run, daemon=True, name="mind-loop")
+        self._mind_thread.start()
+        logger.info("🧠 Mind loop 已启动（后台线程）")
+
+    def stop_mind(self):
+        """停止 mind_loop。"""
+        if self._mind_loop and self._mind_loop.is_running():
+            self._mind_loop.stop()
+            logger.info("🧠 Mind loop 已停止")
+
+    async def feed_cron_tick(self):
+        """放入 cron_tick 念头（由 cron handler 调用）。"""
+        pool = await MindPool.get_instance()
+        await pool.put(cron_tick(source="hermes_cron"))
+
+    async def feed_user_message(self, text: str, sender_id: str = "",
+                                 sender_name: str = ""):
+        """放入一个用户消息念头（由 QQ bridge 调用）。"""
+        pool = await MindPool.get_instance()
+        ev = user_msg_event(text, sender_id, sender_name)
+        await pool.put(ev)
+        logger.info(f"[核心] 用户消息已放入念头池: {text[:50]}")
+
+    # ── 原有接口（保留兼容） ────────────────────────────────────
 
     def start(self):
         """启动（后台模式）。"""
@@ -73,25 +155,15 @@ class Partner:
             self._recover()
 
         self.state.heartbeat(status="idle")
-
         config_path = os.path.join(self.workspace, "partner_config.json")
         self.config.save(config_path)
-
         print("✅ Partner is running.")
 
     def run_cycle(self) -> Optional[str]:
-        """运行一个研究周期（为向后兼容保留）。
-
-        实际逻辑已迁移到 Hermes cron。此方法仅保留轻量维护：
-        1. 自检
-        2. 推送未推送事件
-        3. 更新心跳
-        """
+        """运行一个研究周期（为向后兼容保留）。"""
         self.state.heartbeat(status="working")
-
         result = None
 
-        # 自检
         try:
             check_events = self.self_checker.run_all()
             if check_events:
@@ -101,7 +173,6 @@ class Partner:
         except Exception as e:
             logger.warning(f"Self-check failed: {e}")
 
-        # 检查是否有待处理的任务
         try:
             task = self.task_queue.get_next()
             if task and not result:
@@ -122,7 +193,6 @@ class Partner:
 
     def add_task(self, title: str, description: str,
                  task_type: str = "deep_dive", priority: int = 5) -> str:
-        """添加研究任务。"""
         task = Task(
             type=task_type,
             title=title,
@@ -132,7 +202,6 @@ class Partner:
         return self.task_queue.add_task(task)
 
     def _recover(self):
-        """崩溃后恢复。"""
         latest_cp = self.state.get_latest_checkpoint()
         if latest_cp:
             success = self.state.restore_from_checkpoint(

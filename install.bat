@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-scripts\install.bat
+powershell -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1"

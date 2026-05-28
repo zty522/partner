@@ -181,6 +181,9 @@ class QQQfficialBridge:
         self._bot.set_ready_handler(self._handle_ready)
         self._bot.set_error_handler(self._handle_error)
 
+        # 启动 Mind 自主念头系统（后台线程）
+        self._start_mind()
+
         # Start notification poller
         self._start_notification_poller()
 
@@ -269,6 +272,12 @@ class QQQfficialBridge:
                                 with open(user_ctx_path) as f:
                                     ctx = json.load(f)
                                 openid = ctx.get("openid", "")
+                            # Fallback to proactive_openid.txt
+                            if not openid:
+                                fallback = os.path.join(os.path.dirname(user_ctx_path), "proactive_openid.txt")
+                                if os.path.exists(fallback):
+                                    with open(fallback) as f:
+                                        openid = f.read().strip()
                         except Exception:
                             pass
 
@@ -292,6 +301,59 @@ class QQQfficialBridge:
                 time.sleep(60)  # Check every 60 seconds
         t = threading.Thread(target=poll, daemon=True)
         t.start()
+
+    def _start_mind(self):
+        """启动 Mind 自主念头系统（后台线程）。
+
+        - 使用 Partner core 的 start_mind() 启动 mind_loop
+        - 注册推送回调，让 Report 念头直接推送到 QQ
+        - 启动时读取 active_plan，避免报 "空闲中"
+        """
+        try:
+            from .core import Partner
+            from .config import PartnerConfig, WorkspaceConfig
+            cfg = PartnerConfig(workspace=WorkspaceConfig(path=self.workspace))
+            self._partner = Partner(cfg)
+            self._partner.start()
+            self._partner.start_mind()
+
+            # 设置推送回调：Report 念头直接推送到 QQ 用户
+            from .mind.executor import set_push_callback
+
+            def _push_to_qq(content: str):
+                """将 Report 内容推送到 QQ 用户。"""
+                try:
+                    # 读取用户 openid
+                    user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
+                    openid = ""
+                    if os.path.exists(user_ctx_path):
+                        with open(user_ctx_path) as f:
+                            ctx = json.load(f)
+                        openid = ctx.get("openid", "")
+                    # 降级到 proactive_openid.txt
+                    if not openid:
+                        fallback = os.path.join(
+                            os.path.dirname(user_ctx_path), "proactive_openid.txt"
+                        )
+                        if os.path.exists(fallback):
+                            with open(fallback) as f:
+                                openid = f.read().strip()
+
+                    if openid and self._bot and self._bot.get_event_loop():
+                        # Truncate long messages
+                        text = content[:500] if len(content) > 500 else content
+                        asyncio.run_coroutine_threadsafe(
+                            self._bot.send_message(openid, text, QQMessageType.PRIVATE),
+                            self._bot.get_event_loop(),
+                        )
+                        logger.info(f"[Mind] 推送报告到 {openid}: {text[:60]}...")
+                except Exception as e:
+                    logger.warning(f"[Mind] 推送回调异常: {e}")
+
+            set_push_callback(_push_to_qq)
+            logger.info("🧠 Mind 系统已自动启动")
+        except Exception as e:
+            logger.warning(f"Mind 系统启动失败（不影响 QQ 机器人）: {e}")
 
     # ── Handlers ──────────────────────────────────────────────────
 
@@ -391,6 +453,8 @@ class QQQfficialBridge:
         This runs in a background thread so the QQ bot event loop
         is free to send the initial "请等待..." reply immediately.
         """
+        # Feed user message into Mind Pool (cross-thread safe, non-blocking)
+        self._feed_mind_pool(user_text, msg)
         try:
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
@@ -447,6 +511,26 @@ class QQQfficialBridge:
                 self._send_reply(msg, error_text)
             except Exception:
                 pass
+
+    def _feed_mind_pool(self, text: str, msg):
+        """将用户消息作为 user_message 念头放入 Mind Pool。
+
+        非阻塞、跨线程安全。Mind Pool 可能未初始化，忽略。
+        """
+        try:
+            from .mind import MindPool
+            pool = MindPool.get_sync_instance()
+            if pool is not None:
+                from .mind import user_message
+                ev = user_message(
+                    text=text,
+                    sender_id=msg.sender_id if hasattr(msg, 'sender_id') else "",
+                    sender_name=msg.sender_name if hasattr(msg, 'sender_name') else "",
+                )
+                pool.put_threadsafe(ev)
+                logger.debug(f"[Mind] 用户消息已投递到念头池: {text[:40]}")
+        except Exception:
+            pass
 
     def _get_response(self, sender: str, text: str, msg_type: QQMessageType) -> str:
         """Get a response using LLM via agent adapter.
@@ -951,20 +1035,20 @@ class QQQfficialBridge:
 
             if job_id:
                 try:
-                    subprocess.run(
-                        ["hermes", "cron", "run", job_id, "--accept-hooks"],
-                        capture_output=True, timeout=120
+                    subprocess.Popen(
+                        ["hermes", "cron", "run", job_id],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
                 except Exception:
                     if job_name:
-                        subprocess.run(
-                            ["hermes", "cron", "run", job_name, "--accept-hooks"],
-                            capture_output=True, timeout=120
+                        subprocess.Popen(
+                            ["hermes", "cron", "run", job_name],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         )
             elif job_name:
-                subprocess.run(
-                    ["hermes", "cron", "run", job_name, "--accept-hooks"],
-                    capture_output=True, timeout=120
+                subprocess.Popen(
+                    ["hermes", "cron", "run", job_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
         except Exception as e:
             logger.debug(f"Immediate cron trigger failed (non-blocking): {e}")

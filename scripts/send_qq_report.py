@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Send QQ notification for Partner cycle report.
+"""Send QQ notification for Partner cycle report — 结构化数据收集器。
+
+不再硬编码任何回复模板。从 state 文件收集结构化数据，
+输出 JSON 供 LLM 生成自然语言回复。QQ 消息也发送结构化载荷，
+LLM 在 bridge 端渲染成自然语言。
 
 Usage:
     python3 scripts/send_qq_report.py /path/to/partner_workspace
 
-This script:
-1. Reads cycle results from state files
-2. Checks if user sent a message within 60 minutes
-3. If yes → sends QQ report via REST API (passive reply)
-4. If no → writes notification file for next user interaction
-5. Always writes to state/notifications/ for bridge fallback
+Output (stdout):
+    JSON 对象包含 collected data + 推送成功/失败状态
+
+Side effects:
+    1. 保存 notification JSON 到 state/notifications/
+    2. 如果用户在 60 分钟内发过消息，通过 QQ API 推送
 """
 
 import json
@@ -20,12 +24,7 @@ from datetime import datetime, timezone
 
 
 def load_qq_credentials(workspace: str) -> tuple:
-    """Load QQ bot credentials from workspace config files.
-
-    Tries qq_config.json first, then partner_config.json messaging.qq section.
-    Returns (app_id, app_secret, is_sandbox).
-    """
-    # Try qq_config.json
+    """Load QQ bot credentials from workspace config files."""
     qq_cfg_path = os.path.join(workspace, "qq_config.json")
     if os.path.exists(qq_cfg_path):
         with open(qq_cfg_path) as f:
@@ -36,7 +35,6 @@ def load_qq_credentials(workspace: str) -> tuple:
         if app_id and app_secret:
             return app_id, app_secret, is_sandbox
 
-    # Try partner_config.json
     pcfg_path = os.path.join(workspace, "partner_config.json")
     if os.path.exists(pcfg_path):
         with open(pcfg_path) as f:
@@ -54,13 +52,12 @@ def load_qq_credentials(workspace: str) -> tuple:
     )
 
 
-# Globals set in main()
 APP_ID = ""
 APP_SECRET = ""
 IS_SANDBOX = True
+API_BASE = "https://sandbox.api.sgroup.qq.com"
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
-API_BASE = "https://sandbox.api.sgroup.qq.com" if IS_SANDBOX else "https://api.sgroup.qq.com"
 
 
 def log(msg: str):
@@ -116,131 +113,181 @@ def send_qq_message(openid: str, content: str, access_token: str) -> bool:
         return False
 
 
-def build_report(workspace: str) -> str:
-    """Build a concise heartbeat report from state files.
-    
-    Reads active_plan.json for current plan status (new heartbeat model),
-    falls back to task_queue.json for legacy compatibility.
+def safe_read_json(path: str, default=None):
+    """Read a JSON file, return default on failure."""
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def collect_state_data(workspace: str) -> dict:
+    """从 state 文件收集结构化数据，不生成任何自然语言文本。
+
+    Returns:
+        dict 包含以下字段（所有字段都可能为空/不存在）：
+        - workspace: 工作区路径
+        - timestamp: 收集时间
+        - plan: active_plan.json 原始数据
+        - queue: task_queue.json 统计
+        - stats: stats.json 数据
+        - events: event_bus.jsonl 未推送事件摘要
+        - qq_context: QQ 用户上下文（如果有）
     """
     state_dir = os.path.join(workspace, "state")
+    data = {
+        "workspace": workspace,
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "plan": None,
+        "queue": {"total": 0, "pending": 0, "in_progress": 0, "completed": 0, "failed": 0},
+        "stats": {},
+        "events": [],
+        "qq_context": None,
+    }
 
-    # ── Active Plan (new heartbeat model) ──
-    active_plan_path = os.path.join(state_dir, "active_plan.json")
-    if os.path.exists(active_plan_path):
+    # Active plan
+    plan = safe_read_json(os.path.join(state_dir, "active_plan.json"))
+    if plan:
+        # 保留原始数据，只精简 phase 的详细内容
+        phases = plan.get("phases", [])
+        phase_summary = []
+        for i, p in enumerate(phases):
+            phase_summary.append({
+                "index": i,
+                "name": p.get("name", f"phase_{i}"),
+                "type": p.get("type", ""),
+                "status": p.get("status", "pending"),
+                "current_step": p.get("current_step", ""),
+                "started_at": p.get("started_at"),
+                "completed_at": p.get("completed_at"),
+            })
+        data["plan"] = {
+            "status": plan.get("status", "idle"),
+            "title": plan.get("title", ""),
+            "goal": plan.get("goal", ""),
+            "current_phase_index": plan.get("current_phase_index", 0),
+            "phases": phase_summary,
+            "created_at": plan.get("created_at"),
+            "heartbeat_summary": plan.get("heartbeat_summary", ""),
+            "all_done": all(p.get("status") == "completed" for p in phases),
+        }
+
+    # Task queue
+    queue = safe_read_json(os.path.join(state_dir, "task_queue.json"), default=[])
+    if isinstance(queue, list):
+        status_counts = {"pending": 0, "in_progress": 0, "completed": 0, "failed": 0}
+        pending_titles = []
+        in_progress_titles = []
+        for t in queue:
+            if isinstance(t, dict):
+                s = t.get("status", "")
+                if s in status_counts:
+                    status_counts[s] += 1
+                if s == "pending" and len(pending_titles) < 5:
+                    pending_titles.append({
+                        "title": t.get("title", "?"),
+                        "priority": t.get("priority", 5),
+                        "created_at": t.get("created_at", ""),
+                    })
+                elif s == "in_progress" and len(in_progress_titles) < 3:
+                    in_progress_titles.append(t.get("title", "?"))
+        data["queue"] = {
+            **status_counts,
+            "total": len(queue),
+            "pending_titles": pending_titles,
+            "in_progress_titles": in_progress_titles,
+        }
+
+    # Stats
+    data["stats"] = safe_read_json(os.path.join(state_dir, "stats.json"), default={})
+
+    # Knowledge base summary
+    kb = safe_read_json(os.path.join(state_dir, "knowledge.json"))
+    if kb:
+        entries = kb.get("entries", kb if isinstance(kb, list) else [])
+        today = datetime.now().strftime("%Y-%m-%d")
+        data["knowledge"] = {
+            "total_entries": len(entries),
+            "recent_additions": sum(
+                1 for e in entries
+                if today in (e.get("created_at", "") or "")
+            ),
+        }
+    else:
+        data["knowledge"] = {"total_entries": 0, "recent_additions": 0}
+
+    # Journal summary
+    journal_path = os.path.join(state_dir, "journal.jsonl")
+    if os.path.exists(journal_path):
         try:
-            with open(active_plan_path) as f:
-                plan = json.load(f)
-            plan_status = plan.get("status", "idle")
-            title = plan.get("title", "")
-            summary = plan.get("heartbeat_summary", "")
-            phases = plan.get("phases", [])
-            cur_idx = plan.get("current_phase_index", 0)
-
-            done = sum(1 for p in phases if p.get("status") == "completed")
-            total = len(phases)
-
-            lines = [f"🤖 Partner 心跳"]
-            if plan_status == "idle":
-                lines.append("🟢 空闲中")
-                lines.append(summary or "等待新任务")
-            elif plan_status == "completed":
-                lines.append(f"✅ 计划完成: {title}")
-                lines.append(summary or f"共 {total} 个阶段全部完成")
-            else:
-                lines.append(f"🔵 {title or '执行中'}")
-                if summary:
-                    lines.append(summary)
-                cur_phase = phases[cur_idx] if cur_idx < len(phases) else None
-                if cur_phase:
-                    step = cur_phase.get("current_step", "")
-                    pname = cur_phase.get("name", f"阶段{cur_idx+1}")
-                    line = f"📋 [{done}/{total}] {pname}"
-                    if step:
-                        line += f" → {step}"
-                    lines.append(line)
-
-            return "\n".join(lines)
-        except Exception as e:
-            log(f"Failed to read active_plan: {e}")
-
-    # ── Legacy: stats + task_queue ──
-    stats = {}
-    stats_path = os.path.join(state_dir, "stats.json")
-    if os.path.exists(stats_path):
-        with open(stats_path) as f:
-            stats = json.load(f)
-
-    # Heartbeat
-    hb = {}
-    hb_path = os.path.join(state_dir, "heartbeat.json")
-    if os.path.exists(hb_path):
-        with open(hb_path) as f:
-            hb = json.load(f)
-
-    # Task queue summary
-    queue_path = os.path.join(state_dir, "task_queue.json")
-    pending_count = 0
-    in_progress_count = 0
-    in_progress_titles = []
-    if os.path.exists(queue_path):
-        with open(queue_path) as f:
-            try:
-                tasks = json.load(f)
-                for t in tasks:
-                    if isinstance(t, dict):
-                        status = t.get("status", "")
-                        if status == "pending":
-                            pending_count += 1
-                        elif status == "in_progress":
-                            in_progress_count += 1
-                            title = t.get("title", "?")
-                            if len(in_progress_titles) < 3:
-                                in_progress_titles.append(title)
-            except Exception:
-                pass
-
-    # Cycle context (latest batch)
-    ctx_path = os.path.join(state_dir, "_cycle_context.json")
-    batch_titles = []
-    if os.path.exists(ctx_path):
-        try:
-            with open(ctx_path) as f:
-                ctx = json.load(f)
-            for t in ctx.get("batch", []):
-                title = t.get("title", "?")
-                if len(batch_titles) < 3:
-                    batch_titles.append(title)
-        except Exception:
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_activities = 0
+            with open(journal_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if today in entry.get("timestamp", ""):
+                            today_activities += 1
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            data["journal"] = {"today_activities": today_activities}
+        except OSError:
             pass
 
-    total_cycles = stats.get("total_cycles", 0)
-    completed = stats.get("total_tasks_completed", 0)
-    knowledge = stats.get("total_knowledge_entries", 0)
+    # Event bus — 未推送事件摘要
+    event_bus_path = os.path.join(state_dir, "event_bus.jsonl")
+    if os.path.exists(event_bus_path):
+        unpushed = []
+        try:
+            with open(event_bus_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        if not ev.get("pushed", False):
+                            unpushed.append({
+                                "type": ev.get("type", ""),
+                                "subtype": ev.get("subtype", ""),
+                                "title": ev.get("title", ""),
+                                "priority": ev.get("priority", 5),
+                            })
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+        except OSError:
+            pass
+        if unpushed:
+            data["events"] = unpushed[:10]
 
-    lines = [
-        f"📍 Partner 研究汇报",
-        f"📊 第 {total_cycles} 轮完成 | 累计完成任务 {completed} 项",
-        f"📚 知识库 {knowledge} 条 | 队列 {pending_count} 待办, {in_progress_count} 进行中",
-    ]
-    if in_progress_titles:
-        lines.append(f"▶️ 正在做: {' | '.join(in_progress_titles)}")
-    if batch_titles:
-        lines.append(f"📋 本轮: {' | '.join(batch_titles)}")
+    # QQ user context
+    ctx_path = os.path.join(state_dir, "qq_user_context.json")
+    if os.path.exists(ctx_path):
+        ctx = safe_read_json(ctx_path)
+        if ctx:
+            data["qq_context"] = {
+                "openid": ctx.get("openid", ""),
+                "last_message_at": ctx.get("last_message_at", ""),
+            }
 
-    return "\n".join(lines)
+    return data
 
 
-def save_notification(workspace: str, summary: str):
-    """Save notification for next user interaction."""
+def save_notification(workspace: str, state_data: dict):
+    """Save structured notification for next user interaction."""
     notif_dir = os.path.join(workspace, "state", "notifications")
     os.makedirs(notif_dir, exist_ok=True)
 
     notif = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": state_data["timestamp"],
         "type": "cycle_complete",
-        "summary": summary,
-        "pending_count": 0,
-        "details": [],
+        "state_data": state_data,
     }
 
     path = os.path.join(notif_dir, f"cycle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
@@ -259,7 +306,7 @@ def main():
     workspace = sys.argv[1]
     state_dir = os.path.join(workspace, "state")
 
-    # 0. Load QQ credentials from config
+    # 0. Load QQ credentials
     try:
         APP_ID, APP_SECRET, IS_SANDBOX = load_qq_credentials(workspace)
         API_BASE = "https://sandbox.api.sgroup.qq.com" if IS_SANDBOX else "https://api.sgroup.qq.com"
@@ -267,15 +314,15 @@ def main():
         log(f"⚠️ {e}")
         sys.exit(1)
 
-    # 1. Build report
-    report = build_report(workspace)
-    log(f"Report:\n{report}")
+    # 1. Collect structured state data (no hardcoded text)
+    state_data = collect_state_data(workspace)
+    log(f"Collected state data: plan={state_data.get('plan', {}).get('status', 'N/A')}, "
+        f"queue_pending={state_data['queue']['pending']}")
 
-    # 2. Always save notification file
-    save_notification(workspace, report)
+    # 2. Save notification file (structured JSON, no hardcoded text)
+    save_notification(workspace, state_data)
 
-    # 3. Check if user sent message within 60 minutes
-    # Check heartbeat suppression flag (set when a task was just queued)
+    # 3. Check QQ user context for push eligibility
     flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
     if os.path.exists(flag_path):
         try:
@@ -284,49 +331,64 @@ def main():
             if time.time() - flag_time < 180:  # 3 minutes
                 log("Heartbeat suppressed — task was just queued, skipping push")
                 os.remove(flag_path)
+                state_data["pushed"] = False
+                state_data["push_reason"] = "suppressed"
+                print(json.dumps(state_data, ensure_ascii=False))
                 return
             else:
-                os.remove(flag_path)  # stale flag
+                os.remove(flag_path)
         except Exception:
             pass
 
-    ctx_path = os.path.join(state_dir, "qq_user_context.json")
-    if not os.path.exists(ctx_path):
-        log("No QQ user context found — skipping passive send, notification saved")
-        return
-
-    with open(ctx_path) as f:
-        ctx = json.load(f)
-
-    openid = ctx.get("openid", "")
-    last_msg_at_str = ctx.get("last_message_at", "")
-    if not openid or not last_msg_at_str:
-        log("Incomplete QQ user context — skipping passive send")
+    ctx = state_data.get("qq_context")
+    if not ctx or not ctx.get("openid") or not ctx.get("last_message_at"):
+        log("No QQ user context found — skipping push, notification saved")
+        state_data["pushed"] = False
+        state_data["push_reason"] = "no_context"
+        print(json.dumps(state_data, ensure_ascii=False))
         return
 
     try:
-        last_msg_at = datetime.fromisoformat(last_msg_at_str)
+        last_msg_at = datetime.fromisoformat(ctx["last_message_at"])
         now = datetime.now(timezone.utc) if last_msg_at.tzinfo else datetime.now()
         elapsed = (now - last_msg_at).total_seconds()
     except Exception as e:
-        log(f"Cannot parse last_message_at '{last_msg_at_str}': {e}")
+        log(f"Cannot parse last_message_at: {e}")
+        state_data["pushed"] = False
+        state_data["push_reason"] = "parse_error"
+        print(json.dumps(state_data, ensure_ascii=False))
         return
 
     if elapsed > 3600:
-        log(f"User last messaged {elapsed:.0f}s ago (>60min) — passive send skipped, notification saved")
+        log(f"User last messaged {elapsed:.0f}s ago (>60min) — push skipped, notification saved")
+        state_data["pushed"] = False
+        state_data["push_reason"] = "user_inactive"
+        print(json.dumps(state_data, ensure_ascii=False))
         return
 
-    # 4. Send via QQ REST API
-    log(f"User last messaged {elapsed:.0f}s ago — sending passive report to {openid}")
+    # 4. Send structured data as JSON payload via QQ API
+    #    消息内容用 JSON 格式发送，让 QQ bridge 的 LLM 渲染成自然语言
+    log(f"User last messaged {elapsed:.0f}s ago — sending structured report to {ctx['openid']}")
     try:
         token = get_access_token()
-        success = send_qq_message(openid, report, token)
+        # 发送结构化 JSON 作为消息，bridge 端会用 LLM 渲染
+        message_json = json.dumps({"type": "partner_heartbeat", "data": state_data}, ensure_ascii=False)
+        success = send_qq_message(ctx["openid"], message_json, token)
         if success:
-            log("✅ Report sent to QQ!")
+            log("✅ Structured report sent to QQ!")
+            state_data["pushed"] = True
+            state_data["push_reason"] = "sent"
         else:
-            log("⚠️ Report saved as notification (send failed)")
+            log("⚠️ Send failed — notification saved")
+            state_data["pushed"] = False
+            state_data["push_reason"] = "send_failed"
     except Exception as e:
-        log(f"⚠️ Send error: {e} — notification saved for next interaction")
+        log(f"⚠️ Send error: {e} — notification saved")
+        state_data["pushed"] = False
+        state_data["push_reason"] = "error"
+
+    # 5. Output structured JSON to stdout
+    print(json.dumps(state_data, ensure_ascii=False))
 
 
 if __name__ == "__main__":
