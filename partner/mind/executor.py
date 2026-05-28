@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import time as _time
 from datetime import datetime
 from typing import Optional, Dict, Any
 
@@ -29,11 +30,6 @@ _pool: Optional[MindPool] = None
 
 # 推送回调：msg(str) -> None
 _push_callback = None
-
-# 当前活跃项目（Project 事件的标题）
-# 由 _handle_project() 设置，由 CRON_TICK 读取来生成关联探索
-_current_project: str = ""
-_current_project_id: str = ""
 
 
 def set_push_callback(callback):
@@ -241,18 +237,8 @@ async def _handle_cron_tick(event: MindEvent):
     logger.info(f"[CRON] Tick received, scheduling periodic tasks. "
                 f"Pool size: {pool.qsize()}")
 
-    # 0. 检查是否有活跃项目 → CRON_TICK 围绕项目主题探索
-    global _current_project
-    if _current_project:
-        logger.info(f"[CRON] Active project detected: '{_current_project[:60]}'")
-        await pool.put(curiosity(
-            topic=_current_project,
-            priority=7,
-            source="cron_tick:project_related",
-        ))
-        logger.info(f"[CRON] Generated curiosity for project: '{_current_project[:60]}'")
-    elif _knowledge and len(_knowledge.entries) > 0:
-        # 无活跃项目 → 自由探索知识空白
+    # 自由探索知识空白
+    if _knowledge and len(_knowledge.entries) > 0:
         categories = _knowledge.stats().get("by_category", {})
         if categories:
             topic = min(categories, key=categories.get)
@@ -397,16 +383,11 @@ async def _handle_project(event: MindEvent):
 
     Project 事件的生命周期：
     1. 被 mind_loop 取出执行
-    2. 注册自身为 _current_project（全局变量，供 CRON_TICK 读取）
-    3. 生成一个 Curiosity 探索子念头
-    4. 将自身（Project）放回池子等待下次唤起
-    5. 用户可以发"停下"来清除项目
-
-    这样 Project 事件在池里循环，每次被取出都产生探索，
-    同时 _current_project 让 CRON_TICK 也能围绕项目主题做背景搜索。
+    2. 生成一个 Curiosity 探索子念头
+    3. 将自身（Project）放入等待室（wake_after=now+900s）
+    4. 15 分钟后自动唤醒，生成下一轮探索
+    5. 最多 100 步后终止
     """
-    global _current_project, _current_project_id
-
     title = event.payload.get("title", "")
     goal = event.payload.get("goal", "")
     step = event.payload.get("step", 0)
@@ -415,12 +396,9 @@ async def _handle_project(event: MindEvent):
         logger.warning(f"[PROJECT] No title, skipping")
         return
 
-    # 1. 注册为当前活跃项目
-    _current_project = title
-    _current_project_id = event.id
-    logger.info(f"[PROJECT] Registered as current project: '{title[:60]}' (step={step})")
+    logger.info(f"[PROJECT] Executing step {step}: '{title[:60]}'")
 
-    # 2. 记录到 journal
+    # 1. 记录到 journal
     if _journal:
         try:
             from ..journal import JournalEntry
@@ -433,7 +411,7 @@ async def _handle_project(event: MindEvent):
         except Exception:
             pass
 
-    # 3. 生成探索子念头
+    # 2. 生成探索子念头
     pool = await ensure_pool()
     await pool.put(curiosity(
         topic=title,
@@ -441,28 +419,26 @@ async def _handle_project(event: MindEvent):
         source=f"project:step_{step}",
         parent_id=event.id,
     ))
-    logger.info(f"[PROJECT] Generated curiosity for step {step}: '{title[:60]}'")
+    logger.info(f"[PROJECT] Generated curiosity for step {step}")
 
-    # 4. 将自身放回池子（递增 step），等待下次被取出
+    # 3. 将自身放回池子（step+1, wake_after=now+900s=15分钟）
     next_step = step + 1
-    # 最多 100 步后停止放回（防止无限循环）
     if next_step < 100:
         await pool.put(MindEvent(
             type=EventType.PROJECT,
-            priority=6,  # 比初始优先级低，让其他事件先处理
+            priority=6,
             payload={
                 "title": title,
                 "goal": goal,
                 "step": next_step,
             },
+            wake_after=_time.time() + 900,  # 15 分钟后唤醒
             source="project:recur",
             parent_id=event.id,
         ))
-        logger.info(f"[PROJECT] Re-queued for step {next_step}")
+        logger.info(f"[PROJECT] Re-queued for step {next_step} (wake in 900s)")
     else:
-        logger.info(f"[PROJECT] Max steps reached, clearing project")
-        _current_project = ""
-        _current_project_id = ""
+        logger.info(f"[PROJECT] Max steps reached, terminating")
 
     logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, title='{title[:40]}'")
 

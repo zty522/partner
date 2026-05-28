@@ -441,6 +441,10 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
+            # SEND "思考中，请等待..." IMMEDIATELY (so user gets instant feedback)
+            # This will be overwritten by the actual reply when ready
+            self._send_reply(msg, "思考中，请等待...")
+
             # Welcome message (LLM-generated, not hardcoded)
             if self._should_welcome():
                 welcome = self._llm_chat("system",

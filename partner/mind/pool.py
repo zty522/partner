@@ -2,17 +2,13 @@
 
 核心：asyncio.PriorityQueue 用于 async 环境。
 扩展：thread_safe_queue (queue.PriorityQueue) 用于跨线程投递。
-
-所有模块都能通过 get_instance() 获取单例，
-用 put(event) 放入新念头，用 async get() 取出最高优先级的念头。
-
-跨线程投递：外部线程调用 put_threadsafe()，mind_loop 会定期 poll。
+延迟：wake_after 支持 — 事件设置 wake_after 后不到时间不出队。
 """
 
 import asyncio
 import logging
 import queue
-import threading
+import time as _time
 from typing import Optional
 
 from .event_types import MindEvent
@@ -23,8 +19,8 @@ logger = logging.getLogger(__name__)
 class MindPool:
     """全局念头池单例。
 
-    使用 asyncio.PriorityQueue 作为主队列，
-    queue.PriorityQueue 作为跨线程桥接。
+    支持 wake_after 延迟唤醒：事件设置 wake_after=time.time()+900
+    后，900 秒内不会被 get() 取出。到时间后自动回到主队列。
     """
 
     _instance: Optional['MindPool'] = None
@@ -32,14 +28,14 @@ class MindPool:
 
     def __init__(self, maxsize: int = 0):
         self._queue: asyncio.PriorityQueue[MindEvent] = asyncio.PriorityQueue(maxsize=maxsize)
-        # 跨线程桥接队列
         self._thread_queue: queue.PriorityQueue[MindEvent] = queue.PriorityQueue(maxsize=0)
+        # 等待室：{event.id: (wake_after, event)} — 不到时间的暂存这里
+        self._waiting_room: dict = {}
         self._total_put: int = 0
         self._total_get: int = 0
 
     @classmethod
     async def get_instance(cls) -> 'MindPool':
-        """获取单例（async 环境用）。"""
         if cls._instance is None:
             async with cls._lock:
                 if cls._instance is None:
@@ -48,32 +44,31 @@ class MindPool:
 
     @classmethod
     def get_sync_instance(cls) -> 'MindPool':
-        """获取单例（同步/跨线程环境用）。
-        注意：必须在 get_instance() 之后调用，否则返回 None。
-        """
         return cls._instance
 
     @classmethod
     def reset_instance(cls):
-        """重置单例。"""
         cls._instance = None
 
     async def put(self, event: MindEvent):
-        """放入一个念头（async 环境）。"""
-        await self._queue.put(event)
+        """放入一个念头。如设置了 wake_after 则进入等待室。"""
+        if event.wake_after and event.wake_after > _time.time():
+            self._waiting_room[event.id] = (event.wake_after, event)
+            logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
+                        f"pri={event.priority} [delayed until {event.wake_after:.0f}]")
+        else:
+            await self._queue.put(event)
+            logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
+                        f"pri={event.priority}")
         self._total_put += 1
-        logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
-                    f"pri={event.priority}")
 
     def put_threadsafe(self, event: MindEvent):
-        """从非 async 线程安全地放入一个念头。"""
         self._thread_queue.put(event)
         self._total_put += 1
         logger.info(f"[MIND] PUT(event_type={event.type.value}, id={event.id[:8]}, "
                     f"pri={event.priority})  [threadsafe]")
 
     async def _drain_thread_queue(self):
-        """将跨线程队列中的念头全部搬到 async 队列中。"""
         while True:
             try:
                 ev = self._thread_queue.get_nowait()
@@ -81,26 +76,47 @@ class MindPool:
             except queue.Empty:
                 break
 
-    async def get(self) -> MindEvent:
-        """取出优先级最高的念头（阻塞直到非空）。
-        取出前先 drain 跨线程队列。
-        """
+    async def _release_waiting(self):
+        """将等待室中到时间的事件放回主队列。"""
+        now = _time.time()
+        ready = [eid for eid, (wake_at, ev) in self._waiting_room.items() if wake_at <= now]
+        for eid in ready:
+            _, ev = self._waiting_room.pop(eid)
+            await self._queue.put(ev)
+            logger.info(f"[MIND] Released from waiting room: {ev.type.value}, "
+                        f"id={ev.id[:8]}")
+        return len(ready)
+
+    async def get(self) -> Optional[MindEvent]:
+        """取出优先级最高的、已到唤醒时间的念头。"""
         await self._drain_thread_queue()
+        await self._release_waiting()
+
+        if self._queue.qsize() == 0:
+            raise asyncio.QueueEmpty
+
         event = await self._queue.get()
+        # 如果事件设置了 wake_after 但还没到，放回等待室，递归取下一个
+        if event.wake_after and event.wake_after > _time.time():
+            self._waiting_room[event.id] = (event.wake_after, event)
+            logger.debug(f"[MIND] Event {event.id[:8]} not yet due "
+                         f"(wake_after={event.wake_after:.0f}), back to waiting room")
+            return await self.get()
+
         self._total_get += 1
         logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
                     f"pri={event.priority}, topic={event.payload.get('topic', '')}")
         return event
 
     def qsize(self) -> int:
-        """当前队列总大小（async + 跨线程）。"""
-        return self._queue.qsize() + self._thread_queue.qsize()
+        return self._queue.qsize() + self._thread_queue.qsize() + len(self._waiting_room)
 
     def stats(self) -> dict:
         return {
             "pool_size": self.qsize(),
             "async_queue_size": self._queue.qsize(),
             "thread_queue_size": self._thread_queue.qsize(),
+            "waiting_room_size": len(self._waiting_room),
             "total_put": self._total_put,
             "total_get": self._total_get,
         }

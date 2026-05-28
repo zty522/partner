@@ -42,6 +42,7 @@ class MindEvent:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     source: str = ""                   # 产生来源："cron_tick" | "executor" | "user" | "self_check"
     parent_id: Optional[str] = None    # 由哪个念头产生的？
+    wake_after: Optional[float] = None # 时间戳（time.time()），在此之前不出队
 
     def __lt__(self, other: 'MindEvent') -> bool:
         """PriorityQueue 使用 < 比较确定顺序。数值越低优先级越高。"""
