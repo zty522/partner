@@ -120,7 +120,7 @@ def _get_handler(event_type: EventType):
 
 
 async def _handle_curiosity(event: MindEvent):
-    """好奇念头：检索知识库 + 搜索，生成报告。"""
+    """好奇念头：检索知识库 + 搜索，收集结构化数据后交给 LLM 生成报告。"""
     topic = event.payload.get("topic", "")
     if not topic:
         logger.warning(f"[CURIOSITY] No topic, skipping event {event.id[:8]}")
@@ -128,52 +128,69 @@ async def _handle_curiosity(event: MindEvent):
 
     logger.info(f"[CURIOSITY] Searching for: '{topic}'")
 
-    # 1. 搜索知识库
-    knowledge_text = ""
+    # 1. 搜索知识库 → 收集结构化数据
+    kb_entries = []
     if _knowledge:
         results = _knowledge.search(topic, top_k=3)
-        if results:
-            knowledge_text = "\n".join(
-                f"- [{e.category}] {e.title}: {e.content[:200]}"
-                for e in results
-            )
+        for e in results:
+            kb_entries.append({
+                "category": e.category,
+                "title": e.title,
+                "content": e.content[:300],
+                "confidence": e.confidence,
+            })
 
-    # 2. 用 adapter 搜索网络（如果有）
-    web_results = ""
+    # 2. 用 adapter 搜索网络 → 收集原始结果
+    web_result_text = ""
     if _adapter:
         try:
-            search_prompt = (
+            prompt = (
                 f"搜索关于 '{topic}' 的最新研究进展。返回关键发现和结论。"
-                f"用中文。\n\n"
-                f"已有知识：\n{knowledge_text or '无'}"
+                f"用中文。\n\n已有知识：\n"
+                + ("\n".join(f"- [{e['category']}] {e['title']}" for e in kb_entries) if kb_entries else "无")
             )
-            web_results = _adapter.execute_task(search_prompt)
+            web_result_text = _adapter.execute_task(prompt) or ""
         except Exception as e:
             logger.warning(f"[CURIOSITY] Web search failed: {e}")
 
-    # 3. 构建报告内容
-    parts = [f"💡 关于「{topic}」的探索结果："]
-    if knowledge_text:
-        parts.append(f"\n📚 已有知识：\n{knowledge_text}")
-    if web_results:
-        parts.append(f"\n🔍 新发现：\n{web_results[:500]}")
-    else:
-        parts.append("\n（暂无新发现）")
+    # 3. 用 LLM 生成自然语言报告（如果 adapter 可用）
+    report_content = ""
+    if _adapter and (kb_entries or web_result_text):
+        try:
+            data_json = json.dumps({
+                "topic": topic,
+                "knowledge_entries": kb_entries,
+                "web_search_result": web_result_text[:1000],
+            }, ensure_ascii=False)
+            llm_prompt = (
+                f"你刚刚探索了 '{topic}' 这个主题。以下是你收集到的数据。"
+                f"请用 2-3 句话自然地告诉用户你发现了什么。不要用模板开头，"
+                f"就像聊天一样。\n\n结构化数据：\n{data_json}"
+            )
+            report_content = _adapter.chat(llm_prompt) or ""
+        except Exception as e:
+            logger.warning(f"[CURIOSITY] LLM report generation failed: {e}")
 
-    content = "\n".join(parts)
+    # 4. 如果 LLM 生成失败，用结构化 JSON（无模板，无硬编码）
+    if not report_content:
+        report_content = json.dumps({
+            "type": "curiosity_result",
+            "topic": topic,
+            "knowledge_entries": kb_entries,
+            "web_search": web_result_text[:500] if web_result_text else "",
+        }, ensure_ascii=False)
+        logger.info(f"[CURIOSITY] LLM unavailable, sending structured data instead")
 
-    # 4. 生成 Report 念头放入池子
+    # 5. 生成 Report 念头
     pool = await ensure_pool()
     await pool.put(report(
-        content=content,
+        content=report_content,
         priority=3,
         source="executor:curiosity",
         parent_id=event.id,
     ))
 
-    logger.info(f"[CURIOSITY] Summary generated for '{topic}' ({len(content)} chars)")
-
-    # 5. 记录 DONE
+    logger.info(f"[CURIOSITY] Summary generated for '{topic}' ({len(report_content)} chars)")
     logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}'")
 
 
@@ -321,8 +338,15 @@ async def _handle_self_reflection(event: MindEvent):
                     for ev in check_events:
                         logger.info(f"[SELFCHECK]   [{ev.subtype}] {ev.title}")
                         pool = await ensure_pool()
+                        # Pass structured data, not hardcoded text
                         await pool.put(report(
-                            content=f"[自检][{ev.subtype}] {ev.title}",
+                            content=json.dumps({
+                                "type": "self_check_issue",
+                                "subtype": ev.subtype,
+                                "title": ev.title,
+                                "body": ev.body,
+                                "priority": ev.priority,
+                            }, ensure_ascii=False),
                             priority=4,
                             source="self_reflection",
                         ))

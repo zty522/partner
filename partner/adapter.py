@@ -69,22 +69,44 @@ class HermesAdapter(AgentAdapter):
         return [SearchResult(title="Search Result", url="", snippet=result)]
     
     def execute_task(self, prompt: str) -> str:
-        """Execute a task by writing a prompt file and invoking hermes.
-        
-        For MVP, this writes the prompt to a file that can be picked up
-        by the cron-triggered hermes session.
+        """Execute a research task via Hermes CLI chat.
+
+        Writes prompt to state file for reference, then invokes hermes chat
+        to get a response. If hermes is unavailable, returns empty string
+        (caller handles this gracefully).
         """
         import subprocess
-        import tempfile
         import os
-        
-        # Write prompt to temp file
+
+        # Write prompt to state file for reference
         prompt_file = os.path.join(self.workspace, "state", "current_task.md")
-        with open(prompt_file, 'w') as f:
-            f.write(prompt)
-        
-        # For MVP, return a placeholder - in production this would invoke hermes
-        return "Task queued for execution by Hermes agent."
+        try:
+            os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
+            with open(prompt_file, 'w') as f:
+                f.write(prompt)
+        except Exception:
+            pass
+
+        # Try hermes chat to execute the task
+        try:
+            cmd = ["hermes", "chat", "--query", prompt, "--quiet", "--toolsets", ""]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+                cwd=self.workspace,
+            )
+            out = result.stdout.strip()
+            if result.returncode == 0 and out:
+                return out
+            logger.warning(f"hermes execute_task returned {result.returncode}: {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"hermes execute_task timed out (60s)")
+        except FileNotFoundError:
+            logger.warning(f"hermes CLI not found")
+        except Exception as e:
+            logger.warning(f"hermes execute_task error: {e}")
+
+        # No result — return empty, caller handles it
+        return ""
     
     def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via hermes subprocess (fast timeout, fallback on hang)."""
