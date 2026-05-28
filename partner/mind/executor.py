@@ -28,8 +28,12 @@ _state = None
 _pool: Optional[MindPool] = None
 
 # 推送回调：msg(str) -> None
-# 由 QQ bridge 设置，Report 念头直接调用此回调推送到用户
 _push_callback = None
+
+# 当前活跃项目（Project 事件的标题）
+# 由 _handle_project() 设置，由 CRON_TICK 读取来生成关联探索
+_current_project: str = ""
+_current_project_id: str = ""
 
 
 def set_push_callback(callback):
@@ -237,44 +241,23 @@ async def _handle_cron_tick(event: MindEvent):
     logger.info(f"[CRON] Tick received, scheduling periodic tasks. "
                 f"Pool size: {pool.qsize()}")
 
-    # 0. 检查是否有活跃计划 → CRON_TICK 应该围绕计划主题探索
-    active_topic = ""
-    # 优先读根目录 active_plan.json（hermes cron 写的），再读 state/ 下的
-    plan_candidates = []
-    if _workspace:
-        plan_candidates.append(os.path.join(_workspace, "active_plan.json"))
-        plan_candidates.append(os.path.join(_workspace, "state", "active_plan.json"))
-    for plan_path in plan_candidates:
-        if plan_path and os.path.exists(plan_path):
-            try:
-                with open(plan_path, "r", encoding="utf-8") as f:
-                    plan = json.load(f)
-                plan_status = plan.get("status", "idle")
-                plan_title = plan.get("title", "")
-                if plan_status in ("planning", "active") and plan_title:
-                    active_topic = plan_title
-                    logger.info(f"[CRON] Active plan detected: '{plan_title[:60]}' (from {plan_path})")
-                    break
-            except Exception as e:
-                logger.warning(f"[CRON] Failed to read {plan_path}: {e}")
-
-    # 1. 探索：如果有活跃计划就探索相关主题，否则探索知识空白
-    if active_topic:
-        # 围绕活跃计划探索
+    # 0. 检查是否有活跃项目 → CRON_TICK 围绕项目主题探索
+    global _current_project
+    if _current_project:
+        logger.info(f"[CRON] Active project detected: '{_current_project[:60]}'")
         await pool.put(curiosity(
-            topic=active_topic,
+            topic=_current_project,
             priority=7,
-            source="cron_tick:plan_related",
+            source="cron_tick:project_related",
         ))
-        logger.info(f"[CRON] Generated curiosity for active plan: '{active_topic}'")
+        logger.info(f"[CRON] Generated curiosity for project: '{_current_project[:60]}'")
     elif _knowledge and len(_knowledge.entries) > 0:
-        # 无活跃计划 → 自由探索知识空白
+        # 无活跃项目 → 自由探索知识空白
         categories = _knowledge.stats().get("by_category", {})
         if categories:
             topic = min(categories, key=categories.get)
         else:
             topic = "最近的研究发现"
-
         await pool.put(curiosity(
             topic=topic,
             priority=7,
@@ -410,17 +393,78 @@ async def _handle_inspiration(event: MindEvent):
 
 
 async def _handle_project(event: MindEvent):
-    """项目念头：长期执行任务（简化版）。"""
-    title = event.payload.get("title", "未知项目")
-    logger.info(f"[项目] 开始执行: {title}")
-    # 简化：先当作探索任务处理
+    """项目念头：长期研究任务。
+
+    Project 事件的生命周期：
+    1. 被 mind_loop 取出执行
+    2. 注册自身为 _current_project（全局变量，供 CRON_TICK 读取）
+    3. 生成一个 Curiosity 探索子念头
+    4. 将自身（Project）放回池子等待下次唤起
+    5. 用户可以发"停下"来清除项目
+
+    这样 Project 事件在池里循环，每次被取出都产生探索，
+    同时 _current_project 让 CRON_TICK 也能围绕项目主题做背景搜索。
+    """
+    global _current_project, _current_project_id
+
+    title = event.payload.get("title", "")
+    goal = event.payload.get("goal", "")
+    step = event.payload.get("step", 0)
+
+    if not title:
+        logger.warning(f"[PROJECT] No title, skipping")
+        return
+
+    # 1. 注册为当前活跃项目
+    _current_project = title
+    _current_project_id = event.id
+    logger.info(f"[PROJECT] Registered as current project: '{title[:60]}' (step={step})")
+
+    # 2. 记录到 journal
+    if _journal:
+        try:
+            from ..journal import JournalEntry
+            _journal.log(JournalEntry(
+                task_id=f"project_{datetime.now().strftime('%H%M%S')}",
+                task_type="project",
+                task_title=title[:60],
+                result_summary=goal[:100] or "推进中",
+            ))
+        except Exception:
+            pass
+
+    # 3. 生成探索子念头
     pool = await ensure_pool()
     await pool.put(curiosity(
         topic=title,
-        priority=5,
-        source="project",
+        priority=4,
+        source=f"project:step_{step}",
         parent_id=event.id,
     ))
+    logger.info(f"[PROJECT] Generated curiosity for step {step}: '{title[:60]}'")
+
+    # 4. 将自身放回池子（递增 step），等待下次被取出
+    next_step = step + 1
+    # 最多 100 步后停止放回（防止无限循环）
+    if next_step < 100:
+        await pool.put(MindEvent(
+            type=EventType.PROJECT,
+            priority=6,  # 比初始优先级低，让其他事件先处理
+            payload={
+                "title": title,
+                "goal": goal,
+                "step": next_step,
+            },
+            source="project:recur",
+            parent_id=event.id,
+        ))
+        logger.info(f"[PROJECT] Re-queued for step {next_step}")
+    else:
+        logger.info(f"[PROJECT] Max steps reached, clearing project")
+        _current_project = ""
+        _current_project_id = ""
+
+    logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, title='{title[:40]}'")
 
 
 async def _handle_evolution(event: MindEvent):
