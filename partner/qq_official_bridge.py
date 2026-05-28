@@ -997,66 +997,52 @@ class QQQfficialBridge:
             return "CHAT"
 
     def _queue_task(self, text: str, msg: QQMessage) -> str:
-        """Queue a research task from QQ chat to task_queue.json.
+        """Queue a research task from QQ chat into Mind Pool.
 
-        Returns a confirmation message to send back to the user.
+        Instead of writing to task_queue.json (which nothing reads anymore),
+        puts a Curiosity event into MindPool. The mind system will process
+        it as a spontaneous exploration impulse.
         """
-        import uuid
-        state_dir = os.path.join(self.workspace, "state")
-        queue_path = os.path.join(state_dir, "task_queue.json")
-
-        # Build task
-        task = {
-            "id": f"task_{uuid.uuid4().hex[:8]}",
-            "type": "deep_dive",
-            "title": text[:60] + ("..." if len(text) > 60 else ""),
-            "description": text,
-            "priority": 7,
-            "created_at": datetime.now().isoformat(),
-            "ttl_hours": 48,
-            "status": "pending",
-            "tags": ["qq_task"],
-            "source": "qq",
-            "sender_name": msg.sender_name or "QQ用户",
-        }
-
-        # Load existing tasks, append, save
-        tasks = []
         try:
-            with open(queue_path, 'r', encoding='utf-8') as f:
-                tasks = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            tasks = []
-        tasks.append(task)
-        with open(queue_path, 'w', encoding='utf-8') as f:
-            json.dump(tasks, f, indent=2, ensure_ascii=False)
+            from .mind import MindPool, curiosity as curiosity_event
 
-        # Also kick active_plan to "planning" so next cron cycle picks it up
-        plan_path = os.path.join(state_dir, "active_plan.json")
-        try:
-            with open(plan_path, 'r', encoding='utf-8') as f:
-                plan = json.load(f)
-            if plan.get("status") in ("idle", "completed"):
-                plan["status"] = "planning"
-                plan["last_heartbeat"] = datetime.now().isoformat()
-                plan["heartbeat_summary"] = f"QQ用户下达了新任务: {text[:40]}..."
-                with open(plan_path, 'w', encoding='utf-8') as f:
-                    json.dump(plan, f, indent=2, ensure_ascii=False)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
+            # Extract topic from user's message
+            topic = text.strip()
+            # Try to remove common prefixes
+            for prefix in ["研究", "搜索", "查一下", "看看", "做一下", "去研究", "去搜索", "帮我查",
+                           "帮我研究", "read about", "search for", "look into", "research"]:
+                if topic.lower().startswith(prefix.lower()):
+                    topic = topic[len(prefix):].strip()
+                    break
 
-        # Mark task queued timestamp to suppress heartbeat double-report
-        self._last_task_queued_at = time.time()
-        # Also write flag file so external scripts (send_qq_report.py) can check
-        try:
-            flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
-            with open(flag_path, "w") as f:
-                f.write(str(self._last_task_queued_at))
-        except Exception:
-            pass
+            # Put into MindPool via thread-safe channel
+            pool = MindPool.get_sync_instance()
+            if pool is not None:
+                ev = curiosity_event(
+                    topic=topic or text[:50],
+                    priority=2,  # User-requested → high priority
+                    source="qq_user",
+                )
+                pool.put_threadsafe(ev)
+                logger.info(f"[QQ] Task queued to Mind Pool: '{topic}'")
 
-        # Immediately trigger the cron job so the task starts processing now
-        try:
+            # Log to journal
+            try:
+                from .journal import JournalEntry
+                self.journal.log(JournalEntry(
+                    task_id=f"qq_task_{datetime.now().strftime('%H%M%S')}",
+                    task_type="user_request",
+                    task_title=topic[:60],
+                    result_summary=f"来自 {msg.sender_name or 'QQ用户'}",
+                ))
+            except Exception:
+                pass
+
+            return f"好，我去看看「{topic[:40]}」。有结果了跟你说。"
+
+        except Exception as e:
+            logger.error(f"Failed to queue task to Mind Pool: {e}")
+            return "收到，不过系统暂时没法处理，等会儿再试试？"
             cfg_path = os.path.join(self.workspace, "partner_config.json")
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)

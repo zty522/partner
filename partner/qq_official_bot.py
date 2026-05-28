@@ -266,7 +266,7 @@ class QQQfficialBot:
             if msg_id:
                 payload["msg_id"] = msg_id
             # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
-            payload["msg_seq"] = random.randint(1, 999999999)
+            payload["msg_seq"] = int(time.time() * 1000)  # 毫秒时间戳，天然递增
         elif message_type == QQMessageType.GROUP_AT:
             endpoint = f"/v2/groups/{target_id}/messages"
             if media:
@@ -276,7 +276,7 @@ class QQQfficialBot:
             if msg_id:
                 payload["msg_id"] = msg_id
             # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
-            payload["msg_seq"] = random.randint(1, 999999999)
+            payload["msg_seq"] = int(time.time() * 1000)  # 毫秒时间戳，天然递增
         elif message_type == QQMessageType.GUILD:
             endpoint = f"/channels/{target_id}/messages"
             payload = {"content": content, "msg_id": msg_id} if msg_id else {"content": content}
