@@ -91,7 +91,7 @@ class HermesAdapter(AgentAdapter):
         try:
             cmd = ["hermes", "chat", "--query", prompt, "--quiet", "--toolsets", ""]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60,
+                cmd, capture_output=True, text=True, timeout=180,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -116,18 +116,17 @@ class HermesAdapter(AgentAdapter):
             cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=120,
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:
                 return out
-            # Try with explicit provider fallback
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
-            return None  # Don't send error text to user
+            return None
         except subprocess.TimeoutExpired:
-            logger.warning(f"hermes chat timed out (30s) for query: {message[:60]}")
-            return None  # Fallback to local response
+            logger.warning(f"hermes chat timed out (120s) for query: {message[:60]}")
+            return None
         except FileNotFoundError:
             return None
         except Exception as e:
