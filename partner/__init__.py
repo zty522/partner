@@ -1,4 +1,5 @@
-"""Partner - Your AI Research Companion.
+"""
+Partner - Your AI Research Companion.
 
 An autonomous research entity that works independently in the background
 and talks to you when you ask: "What have you been doing?"
@@ -10,3 +11,5 @@ It reads papers, explores projects, builds knowledge, and proposes ideas
 
 __version__ = "0.4.0"
 __author__ = "Partner Team"
+
+from . import manager

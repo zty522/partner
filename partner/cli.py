@@ -16,7 +16,12 @@ from .i18n import lang, t, reload as i18n_reload
 
 
 def get_workspace() -> str:
-    """Get configured workspace path (delegates to setup.find_workspace)."""
+    """Get configured workspace path (delegates to setup.find_workspace).
+    Checks PARTNER_WORKSPACE env var first (for multi-instance)."""
+    # Multi-instance: env var takes priority
+    env_ws = os.environ.get('PARTNER_WORKSPACE', '')
+    if env_ws and os.path.isdir(env_ws):
+        return env_ws
     from .setup import find_workspace as _fw
     return _fw()
 
@@ -118,7 +123,10 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
     label = {"qq": "QQ"}.get(platform, platform)
     pp = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if platform == "qq":
-        cfg = os.path.join(workspace, "qq_config.json")
+        # Multi-instance: check 00_config/ first, then workspace root
+        cfg = os.path.join(workspace, "00_config", "qq_config.json")
+        if not os.path.exists(cfg):
+            cfg = os.path.join(workspace, "qq_config.json")
         if not os.path.exists(cfg):
             print(t("cli.qq_not_configured"))
             return

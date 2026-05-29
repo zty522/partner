@@ -228,6 +228,71 @@ partner/
 
 ---
 
+## Multi-Instance Management (v0.5.0)
+
+Partner supports running multiple independent instances, each with:
+- Its own QQ bot account
+- Its own research direction and workspace
+- Its own knowledge base, logs, and records
+- Its own cron schedule
+
+### Directory Structure
+
+```
+~/.partner/
+├── global_config.json           # Global configuration
+├── instances/
+│   ├── default/                 # Default instance (migrated from single-instance)
+│   │   ├── 00_config/           # Instance-specific config
+│   │   ├── 10_logs/             # Instance logs
+│   │   ├── 20_records/          # Core records
+│   │   └── 99_temp/
+│   ├── age_pred/                # Another instance
+│   │   └── ...
+│   └── drug_discovery/
+│       └── ...
+└── audit.log                    # Global audit log
+```
+
+### Commands
+
+```bash
+# Create a new instance
+partner-manager create --id age_pred --qq-config /path/to/qq_config.json
+
+# Start/stop/restart
+partner-manager start --id age_pred
+partner-manager stop --id age_pred
+partner-manager restart --id age_pred
+
+# List all instances
+partner-manager list
+
+# View logs
+partner-manager logs --id age_pred --tail 50
+
+# Systemd auto-start
+partner-manager enable --id age_pred
+partner-manager disable --id age_pred
+
+# Global operations
+partner-manager start --all
+partner-manager stop --all
+partner-manager status --watch
+```
+
+### Systemd Service Template
+
+```bash
+# Enable auto-start for an instance
+partner-manager enable --id age_pred
+
+# The service file is at ~/.config/systemd/user/partner@.service
+systemctl --user start partner@age_pred.service
+```
+
+---
+
 ## License
 
 [Apache 2.0](LICENSE) — use it however you want.

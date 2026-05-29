@@ -1,0 +1,21 @@
+{
+  "global": {
+    "max_concurrent": 3,
+    "default_agent_backend": "hermes",
+    "default_interval_minutes": 15
+  },
+  "instances": {
+    "default": {
+      "enabled": true,
+      "working_dir": "~/.partner/instances/default",
+      "qq_config": "00_config/qq_config.json",
+      "agent_backend": "hermes",
+      "interval_minutes": 15
+    }
+  },
+  "scheduling": {
+    "self_check_time": "04:00",
+    "diary_time": "23:00",
+    "clock_tick_interval": 900
+  }
+}

@@ -4,7 +4,8 @@
 
 set -euo pipefail 2>/dev/null || set -eu
 
-WORKSPACE="/mnt/e/work/partner_workspace"
+WORKSPACE="${PARTNER_WORKSPACE:-/home/os/.partner/instances/default}"
+INSTANCE_ID="${PARTNER_INSTANCE_ID:-default}"
 PARTNER_DIR="/mnt/e/work/partner"
 PID_FILE="$WORKSPACE/state/qq_bot.pid"
 
@@ -23,19 +24,6 @@ sleep 3
 rm -f "$PID_FILE" 2>/dev/null || true
 
 # Run QQ Bot in foreground for systemd to track
-exec /home/os/miniconda3/bin/python3 -c "
-import sys, os, json
-sys.path.insert(0, '$PARTNER_DIR')
-sys.argv[0] = sys.argv[0].replace('\\\\', '/')
-
-from partner.qq_official_bridge import QQQfficialBridge
-
-cfg = os.path.join('$WORKSPACE', '00_config', 'partner_config.json')
-with open(cfg) as f:
-    config = json.load(f)
-qq_cfg = os.path.join('$WORKSPACE', '00_config', config.get('messaging', {}).get('qq_config', 'qq_config.json'))
-
-bridge = QQQfficialBridge('$WORKSPACE')
-bridge.load_config_from_file(qq_cfg)
-bridge.start()
-"
+exec /home/os/miniconda3/bin/python3 -m partner \
+    --instance-id "$INSTANCE_ID" \
+    --workspace "$WORKSPACE"
