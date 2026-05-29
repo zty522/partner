@@ -3,7 +3,7 @@
     Partner - Universal Windows Installer
 .DESCRIPTION
     Installs Partner natively on Windows (no WSL required).
-    Detects Python version and installs 3.12 if needed.
+    Uses the embeddable Python package (no admin rights needed).
 
     Usage:
       powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
@@ -19,7 +19,8 @@ $PartnerRepo = "https://github.com/zty522/partner.git"
 $PartnerDir  = "$env:USERPROFILE\.partner"
 $PythonDir   = "$PartnerDir\python"
 $PythonVer   = "3.12.3"
-$PythonUrl   = "https://www.python.org/ftp/python/$PythonVer/python-${PythonVer}-amd64.exe"
+$PythonVerShort = "312"
+$PythonZipUrl = "https://www.python.org/ftp/python/$PythonVer/python-${PythonVer}-embed-amd64.zip"
 
 # ── Colors ──
 $cGreen  = "Green"
@@ -74,49 +75,81 @@ function Refresh-Path {
     $env:Path = "$userPath;$machinePath"
 }
 
-# ── Install Python 3.12 to isolated directory ──
+# ── Install Python (embeddable zip package) to isolated directory ──
 function Install-PythonIsolated {
-    Write-Info "Downloading Python $PythonVer installer..."
-    $installer = "$env:TEMP\python-$PythonVer-amd64.exe"
-    try {
-        Invoke-WebRequest -Uri $PythonUrl -OutFile $installer -UseBasicParsing -ErrorAction Stop
-    } catch {
-        Exit-Error "Failed to download Python installer: $_"
+    # Ensure target directory exists
+    if (-not (Test-Path $PythonDir)) {
+        New-Item -ItemType Directory -Path $PythonDir -Force | Out-Null
     }
 
-    Write-Info "Installing Python $PythonVer to $PythonDir ..."
+    $zipFile = "$env:TEMP\python-${PythonVer}-embed-amd64.zip"
+
+    Write-Info "Downloading Python $PythonVer embeddable package..."
     try {
-        $proc = Start-Process -Wait -FilePath $installer -ArgumentList @(
-            "/quiet",
-            "InstallAllUsers=0",
-            "Include_test=0",
-            "Include_launcher=0",
-            "InstallLauncherAllUsers=0",
-            "TargetDir=$PythonDir",
-            "PrependPath=0"
-        ) -PassThru
-
-        if ($proc.ExitCode -ne 0) {
-            Exit-Error "Python installer exited with code $($proc.ExitCode). Installation may have failed."
-        }
+        Invoke-WebRequest -Uri $PythonZipUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
     } catch {
-        Exit-Error "Failed to install Python: $_"
+        Exit-Error "Failed to download Python embeddable package: $_"
     }
-    Remove-Item $installer -Force -ErrorAction SilentlyContinue
 
-    # Verify the isolated Python
-    Refresh-Path
+    Write-Info "Extracting Python $PythonVer to $PythonDir ..."
+    try {
+        Expand-Archive -Path $zipFile -DestinationPath $PythonDir -Force
+    } catch {
+        Exit-Error "Failed to extract Python embeddable package: $_"
+    }
+    Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
+
+    # Verify the extracted Python
     $pyPath = "$PythonDir\python.exe"
     if (-not (Test-Path $pyPath)) {
-        Exit-Error "Python was installed but python.exe not found at $pyPath"
+        Exit-Error "Python was extracted but python.exe not found at $pyPath"
     }
+
+    # Enable site-packages by uncommenting "import site" in the ._pth file
+    $pthFile = "$PythonDir\python${PythonVerShort}._pth"
+    if (Test-Path $pthFile) {
+        Write-Info "Enabling site-packages in $pthFile ..."
+        $pthContent = Get-Content $pthFile -Raw
+        # Replace "#import site" with "import site" (uncomment it)
+        $pthContent = $pthContent -replace '#import site', 'import site'
+        Set-Content -Path $pthFile -Value $pthContent -NoNewline
+    } else {
+        Write-Warn "._pth file not found at $pthFile — creating one..."
+        $pthContent = @"
+python${PythonVerShort}.zip
+.
+import site
+"@
+        Set-Content -Path $pthFile -Value $pthContent -NoNewline
+    }
+
+    # Bootstrap pip via get-pip.py
+    $getPipUrl = "https://bootstrap.pypa.io/get-pip.py"
+    $getPipScript = "$env:TEMP\get-pip.py"
+    Write-Info "Downloading get-pip.py..."
+    try {
+        Invoke-WebRequest -Uri $getPipUrl -OutFile $getPipScript -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Exit-Error "Failed to download get-pip.py: $_"
+    }
+
+    Write-Info "Bootstrapping pip..."
+    try {
+        $pipOutput = & $pyPath $getPipScript --no-warn-script-location 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Exit-Error "pip bootstrap failed: $pipOutput"
+        }
+    } catch {
+        Exit-Error "Failed to bootstrap pip: $_"
+    }
+    Remove-Item $getPipScript -Force -ErrorAction SilentlyContinue
 
     $pyInfo = Test-PythonVersion $pyPath
     if ($pyInfo -eq $null) {
         Exit-Error "Installed Python could not be detected at $pyPath"
     }
 
-    Write-Info "Python $($pyInfo.Full) installed at $PythonDir"
+    Write-Info "Python $($pyInfo.Full) installed (embeddable) at $PythonDir"
     return $pyInfo
 }
 
@@ -154,12 +187,12 @@ function Ensure-Python {
                 return $py
             }
         }
-        Write-Warn "winget install did not result in a detectable Python. Falling back to direct download..."
+        Write-Warn "winget install did not result in a detectable Python. Falling back to embeddable package..."
     } catch {
-        Write-Warn "winget not available. Downloading Python directly..."
+        Write-Warn "winget not available. Downloading embeddable Python directly..."
     }
 
-    # Fallback: download and install to isolated directory
+    # Fallback: download and install embeddable Python to isolated directory
     return Install-PythonIsolated
 }
 

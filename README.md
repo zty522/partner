@@ -60,11 +60,11 @@ partner status                View full status (research + bot health)
 partner bot start qq          Start QQ bot + autonomous mind system (auto-starts)
 partner bot stop qq           Stop QQ bot
 partner update                Pull latest code + reinstall
-```
+---
 
-### Checking Records
+## Checking Records
 
-During research, Partner automatically saves findings to `~/.partner/records/`:
+During research, Partner automatically saves findings to `~/.partner/20_records/`:
 
 | File | Format | Description |
 |------|--------|-------------|
@@ -75,6 +75,30 @@ During research, Partner automatically saves findings to `~/.partner/records/`:
 | `session_history.jsonl` | JSONL | Session summaries |
 
 You can view the latest records by sending `/summary` in QQ. The bot will reply with the 5 most recent exploration entries.
+
+---
+
+## Directory Structure
+
+Partner organizes all data under `~/.partner/`:
+
+```
+~/.partner/
+├── 00_config/          # Configuration files (partner_config.json, qq_config.json)
+├── 10_logs/            # Log files (research_loop.log, qq_bridge.log)
+├── 20_records/         # 🔥 CORE — user supervision and traceability entry point
+│   ├── projects/       # Organized by project
+│   │   └── age_pred_v2/
+│   │       ├── exploration_log.md  # Exploration history (Markdown)
+│   │       ├── knowledge.json      # Structured knowledge entries
+│   │       ├── experiments.csv     # Experiment parameters and results
+│   │       └── artifacts/          # Output files
+│   ├── global_knowledge.json
+│   └── session_history.jsonl
+└── 99_temp/            # Temporary files (safe to clean)
+```
+
+The `20_records/` directory is the single entry point for supervision and traceability. All exploration, knowledge, and experiment results are stored there in human-readable formats.
 
 ---
 
