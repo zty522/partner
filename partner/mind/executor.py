@@ -511,16 +511,14 @@ async def _handle_inspiration(event: MindEvent):
 
 
 async def _handle_project(event: MindEvent):
-    """项目念头：长期研究任务（对话优先 + 结果推送）。
+    """项目念头：长期研究任务。
 
     Project 事件的生命周期：
     1. 被 mind_loop 取出执行
-    2. 获取对话上下文（优先使用用户已提供的信息）
-    3. 生成一个 Curiosity 探索子念头（携带对话上下文）
-    4. 将自身（Project）放入等待室（wake_after=now+900s）
-    5. 15 分钟后自动唤醒，生成下一轮探索
-    6. 最多 100 步后终止
-    7. 执行完成后主动推送到 QQ
+    2. 生成一个 Curiosity 探索子念头
+    3. 将自身（Project）放入等待室（wake_after=now+900s）
+    4. 15 分钟后自动唤醒，生成下一轮探索
+    5. 最多 100 步后终止
     """
     title = event.payload.get("title", "")
     goal = event.payload.get("goal", "")
@@ -545,28 +543,11 @@ async def _handle_project(event: MindEvent):
         except Exception:
             pass
 
-    # 2. 获取对话上下文（优先使用对话历史）
-    dialog_context = {}
-    if _workspace:
-        try:
-            from ..context_broker import ContextBroker
-            broker = ContextBroker(_workspace, _knowledge)
-            ctx = broker.get_context_for_search(title)
-            if ctx.get("has_relevant_context"):
-                dialog_context = ctx
-                logger.info(f"[PROJECT] 获取到对话上下文：路径={ctx.get('project_path','无')}, "
-                           f"问题={ctx.get('issues',[])}")
-        except Exception as e:
-            logger.debug(f"[PROJECT] 上下文获取失败: {e}")
-
-    # 3. 生成探索子念头（传递对话上下文用于搜索优先）
+    # 2. 生成探索子念头（传递项目事实）
     pool = await ensure_pool()
     project_facts = event.payload.get("project_facts", {})
     curiosity_payload = {"topic": title}
-    if dialog_context:
-        curiosity_payload["project_facts"] = dialog_context
-        logger.info(f"[PROJECT] 传递对话上下文给好奇念头: {len(dialog_context)} 项")
-    elif project_facts:
+    if project_facts:
         curiosity_payload["project_facts"] = project_facts
         logger.info(f"[PROJECT] 传递项目事实给好奇念头: {len(project_facts)} 项")
     await pool.put(MindEvent(
@@ -578,9 +559,10 @@ async def _handle_project(event: MindEvent):
     ))
     logger.info(f"[PROJECT] Generated curiosity for step {step}")
 
-    # 4. 将自身放回池子（step+1, wake_after 取决于来源）
+    # 3. 将自身放回池子（step+1, wake_after 取决于来源）
     next_step = step + 1
     if next_step < 100:
+        # qq_user / wake_up 来源：首次立即处理，后续 5 分钟唤醒
         source_is_immediate = any(
             tag in (event.source or "")
             for tag in ["qq_user", "wake_up"]
@@ -593,7 +575,6 @@ async def _handle_project(event: MindEvent):
                 "title": title,
                 "goal": goal,
                 "step": next_step,
-                "project_facts": dialog_context or project_facts,
             },
             wake_after=_time.time() + wake_delay,
             source="project:recur",
@@ -602,24 +583,6 @@ async def _handle_project(event: MindEvent):
         logger.info(f"[PROJECT] Re-queued for step {next_step} (wake in {wake_delay}s)")
     else:
         logger.info(f"[PROJECT] Max steps reached, terminating")
-
-    # 5. 执行完成后主动推送到 QQ
-    try:
-        result_summary = (
-            f"完成了一轮项目研究: {title[:60]}\n"
-            f"已执行 {step + 1} 个步骤，继续跟进中。"
-        )
-        if dialog_context:
-            if dialog_context.get("issues"):
-                result_summary += f"\n关注的问题: {', '.join(dialog_context['issues'][:3])}"
-            if dialog_context.get("metrics"):
-                metrics_str = ", ".join(f"{k}={v}" for k, v in list(dialog_context["metrics"].items())[:3])
-                result_summary += f"\n已知指标: {metrics_str}"
-        if _push_callback is not None:
-            _push_callback(result_summary)
-            logger.info(f"[PROJECT] 结果已主动推送到 QQ")
-    except Exception as e:
-        logger.debug(f"[PROJECT] 结果推送失败: {e}")
 
     logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, title='{title[:40]}'")
 

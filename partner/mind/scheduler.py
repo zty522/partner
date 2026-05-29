@@ -12,8 +12,6 @@
 
 import asyncio
 import logging
-import os
-import time as _time
 from typing import Optional
 
 from .pool import MindPool
@@ -26,11 +24,6 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT = 10
 # 自脉冲间隔（秒）
 SELF_PULSE_INTERVAL = 15 * 60  # 15 分钟
-
-# 心跳文件路径 — 供外部 watchdog 监控研究循环是否存活
-HEARTBEAT_PATH = "/tmp/partner_research_heartbeat.txt"
-# 心跳更新间隔（秒）
-HEARTBEAT_INTERVAL = 30
 
 
 async def mind_loop(pool: MindPool = None, save_path: str = ""):
@@ -74,23 +67,11 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
 
     # 内置自脉冲定时器（15 分钟间隔自动注入 CRON_TICK）
     last_pulse = 0.0
-    # 上次心跳更新时间
-    last_heartbeat = 0.0
 
     try:
         while True:
             # 清理已完成的 task
             pending_tasks = {t for t in pending_tasks if not t.done()}
-
-            # ── 心跳：每 30 秒写入一次（供外部 watchdog 监控存活）──
-            now_ts = _time.time()
-            if now_ts - last_heartbeat >= HEARTBEAT_INTERVAL:
-                last_heartbeat = now_ts
-                try:
-                    with open(HEARTBEAT_PATH, "w") as f:
-                        f.write(f"{now_ts}\npool_size={pool.qsize()}\npending_tasks={len(pending_tasks)}\n")
-                except Exception:
-                    pass
 
             # ── 自脉冲：每 15 分钟自动注入 CRON_TICK ──
             now = asyncio.get_event_loop().time()
@@ -140,19 +121,9 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
 
 
 async def _run_event_safely(event: MindEvent):
-    """安全执行一个念头（不抛出异常），带超时检测。"""
+    """安全执行一个念头（不抛出异常）。"""
     try:
-        # 超时检测：如果任务处理超过 5 分钟，记录错误
-        done, pending = await asyncio.wait(
-            [asyncio.create_task(execute_event(event))],
-            timeout=300,  # 5 分钟超时
-        )
-        if pending:
-            for t in pending:
-                t.cancel()
-            logger.error(
-                f"[调度] 念头 {event.id[:8]} ({event.type.value}) 执行超时（>5分钟），已取消"
-            )
+        await execute_event(event)
     except asyncio.CancelledError:
         logger.info(f"[调度] 念头 {event.id[:8]} 执行被取消")
     except Exception as e:

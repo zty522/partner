@@ -33,7 +33,6 @@ class Intent(Enum):
     DETAIL = "detail"
     TASK_ADD = "task_add"
     TASK_CANCEL = "task_cancel"
-    EXECUTE_DIRECT = "execute_direct"  # "直接动手"类指令
     WORKSPACE = "workspace"
     HELP = "help"
     GENERAL = "general"
@@ -93,16 +92,6 @@ INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
     (r"(添加|新建|增加|add)\s*(一个)?\s*任务[：:]?\s*(.+)", Intent.TASK_ADD, 0.95, 3),
     (r"(去研究|去搜索|去查|帮我查|帮我研究)[一下]?\s*(.+)", Intent.TASK_ADD, 0.85, 2),
     (r"(取消|删除|不要了)\s*(任务)?\s*[「『]?(.+?)[」』]?$", Intent.TASK_CANCEL, 0.9, 3),
-
-    # EXECUTE_DIRECT: "直接动手"类指令 — 跳过搜索，直接执行
-    (r"(直接动手|直接开始执行|有结果了跟我说|别调研了|自己去跑|别搜了)",
-     Intent.EXECUTE_DIRECT, 0.99, None),
-    (r"(先跑一下|直接跑|开始弄|开始干|别查了|直接做)",
-     Intent.EXECUTE_DIRECT, 0.95, None),
-    (r"直接(修|改|试|跑|做|执行)[一下]?\s*(.+)",
-     Intent.EXECUTE_DIRECT, 0.92, 2),
-    (r"别(调研|搜索|查|找)[了啦].*?(直接|去|尽快)[修改试跑](.+)",
-     Intent.EXECUTE_DIRECT, 0.9, 3),
 
     # Help
     (r"^(帮助|help|你(能|会|可以)做什么|\?|？)$", Intent.HELP, 0.99, None),
@@ -191,7 +180,6 @@ class ConversationRouter:
             Intent.DETAIL: "请求详情",
             Intent.TASK_ADD: "添加任务",
             Intent.TASK_CANCEL: "取消任务",
-            Intent.EXECUTE_DIRECT: "直接动手",
             Intent.HELP: "寻求帮助",
             Intent.GENERAL: "日常对话",
         }
@@ -214,8 +202,6 @@ class ConversationRouter:
             lines.append("简短打招呼，询问需要什么帮助。")
         elif parsed.intent == Intent.DETAIL:
             lines.append("如果知识库有相关详情，简要介绍关键点。")
-        elif parsed.intent == Intent.EXECUTE_DIRECT:
-            lines.append("用户要求直接动手执行。直接回应，不要搜索，不要调研，不要问方向。简短确认后立即开始执行。")
 
         return "\n".join(lines)
 

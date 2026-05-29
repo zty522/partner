@@ -70,15 +70,12 @@ class MindEvent:
 # ── Convenience factory functions ──────────────────────────────────
 
 def curiosity(topic: str, priority: int = 5, source: str = "",
-              parent_id: str = None, dialog_context: str = "") -> MindEvent:
+              parent_id: str = None) -> MindEvent:
     """创建一个 Curiousity 念头，payload 含 topic。"""
-    payload = {"topic": topic}
-    if dialog_context:
-        payload["dialog_context"] = dialog_context
     return MindEvent(
         type=EventType.CURIOSITY,
         priority=priority,
-        payload=payload,
+        payload={"topic": topic},
         source=source,
         parent_id=parent_id,
     )

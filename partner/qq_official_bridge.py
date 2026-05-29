@@ -90,9 +90,6 @@ class QQQfficialBridge:
             workspace, self.knowledge, self.journal
         )
 
-        # 初始化 DirectExecutor（直接动手执行）
-        self.direct_executor = None
-
         # Wire up LLM response generation: router uses adapter directly
         self._wire_router_llm()
 
@@ -399,27 +396,6 @@ class QQQfficialBridge:
 
             set_push_callback(_push_to_qq)
             logger.info("🧠 Mind 系统已自动启动")
-
-            # 注册对话上下文提供者到 searcher
-            try:
-                from .searcher import set_context_provider
-                set_context_provider(
-                    lambda q: self.context_broker.get_context_for_search(q)
-                )
-                logger.info("[QQ] 对话上下文提供者已注册到 searcher")
-            except Exception as e:
-                logger.debug(f"[QQ] 注册 searcher 上下文提供者失败: {e}")
-
-            # 初始化 DirectExecutor
-            try:
-                from .direct_executor import DirectExecutor
-                self.direct_executor = DirectExecutor(
-                    self.workspace, self.context_broker
-                )
-                self.direct_executor.set_push_callback(_push_to_qq)
-                logger.info("[QQ] DirectExecutor 已初始化")
-            except Exception as e:
-                logger.debug(f"[QQ] DirectExecutor 初始化失败: {e}")
         except Exception as e:
             logger.warning(f"Mind 系统启动失败（不影响 QQ 机器人）: {e}")
 
@@ -536,12 +512,6 @@ class QQQfficialBridge:
                 self._force_run_triggered = True
             else:
                 self._force_run_triggered = False
-
-            # Step 0.5: Extract context from user message (real-time)
-            try:
-                self.context_broker.on_user_message(msg.sender_id, user_text)
-            except Exception as e:
-                logger.debug(f"[QQ] 上下文提取跳过: {e}")
 
             # Step 1: Use LLM to classify: task request or casual chat?
             _task_queued = False
@@ -1052,23 +1022,9 @@ class QQQfficialBridge:
 
         Creates a Project event that will persist in the pool across multiple
         cycles, generating Curiosity sub-events each time it's processed.
-
-        Before queuing, checks if research loop (consumer) is running.
-        If not, tries to restart and informs the user.
         """
         try:
             from .mind import MindPool, MindEvent, EventType, cron_tick as _cron_tick
-
-            # 检查研究循环是否存活
-            consumer_alive = self._check_consumer_healthy()
-            restarted = False
-            if not consumer_alive:
-                logger.warning("[QQ] 研究循环未运行，尝试重启...")
-                restarted = self._ensure_consumer_running()
-                if restarted:
-                    logger.info("[QQ] 研究循环已重启")
-                else:
-                    logger.warning("[QQ] 研究循环重启失败，但仍继续排队")
 
             # Extract topic from user's message
             topic = text.strip()
@@ -1111,12 +1067,7 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-            if consumer_alive:
-                return f"好，我来推进「{topic[:40]}」。有进展了跟你说。"
-            elif restarted:
-                return f"好，我来推进「{topic[:40]}」。研究引擎刚才停了，已重启，现在开始处理。"
-            else:
-                return f"好，我来推进「{topic[:40]}」。不过我注意到研究引擎似乎没有正常运行，已尝试重启。如果没反应再告诉我。"
+            return f"好，我来推进「{topic[:40]}」。有进展了跟你说。"
 
         except Exception as e:
             logger.error(f"Failed to queue project to Mind Pool: {e}")
@@ -1164,73 +1115,6 @@ class QQQfficialBridge:
             self._mind_health_last_qsize = current_qsize
         except Exception as e:
             logger.debug(f"[Health] 健康检查异常（非致命）: {e}")
-
-    def _check_consumer_healthy(self) -> bool:
-        """检查研究循环（Mind Pool 消费者）是否正常运行。
-
-        检查条件：
-        1. MindPool 实例存在
-        2. 心跳文件在 2 分钟内更新过
-        3. 如果以上不满足，尝试重新启动
-
-        Returns:
-            True if healthy, False if unhealthy
-        """
-        from .mind import MindPool
-        pool = MindPool.get_sync_instance()
-        if pool is None:
-            logger.warning("[Health] MindPool 实例不存在")
-            return False
-
-        # 检查心跳文件
-        heartbeat_file = "/tmp/partner_research_heartbeat.txt"
-        if os.path.exists(heartbeat_file):
-            try:
-                with open(heartbeat_file) as f:
-                    line = f.readline().strip()
-                if line and line.replace('.', '').isdigit():
-                    ts = float(line)
-                    age = time.time() - ts
-                    if age > 120:  # 超过 2 分钟
-                        logger.warning(f"[Health] 心跳文件过时: {age:.0f}s > 120s")
-                        return False
-                    return True
-            except Exception:
-                pass
-
-        # 池中有事件且不为空，也认为正常
-        if pool.qsize() > 0:
-            return True
-
-        return False
-
-    def _ensure_consumer_running(self) -> bool:
-        """确保研究循环消费者正在运行。
-
-        如果消费者未运行，尝试启动。
-
-        Returns:
-            True if running (or started successfully), False otherwise
-        """
-        if self._check_consumer_healthy():
-            return True
-
-        logger.warning("[Health] 研究循环未运行，尝试重启...")
-        try:
-            from .mind import MindPool
-            # 触发 Mind 系统的启动
-            self._start_mind()
-            # 等待片刻确认启动成功
-            time.sleep(2)
-            if self._check_consumer_healthy():
-                logger.info("[Health] 研究循环已成功重启")
-                return True
-            else:
-                logger.error("[Health] 研究循环重启后仍未响应")
-                return False
-        except Exception as e:
-            logger.error(f"[Health] 重启研究循环失败: {e}")
-            return False
 
     def _send_reply(self, original_msg: QQMessage, reply: str):
         """Send reply back to the user."""
