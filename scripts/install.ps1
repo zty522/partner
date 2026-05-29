@@ -127,7 +127,7 @@ function Install-PythonIsolated {
         # Uncomment 'import site' to activate package discovery
         $pthContent = $pthContent -replace '#import site', 'import site'
         
-        $pthContent | Set-Content -Path $pthFile -Encoding UTF8
+        [System.IO.File]::WriteAllLines($pthFile, $pthContent)
     } else {
         Write-Warn "._pth file not found at $pthFile — creating one..."
         $pthContent = @"
@@ -136,7 +136,7 @@ python${PythonVerShort}.zip
 Lib\site-packages
 import site
 "@
-        Set-Content -Path $pthFile -Value $pthContent -Encoding UTF8
+        [System.IO.File]::WriteAllText($pthFile, $pthContent)
     }
 
     # Bootstrap pip via get-pip.py
