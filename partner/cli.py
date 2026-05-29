@@ -553,16 +553,23 @@ def main():
         except (json.JSONDecodeError, OSError):
             pass
     if not detected_lang:
-        print()
-        print(f"  {C_BOLD}{C_CYAN}{t('cli.lang_prompt_welcome')}{C_RESET}")
-        print(f"  {t('cli.lang_prompt_option')}")
-        choice = input("  Choose [1/2]: ").strip()
-        lang_code = "zh" if choice == "2" else "en"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump({"language": lang_code}, f, indent=2)
-        print(f"  {t('cli.lang_selected', lang=lang_code)}")
-        print()
+        # Auto-default to English when no TTY (systemd, cron, etc.)
+        if not sys.stdin.isatty():
+            detected_lang = "en"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"language": detected_lang}, f, indent=2)
+        else:
+            print()
+            print(f"  {C_BOLD}{C_CYAN}{t('cli.lang_prompt_welcome')}{C_RESET}")
+            print(f"  {t('cli.lang_prompt_option')}")
+            choice = input("  Choose [1/2]: ").strip()
+            lang_code = "zh" if choice == "2" else "en"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump({"language": lang_code}, f, indent=2)
+            print(f"  {t('cli.lang_selected', lang=lang_code)}")
+            print()
 
     parser = argparse.ArgumentParser(
         prog='partner',
