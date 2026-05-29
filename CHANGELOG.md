@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.0] - 2026-05-30
+
+### 🚀 新增功能
+
+- **多实例管理（partner-manager）**: 新增 `partner.manager` 模块和 `partner-manager` CLI 命令，支持创建、启动、停止、重启多个独立 Partner 实例
+  - `partner-manager create --id <name> --qq-config <path>` — 创建新实例
+  - `partner-manager start/stop/restart --id <name>` — 管理实例生命周期
+  - `partner-manager list` — 列出所有实例和状态
+  - `partner-manager logs --id <name> --tail 50` — 查看实例日志
+  - `partner-manager enable/disable --id <name>` — 设置/取消开机自启
+  - `partner-manager status --watch` — 交互式监控面板
+  - 每个实例完全隔离：独立的 QQ 配置、日志、知识库、研究计划
+- **实例目录结构**: `~/.partner/instances/<id>/` 下分 `00_config/`、`10_logs/`、`20_records/`、`99_temp/`
+- **`__main__.py` 实例路由**: `python3 -m partner --instance-id <id> --workspace <path>` 自动启动 QQ bridge
+- **systemd 模板**: 每个实例生成独立的 `partner-<id>.service`
+- **单实例→多实例迁移**: `partner-manager migrate --workspace <path>` 无缝迁移
+
+### ⚙️ 改进
+
+- Exe 安装器文件名为 `Partner-0.5.0-Setup.exe`，版本号与代码同步
+
 ## [0.4.0] - 2026-05-29
 
 ### 🧠 主动型智能体全面升级 — 不再被动等待指令

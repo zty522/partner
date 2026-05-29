@@ -3,7 +3,7 @@
 ; Build with: ISCC.exe installer.iss
 
 #define MyAppName "Partner"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "Partner Team"
 #define MyAppURL "https://github.com/zty522/partner"
 #define MyAppExeName "Partner.bat"

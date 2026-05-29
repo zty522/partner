@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-research"
-version = "0.2.0"
+version = "0.5.0"
 description = "Partner - Your AI Research Companion. An autonomous research entity that works independently and talks to you when you ask: 'What have you been doing?'"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -51,6 +51,7 @@ all = [
 
 [project.scripts]
 partner = "partner.cli:main"
+partner-manager = "partner.manager:main"
 
 [project.urls]
 Homepage = "https://github.com/zty522/partner"
