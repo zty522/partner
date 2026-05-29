@@ -5,13 +5,13 @@
 ### 🚀 新增功能
 
 - **多实例管理（partner-manager）**: 新增 `partner.manager` 模块和 `partner-manager` CLI 命令，支持创建、启动、停止、重启多个独立 Partner 实例
-  - `partner-manager create --id <name> --qq-config <path>` — 创建新实例
+  - `partner-manager create --id <name>` — 不传 `--qq-config` 时交互式输入 AppID/AppSecret，自动写配置
   - `partner-manager start/stop/restart --id <name>` — 管理实例生命周期
   - `partner-manager list` — 列出所有实例和状态
   - `partner-manager logs --id <name> --tail 50` — 查看实例日志
   - `partner-manager enable/disable --id <name>` — 设置/取消开机自启
   - `partner-manager status --watch` — 交互式监控面板
-  - 每个实例完全隔离：独立的 QQ 配置、日志、知识库、研究计划
+  - 每个命令执行后显示下一步提示（tip），使用更友好
 - **实例目录结构**: `~/.partner/instances/<id>/` 下分 `00_config/`、`10_logs/`、`20_records/`、`99_temp/`
 - **`__main__.py` 实例路由**: `python3 -m partner --instance-id <id> --workspace <path>` 自动启动 QQ bridge
 - **systemd 模板**: 每个实例生成独立的 `partner-<id>.service`

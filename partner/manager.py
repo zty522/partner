@@ -178,9 +178,11 @@ def instance_exists(instance_id: str) -> bool:
 def create_instance(instance_id: str, qq_config_src: Optional[str] = None) -> bool:
     """Create a new instance with directory structure and optional QQ config.
 
+    If qq_config_src is not provided, interactively prompt for credentials.
+
     Args:
         instance_id: Unique identifier for this instance.
-        qq_config_path: Path to source qq_config.json to copy in.
+        qq_config_src: Path to source qq_config.json to copy in (optional).
 
     Returns:
         True on success, False on failure.
@@ -197,7 +199,7 @@ def create_instance(instance_id: str, qq_config_src: Optional[str] = None) -> bo
         (inst / sub).mkdir(parents=True, exist_ok=True)
         print(f"  Created  {sub}/")
 
-    # Copy QQ config if provided
+    # QQ config: copy or prompt
     if qq_config_src:
         src = Path(qq_config_src)
         if not src.exists():
@@ -208,11 +210,57 @@ def create_instance(instance_id: str, qq_config_src: Optional[str] = None) -> bo
         shutil.copy2(str(src), str(dst))
         print(f"  Copied   qq_config.json from {src}")
     else:
-        print(f"  {C_YELLOW}No QQ config provided. Configure later via{C_RESET}")
-        print(f"  place qq_config.json in {qq_config_path(instance_id)}")
+        # Interactive prompt
+        print(f"  {C_YELLOW}No --qq-config provided. Let's configure the QQ bot.{C_RESET}")
+        print()
+        try:
+            app_id = input("  AppID (from QQ开放平台): ").strip()
+            if not app_id:
+                print(f"  {C_RED}AppID is required.{C_RESET}")
+                return False
+            app_secret = input("  AppSecret: ").strip()
+            if not app_secret:
+                print(f"  {C_RED}AppSecret is required.{C_RESET}")
+                return False
+            sandbox_input = input("  Use sandbox? (Y/n): ").strip().lower()
+            is_sandbox = sandbox_input not in ("n", "no", "false", "0")
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {C_YELLOW}Cancelled.{C_RESET}")
+            return False
 
+        qq_config = {
+            "app_id": app_id,
+            "app_secret": app_secret,
+            "is_sandbox": is_sandbox,
+        }
+        dst = qq_config_path(instance_id)
+        with open(dst, "w", encoding="utf-8") as f:
+            json.dump(qq_config, f, indent=2, ensure_ascii=False)
+        print(f"  Written  qq_config.json")
+        print(f"    AppID:    {app_id}")
+        print(f"    Sandbox:  {is_sandbox}")
+
+    print()
     print(f"{C_GREEN}Instance '{instance_id}' created.{C_RESET}")
+    show_create_tip(instance_id)
     return True
+
+
+def show_create_tip(instance_id: str):
+    """Print next-step tips after creating an instance."""
+    print()
+    print(f"{C_BOLD}Next steps:{C_RESET}")
+    print(f"  {C_CYAN}> partner-manager start --id {instance_id}{C_RESET}")
+    print(f"  {C_DIM}  Starts the QQ bot and Mind Pool {C_RESET}")
+    print()
+    print(f"  {C_CYAN}> partner-manager list{C_RESET}")
+    print(f"  {C_DIM}  Show all instances{C_RESET}")
+    print()
+    print(f"  {C_CYAN}> partner-manager enable --id {instance_id}{C_RESET}")
+    print(f"  {C_DIM}  Auto-start on boot (systemd){C_RESET}")
+    print()
+    print(f"  {C_CYAN}> partner-manager logs --id {instance_id} --tail 50{C_RESET}")
+    print(f"  {C_DIM}  View runtime logs{C_RESET}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -925,9 +973,13 @@ def main():
         prog="partner-manager",
         description="Manage multiple Partner instances.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  partner-manager create --id age_pred --qq-config /path/to/qq_config.json
+        epilog="""\
+Examples (after creating with partner-manager):
+  partner-manager create --id age_pred
+    → prompts for AppID/AppSecret interactively
+
+  partner-manager create --id wechat_bot --qq-config ./qq_config.json
+
   partner-manager start --id age_pred
   partner-manager stop --id age_pred
   partner-manager restart --id age_pred
@@ -949,7 +1001,7 @@ Examples:
     p_create.add_argument("--id", required=True, dest="instance_id",
                           help="Unique instance identifier (e.g. age_pred)")
     p_create.add_argument("--qq-config", dest="qq_config_src", default=None,
-                          help="Path to qq_config.json to copy into the instance")
+                          help="Path to qq_config.json (optional — prompts interactively if omitted)")
 
     # ── start ──
     p_start = subparsers.add_parser("start", help="Start one or all instances")
@@ -1014,6 +1066,8 @@ Examples:
             start_instance(args.instance_id)
         else:
             parser.error("Use --id <name> or --all")
+        print()
+        print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager list{C_RESET} to see all instances")
 
     elif args.command == "stop":
         if args.stop_all:
@@ -1025,9 +1079,13 @@ Examples:
 
     elif args.command == "restart":
         restart_instance(args.instance_id)
+        print()
+        print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager logs --id {args.instance_id} --tail 10{C_RESET} to check startup")
 
     elif args.command == "list":
         print_instance_list()
+        print()
+        print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager start --id <name>{C_RESET} to start an instance")
 
     elif args.command == "logs":
         print_instance_logs(args.instance_id, tail=args.tail)
@@ -1051,8 +1109,12 @@ Examples:
             elif status == STATUS_CRASHED:
                 print(f"  {C_YELLOW}Stale PID file found but process is gone.{C_RESET}")
                 print(f"  Run: partner-manager start --id {args.instance_id}")
+            print()
+            print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager list{C_RESET} for all instances")
         else:
             print_instance_list()
+            print()
+            print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager logs --id <name> --tail 50{C_RESET} to see logs")
 
     elif args.command == "enable":
         enable_on_boot(args.instance_id)
