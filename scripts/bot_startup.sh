@@ -4,7 +4,7 @@
 
 set -euo pipefail 2>/dev/null || set -eu
 
-WORKSPACE="$HOME/.partner"
+WORKSPACE="/mnt/e/work/partner_workspace"
 PARTNER_DIR="/mnt/e/work/partner"
 PID_FILE="$WORKSPACE/state/qq_bot.pid"
 
