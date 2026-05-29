@@ -36,7 +36,8 @@ And it tells you everything it discovered while you were away.
 # Linux
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 
-# Windows — download the installer from GitHub Releases
+# Windows (one-liner, no downloads needed)
+powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
 ```
 
 ### Commands
@@ -125,7 +126,56 @@ No shell subprocesses. No `curl`. No `hermes` CLI for search. Just Python `reque
 
 ---
 
-## What's New in v0.4.0
+## v0.4.0: Proactive Agent Behavior
+
+Partner is now a **proactive** research companion, not a passive chatbot.
+
+### Behavior Changes
+
+| Before | After |
+|--------|-------|
+| "我回来了" (vague) | Detailed restart report: project name, progress, metrics, next steps |
+| "有什么需要？" (asks back) | "根据上次对话，我建议继续推进X。已经开始搜索文献。" |
+| "不知道下一步怎么做" | "我去查一下文献和代码，找到突破口。" or "没有直接找到方案，我打算尝试[方案]。" |
+| Skips silently when search finds nothing | Generates tentative plan: "关于X没有直接记录，我计划从以下方向探索..." |
+| Idles when queue is empty | Auto-detects idle → generates exploration from knowledge gaps → notifies user |
+| Waits for user to ask | Pushes progress to QQ after every task completion |
+
+### Restart Report Format
+```
+✅ 系统已重启，恢复运行。
+📌 上次工作状态：age_pred_v2，已执行到：batch_correction leak fix - script written but not run（MAE=7.08）
+📋 当前计划：
+1. 运行泄漏修复实验
+2. 测试 scGPT embedding
+3. 搜索相关文献
+🕒 预计下次汇报：有实质性进展时主动发送。
+```
+
+### Status Query Format (no more "有什么需要")
+```
+📊 当前研究：age_pred_v2
+📈 最近成果：batch_correction leak fix, MAE=7.08
+⏳ 正在进行：推进研究计划中
+🎯 接下来计划：
+  • 运行泄漏修复实验
+  • 测试 scGPT embedding
+```
+
+### Idle Auto-Exploration
+When the Mind Pool is empty (no active projects, no pending curiosity), the cron tick automatically:
+1. Checks `knowledge.json` for poorly-covered topics
+2. Generates new Curiosity events for those gaps
+3. Notifies the user: "当前没有进行中的项目，已自动开始探索以下方向：..."
+
+### Never Skip, Never Say "I Don't Know"
+- Search returns nothing → generates a tentative exploration plan
+- LLM unavailable → provides structured fallback with whatever data exists
+- Completely stuck → suggests a specific approach: "没有直接找到方案，我打算尝试..."
+
+---
+
+## What's New in v0.4.0 (Architecture)
 
 - **Mind Pool system** — replaces old cron-driven execution with event-driven spontaneous thought
 - **Project events** — replace `active_plan.json`. User research requests become self-cycling Project events with `wake_after` delay
@@ -183,6 +233,7 @@ partner/
 │   ├── conversation.py     # LLM-native conversation (no templates)
 │   ├── core.py             # Partner class + Mind integration
 │   ├── context_broker.py   # Dialog → Knowledge context bridge (v0.4.0)
+│   ├── state_persistence.py # last_state.json save/load/format (v0.4.0)
 │   ├── qq_official_bridge.py  # QQ bot + auto-start Mind + instant reply
 │   ├── router.py           # Intent classification only (no hardcoded responses)
 │   └── ... (23 files total)

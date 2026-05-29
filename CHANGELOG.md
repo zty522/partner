@@ -1,35 +1,63 @@
 # Changelog
 
-## [0.4.1] - 2026-05-29
+## [0.4.0] - 2026-05-29
 
-### 🔧 Bugfix Release: 消息可靠性 + 上下文桥接
+### 🧠 主动型智能体全面升级 — 不再被动等待指令
 
-#### Fixed: QQ 消息丢失（WebSocket 断连）
-- **心跳间隔缩短至 15 秒**（原 41s），降低断连检测延迟
-- **渐进式重连**：首次 5s，后续 10s（原固定 30s）
-- **消息 ID 去重缓存**（5 分钟 TTL），防止重连后重复处理
-- **详细的连接状态日志**：连接耗时、断连时长、conn_id 追踪
-- 沙箱模式 `msg_id` 修复：不传 msg_id 到沙箱 API，避免 40011000 错误
+#### Behavior: 从"被动问答"到"主动汇报"
 
-#### Fixed: TASK 指令静默处理
-- **PROJECT 入队后立即注入 CRON_TICK**，强制 Mind 循环立即处理，不等 15 分钟自脉冲
-- **Project 唤醒延迟缩减**：QQ 用户的 PROJECT 从 15 分钟缩短至 5 分钟
-- **CRON_TICK 加速等待中的 PROJECT**：将等待超过 5 分钟的 PROJECT 事件优先级提高（6→4），唤醒缩短至 60 秒
-- **Mind 循环健康检查**：池大小连续 2 次无变化则告警
+- **重启后结构化汇报**：现在 Partner 重启时会发送包含项目名、进度、指标、计划的详细汇报，取代模糊的"我回来了"。格式：
+  ✅ 系统已重启，恢复运行。
+  📌 上次工作状态：[项目名称]，已执行到：[具体进度]
+  📋 当前计划：[1-3 步计划]
+  🕒 预计下次汇报：有实质性进展时主动发送。
+- **状态查询结构化回复**：被问"在做什么"时，回复格式为：
+  📊 当前研究：[项目名称]
+  📈 最近成果：[指标变化]
+  ⏳ 正在进行：[具体操作]
+  🎯 下一步计划：[自主规划]
+- **禁止反问用户**：不再说"有什么需要"或"你想让我怎么做"。缺乏信息时主动搜索知识库、对话历史或网络，然后给出提议。
 
-#### New: 对话与研究循环上下文桥接
-- **`context_broker.py`** 新建模块，自动从 QQ 对话历史中提取项目关键信息
-  - `extract_project_facts()`: 正则提取指标（MAE=7.08）、问题（batch_correction_leak）、文件路径
-  - `save_to_knowledge()`: 将对话信息沉淀到知识库
-  - `get_project_context()`: 生成 LLM 可读的项目上下文文本
-- **PROJECT 事件携带对话上下文**：`payload` 中增加 `dialog_context` 和 `project_facts`
-- **CURIOSITY 处理时注入对话背景**：LLM 生成报告时能看到之前的聊天记录
+#### State: `last_state.json` 持久化与自动恢复
+
+- **新增 `state_persistence.py`**：每次研究循环处理后保存当前状态到 `last_state.json`
+  - 包含：active_project、last_action、last_metrics、pending_tasks、last_dialog_summary
+  - 重启时自动读取并生成结构化汇报
+- **`_handle_wake_up`**：启动后读取 last_state，生成详细复工简报
+- **`_handle_project`**：每轮执行后保存状态并主动推送到 QQ
+
+#### Proactive: 空闲自动探索
+
+- **`_handle_cron_tick` 空闲检测**：如果 Mind Pool 中没有 PROJECT 或 Curiosity 事件，自动从 knowledge.json 找出知识覆盖最弱的领域生成探索任务
+- **主动推送**：空闲时向用户发送"没有进行中的项目，已自动开始探索以下方向：..."
+- **`_handle_curiosity` 永不空手而归**：搜索无结果时不再跳过，而是生成试探性方案告诉用户计划做什么
+
+#### Prompt: LLM 系统提示词升级
+
+- **qq_official_bridge.py `_llm_chat`**：系统提示词重写为主动型
+  - 强制回复包含具体项目名称、进度、指标
+  - 禁止反问"有什么需要"
+  - 要求用结构化格式回答状态查询
+  - 不知道时必须提议下一步方案，而非说"不知道"
+
+#### Install: Windows 一键安装
+
+- **`scripts/install.ps1`**：支持一行命令安装
+  ```powershell
+  powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
+  ```
+  - 自动检测/下载 Python 3.10+
+  - 自动检测/下载 Git
+  - 克隆 Partner 仓库并安装
+  - 创建桌面快捷方式
+  - 添加 PATH
 
 #### Other
-- 更新 README，新增 `context_broker.py` 到项目布局
-- Mind Pool 事件类型表增加 WAKE_UP
 
-## [0.4.0] - 2026-05-28
+- README 更新，强调主动型智能体特性
+- CHANGELOG 更新
+
+## [0.4.0-arch] - 2026-05-28
 
 ### 🧠 Mind Pool — Spontaneous Thought Architecture (Major Rearchitecture)
 
@@ -60,12 +88,9 @@
 - **Duplicate QQ messages**: Report events now push via direct callback instead of file polling + poller double-delivery
 - **"空闲中" misreport**: Mind reads existing state on startup, reports actual status
 - **Cron no longer drives research**: Cron only injects `CRON_TICK` pulse — the mind pool decides autonomous actions
+- **QQ 消息丢失修复** — WebSocket 断连重连后自动拉取丢失消息；消息 ID 去重缓存（5分钟 TTL）
+- **TASK 指令即时回复** — PROJECT 入队后立即注入 CRON_TICK 强制研究循环处理
+- **对话上下文打通** — context_broker.py：自动从对话中提取项目关键信息
 
 #### Removed CLI
 - `partner mind` command (replaced by auto-start on QQ bridge connect)
-
-### 🏗️ Previous v0.4.0 Changes (retained)
-- **代码瘦身 33%**: 从 13,715 行减至 9,158 行
-- **Event Bus 推送系统**: `event_bus.jsonl`
-- **轻量自检引擎**: 3 步自检（知识冲突、卡死、数据泄漏）
-- **即时 QQ 回复**: 两步处理（placeholder → actual reply）

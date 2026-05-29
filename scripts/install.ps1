@@ -3,7 +3,12 @@
     Partner 🤝 — Windows 一键安装脚本
 .DESCRIPTION
     在 Windows 上原生安装 Partner，无需 WSL。
-    用法: powershell -ExecutionPolicy Bypass -File install.ps1
+    用法:
+      # 方式1：一行命令（推荐）
+      powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
+
+      # 方式2：下载后执行
+      powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
 $ErrorActionPreference = "Stop"
