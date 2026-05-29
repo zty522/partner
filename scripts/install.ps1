@@ -293,6 +293,29 @@ function Install-PartnerPackage {
         }
         Write-Info "pip: $($pipVer.Trim())"
         
+        # Clean corrupted distributions (e.g. ~artner-research from aborted installs)
+        $siteDirs = & $pythonExe -c "
+import site
+dirs = list(site.getsitepackages())
+if site.ENABLE_USER_SITE:
+    dirs.append(site.getusersitepackages())
+for d in dirs:
+    print(d)
+" 2>&1
+        foreach ($sd in $siteDirs) {
+            $sd = $sd.Trim()
+            if ($sd -and (Test-Path $sd)) {
+                $corrupted = Get-ChildItem "$sd\~*" -Directory -ErrorAction SilentlyContinue
+                foreach ($d in $corrupted) {
+                    Remove-Item -Recurse -Force $d.FullName -ErrorAction SilentlyContinue
+                }
+                $corruptedEggs = Get-ChildItem "$sd\~*" -File -ErrorAction SilentlyContinue
+                foreach ($f in $corruptedEggs) {
+                    Remove-Item -Force $f.FullName -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        
         $pipOutput = & $pythonExe -m pip install -e . 2>&1
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
@@ -302,7 +325,13 @@ function Install-PartnerPackage {
         Pop-Location
     } catch {
         Pop-Location
-        Exit-Error "pip install failed: $_"
+        $errMsg = $_.ToString()
+        # Ignore WARNING-level messages from pip stderr ($ErrorActionPreference=Stop turns them into errors)
+        if ($errMsg -match "^WARNING: ") {
+            Write-Info "Partner package installed (with warnings)"
+            return
+        }
+        Exit-Error "pip install failed: $errMsg"
     }
 }
 
