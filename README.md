@@ -36,21 +36,8 @@ And it tells you everything it discovered while you were away.
 # Linux
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 
-# Windows (one-liner, silent install)
-powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
+# Windows — download the installer from GitHub Releases
 ```
-
-### First Run
-
-On first launch, Partner will ask you to choose a language:
-
-```
-Welcome to Partner! Please choose your language:
-1. English (default)
-2. 中文
-```
-
-You can also change the language at any time by sending `/lang en` or `/lang zh` in QQ.
 
 ### Commands
 
@@ -60,45 +47,7 @@ partner status                View full status (research + bot health)
 partner bot start qq          Start QQ bot + autonomous mind system (auto-starts)
 partner bot stop qq           Stop QQ bot
 partner update                Pull latest code + reinstall
----
-
-## Checking Records
-
-During research, Partner automatically saves findings to `~/.partner/20_records/`:
-
-| File | Format | Description |
-|------|--------|-------------|
-| `projects/{name}/exploration_log.md` | Markdown | Human-readable exploration history with timestamps |
-| `projects/{name}/knowledge.json` | JSON | Structured knowledge entries with confidence scores |
-| `projects/{name}/experiments.csv` | CSV | Experiment parameters and metric results |
-| `global_knowledge.json` | JSON | Cross-project knowledge |
-| `session_history.jsonl` | JSONL | Session summaries |
-
-You can view the latest records by sending `/summary` in QQ. The bot will reply with the 5 most recent exploration entries.
-
----
-
-## Directory Structure
-
-Partner organizes all data under `~/.partner/`:
-
 ```
-~/.partner/
-├── 00_config/          # Configuration files (partner_config.json, qq_config.json)
-├── 10_logs/            # Log files (research_loop.log, qq_bridge.log)
-├── 20_records/         # 🔥 CORE — user supervision and traceability entry point
-│   ├── projects/       # Organized by project
-│   │   └── age_pred_v2/
-│   │       ├── exploration_log.md  # Exploration history (Markdown)
-│   │       ├── knowledge.json      # Structured knowledge entries
-│   │       ├── experiments.csv     # Experiment parameters and results
-│   │       └── artifacts/          # Output files
-│   ├── global_knowledge.json
-│   └── session_history.jsonl
-└── 99_temp/            # Temporary files (safe to clean)
-```
-
-The `20_records/` directory is the single entry point for supervision and traceability. All exploration, knowledge, and experiment results are stored there in human-readable formats.
 
 ---
 
@@ -176,6 +125,25 @@ No shell subprocesses. No `curl`. No `hermes` CLI for search. Just Python `reque
 
 ---
 
+## What's New in v0.4.0
+
+- **Mind Pool system** — replaces old cron-driven execution with event-driven spontaneous thought
+- **Project events** — replace `active_plan.json`. User research requests become self-cycling Project events with `wake_after` delay
+- **Waiting room** — delayed events stay in pool until their time comes (no busy-looping)
+- **`searcher.py`** — direct academic API calls (Semantic Scholar/Crossref/ArXiv). No shell subprocesses
+- **Instant QQ reply** — "思考中，请等待..." sent immediately, replaced by actual response
+- **No hardcoded responses** — all conversation through LLM, zero templates
+- **Codebase cleanup** — 22 Python files (was 26), removed `active_plan.json`, `task_queue.json`, `send_qq_report.py` old patterns
+
+### v0.4.0 后续修复
+
+- 🔧 **QQ 消息丢失修复** — WebSocket 断连重连后自动拉取丢失消息；消息 ID 去重缓存（5分钟 TTL）；心跳间隔缩短至 15 秒；渐进式重连（5s → 10s）
+- 💬 **TASK 指令即时回复** — 沙箱模式修复（不传 msg_id 避免 40011000）；PROJECT 入队后立即注入 CRON_TICK 强制研究循环处理；Mind 循环健康检查（池大小连续 2 次无变化则告警）
+- 🧠 **对话上下文打通** — 新建 `context_broker.py`：自动从对话中提取项目关键信息（MAE、泄漏问题等）并沉淀到知识库；研究循环从 PROJECT 事件获取完整对话上下文；LLM 生成报告时使用对话背景
+- 📚 **更新 README**，完善说明
+
+---
+
 ## Supported Agents
 
 | Agent | Status | Notes |
@@ -215,7 +183,6 @@ partner/
 │   ├── conversation.py     # LLM-native conversation (no templates)
 │   ├── core.py             # Partner class + Mind integration
 │   ├── context_broker.py   # Dialog → Knowledge context bridge (v0.4.0)
-│   ├── state_persistence.py # last_state.json save/load/format (v0.4.0)
 │   ├── qq_official_bridge.py  # QQ bot + auto-start Mind + instant reply
 │   ├── router.py           # Intent classification only (no hardcoded responses)
 │   └── ... (23 files total)
@@ -228,70 +195,56 @@ partner/
 
 ---
 
-## Multi-Instance Management (v0.5.0)
 
-Partner supports running multiple independent instances, each with:
-- Its own QQ bot account
-- Its own research direction and workspace
-- Its own knowledge base, logs, and records
-- Its own cron schedule
+---
 
-### Directory Structure
+## Directory Structure
+
+Partner organizes all data under `~/.partner/`:
 
 ```
 ~/.partner/
 ├── global_config.json           # Global configuration
 ├── instances/
-│   ├── default/                 # Default instance (migrated from single-instance)
-│   │   ├── 00_config/           # Instance-specific config
-│   │   ├── 10_logs/             # Instance logs
-│   │   ├── 20_records/          # Core records
-│   │   └── 99_temp/
-│   ├── age_pred/                # Another instance
-│   │   └── ...
-│   └── drug_discovery/
-│       └── ...
-└── audit.log                    # Global audit log
+│   └── {instance_id}/
+│       ├── 00_config/           # Configuration files
+│       ├── 10_logs/             # Log files
+│       ├── 20_records/          # 🔥 Core records (exploration, knowledge, experiments)
+│       └── 99_temp/             # Temporary files
+├── audit.log                    # Global audit log
+└── README.md
 ```
+
+The `20_records/` directory is the single entry point for supervision and traceability. All exploration, knowledge, and experiment results are stored there in human-readable formats.
+
+---
+
+## Multi-Instance Management (v0.5.0)
+
+Partner supports running multiple independent instances, each with its own QQ bot account, research direction, knowledge base, and cron schedule.
 
 ### Commands
 
 ```bash
-# Create a new instance
 partner-manager create --id age_pred --qq-config /path/to/qq_config.json
-
-# Start/stop/restart
 partner-manager start --id age_pred
 partner-manager stop --id age_pred
 partner-manager restart --id age_pred
-
-# List all instances
 partner-manager list
-
-# View logs
 partner-manager logs --id age_pred --tail 50
-
-# Systemd auto-start
-partner-manager enable --id age_pred
-partner-manager disable --id age_pred
-
-# Global operations
 partner-manager start --all
 partner-manager stop --all
-partner-manager status --watch
 ```
 
-### Systemd Service Template
+### Systemd Auto-Start
 
 ```bash
-# Enable auto-start for an instance
 partner-manager enable --id age_pred
-
-# The service file is at ~/.config/systemd/user/partner@.service
 systemctl --user start partner@age_pred.service
 ```
 
 ---
+
 
 ## License
 
