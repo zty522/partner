@@ -125,25 +125,6 @@ No shell subprocesses. No `curl`. No `hermes` CLI for search. Just Python `reque
 
 ---
 
-## What's New in v0.4.0
-
-- **Mind Pool system** — replaces old cron-driven execution with event-driven spontaneous thought
-- **Project events** — replace `active_plan.json`. User research requests become self-cycling Project events with `wake_after` delay
-- **Waiting room** — delayed events stay in pool until their time comes (no busy-looping)
-- **`searcher.py`** — direct academic API calls (Semantic Scholar/Crossref/ArXiv). No shell subprocesses
-- **Instant QQ reply** — "思考中，请等待..." sent immediately, replaced by actual response
-- **No hardcoded responses** — all conversation through LLM, zero templates
-- **Codebase cleanup** — 22 Python files (was 26), removed `active_plan.json`, `task_queue.json`, `send_qq_report.py` old patterns
-
-### v0.4.0 后续修复
-
-- 🔧 **QQ 消息丢失修复** — WebSocket 断连重连后自动拉取丢失消息；消息 ID 去重缓存（5分钟 TTL）；心跳间隔缩短至 15 秒；渐进式重连（5s → 10s）
-- 💬 **TASK 指令即时回复** — 沙箱模式修复（不传 msg_id 避免 40011000）；PROJECT 入队后立即注入 CRON_TICK 强制研究循环处理；Mind 循环健康检查（池大小连续 2 次无变化则告警）
-- 🧠 **对话上下文打通** — 新建 `context_broker.py`：自动从对话中提取项目关键信息（MAE、泄漏问题等）并沉淀到知识库；研究循环从 PROJECT 事件获取完整对话上下文；LLM 生成报告时使用对话背景
-- 📚 **更新 README**，完善说明
-
----
-
 ## Supported Agents
 
 | Agent | Status | Notes |
@@ -219,7 +200,7 @@ The `20_records/` directory is the single entry point for supervision and tracea
 
 ---
 
-## Multi-Instance Management (v0.5.0)
+## Multi-Instance Management
 
 Partner supports running multiple independent instances, each with its own QQ bot account, research direction, knowledge base, and cron schedule.
 

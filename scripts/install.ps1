@@ -281,10 +281,19 @@ function Install-PartnerPackage {
     try {
         $pythonExe = $Python.Path
         Write-Info "Running pip install -e . ..."
+        
+        # Verify pip works first
+        $pipVer = & $pythonExe -m pip --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Pop-Location
+            Exit-Error "pip is not working. Output: $pipVer"
+        }
+        Write-Info "pip: $($pipVer.Trim())"
+        
         $pipOutput = & $pythonExe -m pip install -e . -q 2>&1
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
-            Exit-Error "pip install failed. Error: $pipOutput"
+            Exit-Error "pip install failed. Full output: $pipOutput"
         }
         Write-Info "Partner package installed"
         Pop-Location
