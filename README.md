@@ -125,6 +125,44 @@ No shell subprocesses. No `curl`. No `hermes` CLI for search. Just Python `reque
 
 ---
 
+## What's New in v0.4.1 — Execution Pipeline Overhaul
+
+Research loop stalling, tasks queued but never consumed, "I'll let you know when there's progress" becoming an empty promise — all fixed.
+
+### 🛡️ Research Loop Auto-Recovery
+- **Heartbeat file**: `scheduler.py` writes `/tmp/partner_research_heartbeat.txt` every 30s for external monitoring
+- **watchdog.sh**: cron-based script (every 1min) checks heartbeat file — if stale for 2+ minutes, auto-restarts `partner.service`
+- **Task timeout**: `_run_event_safely` has a 5-min timeout; stuck tasks are cancelled and logged
+- **Consumer health**: `_check_consumer_healthy()` checks heartbeat + MindPool instance liveness
+- **TASK instant recovery**: `_queue_task` checks consumer health before queuing; if dead, auto-restarts and notifies the user
+
+### ⚡ "Just Do It" Intent + Immediate Execution
+- **New `EXECUTE_DIRECT` intent** in `router.py` — matches "直接动手", "别调研了", "自己去跑", "先跑一下", etc.
+- **`direct_executor.py`** — new module that skips search entirely:
+  - Locates project directory (from context_broker)
+  - Selects script based on user instruction (fix leak, run experiment, try cross-features)
+  - Executes in isolated subprocess with output capture
+  - Pushes result summary to QQ on completion
+- Integrated into QQ bridge — EXECUTE_DIRECT messages trigger DirectExecutor directly
+
+### 🧠 Dialog Context Takes Priority
+- **`context_broker.py` v2 (enhanced)**:
+  - `on_user_message()` — real-time extraction on every QQ message: project paths (`/mnt/e/work/...`), line numbers (`第239行`), metrics (`MAE=7.08`), issues (`batch_correction_leak`)
+  - Dual storage: `knowledge_context.json` (dedicated tracking) + `knowledge.json` (standard KB)
+  - `get_context_for_search()` — retrieves relevant context from last 1 hour
+- **`searcher.py` dialog-first strategy**:
+  - New `set_context_provider()` registers the dialog context provider
+  - `search()` checks dialog context first (if paths/line numbers/metrics exist, returns those as results) before hitting academic APIs
+  - EXECUTE_DIRECT skips search entirely
+- **`executor._handle_project()`**: fetches latest dialog context from context_broker on every cycle, passes to Curiosity sub-events
+
+### 📤 Task Result Push
+- **`direct_executor.py`**: auto-calls QQ push callback after execution with result summary (MAE change, leak fix, etc.)
+- **`executor._handle_project()`**: pushes to QQ after each cycle with step count, issues being tracked, known metrics
+- **`executor._handle_report()`**: Report events pushed via direct callback — no more file polling
+
+---
+
 ## What's New in v0.4.0
 
 - **Mind Pool system** — replaces old cron-driven execution with event-driven spontaneous thought
@@ -182,7 +220,8 @@ partner/
 │   ├── autocheck.py        # Merged: event_bus + self_check + notifier
 │   ├── conversation.py     # LLM-native conversation (no templates)
 │   ├── core.py             # Partner class + Mind integration
-│   ├── context_broker.py   # Dialog → Knowledge context bridge (v0.4.0)
+|   ├── context_broker.py   # Dialog → Knowledge context bridge (v0.4.1)
+│   ├── direct_executor.py # "Just do it" execution (v0.4.1)
 │   ├── qq_official_bridge.py  # QQ bot + auto-start Mind + instant reply
 │   ├── router.py           # Intent classification only (no hardcoded responses)
 │   └── ... (23 files total)

@@ -1,7 +1,13 @@
-"""Searcher — 学术搜索模块。
+"""Searcher — 学术搜索模块（对话优先版 v2）。
 
 使用 Python requests 直接调用免费学术搜索 API，
 不经过 shell/curl/hermes 子进程，避免安全软件拦截。
+
+搜索策略（优先级）：
+1. 对话上下文（context_broker）— 用户已提供的信息优先
+2. Semantic Scholar API（免认证，无需 API Key）
+3. Crossref API（当 S2 不可用时）
+4. ArXiv API（最终降级）
 
 当前后端：Semantic Scholar API（免认证，无需 API Key）
 备用后端：Crossref API（当 S2 不可用时）
@@ -9,10 +15,13 @@
 
 import logging
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# 对话上下文提供者（由 bridge 在初始化时注册）
+_context_provider: Optional[Callable[[str], Dict]] = None
 
 # Semantic Scholar API
 S2_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -27,8 +36,23 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 SEARCH_TIMEOUT = 30  # seconds
 
 
+def set_context_provider(provider: Callable[[str], Dict]):
+    """注册对话上下文提供者（由 QQ bridge 初始化时调用）。
+
+    provider: fn(query) -> Dict 包含 project_path, issues, files, scripts 等
+    """
+    global _context_provider
+    _context_provider = provider
+    logger.info("[Searcher] 对话上下文提供者已注册")
+
+
 def search(topic: str, max_results: int = 5) -> List[Dict]:
     """搜索学术文献，按优先级尝试多个后端。
+
+    策略：
+    1. 如果对话上下文提供者返回了有效信息（路径、行号、指标），
+       直接返回这些上下文作为"搜索结果"，标记 source: "dialog"
+    2. 否则按序尝试学术 API
 
     Args:
         topic: 搜索主题
@@ -37,7 +61,13 @@ def search(topic: str, max_results: int = 5) -> List[Dict]:
     Returns:
         List[Dict]，每个 dict 包含 title, authors, year, url, abstract, source
     """
-    # 优先 Semantic Scholar
+    # 步骤1：检查对话上下文
+    dialog_results = _search_dialog_context(topic)
+    if dialog_results:
+        logger.info(f"[Searcher] 使用对话上下文作为搜索结果 ({len(dialog_results)} 条)")
+        return dialog_results
+
+    # 步骤2：学术 API
     try:
         results = _search_semantic_scholar(topic, max_results)
         if results:
@@ -62,6 +92,75 @@ def search(topic: str, max_results: int = 5) -> List[Dict]:
         logger.warning(f"[Searcher] ArXiv failed: {e}")
 
     return []
+
+
+def _search_dialog_context(topic: str) -> List[Dict]:
+    """从对话上下文中搜索（优先于网络搜索）。
+
+    如果有对话上下文提供者且返回了信息，直接封装为搜索结果返回。
+
+    Returns:
+        非空列表表示有对话上下文可用；空列表表示需要走网络搜索
+    """
+    if not _context_provider:
+        return []
+
+    try:
+        ctx = _context_provider(topic)
+        if not ctx or not ctx.get("has_relevant_context"):
+            return []
+
+        results = []
+
+        # 如果有项目路径 + 问题，构造一个"搜索结果"
+        project_path = ctx.get("project_path", "")
+        issues = ctx.get("issues", [])
+        files = ctx.get("files", [])
+        scripts = ctx.get("scripts", [])
+        metrics = ctx.get("metrics", {})
+        line_numbers = ctx.get("line_numbers", [])
+
+        # 构造对话知识条目
+        parts = ["【从对话中获取的项目信息】"]
+        if project_path:
+            parts.append(f"项目路径: {project_path}")
+        if metrics:
+            parts.append(f"已知指标: {', '.join(f'{k}={v}' for k, v in metrics.items())}")
+        if issues:
+            parts.append(f"已知问题: {', '.join(issues)}")
+        if line_numbers:
+            parts.append(f"相关行号: {', '.join(str(n) for n in line_numbers)}")
+        if files:
+            parts.append(f"相关文件: {', '.join(files)}")
+        if scripts:
+            parts.append(f"脚本: {', '.join(scripts)}")
+
+        results.append({
+            "title": f"对话上下文: {project_path or topic}",
+            "authors": ["用户"],
+            "year": datetime.now().year,
+            "url": project_path or "",
+            "abstract": "\n".join(parts),
+            "source": "dialog",
+            "_dialog_context": ctx,  # 内部标记
+        })
+
+        # 如果有原始对话片段，追加为额外结果
+        for i, snippet in enumerate(ctx.get("raw_snippets", [])[:3]):
+            results.append({
+                "title": f"对话参考 #{i + 1}",
+                "authors": ["用户"],
+                "year": datetime.now().year,
+                "url": "",
+                "abstract": snippet[:300],
+                "source": "dialog",
+            })
+
+        return results
+
+    except Exception as e:
+        logger.warning(f"[Searcher] 对话上下文搜索失败: {e}")
+        return []
 
 
 def _search_semantic_scholar(query: str, limit: int = 5) -> List[Dict]:

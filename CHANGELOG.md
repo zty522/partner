@@ -2,32 +2,51 @@
 
 ## [0.4.1] - 2026-05-29
 
-### 🔧 Bugfix Release: 消息可靠性 + 上下文桥接
+### 🚀 执行链路全面修复 — 告别空头支票
 
-#### Fixed: QQ 消息丢失（WebSocket 断连）
-- **心跳间隔缩短至 15 秒**（原 41s），降低断连检测延迟
-- **渐进式重连**：首次 5s，后续 10s（原固定 30s）
-- **消息 ID 去重缓存**（5 分钟 TTL），防止重连后重复处理
-- **详细的连接状态日志**：连接耗时、断连时长、conn_id 追踪
-- 沙箱模式 `msg_id` 修复：不传 msg_id 到沙箱 API，避免 40011000 错误
+研究循环停滞、任务入队不消费、"有进展了跟你说"成为空头支票——全部修复。
 
-#### Fixed: TASK 指令静默处理
-- **PROJECT 入队后立即注入 CRON_TICK**，强制 Mind 循环立即处理，不等 15 分钟自脉冲
-- **Project 唤醒延迟缩减**：QQ 用户的 PROJECT 从 15 分钟缩短至 5 分钟
-- **CRON_TICK 加速等待中的 PROJECT**：将等待超过 5 分钟的 PROJECT 事件优先级提高（6→4），唤醒缩短至 60 秒
-- **Mind 循环健康检查**：池大小连续 2 次无变化则告警
+#### Fixed: 研究循环停滞（自动恢复）
 
-#### New: 对话与研究循环上下文桥接
-- **`context_broker.py`** 新建模块，自动从 QQ 对话历史中提取项目关键信息
-  - `extract_project_facts()`: 正则提取指标（MAE=7.08）、问题（batch_correction_leak）、文件路径
-  - `save_to_knowledge()`: 将对话信息沉淀到知识库
-  - `get_project_context()`: 生成 LLM 可读的项目上下文文本
-- **PROJECT 事件携带对话上下文**：`payload` 中增加 `dialog_context` 和 `project_facts`
-- **CURIOSITY 处理时注入对话背景**：LLM 生成报告时能看到之前的聊天记录
+- **心跳文件**：`scheduler.py` 每 30 秒写入 `/tmp/partner_research_heartbeat.txt`，供外部监控。
+- **watchdog 脚本**：`scripts/watchdog.sh`，由 cron 每分钟执行，心跳超过 2 分钟未更新则自动 `systemctl restart partner`。
+- **任务超时保护**：`_run_event_safely` 中增加 5 分钟超时检测，超时强制取消并记录错误。
+- **消费者健康检查**：`qq_official_bridge._check_consumer_healthy()` 检查心跳 + MindPool 实例存活。
+- **TASK 指令即时恢复**：`_queue_task` 入队前检查消费者状态，未运行则自动重启并告知用户。
+
+#### New: "直接动手"意图 + 立即执行
+
+- **`router.py`**：新增 `EXECUTE_DIRECT` 意图，匹配"直接动手"、"别调研了"、"自己去跑"、"先跑一下"等关键词。
+- **`direct_executor.py`**：新模块，跳过搜索直接：
+  - 定位项目目录（从 context_broker 获取）
+  - 根据用户指令选择脚本（修泄漏、跑实验、试交叉特征等）
+  - 隔离执行 + 输出捕获
+  - 完成后自动推送到 QQ
+- **QQ bridge 集成**：EXECUTE_DIRECT 消息直接触发 DirectExecutor。
+
+#### Fixed: 对话上下文→研究循环优先
+
+- **`context_broker.py` 强化版 v2**：
+  - 实时监听：`on_user_message()` 在每条 QQ 消息到达时提取项目路径、行号、指标、问题
+  - 正则增强：`/mnt/e/work/...` 路径、`第239行` 行号、`MAE=7.08` 指标、`batch_correction_leak` 问题
+  - 双通道保存：同时写入 `knowledge_context.json`（独立跟踪）和 `knowledge.json`（标准知识库）
+  - 上下文检索：`get_context_for_search()` 检索最近 1 小时的相关知识
+- **`searcher.py` 对话优先**：
+  - 新增 `set_context_provider()` 注册对话上下文提供者
+  - `search()` 策略：先检查对话上下文（有路径/行号/指标则直接返回），再走学术 API
+  - EXECUTE_DIRECT 完全跳过搜索
+- **`executor._handle_project()`**：每次执行前从 context_broker 获取最新对话上下文，传递给 Curiosity 子事件
+
+#### New: 执行结果主动推送
+
+- **`direct_executor.py`**：执行完成后自动调用 QQ push callback，发送结果摘要（含 MAE 变化、泄漏修复等）
+- **`executor._handle_project()`**：每轮执行完成后主动推送到 QQ，包含当前步骤、关注问题、已知指标
+- **`executor._handle_report()`**：Report 事件通过直接回调推送，不再依赖文件轮询
 
 #### Other
-- 更新 README，新增 `context_broker.py` 到项目布局
-- Mind Pool 事件类型表增加 WAKE_UP
+
+- 新增 `scripts/watchdog.sh` 安装说明到 README
+- CHANGELOG 本次更新详解
 
 ## [0.4.0] - 2026-05-28
 
