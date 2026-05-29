@@ -1,131 +1,318 @@
 <#
 .SYNOPSIS
-    Partner 🤝 — Windows 一键安装脚本
+    Partner - Windows One-Click Installer
 .DESCRIPTION
-    在 Windows 上原生安装 Partner，无需 WSL。
-    用法:
-      # 方式1：一行命令（推荐）
+    Installs Partner natively on Windows (no WSL required).
+    Usage:
+      # One-liner (recommended)
       powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
 
-      # 方式2：下载后执行
+      # Download and run
       powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
+# ── Encoding ──
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
 $ErrorActionPreference = "Stop"
-$Host.UI.RawUI.WindowTitle = "Installing Partner 🤝"
+$Host.UI.RawUI.WindowTitle = "Installing Partner"
 
-$Green  = "Green"
-$Yellow = "Yellow"
-$Red    = "Red"
-$Cyan   = "Cyan"
+$PartnerRepo = "https://github.com/zty522/partner.git"
+$PartnerDir  = "$env:USERPROFILE\.partner"
 
-function Write-Info  { Write-Host "✓ " -ForegroundColor $Green -NoNewline; Write-Host "$args" }
-function Write-Warn  { Write-Host "⚠ " -ForegroundColor $Yellow -NoNewline; Write-Host "$args" }
-function Write-Error { Write-Host "✗ " -ForegroundColor $Red -NoNewline; Write-Host "$args" }
-function Write-Header { Write-Host "`n━━━ $args ━━━`n" -ForegroundColor $Cyan }
+# ── Colors ──
+$cGreen  = "Green"
+$cYellow = "Yellow"
+$cRed    = "Red"
+$cCyan   = "Cyan"
 
-# ── 检测系统 ──
-Write-Header "检测系统环境"
+function Write-Info   { Write-Host "`u{2713} " -ForegroundColor $cGreen -NoNewline;  Write-Host "$args" }
+function Write-Warn   { Write-Host "`u{26A0} " -ForegroundColor $cYellow -NoNewline; Write-Host "$args" }
+function Write-Err    { Write-Host "`u{2717} " -ForegroundColor $cRed -NoNewline;    Write-Host "$args" }
+function Write-Header { Write-Host "`n--- $args ---`n" -ForegroundColor $cCyan }
+
+function Exit-Error($msg) {
+    Write-Err $msg
+    exit 1
+}
+
+# ── Detect System ──
+Write-Header "Checking system"
 Write-Info "Windows $([Environment]::OSVersion.Version)"
 
-# ── 安装目录 ──
-$PartnerDir = "$env:USERPROFILE\.partner"
+# ── Python detection ──
+function Test-PythonVersion($pyCmd) {
+    try {
+        $ver = & $pyCmd --version 2>&1
+        if ($ver -match "(\d+)\.(\d+)") {
+            $major = [int]$Matches[1]
+            $minor = [int]$Matches[2]
+            return @{Path=$pyCmd; Major=$major; Minor=$minor; Full="$major.$minor"}
+        }
+    } catch {}
+    return $null
+}
 
-# ── 检测 Python ──
-function Get-PythonPath {
+function Find-InstalledPython {
     foreach ($cmd in @("python", "python3")) {
-        try {
-            $ver = & $cmd --version 2>&1
-            if ($ver -match "(\d+)\.(\d+)") {
-                $major = [int]$Matches[1]; $minor = [int]$Matches[2]
-                if ($major -ge 3 -and $minor -ge 10) { return @{Path=$cmd; Version="$major.$minor"} }
-            }
-        } catch { continue }
+        $result = Test-PythonVersion $cmd
+        if ($result -ne $null) { return $result }
     }
     return $null
 }
 
-$Python = Get-PythonPath
-if (-not $Python) {
-    Write-Warn "需要 Python 3.10+"
-    $choice = Read-Host "  是否自动下载安装 Python? (Y/n)"
-    if ($choice -ne "n") {
-        Write-Info "正在下载 Python 3.12..."
-        $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe"
-        $installer = "$env:TEMP\python-installer.exe"
-        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-        Start-Process -Wait -FilePath $installer -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1"
-        Remove-Item $installer -Force
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-        $Python = Get-PythonPath
-    }
-}
-if (-not $Python) { Write-Error "请手动安装 Python 3.10+ 后重试"; exit 1 }
-Write-Info "Python: $($Python.Version) ($($Python.Path))"
+Write-Header "Checking Python"
 
-# ── 检测 git ──
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Warn "Git 未安装"
-    $choice = Read-Host "  是否下载安装 Git? (Y/n)"
-    if ($choice -ne "n") {
-        Write-Info "正在下载 Git for Windows..."
-        $url = "https://github.com/git-for-windows/git/releases/download/v2.45.0.windows.1/Git-2.45.0-64-bit.exe"
-        $installer = "$env:TEMP\git-installer.exe"
-        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
-        Start-Process -Wait -FilePath $installer -ArgumentList "/VERYSILENT", "/NORESTART"
-        Remove-Item $installer -Force
-        $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-    }
-}
-Write-Info "git: $(& git --version 2>&1 | Select -First 1)"
+$Python = Find-InstalledPython
 
-# ── 安装 Partner ──
-Write-Header "安装 Partner"
-if (Test-Path $PartnerDir) {
-    Write-Info "Partner 目录已存在: $PartnerDir"
-    Push-Location $PartnerDir
-    & git pull --ff-only 2>&1 | Out-Null
-    Pop-Location
+if ($Python) {
+    $verStr = $Python.Full
+    Write-Info "Python $verStr found: $($Python.Path)"
+
+    if ($Python.Major -ne 3) {
+        Exit-Error "Python 3 is required. Found Python $verStr."
+    }
+
+    if ($Python.Minor -lt 10) {
+        Exit-Error "Python 3.10+ is required. Found Python $verStr."
+    }
+
+    if ($Python.Minor -gt 12) {
+        Exit-Error "Python $verStr is not supported. Partner requires Python 3.10, 3.11, or 3.12."
+    }
 } else {
-    Write-Info "克隆 Partner 仓库..."
-    & git clone "https://github.com/zty522/partner.git" $PartnerDir
+    Write-Warn "Python 3 not detected"
+    $choice = Read-Host "  Download and install Python 3.12 automatically? (Y/n)"
+    if ($choice -eq "n") {
+        Exit-Error "Please install Python 3.10, 3.11, or 3.12 manually and re-run this installer."
+    }
+
+    Write-Info "Downloading Python 3.12..."
+    $url = "https://www.python.org/ftp/python/3.12.3/python-3.12.3-amd64.exe"
+    $installer = "$env:TEMP\python-3.12.3-amd64.exe"
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Exit-Error "Failed to download Python installer: $_"
+    }
+
+    Write-Info "Installing Python 3.12..."
+    try {
+        $proc = Start-Process -Wait -FilePath $installer -ArgumentList "/quiet", "InstallAllUsers=0", "PrependPath=1" -PassThru
+        if ($proc.ExitCode -ne 0) {
+            Exit-Error "Python installer exited with code $($proc.ExitCode). Installation may have failed."
+        }
+    } catch {
+        Exit-Error "Failed to install Python: $_"
+    }
+    Remove-Item $installer -Force -ErrorAction SilentlyContinue
+
+    # Refresh PATH
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+
+    $Python = Find-InstalledPython
+    if (-not $Python) {
+        Exit-Error "Python was installed but could not be detected. Try restarting your terminal and re-running the installer."
+    }
+    Write-Info "Python $($Python.Full) installed successfully"
 }
 
-Push-Location $PartnerDir
-& $Python.Path -m pip install -e . -q --break-system-packages 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    & $Python.Path -m pip install -e . -q 2>&1 | Out-Null
+# ── Git detection ──
+Write-Header "Checking Git"
+
+$GitInstalled = $false
+try {
+    $gitVer = & git --version 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $GitInstalled = $true
+        Write-Info "Git: $($gitVer | Select-Object -First 1)"
+    }
+} catch {}
+
+if (-not $GitInstalled) {
+    Write-Warn "Git not detected"
+    $choice = Read-Host "  Download and install Git for Windows automatically? (Y/n)"
+    if ($choice -eq "n") {
+        Exit-Error "Please install Git manually and re-run this installer."
+    }
+
+    Write-Info "Downloading Git for Windows..."
+    $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.45.0.windows.1/Git-2.45.0-64-bit.exe"
+    $gitInstaller = "$env:TEMP\git-installer.exe"
+    try {
+        Invoke-WebRequest -Uri $gitUrl -OutFile $gitInstaller -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Exit-Error "Failed to download Git installer: $_"
+    }
+
+    Write-Info "Installing Git for Windows..."
+    try {
+        $proc = Start-Process -Wait -FilePath $gitInstaller -ArgumentList "/VERYSILENT", "/NORESTART" -PassThru
+        if ($proc.ExitCode -ne 0) {
+            Exit-Error "Git installer exited with code $($proc.ExitCode). Installation may have failed."
+        }
+    } catch {
+        Exit-Error "Failed to install Git: $_"
+    }
+    Remove-Item $gitInstaller -Force -ErrorAction SilentlyContinue
+
+    # Refresh PATH
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
+
+    # Verify Git is now available
+    try {
+        $gitVer = & git --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Info "Git installed: $($gitVer | Select-Object -First 1)"
+        } else {
+            Exit-Error "Git was installed but could not be detected. Try restarting your terminal and re-running the installer."
+        }
+    } catch {
+        Exit-Error "Git was installed but could not be detected. Try restarting your terminal and re-running the installer."
+    }
 }
-Pop-Location
-Write-Info "Partner 安装完成"
 
-# ── 创建启动器 ──
-Write-Header "创建启动器"
+# ── Clone / Update repository ──
+Write-Header "Setting up Partner repository"
 
-# 添加到用户 PATH
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$PartnerDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$UserPath;$PartnerDir", "User")
-    Write-Info "已添加到用户 PATH"
+if (Test-Path $PartnerDir) {
+    Write-Info "Repository directory exists: $PartnerDir"
+    try {
+        Push-Location $PartnerDir
+        & git pull --ff-only 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Git pull failed, continuing with existing repository"
+        } else {
+            Write-Info "Repository updated"
+        }
+        Pop-Location
+    } catch {
+        Write-Warn "Could not update repository: $_"
+        Pop-Location
+    }
+} else {
+    Write-Info "Cloning Partner repository..."
+    try {
+        & git clone $PartnerRepo $PartnerDir
+        if ($LASTEXITCODE -ne 0) {
+            Exit-Error "Failed to clone repository. Check your internet connection."
+        }
+        Write-Info "Repository cloned successfully"
+    } catch {
+        Exit-Error "Failed to clone repository: $_"
+    }
 }
 
-# 桌面快捷方式 → wscript.exe + Partner.vbs（无终端窗口）
-$DesktopPath = [Environment]::GetFolderPath("Desktop")
-$ShortcutPath = "$DesktopPath\Partner.lnk"
-$WScriptShell = New-Object -ComObject WScript.Shell
-$Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = "wscript.exe"
-$Shortcut.Arguments = "$PartnerDir\Partner.vbs"
-$Shortcut.Description = "Partner - Your AI Research Companion"
-$Shortcut.WorkingDirectory = "$PartnerDir"
-$Shortcut.IconLocation = "$PartnerDir\Partner.exe, 0"
-$Shortcut.Save()
-Write-Info "桌面快捷方式已创建"
+# ── Install via pip ──
+Write-Header "Installing Partner"
 
-# ── 完成 ──
-Write-Header "Partner 安装完成!"
+try {
+    Push-Location $PartnerDir
+
+    Write-Info "Running pip install -e . --user ..."
+    $pipOutput = & $Python.Path -m pip install -e . --user 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Pop-Location
+        Exit-Error "pip install failed. Error: $pipOutput"
+    }
+
+    Pop-Location
+} catch {
+    Pop-Location
+    Exit-Error "pip install failed: $_"
+}
+
+Write-Info "Partner package installed"
+
+# ── Verify partner.exe was installed and find Scripts directory ──
+Write-Header "Configuring PATH"
+
+# Standard location for pip --user install on Windows
+$PythonVerTag = "Python$($Python.Major)$($Python.Minor)"
+$ScriptsDir = "$env:APPDATA\Python\$PythonVerTag\Scripts"
+$ScriptsFound = $false
+$FoundScriptsDir = ""
+
+# Verify the directory exists and contains the partner executable
+if (Test-Path "$ScriptsDir\partner.exe" -PathType Leaf) {
+    $FoundScriptsDir = $ScriptsDir
+    $ScriptsFound = $true
+} elseif (Test-Path "$ScriptsDir\partner" -PathType Leaf) {
+    $FoundScriptsDir = $ScriptsDir
+    $ScriptsFound = $true
+} else {
+    # Fallback: search common locations
+    Write-Warn "partner executable not found in $ScriptsDir"
+    Write-Info "Searching for partner executable in common Scripts directories..."
+    $candidateDirs = @(
+        "$env:APPDATA\Python\Python312\Scripts",
+        "$env:APPDATA\Python\Python311\Scripts",
+        "$env:APPDATA\Python\Python310\Scripts",
+        "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts",
+        "$env:LOCALAPPDATA\Programs\Python\Python310\Scripts"
+    )
+    foreach ($dir in $candidateDirs) {
+        if (Test-Path "$dir\partner.exe" -PathType Leaf) {
+            $FoundScriptsDir = $dir
+            $ScriptsFound = $true
+            break
+        }
+    }
+}
+
+if ($ScriptsFound) {
+    Write-Info "Found partner executable in: $FoundScriptsDir"
+
+    # Add to user PATH permanently
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($currentPath -split ";" -notcontains $FoundScriptsDir) {
+        try {
+            [Environment]::SetEnvironmentVariable("Path", "$currentPath;$FoundScriptsDir", "User")
+            Write-Info "Added to user PATH: $FoundScriptsDir"
+        } catch {
+            Write-Warn "Could not modify PATH: $_"
+        }
+    } else {
+        Write-Info "Already in user PATH: $FoundScriptsDir"
+    }
+} else {
+    Write-Warn "Could not locate partner.exe in any Scripts directory."
+    Write-Warn "Partner installed but not added to PATH. You may need to add the directory manually."
+    Write-Warn "Look for partner.exe in: $ScriptsDir"
+}
+
+# ── Desktop shortcut (optional) ──
+Write-Header "Desktop shortcut"
+
+$createShortcut = Read-Host "  Create a desktop shortcut for Partner? (Y/n)"
+if ($createShortcut -ne "n") {
+    try {
+        $DesktopPath  = [Environment]::GetFolderPath("Desktop")
+        $ShortcutPath = "$DesktopPath\Partner.lnk"
+        $WScriptShell = New-Object -ComObject WScript.Shell
+        $Shortcut     = $WScriptShell.CreateShortcut($ShortcutPath)
+        $Shortcut.TargetPath         = "wscript.exe"
+        $Shortcut.Arguments          = "$PartnerDir\Partner.vbs"
+        $Shortcut.Description        = "Partner - Your AI Research Companion"
+        $Shortcut.WorkingDirectory   = "$PartnerDir"
+        $Shortcut.IconLocation       = "$PartnerDir\Partner.exe, 0"
+        $Shortcut.Save()
+        Write-Info "Desktop shortcut created: $ShortcutPath"
+    } catch {
+        Write-Warn "Could not create desktop shortcut: $_"
+    }
+} else {
+    Write-Info "Desktop shortcut skipped"
+}
+
+# ── Done ──
+Write-Header "Installation complete"
 Write-Host ""
-Write-Host "  安装目录: $PartnerDir" -ForegroundColor $Cyan
+Write-Host "  `u{2713} Partner installed successfully. Restart your terminal and run 'partner' to start." -ForegroundColor $cGreen
 Write-Host ""
-Write-Host "  双击桌面上的 Partner 快捷方式启动" -ForegroundColor $Green
+Write-Host "  Installation directory: $PartnerDir" -ForegroundColor $cCyan
+if ($ScriptsFound) {
+    Write-Host "  Scripts directory:      $FoundScriptsDir" -ForegroundColor $cCyan
+}
 Write-Host ""

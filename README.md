@@ -36,9 +36,21 @@ And it tells you everything it discovered while you were away.
 # Linux
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 
-# Windows (one-liner, no downloads needed)
+# Windows (one-liner, silent install)
 powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
 ```
+
+### First Run
+
+On first launch, Partner will ask you to choose a language:
+
+```
+Welcome to Partner! Please choose your language:
+1. English (default)
+2. 中文
+```
+
+You can also change the language at any time by sending `/lang en` or `/lang zh` in QQ.
 
 ### Commands
 

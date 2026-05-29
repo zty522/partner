@@ -796,6 +796,10 @@ class QQQfficialBridge:
             minutes = int(interval_match.group(1))
             return self._change_interval(minutes, msg)
 
+        # Language switch: /lang, /language, 切换语言, 设置语言, 切换成中文, 切换成英文
+        if t.lower() in ("/lang", "/language", "切换语言", "设置语言", "切换成中文", "切换成英文"):
+            return self._handle_lang_switch(msg)
+
         return None
 
     def _clear_queue(self, msg: QQMessage) -> str:
@@ -970,6 +974,39 @@ class QQQfficialBridge:
             pass
 
         return f"改好了，以后每 {minutes} 分钟找你一次"
+
+
+    def _handle_lang_switch(self, msg: QQMessage) -> str:
+        """Handle /lang command to switch language dynamically."""
+        from .i18n import reload as i18n_reload
+        import json
+        from pathlib import Path
+
+        config_path = Path.home() / ".partner" / "config.json"
+        try:
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+            else:
+                cfg = {}
+
+            current = cfg.get("language", "en")
+            new_lang = "zh" if current == "en" else "en"
+            cfg["language"] = new_lang
+
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+
+            # Force i18n to re-read config
+            i18n_reload()
+
+            name = "English" if new_lang == "en" else "中文"
+            from .i18n import t
+            return t("cli.lang_switched", name=name)
+        except Exception as e:
+            logger.error(f"Language switch failed: {e}")
+            return f"Failed to switch language: {e}"
 
 
     # ── LLM Intent Classification & Task Queuing ───────────────────

@@ -27,17 +27,38 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 SEARCH_TIMEOUT = 30  # seconds
 
 
-def search(topic: str, max_results: int = 5) -> List[Dict]:
+def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
     """搜索学术文献，按优先级尝试多个后端。
+
+    在尝试学术 API 之前，先从 dialog 上下文检查是否有用户已提供的信息。
 
     Args:
         topic: 搜索主题
         max_results: 最大返回结果数
+        workspace: Partner 工作区路径（可选）。提供后可先查 dialog 上下文。
 
     Returns:
         List[Dict]，每个 dict 包含 title, authors, year, url, abstract, source
     """
-    # 优先 Semantic Scholar
+    # 0. 优先从 dialog 上下文获取用户已提供的信息
+    if workspace:
+        try:
+            from .context_broker import ContextBroker
+            broker = ContextBroker(workspace)
+            recent = broker.collect_recent_dialogs(hours=48)
+            if recent:
+                facts = broker.extract_project_facts(recent)
+                dialog_results = _build_dialog_results(topic, facts)
+                if dialog_results:
+                    logger.info(
+                        f"[Searcher] Found {len(dialog_results)} result(s) "
+                        f"from dialog context for '{topic}'"
+                    )
+                    return dialog_results
+        except Exception as e:
+            logger.debug(f"[Searcher] Dialog context check failed (non-fatal): {e}")
+
+    # 1. 优先 Semantic Scholar
     try:
         results = _search_semantic_scholar(topic, max_results)
         if results:
@@ -176,6 +197,70 @@ def _extract_xml(xml_str: str, tag: str) -> str:
     import re
     m = re.search(f"<{tag}[^>]*>(.*?)</{tag}>", xml_str, re.DOTALL)
     return m.group(1) if m else ""
+
+
+def _build_dialog_results(topic: str, facts: Dict) -> List[Dict]:
+    """从 dialog 事实中构造类似搜索结果的条目。
+
+    Args:
+        topic: 搜索主题
+        facts: ContextBroker.extract_project_facts() 返回的事实字典
+
+    Returns:
+        格式与 search() 一致的 List[Dict]，source="dialog"
+    """
+    results = []
+
+    # Build entry from metrics
+    metrics = facts.get("metrics", {})
+    if metrics:
+        metric_lines = ", ".join(f"{k}={v}" for k, v in metrics.items())
+        results.append({
+            "title": f"对话中的指标 — {topic}",
+            "authors": [],
+            "year": "",
+            "url": "",
+            "abstract": f"从最近对话中提取的实验指标：{metric_lines}",
+            "source": "dialog",
+        })
+
+    # Build entry from files
+    files = facts.get("files", [])
+    if files:
+        results.append({
+            "title": f"对话中提到的相关文件 — {topic}",
+            "authors": [],
+            "year": "",
+            "url": "",
+            "abstract": "用户项目中涉及的文件：\n" + "\n".join(files[:8]),
+            "source": "dialog",
+        })
+
+    # Build entry from issues
+    issues = facts.get("issues", [])
+    if issues:
+        results.append({
+            "title": f"对话中识别的问题 — {topic}",
+            "authors": [],
+            "year": "",
+            "url": "",
+            "abstract": "用户反馈的问题：\n" + "\n".join(issues[:5]),
+            "source": "dialog",
+        })
+
+    # Build entry from raw snippets
+    snippets = facts.get("raw_snippets", [])
+    if snippets:
+        results.append({
+            "title": f"对话摘要 — {topic}",
+            "authors": [],
+            "year": "",
+            "url": "",
+            "abstract": snippets[-1][:500],
+            "source": "dialog",
+        })
+
+    return results
 
 
 def format_results(results: List[Dict], max_items: int = 3) -> str:

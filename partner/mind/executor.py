@@ -124,6 +124,84 @@ def _get_handler(event_type: EventType):
     }.get(event_type)
 
 
+def _scan_project_for_topic(topic: str, workspace: str) -> str:
+    """Scan project directory for code/README files relevant to topic.
+
+    Looks for:
+    - README files (README.md, README.txt, etc.)
+    - Python/JSON/YAML files containing topic-related keywords
+    - Project structure summary
+
+    Returns a formatted string or empty string if nothing found.
+    """
+    import os as _os
+    import fnmatch as _fnmatch
+
+    if not workspace or not _os.path.isdir(workspace):
+        return ""
+
+    topic_lower = topic.lower()
+    topic_keywords = topic_lower.replace("，", " ").replace(",", " ").split()
+    if not topic_keywords:
+        topic_keywords = [topic_lower]
+
+    scanned = {"readme": [], "code": [], "config": []}
+
+    # Walk workspace (max depth 3) looking for relevant files
+    for root, dirs, files in _os.walk(workspace):
+        depth = root.replace(workspace, "").count(_os.sep)
+        if depth > 3:
+            dirs.clear()
+            continue
+        # Skip hidden directories and common noise
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("__pycache__", "node_modules", ".git", "venv", ".venv", "env")]
+
+        for fname in files:
+            # README files
+            if "readme" in fname.lower():
+                try:
+                    with open(_os.path.join(root, fname), "r", encoding="utf-8") as f:
+                        content = f.read(2000)
+                    if any(kw in content.lower() for kw in topic_keywords):
+                        scanned["readme"].append(f"{_os.path.relpath(_os.path.join(root, fname), workspace)}: {content[:300].strip()}")
+                except Exception:
+                    pass
+            # Python files
+            elif fname.endswith(".py"):
+                rel = _os.path.relpath(_os.path.join(root, fname), workspace)
+                if any(kw in rel.lower() for kw in topic_keywords):
+                    try:
+                        with open(_os.path.join(root, fname), "r", encoding="utf-8") as f:
+                            first_lines = f.readlines(40)
+                        scanned["code"].append(f"{rel} ({len(first_lines)} lines)")
+                    except Exception:
+                        scanned["code"].append(rel)
+            # Config/markdown files
+            elif fname.endswith((".md", ".json", ".yaml", ".yml", ".toml", ".txt")):
+                rel = _os.path.relpath(_os.path.join(root, fname), workspace)
+                if any(kw in rel.lower() for kw in topic_keywords):
+                    try:
+                        with open(_os.path.join(root, fname), "r", encoding="utf-8") as f:
+                            first_lines = f.readlines(30)
+                        content_preview = "".join(first_lines)[:500].strip()
+                        scanned["config"].append(f"{rel}: {content_preview[:200]}")
+                    except Exception:
+                        scanned["config"].append(rel)
+
+    # Build report
+    parts = []
+    if scanned["readme"]:
+        parts.append("README 中涉及相关信息：" + " | ".join(scanned["readme"][:3]))
+    if scanned["code"]:
+        parts.append("相关代码文件：" + "、".join(scanned["code"][:5]))
+    if scanned["config"]:
+        parts.append("相关配置/文档：" + "、".join(scanned["config"][:5]))
+
+    if parts:
+        return f"关于「{topic}」，在项目目录中找到了以下相关内容：\n" + "\n".join(parts)
+    return ""
+
+
 # ── 各类型处理函数 ──────────────────────────────────────────────
 
 
@@ -264,7 +342,7 @@ async def _handle_curiosity(event: MindEvent):
     web_results = []
     try:
         from ..searcher import search as _search, format_results
-        web_results = _search(topic, max_results=5)
+        web_results = _search(topic, max_results=5, workspace=_workspace)
         web_result_text = format_results(web_results, max_items=3)
         logger.info(f"[CURIOSITY] Web search returned {len(web_results)} results for '{topic}'")
     except Exception as e:
@@ -303,19 +381,56 @@ async def _handle_curiosity(event: MindEvent):
 
     # 4. 如果没有实质内容或 LLM 生成失败
     if not report_content and not kb_entries and not web_result_text:
-        logger.info(f"[CURIOSITY] Nothing to report for '{topic}' — generating tentative plan")
+        logger.info(f"[CURIOSITY] Nothing to report for '{topic}' — trying dialog context / local scan")
         pool = await ensure_pool()
-        # 绝不说"不知道"或"搜不到"。生成试探性方案。
+
+        # First: derive content from dialog context (never ask user for direction)
+        dialog_content = None
+        if _workspace:
+            try:
+                from ..context_broker import ContextBroker
+                broker = ContextBroker(_workspace)
+                recent = broker.collect_recent_dialogs(hours=48)
+                if recent:
+                    facts = broker.extract_project_facts(recent)
+                    if facts.get("metrics") or facts.get("files") or facts.get("issues"):
+                        lines = [f"关于「{topic}」，从最近的对话中了解到："]
+                        if facts.get("metrics"):
+                            lines.append("指标: " + ", ".join(f"{k}={v}" for k, v in facts["metrics"].items()))
+                        if facts.get("files"):
+                            lines.append("相关文件: " + ", ".join(facts["files"]))
+                        if facts.get("issues"):
+                            lines.append("提到的问题: " + ", ".join(facts["issues"]))
+                        if facts.get("keywords"):
+                            lines.append("技术关键词: " + ", ".join(facts["keywords"][:6]))
+                        if facts.get("raw_snippets"):
+                            lines.append(f"相关对话片段: {facts['raw_snippets'][-1][:200]}")
+                        dialog_content = "\n".join(lines)
+            except Exception as e:
+                logger.debug(f"[CURIOSITY] Dialog context extraction failed: {e}")
+
+        if dialog_content:
+            await pool.put(report(content=dialog_content, priority=3, source="executor:curiosity_dialog"))
+            logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (from dialog)")
+            return
+
+        # Second: scan project directory for README, code files, etc.
+        try:
+            local_facts = _scan_project_for_topic(topic, _workspace)
+            if local_facts:
+                await pool.put(report(content=local_facts, priority=3, source="executor:curiosity_local"))
+                logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (local scan)")
+                return
+        except Exception as e:
+            logger.debug(f"[CURIOSITY] Local scan failed: {e}")
+
+        # Last resort: minimal factual statement, never ask user for direction
         tentative = (
-            f"关于「{topic}」，目前知识库中没有直接记录。\n"
-            f"我将从以下方向继续探索：\n"
-            f"1. 搜索相关学术文献\n"
-            f"2. 分析项目代码和数据\n"
-            f"3. 尝试少量实验验证假设\n"
-            f"有发现时会主动通知你。"
+            f"关于「{topic}」，目前没有找到直接相关的记录。\n"
+            f"我会持续关注这个方向，有新发现时主动通知你。"
         )
         await pool.put(report(content=tentative, priority=3, source="executor:curiosity_tentative"))
-        logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (tentative plan)")
+        logger.info(f"[MIND] DONE event_type=curiosity, id={event.id[:8]}, topic='{topic}' (no info)")
         return
     if not report_content:
         logger.info(f"[CURIOSITY] LLM unavailable for '{topic}' — using structured fallback")

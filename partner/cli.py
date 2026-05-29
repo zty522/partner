@@ -12,6 +12,8 @@ import os
 import sys
 from pathlib import Path
 
+from .i18n import lang, t, reload as i18n_reload
+
 
 def get_workspace() -> str:
     """Get configured workspace path (delegates to setup.find_workspace)."""
@@ -63,7 +65,7 @@ def cmd_default(args):
 def cmd_bot(args):
     workspace = args.workspace or get_workspace()
     if not workspace:
-        print("❌ Partner 未配置")
+        print(t("cli.not_configured"))
         return
     platform = args.platform
     action = args.action
@@ -78,14 +80,14 @@ def _bot_stop(workspace, platform, quiet=False):
     pid_path = os.path.join(workspace, "state", f"{platform}_bot.pid")
     label = {"qq": "QQ"}.get(platform, platform)
     if not os.path.exists(pid_path):
-        print(f"  ⚠ {label} 机器人未在运行")
+        print(t("cli.bot_not_running", label=label))
         return
     try:
         with open(pid_path) as f:
             pid = int(f.read().strip())
         os.kill(pid, 15)
         os.remove(pid_path)
-        print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+        print(t("cli.bot_stopped", label=label, pid=pid))
 
         # Also kill watchdog for this workspace
         import subprocess as _sp
@@ -101,11 +103,11 @@ def _bot_stop(workspace, platform, quiet=False):
             _print_commands()
     except ProcessLookupError:
         os.remove(pid_path)
-        print(f"  ⚠ {label} 进程已不存在，已清理")
+        print(t("cli.bot_process_gone", label=label))
         if not quiet:
             _print_commands()
     except Exception as e:
-        print(f"  ❌ 停止失败: {e}")
+        print(t("cli.stop_failed", error=str(e)))
     if quiet:
         print()  # blank line for spacing
 
@@ -118,27 +120,27 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
     if platform == "qq":
         cfg = os.path.join(workspace, "qq_config.json")
         if not os.path.exists(cfg):
-            print(f"  ❌ QQ 未配置，请先运行: partner setup")
+            print(t("cli.qq_not_configured"))
             return
         
         # Check and auto-install dependencies
         try:
             import aiohttp
         except ImportError:
-            print(f"  ⚠ 缺少 QQ 机器人依赖 (aiohttp)")
-            yn = input(f"     自动安装？[Y/n]: ").strip().lower()
+            print(t("cli.missing_dep", dep="aiohttp"))
+            yn = input(t("cli.auto_install")).strip().lower()
             if yn != "n":
-                print(f"     正在安装 aiohttp...")
+                print(t("cli.installing", dep="aiohttp"))
                 r = subprocess.run([sys.executable, "-m", "pip", "install", "aiohttp>=3.8"],
                                    capture_output=True, text=True, timeout=120)
                 if r.returncode == 0:
-                    print(f"     ✅ aiohttp 安装成功")
+                    print(t("cli.install_ok", dep="aiohttp"))
                 else:
-                    print(f"     ❌ 安装失败: {r.stderr[:100]}")
-                    print(f"     手动安装: pip install aiohttp")
+                    print(t("cli.install_fail", error=r.stderr[:100]))
+                    print(t("cli.install_manual", dep="aiohttp"))
                     return
             else:
-                print(f"     跳过，稍后手动安装: pip install aiohttp")
+                print(t("cli.install_skip", dep="aiohttp"))
                 return
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
@@ -152,7 +154,7 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
 
         if foreground:
             # Foreground mode: start bot, wait, write PID if alive
-            print(f"  🔌 正在连接 QQ 机器人...")
+            print(t("cli.connecting_bot"))
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -168,14 +170,14 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                     os.makedirs(os.path.dirname(pidf), exist_ok=True)
                     with open(pidf, "w") as f:
                         f.write(str(proc.pid))
-                    print(f"  ✅ 机器人已启动 (PID: {proc.pid})")
+                    print(t("cli.bot_connected", pid=proc.pid))
                 else:
                     # Process exited — get output for error
                     out = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
-                    print(out[:500] if out else "  ❌ 机器人连接失败（进程已退出）")
+                    print(out[:500] if out else t("cli.bot_connect_failed"))
                     sys.exit(1)
             except Exception as e:
-                print(f"  ❌ 启动异常: {e}")
+                print(t("cli.start_error", error=str(e)))
                 sys.exit(1)
             return
 
@@ -185,9 +187,9 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
         with open(pidf, "w") as f:
             f.write(str(proc.pid))
-        print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
-        print(f"     日志: {log}")
-        print(f"     停止: partner bot stop qq")
+        print(t("cli.bot_background", label=label, pid=proc.pid))
+        print(t("cli.log_at", log=log))
+        print(t("cli.stop_hint"))
 
         # Start watchdog (process monitor + auto-restart)
         watchdog_script = os.path.join(workspace, "scripts", "bot_watchdog.py")
@@ -199,14 +201,14 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                 stdin=subprocess.DEVNULL, start_new_session=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
-            print(f"  🛡️  Watchdog 已启动 (自动守护)")
+            print(t("cli.watchdog_started"))
         else:
-            print(f"  ⚠ Watchdog 脚本未找到: {watchdog_script}")
+            print(t("cli.watchdog_missing", path=watchdog_script))
 
         if not quiet:
             _print_commands()
     else:
-        print(f"  ❌ 未知机器人: {platform}（仅支持 qq）")
+        print(t("cli.unknown_platform", platform=platform))
 
 
 def cmd_update(args):
@@ -316,11 +318,11 @@ def cmd_update(args):
                 pass
 
     if qq_was_running:
-        print(f"   🤖 QQ 机器人运行中 → 自动重启...")
+        print(t("cli.bot_restarting"))
         _bot_stop(workspace, "qq", quiet=True)
         _bot_start(workspace, "qq", quiet=True)
     else:
-        print(f"   ℹ QQ 机器人未运行（跳过重启）")
+        print(t("cli.bot_not_running_skip"))
     print()
 
     # 6. Check and report current work state
@@ -368,7 +370,7 @@ def cmd_update(args):
         # Mind self-pulse — no external cron needed
         print(f"   🧠 Mind自脉冲: 15分钟（无需外部 cron）")
     else:
-        print(f"   ℹ 未找到工作区（运行 partner setup 配置）")
+        print(f"   {t('cli.workspace_not_found')}")
         # 没工作区 → 询问是否运行 setup
         _tty = None
         try:
@@ -377,7 +379,7 @@ def cmd_update(args):
             pass
         if _tty:
             try:
-                print(f"  {C_CYAN}是否运行配置向导？{C_RESET}[Y/n] ", end="", flush=True)
+                print(f"  {C_CYAN}{t('cli.ttysetup_prompt')}{C_RESET}", end="", flush=True)
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
@@ -413,7 +415,7 @@ def cmd_update(args):
 
         if _tty:
             try:
-                print(f"\n  {C_CYAN}检测到已有配置，是否运行配置向导修改？{C_RESET}[Y/n] ", end="", flush=True)
+                print(f"\n  {C_CYAN}{t('cli.ttysetup_redetect')}{C_RESET}", end="", flush=True)
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
@@ -424,7 +426,7 @@ def cmd_update(args):
             finally:
                 _tty.close()
         else:
-            print(f"\n  检测到已有配置。可稍后运行: {C_BOLD}partner setup{C_RESET}")
+            print(f"\n  {t('cli.ttysetup_detected')}")
 
 
 def _print_commands():
@@ -446,7 +448,7 @@ def _cmd_queue_clear(args):
     from .setup import find_workspace
     workspace = find_workspace()
     if not workspace:
-        print("❌ Partner 未配置")
+        print(t("cli.not_configured"))
         return
 
     state_dir = os.path.join(workspace, "state")
@@ -456,9 +458,9 @@ def _cmd_queue_clear(args):
     try:
         with open(queue_path, 'w', encoding='utf-8') as f:
             json.dump([], f, indent=2, ensure_ascii=False)
-        print("  ✅ 任务队列已清空")
+        print(t("cli.queue_cleared"))
     except Exception as e:
-        print(f"  ❌ 清空失败: {e}")
+        print(t("cli.queue_clear_failed", error=str(e)))
         return
 
     # Reset active_plan
@@ -477,9 +479,9 @@ def _cmd_queue_clear(args):
         }
         with open(plan_path, 'w', encoding='utf-8') as f:
             json.dump(plan, f, indent=2, ensure_ascii=False)
-        print("  ✅ 活跃计划已重置")
+        print(t("cli.plan_reset"))
     except Exception as e:
-        print(f"  ⚠ active_plan 重置失败: {e}")
+        print(t("cli.plan_reset_failed", error=str(e)))
 
     print()
     print("  Commands:")
@@ -496,7 +498,7 @@ def _cmd_config_set(args):
     from .setup import find_workspace
     workspace = find_workspace()
     if not workspace:
-        print("❌ Partner 未配置")
+        print(t("cli.not_configured"))
         return
 
     cfg_path = os.path.join(workspace, "partner_config.json")
@@ -504,7 +506,7 @@ def _cmd_config_set(args):
         with open(cfg_path, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
     except Exception as e:
-        print(f"❌ 读取配置失败: {e}")
+        print(t("cli.config_read_failed", error=str(e)))
         return
 
     key = args.key
@@ -514,23 +516,46 @@ def _cmd_config_set(args):
         try:
             minutes = int(value)
             if minutes < 1:
-                print("❌ 间隔不能小于 1 分钟")
+                print(t("cli.interval_invalid"))
                 return
             if "scheduler" not in cfg:
                 cfg["scheduler"] = {}
             cfg["scheduler"]["interval_minutes"] = minutes
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
-            print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
-            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron edit ...")
+            print(t("cli.interval_set", minutes=minutes))
+            print(t("cli.interval_restart_hint"))
         except ValueError:
-            print("❌ value 必须是数字（分钟数）")
+            print(t("cli.value_must_be_number"))
             return
 
     _print_commands()
 
 
 def main():
+    # ── First-run language detection ──
+    config_dir = Path.home() / ".partner"
+    config_path = config_dir / "config.json"
+    detected_lang = None
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            detected_lang = cfg.get("language", None)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if not detected_lang:
+        print()
+        print(f"  {C_BOLD}{C_CYAN}{t('cli.lang_prompt_welcome')}{C_RESET}")
+        print(f"  {t('cli.lang_prompt_option')}")
+        choice = input("  Choose [1/2]: ").strip()
+        lang_code = "zh" if choice == "2" else "en"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"language": lang_code}, f, indent=2)
+        print(f"  {t('cli.lang_selected', lang=lang_code)}")
+        print()
+
     parser = argparse.ArgumentParser(
         prog='partner',
         description='Partner 🤝 - Your AI Research Companion',
