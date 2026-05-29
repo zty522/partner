@@ -28,7 +28,7 @@ class Recorder:
 
     def __init__(self, workspace: str):
         self.workspace = workspace
-        self.records_dir = os.path.join(os.path.expanduser("~"), ".partner", "records")
+        self.records_dir = os.path.join(os.path.expanduser("~"), ".partner", "20_records")
 
     # ── Internal helpers ─────────────────────────────────────
 

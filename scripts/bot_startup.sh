@@ -4,7 +4,7 @@
 
 set -euo pipefail 2>/dev/null || set -eu
 
-WORKSPACE="/mnt/e/work/partner_workspace"
+WORKSPACE="$HOME/.partner"
 PARTNER_DIR="/mnt/e/work/partner"
 PID_FILE="$WORKSPACE/state/qq_bot.pid"
 
@@ -30,10 +30,10 @@ sys.argv[0] = sys.argv[0].replace('\\\\', '/')
 
 from partner.qq_official_bridge import QQQfficialBridge
 
-cfg = os.path.join('$WORKSPACE', 'partner_config.json')
+cfg = os.path.join('$WORKSPACE', '00_config', 'partner_config.json')
 with open(cfg) as f:
     config = json.load(f)
-qq_cfg = os.path.join('$WORKSPACE', config.get('messaging', {}).get('qq_config', 'qq_config.json'))
+qq_cfg = os.path.join('$WORKSPACE', '00_config', config.get('messaging', {}).get('qq_config', 'qq_config.json'))
 
 bridge = QQQfficialBridge('$WORKSPACE')
 bridge.load_config_from_file(qq_cfg)
