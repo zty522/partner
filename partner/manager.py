@@ -974,11 +974,11 @@ def main():
         description="Manage multiple Partner instances.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
-Examples (after creating with partner-manager):
-  partner-manager create --id age_pred
-    → prompts for AppID/AppSecret interactively
+Examples:
+  partner-manager create
+    → prompts for Instance ID, AppID, AppSecret interactively
 
-  partner-manager create --id wechat_bot --qq-config ./qq_config.json
+  partner-manager create --id age_pred --qq-config ./qq_config.json
 
   partner-manager start --id age_pred
   partner-manager stop --id age_pred
@@ -998,8 +998,8 @@ Examples (after creating with partner-manager):
 
     # ── create ──
     p_create = subparsers.add_parser("create", help="Create a new instance")
-    p_create.add_argument("--id", required=True, dest="instance_id",
-                          help="Unique instance identifier (e.g. age_pred)")
+    p_create.add_argument("--id", dest="instance_id", default=None,
+                          help="Instance identifier (optional — prompts interactively if omitted)")
     p_create.add_argument("--qq-config", dest="qq_config_src", default=None,
                           help="Path to qq_config.json (optional — prompts interactively if omitted)")
 
@@ -1057,7 +1057,17 @@ Examples (after creating with partner-manager):
 
     # ── Dispatch ──
     if args.command == "create":
-        create_instance(args.instance_id, args.qq_config_src)
+        instance_id = args.instance_id
+        if not instance_id:
+            try:
+                instance_id = input("  Instance ID: ").strip()
+                if not instance_id:
+                    print(f"{C_RED}Instance ID is required.{C_RESET}")
+                    sys.exit(1)
+            except (EOFError, KeyboardInterrupt):
+                print(f"\n{C_YELLOW}Cancelled.{C_RESET}")
+                sys.exit(1)
+        create_instance(instance_id, args.qq_config_src)
 
     elif args.command == "start":
         if args.start_all:

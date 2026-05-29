@@ -4,8 +4,9 @@
 
 ### 🚀 新增功能
 
-- **多实例管理（partner-manager）**: 新增 `partner.manager` 模块和 `partner-manager` CLI 命令，支持创建、启动、停止、重启多个独立 Partner 实例
-  - `partner-manager create --id <name>` — 不传 `--qq-config` 时交互式输入 AppID/AppSecret，自动写配置
+- **多实例管理（partner-manager）**: 新增 `partner.manager` 模块和 `partner-manager` CLI 命令
+  - `partner-manager create` — 全部交互式输入（Instance ID、AppID、AppSecret），无需任何参数
+  - `partner-manager create --id age_pred --qq-config ./qq_config.json` — 也支持命令行指定
   - `partner-manager start/stop/restart --id <name>` — 管理实例生命周期
   - `partner-manager list` — 列出所有实例和状态
   - `partner-manager logs --id <name> --tail 50` — 查看实例日志
@@ -20,6 +21,8 @@
 ### ⚙️ 改进
 
 - Exe 安装器文件名为 `Partner-0.5.0-Setup.exe`，版本号与代码同步
+- **install.ps1**: Python 版本检测放宽到 3.10+（不再限制 3.10-3.12，3.14 也能直接用）
+- **install.ps1**: 修复 embeddable Python 安装 `setuptools wheel` 时警告导致安装中断的问题（`--no-warn-script-location` + `$null` 赋值替代管道）
 
 ## [0.4.0] - 2026-05-29
 

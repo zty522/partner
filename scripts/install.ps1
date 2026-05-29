@@ -57,7 +57,7 @@ function Test-PythonVersion($pyCmd) {
 
 function Test-ValidPython($py) {
     if ($py -eq $null) { return $false }
-    return ($py.Major -eq 3 -and $py.Minor -ge 10 -and $py.Minor -le 12)
+    return ($py.Major -eq 3 -and $py.Minor -ge 10)
 }
 
 function Find-InstalledPython {
@@ -157,7 +157,7 @@ import site
         }
         # Also install setuptools and wheel (required for editable installs)
         Write-Info "Installing setuptools and wheel..."
-        & $pyPath -m pip install setuptools wheel -q 2>&1 | Out-Null
+        $null = & $pyPath -m pip install setuptools wheel -q --no-warn-script-location 2>&1
     } catch {
         Exit-Error "Failed to bootstrap pip: $_"
     }
@@ -183,7 +183,7 @@ function Ensure-Python {
 
     # System Python exists but wrong version
     if ($py -ne $null) {
-        Write-Warn "Python $($py.Full) detected but Partner requires 3.10, 3.11, or 3.12."
+        Write-Warn "Python $($py.Full) detected but Partner requires Python 3.10+."
         Write-Info "Installing Python 3.12 to isolated directory..."
         return Install-PythonIsolated
     }
