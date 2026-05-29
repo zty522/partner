@@ -89,6 +89,19 @@ def _humanize_project(name: str) -> str:
         return "未记录"
     if name == "CRON_TICK":
         return "periodic check"
+    # Filter out meaningless/placeholder project names
+    meaningless = [
+        "推进研究项目", "project_knowledge", "最新研究进展",
+        "最近的研究发现", "general", "default", "unknown",
+        "测试", "test", "temp",
+    ]
+    name_lower = name.lower().strip()
+    for bad in meaningless:
+        if name_lower == bad.lower() or name_lower == bad:
+            return "no active project"
+    # Single word chinese phrases that are too vague
+    if len(name) <= 4 and all('\u4e00' <= c <= '\u9fff' for c in name):
+        return "no active project"
     return name
 
 
@@ -123,6 +136,14 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
 
     project = _humanize_project(raw_project)
 
+    # 如果没有活跃项目，展示简洁版本
+    if project == "no active project":
+        return (
+            "✅ 系统已重启，恢复运行。\n"
+            "📌 没有活跃项目。等待用户指令或自动开始探索。\n"
+            "🕒 预计下次汇报：有实质性进展时主动发送。"
+        )
+
     # 构建指标描述（自然语言）
     metrics_str = _humanize_metrics(metrics)
 
@@ -137,6 +158,8 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
     if pending:
         for i, task in enumerate(pending[:3], 1):
             plan_lines.append(f"{i}. {task}")
+    elif project == "no active project":
+        plan_lines = ["1. 等待用户指令", "2. 或自动开始知识探索"]
     else:
         plan_lines = ["1. 根据上次进度继续推进", "2. 搜索相关文献寻找改进方向"]
 
