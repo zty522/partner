@@ -207,7 +207,7 @@ class ContextBroker:
     # ── 方法 3: 保存到知识库 ─────────────────────────────────────
 
     def save_to_knowledge(self, project_name: str, facts: Dict):
-        """将对话中提取的信息写入 knowledge.json。
+        """将对话中提取的信息写入 knowledge.json 和 Recorder 记录系统。
 
         格式：
         {
@@ -221,43 +221,117 @@ class ContextBroker:
             project_name: 项目名称
             facts: extract_project_facts() 返回的事实字典
         """
-        if not self.knowledge:
-            logger.warning("[ContextBroker] knowledge 未初始化，无法保存")
-            return
+        saved_any = False
 
+        # --- 原有的 knowledge_context.json 保存逻辑 ---
+        if self.knowledge:
+            try:
+                # 构造可存储的知识条目
+                entry_data = {
+                    "source": "dialog",
+                    "project": project_name,
+                    "timestamp": datetime.now().isoformat(),
+                    "facts": facts,
+                }
+
+                # 写入独立的 knowledge_context.json（保持 knowledge.json 原有格式干净）
+                existing = []
+                if os.path.exists(self.knowledge_custom_path):
+                    try:
+                        with open(self.knowledge_custom_path, "r", encoding="utf-8") as f:
+                            existing = json.load(f)
+                            if not isinstance(existing, list):
+                                existing = [existing]
+                    except (json.JSONDecodeError, Exception):
+                        existing = []
+
+                existing.append(entry_data)
+                # 最多保留 50 条
+                if len(existing) > 50:
+                    existing = existing[-50:]
+
+                os.makedirs(os.path.dirname(self.knowledge_custom_path), exist_ok=True)
+                with open(self.knowledge_custom_path, "w", encoding="utf-8") as f:
+                    json.dump(existing, f, indent=2, ensure_ascii=False)
+
+                logger.info(f"[ContextBroker] 项目 '{project_name}' 的事实已保存 ({len(facts)} 项)")
+                saved_any = True
+
+            except Exception as e:
+                logger.error(f"[ContextBroker] 保存知识失败: {e}")
+
+        # --- 新增：使用 Recorder 记录系统保存结构化知识条目 ---
         try:
-            # 构造可存储的知识条目
-            entry_data = {
-                "source": "dialog",
-                "project": project_name,
-                "timestamp": datetime.now().isoformat(),
-                "facts": facts,
-            }
+            from .recorder import Recorder
+            recorder = Recorder(self.workspace)
 
-            # 写入独立的 knowledge_context.json（保持 knowledge.json 原有格式干净）
-            existing = []
-            if os.path.exists(self.knowledge_custom_path):
-                try:
-                    with open(self.knowledge_custom_path, "r", encoding="utf-8") as f:
-                        existing = json.load(f)
-                        if not isinstance(existing, list):
-                            existing = [existing]
-                except (json.JSONDecodeError, Exception):
-                    existing = []
+            # 记录指标
+            metrics = facts.get("metrics", {})
+            if metrics:
+                metric_content = ", ".join(f"{k}={v}" for k, v in metrics.items())
+                recorder.add_knowledge(
+                    project=project_name,
+                    entry_type="metric",
+                    content=f"Experiment metrics: {metric_content}",
+                    source="user_dialog",
+                    confidence=0.8,
+                )
 
-            existing.append(entry_data)
-            # 最多保留 50 条
-            if len(existing) > 50:
-                existing = existing[-50:]
+            # 记录发现的问题
+            issues = facts.get("issues", [])
+            for issue in issues:
+                recorder.add_knowledge(
+                    project=project_name,
+                    entry_type="issue",
+                    content=f"Issue identified: {issue}",
+                    source="user_dialog",
+                    confidence=0.7,
+                )
 
-            os.makedirs(os.path.dirname(self.knowledge_custom_path), exist_ok=True)
-            with open(self.knowledge_custom_path, "w", encoding="utf-8") as f:
-                json.dump(existing, f, indent=2, ensure_ascii=False)
+            # 记录相关文件
+            files = facts.get("files", [])
+            if files:
+                recorder.add_knowledge(
+                    project=project_name,
+                    entry_type="file_reference",
+                    content=f"Related files: {', '.join(files[:8])}",
+                    source="user_dialog",
+                    confidence=0.9,
+                )
 
-            logger.info(f"[ContextBroker] 项目 '{project_name}' 的事实已保存 ({len(facts)} 项)")
+            # 记录技术关键词
+            keywords = facts.get("keywords", [])
+            if keywords:
+                recorder.add_knowledge(
+                    project=project_name,
+                    entry_type="keyword",
+                    content=f"Technical keywords: {', '.join(keywords[:12])}",
+                    source="user_dialog",
+                    confidence=0.6,
+                )
 
+            # 记录原始对话片段（如果有）
+            snippets = facts.get("raw_snippets", [])
+            for snippet in snippets[-3:]:  # Last 3 snippets
+                recorder.add_knowledge(
+                    project=project_name,
+                    entry_type="dialog_snippet",
+                    content=snippet[:300],
+                    source="user_dialog",
+                    confidence=0.8,
+                )
+
+            logger.info(f"[ContextBroker] 已通过 Recorder 记录 {project_name} 的对话知识")
+            saved_any = True
+
+        except ImportError:
+            # Recorder not available — non-fatal
+            pass
         except Exception as e:
-            logger.error(f"[ContextBroker] 保存知识失败: {e}")
+            logger.warning(f"[ContextBroker] Recorder save failed (non-fatal): {e}")
+
+        if not saved_any:
+            logger.warning("[ContextBroker] knowledge 未初始化，无法保存")
 
     # ── 方法 4: 获取项目上下文 ───────────────────────────────────
 

@@ -67,6 +67,31 @@ def load(workspace: str) -> Optional[Dict]:
         return None
 
 
+def _humanize_metrics(metrics: Dict) -> str:
+    """Convert internal metric names to natural language."""
+    if not metrics:
+        return ""
+    parts = []
+    for k, v in metrics.items():
+        key_lower = k.lower()
+        if key_lower == "pool_size":
+            parts.append(f"系统状态：队列中有 {v} 个待处理任务")
+        elif key_lower == "task_id":
+            parts.append(f"任务编号：{v}")
+        else:
+            parts.append(f"{k}：{v}")
+    return "（" + "；".join(parts) + "）"
+
+
+def _humanize_project(name: str) -> str:
+    """Convert internal project names to natural language."""
+    if not name:
+        return "未记录"
+    if name == "CRON_TICK":
+        return "periodic check"
+    return name
+
+
 def format_restart_report(last_state: Optional[Dict]) -> str:
     """根据 last_state 生成重启后结构化汇报文本。
 
@@ -90,20 +115,22 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
             "🕒 预计下次汇报：有实质性进展时主动发送。"
         )
 
-    project = last_state.get("active_project", "未记录")
+    raw_project = last_state.get("active_project", "未记录")
     last_action = last_state.get("last_action", "未知")
     metrics = last_state.get("last_metrics", {})
     pending = last_state.get("pending_tasks", [])
     dialog = last_state.get("last_dialog_summary", "")
 
-    # 构建指标描述
-    metrics_str = ""
-    if metrics:
-        metrics_str = ", ".join(f"{k}={v}" for k, v in metrics.items())
-        metrics_str = f"（{metrics_str}）"
+    project = _humanize_project(raw_project)
+
+    # 构建指标描述（自然语言）
+    metrics_str = _humanize_metrics(metrics)
 
     # 构建进度描述
-    progress = f"{last_action}{metrics_str}"
+    if metrics_str:
+        progress = f"{last_action} {metrics_str}"
+    else:
+        progress = last_action
 
     # 构建计划
     plan_lines = []
@@ -149,15 +176,18 @@ def format_status_report(last_state: Optional[Dict]) -> str:
             "🎯 下一步计划：识别可探索的方向并开始研究"
         )
 
-    project = last_state.get("active_project", "暂无活跃项目")
+    raw_project = last_state.get("active_project", "暂无活跃项目")
     last_action = last_state.get("last_action", "分析中")
     metrics = last_state.get("last_metrics", {})
     pending = last_state.get("pending_tasks", [])
 
-    metrics_str = ""
-    if metrics:
-        metrics_str = ", ".join(f"{k}={v}" for k, v in metrics.items())
-        metrics_str = f"（{metrics_str}）"
+    project = _humanize_project(raw_project)
+    metrics_str = _humanize_metrics(metrics)
+
+    if metrics_str:
+        progress = f"{last_action} {metrics_str}"
+    else:
+        progress = last_action
 
     plan_str = ""
     if pending:
@@ -169,7 +199,7 @@ def format_status_report(last_state: Optional[Dict]) -> str:
 
     return (
         f"📊 当前研究：{project}\n"
-        f"📈 最近成果：{last_action}{metrics_str}\n"
+        f"📈 最近成果：{progress}\n"
         f"⏳ 正在进行：推进研究计划中\n"
         f"🎯 {plan_str}"
     )

@@ -26,6 +26,7 @@ _adapter = None  # AgentAdapter instance
 _knowledge = None
 _journal = None
 _state = None
+_recorder = None  # Recorder instance
 _pool: Optional[MindPool] = None
 
 # 推送回调：msg(str) -> None
@@ -52,15 +53,24 @@ def init(workspace: str, adapter=None, knowledge=None,
 
     包括：
     - 设置工作区、适配器、知识库等引用
+    - 初始化 Recorder 记录系统
     - 读取 active_plan.json 和 task_queue.json
     - 如果有未完成的任务，自动生成初始 Curiosity 念头
     """
-    global _workspace, _adapter, _knowledge, _journal, _state
+    global _workspace, _adapter, _knowledge, _journal, _state, _recorder
     _workspace = workspace
     _adapter = adapter
     _knowledge = knowledge
     _journal = journal
     _state = state
+
+    # 初始化 Recorder
+    try:
+        from ..recorder import Recorder
+        _recorder = Recorder(workspace)
+        logger.info(f"[MIND] Recorder initialized for workspace: {workspace}")
+    except Exception as e:
+        logger.warning(f"[MIND] Recorder initialization failed (non-fatal): {e}")
 
     # 读取 active_plan，避免报 "空闲中"
     _bootstrap_from_state()
@@ -619,14 +629,14 @@ async def _handle_cron_tick(event: MindEvent):
     if accelerated:
         logger.info(f"[CRON] 加速了 {accelerated} 个 PROJECT 事件")
 
-    # 6. 保存状态
+    # 6. 保存状态（使用自然语言，无内部变量名）
     try:
         from ..state_persistence import save as _save_state
         if _workspace:
             state = {
-                "active_project": "CRON_TICK",
+                "active_project": "periodic check",
                 "last_action": "周期检查 - 空闲检测与自动探索",
-                "last_metrics": {"pool_size": pool.qsize()},
+                "last_metrics": {"system status": pool.qsize()},
                 "pending_tasks": [f"自动探索继续"],
                 "last_dialog_summary": "",
                 "source": "cron_tick",

@@ -62,6 +62,20 @@ partner bot stop qq           Stop QQ bot
 partner update                Pull latest code + reinstall
 ```
 
+### Checking Records
+
+During research, Partner automatically saves findings to `~/.partner/records/`:
+
+| File | Format | Description |
+|------|--------|-------------|
+| `projects/{name}/exploration_log.md` | Markdown | Human-readable exploration history with timestamps |
+| `projects/{name}/knowledge.json` | JSON | Structured knowledge entries with confidence scores |
+| `projects/{name}/experiments.csv` | CSV | Experiment parameters and metric results |
+| `global_knowledge.json` | JSON | Cross-project knowledge |
+| `session_history.jsonl` | JSONL | Session summaries |
+
+You can view the latest records by sending `/summary` in QQ. The bot will reply with the 5 most recent exploration entries.
+
 ---
 
 ## Core Architecture

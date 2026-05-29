@@ -800,6 +800,12 @@ class QQQfficialBridge:
         if t.lower() in ("/lang", "/language", "切换语言", "设置语言", "切换成中文", "切换成英文"):
             return self._handle_lang_switch(msg)
 
+        # Summary: /summary, 查看记录, 日志, 记录, history, 最近记录
+        summary_patterns = ["/summary", "查看记录", "日志", "记录", "history", "最近记录"]
+        for p in summary_patterns:
+            if t.lower() == p.lower() or t.lower().startswith(p.lower()):
+                return self._handle_summary(msg)
+
         return None
 
     def _clear_queue(self, msg: QQMessage) -> str:
@@ -1007,6 +1013,55 @@ class QQQfficialBridge:
         except Exception as e:
             logger.error(f"Language switch failed: {e}")
             return f"Failed to switch language: {e}"
+
+
+    def _handle_summary(self, msg: QQMessage) -> str:
+        """Handle /summary command: show recent exploration records.
+
+        Creates a Recorder instance, queries recent explorations,
+        and formats a concise summary for the user.
+        """
+        try:
+            from .recorder import Recorder
+            recorder = Recorder(self.workspace)
+            records = recorder.get_recent_explorations(limit=5)
+
+            if not records:
+                return "No exploration records yet."
+
+            lines = ["📋 最近探索记录："]
+            for rec in records:
+                ts = rec.get("timestamp", "").split(".")[0] if rec.get("timestamp") else ""
+                action = rec.get("action", "")
+                findings = rec.get("findings", "")
+                project = rec.get("project", "")
+                if project:
+                    prefix = f"📁 {project}"
+                else:
+                    prefix = ""
+                if ts:
+                    entry = f"• [{ts}] {action}"
+                else:
+                    entry = f"• {action}"
+                if prefix:
+                    entry = f"{prefix} {entry}"
+                lines.append(entry)
+                if findings:
+                    # Truncate findings to stay within QQ limits
+                    short = findings[:100].replace("\n", " ")
+                    if len(findings) > 100:
+                        short += "..."
+                    lines.append(f"  {short}")
+
+            result = "\n".join(lines)
+            # Cap at 1500 chars for QQ
+            if len(result) > 1500:
+                result = result[:1497] + "..."
+            return result
+
+        except Exception as e:
+            logger.error(f"Summary command failed: {e}")
+            return "Sorry, could not retrieve exploration records."
 
 
     # ── LLM Intent Classification & Task Queuing ───────────────────

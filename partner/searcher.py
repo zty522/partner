@@ -54,6 +54,8 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
                         f"[Searcher] Found {len(dialog_results)} result(s) "
                         f"from dialog context for '{topic}'"
                     )
+                    # Record dialog findings
+                    _record_knowledge(workspace, topic, dialog_results, "dialog")
                     return dialog_results
         except Exception as e:
             logger.debug(f"[Searcher] Dialog context check failed (non-fatal): {e}")
@@ -62,6 +64,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
     try:
         results = _search_semantic_scholar(topic, max_results)
         if results:
+            _record_knowledge(workspace, topic, results, "semantic_scholar")
             return results
     except Exception as e:
         logger.warning(f"[Searcher] Semantic Scholar failed: {e}")
@@ -70,6 +73,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
     try:
         results = _search_crossref(topic, max_results)
         if results:
+            _record_knowledge(workspace, topic, results, "crossref")
             return results
     except Exception as e:
         logger.warning(f"[Searcher] Crossref failed: {e}")
@@ -78,6 +82,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
     try:
         results = _search_arxiv(topic, max_results)
         if results:
+            _record_knowledge(workspace, topic, results, "arxiv")
             return results
     except Exception as e:
         logger.warning(f"[Searcher] ArXiv failed: {e}")
@@ -287,3 +292,57 @@ def format_results(results: List[Dict], max_items: int = 3) -> str:
         lines.append("\n".join(parts))
 
     return "\n\n".join(lines)
+
+
+def _record_knowledge(workspace: str, topic: str, results: List[Dict], source: str) -> None:
+    """Record search results into the Recorder system.
+
+    Args:
+        workspace: Partner workspace path
+        topic: The search topic (used as project name)
+        results: Search result dicts from any backend
+        source: Source identifier (e.g. "semantic_scholar", "crossref", "dialog")
+    """
+    if not workspace or not results:
+        return
+    try:
+        from .recorder import Recorder
+
+        recorder = Recorder(workspace)
+        # Use topic as the project name for recording
+        project_name = topic[:60] if topic else "search"
+
+        # Record each result individually as knowledge
+        for r in results[:5]:  # Limit to top 5 results
+            title = r.get("title", "") or ""
+            authors = ", ".join(r.get("authors", [])[:3])
+            year = r.get("year", "")
+            abstract = (r.get("abstract", "") or "")[:300]
+            url = r.get("url", "")
+
+            content_parts = [title]
+            if authors:
+                content_parts.append(f"Authors: {authors}")
+            if year:
+                content_parts.append(f"Year: {year}")
+            if abstract:
+                content_parts.append(f"Abstract: {abstract}")
+            if url:
+                content_parts.append(f"URL: {url}")
+
+            content = " | ".join(content_parts)
+
+            recorder.add_knowledge(
+                project=project_name,
+                entry_type="search_result",
+                content=content,
+                source=source,
+                confidence=0.7,
+            )
+
+        logger.info(
+            f"[Searcher] Recorded {min(len(results), 5)} knowledge entries "
+            f"from '{source}' for topic '{topic[:40]}'"
+        )
+    except Exception as e:
+        logger.debug(f"[Searcher] Failed to record knowledge (non-fatal): {e}")
