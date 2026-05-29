@@ -18,6 +18,23 @@ os.environ['PARTNER_INSTANCE_ID'] = args.instance_id
 if args.workspace:
     os.environ['PARTNER_WORKSPACE'] = args.workspace
 
-from partner.cli import main
-sys.argv = [sys.argv[0]] + remaining
-main()
+# If running with --instance-id/--workspace (manager or systemd), auto-start bridge
+if args.workspace or args.instance_id != 'default' or 'PARTNER_INSTANCE_ID' in os.environ:
+    from partner.qq_official_bridge import QQQfficialBridge
+    workspace = args.workspace or os.path.join(os.path.expanduser("~"), ".partner", "instances", args.instance_id)
+    # Look for qq_config in 00_config/ first, then workspace root
+    cfg = os.path.join(workspace, "00_config", "qq_config.json")
+    if not os.path.exists(cfg):
+        cfg = os.path.join(workspace, "qq_config.json")
+    if os.path.exists(cfg):
+        bridge = QQQfficialBridge(workspace)
+        bridge.load_config_from_file(cfg)
+        bridge.start()
+    else:
+        print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}")
+        sys.exit(1)
+else:
+    # Normal CLI mode
+    from partner.cli import main
+    sys.argv = [sys.argv[0]] + remaining
+    main()
