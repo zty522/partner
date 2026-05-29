@@ -155,6 +155,9 @@ import site
         if ($LASTEXITCODE -ne 0) {
             Exit-Error "pip bootstrap failed: $pipOutput"
         }
+        # Also install setuptools and wheel (required for editable installs)
+        Write-Info "Installing setuptools and wheel..."
+        & $pyPath -m pip install setuptools wheel -q 2>&1 | Out-Null
     } catch {
         Exit-Error "Failed to bootstrap pip: $_"
     }
@@ -290,7 +293,7 @@ function Install-PartnerPackage {
         }
         Write-Info "pip: $($pipVer.Trim())"
         
-        $pipOutput = & $pythonExe -m pip install -e . -q 2>&1
+        $pipOutput = & $pythonExe -m pip install -e . 2>&1
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
             Exit-Error "pip install failed. Full output: $pipOutput"
