@@ -105,22 +105,38 @@ function Install-PythonIsolated {
         Exit-Error "Python was extracted but python.exe not found at $pyPath"
     }
 
-    # Enable site-packages by uncommenting "import site" in the ._pth file
-    $pthFile = "$PythonDir\python${PythonVerShort}._pth"
+    # Enable site-packages by properly configuring the ._pth file
+    $pthFile = "$PythonDir\\python${PythonVerShort}._pth"
+    $sitePackagesDir = "$PythonDir\\Lib\\site-packages"
+    
+    Write-Host "✓ Configuring embedded Python for site-packages and pip..." -ForegroundColor Cyan
+    
+    # 1. Ensure Lib\site-packages directory exists
+    if (-not (Test-Path $sitePackagesDir)) {
+        New-Item -ItemType Directory -Force -Path $sitePackagesDir | Out-Null
+    }
+    
+    # 2. Modify the _pth file
     if (Test-Path $pthFile) {
-        Write-Info "Enabling site-packages in $pthFile ..."
-        $pthContent = Get-Content $pthFile -Raw
-        # Replace "#import site" with "import site" (uncomment it)
+        $pthContent = Get-Content $pthFile
+        
+        # Add 'Lib\site-packages' path if not already present
+        if ($pthContent -notcontains "Lib\site-packages") {
+            $pthContent = $pthContent + "Lib\site-packages"
+        }
+        # Uncomment 'import site' to activate package discovery
         $pthContent = $pthContent -replace '#import site', 'import site'
-        Set-Content -Path $pthFile -Value $pthContent -NoNewline
+        
+        $pthContent | Set-Content -Path $pthFile -Encoding UTF8
     } else {
         Write-Warn "._pth file not found at $pthFile — creating one..."
         $pthContent = @"
 python${PythonVerShort}.zip
 .
+Lib\site-packages
 import site
 "@
-        Set-Content -Path $pthFile -Value $pthContent -NoNewline
+        Set-Content -Path $pthFile -Value $pthContent -Encoding UTF8
     }
 
     # Bootstrap pip via get-pip.py
