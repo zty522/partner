@@ -6,7 +6,9 @@
 """
 
 import asyncio
+import json
 import logging
+import os
 import queue
 import time as _time
 from typing import Optional
@@ -26,13 +28,124 @@ class MindPool:
     _instance: Optional['MindPool'] = None
     _lock = asyncio.Lock()
 
-    def __init__(self, maxsize: int = 0):
+    def __init__(self, maxsize: int = 0, save_path: str = ""):
         self._queue: asyncio.PriorityQueue[MindEvent] = asyncio.PriorityQueue(maxsize=maxsize)
         self._thread_queue: queue.PriorityQueue[MindEvent] = queue.PriorityQueue(maxsize=0)
         # 等待室：{event.id: (wake_after, event)} — 不到时间的暂存这里
         self._waiting_room: dict = {}
         self._total_put: int = 0
         self._total_get: int = 0
+        self._save_path: str = save_path
+        self._auto_save: bool = bool(save_path)
+        import atexit
+        atexit.register(self._atexit_save)
+
+    @classmethod
+    def set_save_path(cls, path: str):
+        if cls._instance:
+            cls._instance._save_path = path
+            cls._instance._auto_save = bool(path)
+
+    def save(self):
+        """Save current pool state to JSON file."""
+        if not self._save_path:
+            return
+        try:
+            import json as _json
+            data = []
+            for ev in self._queue._queue:
+                data.append(self._event_to_dict(ev))
+            try:
+                while True:
+                    ev = self._thread_queue.get_nowait()
+                    data.append(self._event_to_dict(ev))
+            except queue.Empty:
+                pass
+            for eid, (wake_at, ev) in self._waiting_room.items():
+                d = self._event_to_dict(ev)
+                d["wake_after"] = wake_at
+                data.append(d)
+            os.makedirs(os.path.dirname(self._save_path), exist_ok=True)
+            with open(self._save_path, "w", encoding="utf-8") as f:
+                _json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"[MIND] Save failed: {e}")
+
+    def _atexit_save(self):
+        """Save on program exit."""
+        if self._save_path and os.path.exists(os.path.dirname(self._save_path)):
+            try:
+                import json as _json
+                data = []
+                for ev in self._queue._queue:
+                    data.append(self._event_to_dict(ev))
+                try:
+                    while True:
+                        ev = self._thread_queue.get_nowait()
+                        data.append(self._event_to_dict(ev))
+                except queue.Empty:
+                    pass
+                for eid, (wake_at, ev) in self._waiting_room.items():
+                    d = self._event_to_dict(ev)
+                    d["wake_after"] = wake_at
+                    data.append(d)
+                with open(self._save_path, "w", encoding="utf-8") as f:
+                    _json.dump(data, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+
+    async def load(self) -> int:
+        """Load saved pool state from JSON file. Returns restored count."""
+        if not self._save_path or not os.path.exists(self._save_path):
+            return 0
+        try:
+            import json as _json
+            with open(self._save_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            count = 0
+            for d in data:
+                ev = self._dict_to_event(d)
+                if ev.wake_after and ev.wake_after > _time.time():
+                    self._waiting_room[ev.id] = (ev.wake_after, ev)
+                else:
+                    await self._queue.put(ev)
+                count += 1
+            logger.info(f"[MIND] Loaded {count} events from {self._save_path}")
+            try:
+                os.remove(self._save_path)
+            except Exception:
+                pass
+            return count
+        except Exception as e:
+            logger.warning(f"[MIND] Load failed: {e}")
+            return 0
+
+    @staticmethod
+    def _event_to_dict(ev) -> dict:
+        return {
+            "id": ev.id,
+            "type": ev.type.value if hasattr(ev.type, "value") else str(ev.type),
+            "priority": ev.priority,
+            "payload": ev.payload,
+            "created_at": ev.created_at,
+            "source": ev.source,
+            "parent_id": ev.parent_id,
+            "wake_after": ev.wake_after,
+        }
+
+    @staticmethod
+    def _dict_to_event(d: dict):
+        from .event_types import MindEvent, EventType
+        return MindEvent(
+            id=d.get("id", ""),
+            type=EventType(d["type"]),
+            priority=d.get("priority", 5),
+            payload=d.get("payload", {}),
+            created_at=d.get("created_at", ""),
+            source=d.get("source", ""),
+            parent_id=d.get("parent_id"),
+            wake_after=d.get("wake_after"),
+        )
 
     @classmethod
     async def get_instance(cls) -> 'MindPool':
@@ -61,12 +174,16 @@ class MindPool:
             logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
                         f"pri={event.priority}")
         self._total_put += 1
+        if self._auto_save:
+            self.save()
 
     def put_threadsafe(self, event: MindEvent):
         self._thread_queue.put(event)
         self._total_put += 1
         logger.info(f"[MIND] PUT(event_type={event.type.value}, id={event.id[:8]}, "
                     f"pri={event.priority})  [threadsafe]")
+        if self._auto_save:
+            self.save()
 
     async def _drain_thread_queue(self):
         while True:
@@ -106,6 +223,8 @@ class MindPool:
         self._total_get += 1
         logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
                     f"pri={event.priority}, topic={event.payload.get('topic', '')}")
+        if self._auto_save:
+            self.save()
         return event
 
     def qsize(self) -> int:

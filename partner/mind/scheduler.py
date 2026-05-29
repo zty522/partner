@@ -26,21 +26,44 @@ MAX_CONCURRENT = 10
 SELF_PULSE_INTERVAL = 15 * 60  # 15 分钟
 
 
-async def mind_loop(pool: MindPool = None):
-    """念头调度器主循环。
+async def mind_loop(pool: MindPool = None, save_path: str = ""):
+    """念头调度器主循环（带持久化 + WAKE_UP 唤醒）。
 
     永久运行，不断从池中取念头、创建 Task 执行。
     当池为空时短暂休眠避免 CPU 空转。
     内置自脉冲定时器，无需外部 cron 注入 CRON_TICK。
+    启动时恢复持久化事件并注入 WAKE_UP 唤醒脉冲。
 
     Args:
         pool: MindPool 实例。为 None 时自动获取单例。
+        save_path: 持久化文件路径。为空时不保存。
     """
     if pool is None:
         pool = await MindPool.get_instance()
+    
+    # 设置持久化路径
+    if save_path:
+        pool._save_path = save_path
+        pool._auto_save = True
 
     pending_tasks: set[asyncio.Task] = set()
     logger.info("🧠 Mind Loop 启动")
+
+    # 从持久化文件恢复事件
+    try:
+        restored = await pool.load()
+        if restored > 0:
+            logger.info(f"[调度] 从持久化恢复了 {restored} 个事件")
+    except Exception:
+        pass
+
+    # 注入 WAKE_UP 唤醒脉冲（最高优先级）
+    try:
+        from .event_types import wake_up
+        await pool.put(wake_up(source="startup"))
+        logger.info("[调度] WAKE_UP 唤醒脉冲已注入")
+    except Exception as e:
+        logger.warning(f"[调度] WAKE_UP 注入失败: {e}")
 
     # 内置自脉冲定时器（15 分钟间隔自动注入 CRON_TICK）
     last_pulse = 0.0

@@ -81,6 +81,10 @@ async def execute_event(event: MindEvent):
             await handler(event)
         else:
             logger.warning(f"[执行] 无处理函数: {event.type.value}")
+        # Auto-save pool after each event
+        _p = await ensure_pool()
+        if _p._auto_save:
+            _p.save()
     except asyncio.CancelledError:
         logger.info(f"[执行] 念头 #{event.id[:8]} 被取消")
     except Exception as e:
@@ -113,10 +117,104 @@ def _get_handler(event_type: EventType):
         EventType.INSPIRATION: _handle_inspiration,
         EventType.PROJECT: _handle_project,
         EventType.EVOLUTION: _handle_evolution,
+        EventType.WAKE_UP: _handle_wake_up,
     }.get(event_type)
 
 
 # ── 各类型处理函数 ──────────────────────────────────────────────
+
+
+async def _handle_wake_up(event: MindEvent):
+    """唤醒脉冲：启动后自动恢复研究和探索。
+
+    1. 检查 state/active_plan.json 是否有活跃计划 → 生成 PROJECT 念头
+    2. 检查 Mind Pool 中已有 PROJECT → 不做额外操作
+    3. 如果没有项目 → 从知识库生成 Curiosity 探索
+    4. 检查自省时间 → 超过 2 小时生成自省
+    5. 生成复工简报
+    """
+    import time as _wt, json as _json, os as _os
+    pool = await ensure_pool()
+    logger.info(f"[WAKE_UP] 唤醒脉冲开始执行，池大小: {pool.qsize()}")
+
+    # 检查是否有 PROJECT 事件已在池中
+    has_project = False
+    for ev in getattr(pool._queue, '_queue', []):
+        if hasattr(ev, 'type') and ev.type == EventType.PROJECT:
+            has_project = True
+            break
+    if not has_project:
+        for eid, (wake_at, ev) in pool._waiting_room.items():
+            if hasattr(ev, 'type') and ev.type == EventType.PROJECT:
+                has_project = True
+                break
+
+    # 如果没有 PROJECT 事件，检查 active_plan.json
+    if not has_project and _workspace:
+        plan_path = _os.path.join(_workspace, "state", "active_plan.json")
+        if _os.path.exists(plan_path):
+            try:
+                with open(plan_path, 'r', encoding='utf-8') as f:
+                    plan = _json.load(f)
+                if plan.get("status") == "active" and plan.get("title"):
+                    # 从活跃计划生成 PROJECT 念头
+                    await pool.put(MindEvent(
+                        type=EventType.PROJECT,
+                        priority=2,
+                        payload={
+                            "title": plan["title"],
+                            "goal": plan.get("goal", ""),
+                            "step": 0,
+                        },
+                        source="wake_up:plan_restore",
+                    ))
+                    has_project = True
+                    logger.info(f"[WAKE_UP] 从 active_plan 恢复项目: {plan['title'][:40]}")
+            except Exception as e:
+                logger.warning(f"[WAKE_UP] active_plan 读取失败: {e}")
+
+    # 如果没有项目，从知识库生成探索
+    if not has_project:
+        kb_topic = ""
+        if _knowledge and len(_knowledge.entries) > 0:
+            categories = _knowledge.stats().get("by_category", {})
+            if categories:
+                kb_topic = min(categories, key=categories.get)
+        if kb_topic:
+            await pool.put(curiosity(topic=kb_topic, priority=6, source="wake_up:knowledge_gap"))
+            logger.info(f"[WAKE_UP] 生成知识探索: {kb_topic}")
+        else:
+            await pool.put(curiosity(topic="最新研究进展", priority=6, source="wake_up:generic"))
+            logger.info(f"[WAKE_UP] 生成通用探索")
+
+    # 检查自省时间
+    if _journal:
+        recent = _journal.get_recent(10)
+        last_reflection = ""
+        for entry in recent:
+            if getattr(entry, 'task_type', '') == 'self_reflection':
+                last_reflection = getattr(entry, 'timestamp', '')
+                break
+        if last_reflection:
+            from datetime import datetime as _dt
+            try:
+                last_time = _dt.fromisoformat(last_reflection)
+                if (_dt.now() - last_time).total_seconds() > 7200:
+                    await pool.put(MindEvent(type=EventType.SELF_REFLECTION, priority=7, payload={}, source="wake_up:reflection"))
+                    logger.info(f"[WAKE_UP] 生成自省（上次 {last_reflection[:16]}）")
+            except Exception:
+                pass
+        else:
+            await pool.put(MindEvent(type=EventType.SELF_REFLECTION, priority=7, payload={}, source="wake_up:first_reflection"))
+            logger.info(f"[WAKE_UP] 生成首次自省")
+
+    # 复工简报
+    if has_project:
+        await pool.put(report(content="我回来了。已有研究项目在继续推进。", priority=3, source="wake_up:startup"))
+    else:
+        await pool.put(report(content="我回来了。知识库中没有进行中的项目，我已开始自主探索。", priority=3, source="wake_up:startup"))
+    logger.info(f"[WAKE_UP] 唤醒完成，池大小: {pool.qsize()}")
+
 
 
 async def _handle_curiosity(event: MindEvent):
@@ -156,6 +254,15 @@ async def _handle_curiosity(event: MindEvent):
     if kb_entries or web_result_text:
         if _adapter:
             try:
+                # 注入对话上下文（如果存在）
+                dialog_context = event.payload.get("dialog_context", "")
+                dialog_context_block = ""
+                if dialog_context:
+                    dialog_context_block = (
+                        f"\n\n以下是相关的对话上下文（你和用户的对话记录）：\n"
+                        f"{dialog_context[:1500]}"
+                    )
+
                 data_json = json.dumps({
                     "topic": topic,
                     "knowledge_entries": kb_entries,
@@ -164,7 +271,9 @@ async def _handle_curiosity(event: MindEvent):
                 llm_prompt = (
                     f"你刚刚探索了 '{topic}' 这个主题。以下是你收集到的数据。"
                     f"请用 2-3 句话自然地告诉用户你发现了什么。不要用模板开头，"
-                    f"就像聊天一样。\n\n结构化数据：\n{data_json}"
+                    f"就像聊天一样。"
+                    f"{dialog_context_block}"
+                    f"\n\n结构化数据：\n{data_json}"
                 )
                 report_content = _adapter.chat(llm_prompt) or ""
             except Exception as e:
@@ -271,6 +380,29 @@ async def _handle_cron_tick(event: MindEvent):
             source="cron_tick",
         ))
         logger.info(f"[CRON] Generated diary_write at hour={hour}")
+
+    # ── 快速路径：加速等待中的 PROJECT 事件 ──
+    now_ts = _time.time()
+    accelerated = 0
+    # 检查等待室：如果 PROJECT 的 wake_after 远在 5 分钟后，提前唤醒并降优先级
+    for eid, (wake_at, ev) in list(pool._waiting_room.items()):
+        if ev.type == EventType.PROJECT and wake_at > now_ts + 300:
+            # 降低优先级（数值越低越紧急：6→4）
+            if ev.priority > 4:
+                ev.priority = 4
+            # 缩短等待时间：最多再等 60 秒
+            new_wake = now_ts + 60
+            pool._waiting_room[eid] = (new_wake, ev)
+            accelerated += 1
+            logger.info(f"[CRON] 加速 PROJECT {ev.id[:8]} wake_after 从 {int(wake_at-now_ts)}s 降至 60s")
+    # 检查主队列中的 PROJECT 事件，直接降低优先级
+    for ev in list(getattr(pool._queue, '_queue', [])):
+        if ev.type == EventType.PROJECT and ev.priority > 4:
+            ev.priority = 4
+            accelerated += 1
+            logger.info(f"[CRON] 提升 PROJECT {ev.id[:8]} 优先级: 6→4")
+    if accelerated:
+        logger.info(f"[CRON] 加速了 {accelerated} 个 PROJECT 事件")
 
     logger.info(f"[MIND] DONE event_type=cron_tick, id={event.id[:8]}")
     logger.info(f"[CRON] Tick complete. Pool size: {pool.qsize()}")
@@ -411,19 +543,31 @@ async def _handle_project(event: MindEvent):
         except Exception:
             pass
 
-    # 2. 生成探索子念头
+    # 2. 生成探索子念头（传递项目事实）
     pool = await ensure_pool()
-    await pool.put(curiosity(
-        topic=title,
+    project_facts = event.payload.get("project_facts", {})
+    curiosity_payload = {"topic": title}
+    if project_facts:
+        curiosity_payload["project_facts"] = project_facts
+        logger.info(f"[PROJECT] 传递项目事实给好奇念头: {len(project_facts)} 项")
+    await pool.put(MindEvent(
+        type=EventType.CURIOSITY,
         priority=4,
+        payload=curiosity_payload,
         source=f"project:step_{step}",
         parent_id=event.id,
     ))
     logger.info(f"[PROJECT] Generated curiosity for step {step}")
 
-    # 3. 将自身放回池子（step+1, wake_after=now+900s=15分钟）
+    # 3. 将自身放回池子（step+1, wake_after 取决于来源）
     next_step = step + 1
     if next_step < 100:
+        # qq_user / wake_up 来源：首次立即处理，后续 5 分钟唤醒
+        source_is_immediate = any(
+            tag in (event.source or "")
+            for tag in ["qq_user", "wake_up"]
+        )
+        wake_delay = 300 if source_is_immediate else 900  # 5min / 15min
         await pool.put(MindEvent(
             type=EventType.PROJECT,
             priority=6,
@@ -432,11 +576,11 @@ async def _handle_project(event: MindEvent):
                 "goal": goal,
                 "step": next_step,
             },
-            wake_after=_time.time() + 900,  # 15 分钟后唤醒
+            wake_after=_time.time() + wake_delay,
             source="project:recur",
             parent_id=event.id,
         ))
-        logger.info(f"[PROJECT] Re-queued for step {next_step} (wake in 900s)")
+        logger.info(f"[PROJECT] Re-queued for step {next_step} (wake in {wake_delay}s)")
     else:
         logger.info(f"[PROJECT] Max steps reached, terminating")
 

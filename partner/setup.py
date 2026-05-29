@@ -658,7 +658,18 @@ def setup_cron_hermes(workspace: str):
         pass
     
     # Create cron job
-    cron_prompt = f"""你是 Partner 的心跳维护引擎。在 {workspace} 下工作。
+    # Read interval from config (default 15)
+    _interval = 15
+    try:
+        _cfg_path = os.path.join(workspace, "partner_config.json")
+        if os.path.exists(_cfg_path):
+            with open(_cfg_path, 'r', encoding='utf-8') as f:
+                _cfg = json.load(f)
+            _interval = _cfg.get("scheduler", {}).get("interval_minutes", 15)
+    except Exception:
+        pass
+    
+    cron_prompt = f"""
 
 你的核心原则：心跳只做维护，不做研究执行。
 
@@ -751,12 +762,12 @@ def json_save(path, data):
             ["hermes", "cron", "create", 
              "--name", "partner-research-cycle",
              "--skill", "partner-research",
-             f"every {interval_minutes}m",
+             f"every {_interval}m",
              cron_prompt],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode == 0:
-            status_ok(f"Cron job 已自动创建 (每 {interval_minutes} 分钟)")
+            status_ok(f"Cron job 已自动创建 (每 {_interval} 分钟)")
             # Extract and save cron job ID to partner_config.json
             import re
             match = re.search(r'\[([a-f0-9-]+)\]', result.stdout)

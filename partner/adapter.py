@@ -72,6 +72,7 @@ class HermesAdapter(AgentAdapter):
         """Execute a research task via Hermes CLI chat."""
         import subprocess
         import os
+        import shutil
 
         prompt_file = os.path.join(self.workspace, "state", "current_task.md")
         try:
@@ -82,7 +83,8 @@ class HermesAdapter(AgentAdapter):
             pass
 
         try:
-            cmd = ["hermes", "chat", "--query", prompt, "--quiet", "--toolsets", ""]
+            hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
+            cmd = [hermes_bin, "chat", "--query", prompt, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=None,
                 cwd=self.workspace,
@@ -103,9 +105,10 @@ class HermesAdapter(AgentAdapter):
     def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via hermes subprocess."""
         import subprocess
-        import shlex
+        import shutil
         try:
-            cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
+            hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
+            cmd = [hermes_bin, "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
                 capture_output=True, text=True, timeout=None,
@@ -120,6 +123,7 @@ class HermesAdapter(AgentAdapter):
             logger.warning(f"hermes chat timed out for query: {message[:60]}")
             return None
         except FileNotFoundError:
+            logger.warning(f"hermes CLI not found in PATH")
             return None
         except Exception as e:
             logger.warning(f"hermes chat error: {e}")

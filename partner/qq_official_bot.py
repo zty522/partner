@@ -166,6 +166,12 @@ class QQQfficialBot:
         self._shard_count: int = 1
         self._self_id: str = ""
         self._bot_info: Optional[QQBotInfo] = None
+        self._can_reconnect = False
+
+        # Deduplication cache to prevent duplicate message processing after reconnect
+        self._recent_msg_ids: Dict[str, float] = {}  # msg_id -> timestamp
+        self._dedup_ttl = 300  # 5 minutes (300 seconds)
+        self._last_connect_time: float = 0
 
         # Callbacks
         self._message_handler: Optional[Callable[[QQMessage], None]] = None
@@ -266,7 +272,7 @@ class QQQfficialBot:
             if msg_id:
                 payload["msg_id"] = msg_id
             # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
-            payload["msg_seq"] = int(time.time() * 1000)  # 毫秒时间戳，天然递增
+            payload["msg_seq"] = random.randint(100000, 999999)  # 6位随机数，沙箱接受小值
         elif message_type == QQMessageType.GROUP_AT:
             endpoint = f"/v2/groups/{target_id}/messages"
             if media:
@@ -276,7 +282,7 @@ class QQQfficialBot:
             if msg_id:
                 payload["msg_id"] = msg_id
             # Unique msg_seq prevents QQ platform "消息被去重" (40054005)
-            payload["msg_seq"] = int(time.time() * 1000)  # 毫秒时间戳，天然递增
+            payload["msg_seq"] = random.randint(100000, 999999)  # 6位随机数，沙箱接受小值
         elif message_type == QQMessageType.GUILD:
             endpoint = f"/channels/{target_id}/messages"
             payload = {"content": content, "msg_id": msg_id} if msg_id else {"content": content}
@@ -560,6 +566,7 @@ class QQQfficialBot:
 
     async def _run(self):
         """Main run loop: get gateway URL, connect, and listen."""
+        retry_delay = 5  # First retry after 5s
         while self._running:
             try:
                 print("  🔑 正在获取访问令牌...")
@@ -570,24 +577,32 @@ class QQQfficialBot:
                 print("  🌐 正在获取 WebSocket 网关地址...")
                 gateway_info = await self._api_get("/gateway/bot")
                 if not gateway_info:
-                    logger.error("Failed to get gateway URL, retrying in 30s...")
-                    print("  ❌ 获取网关地址失败，30秒后重试...")
-                    await asyncio.sleep(30)
+                    logger.error(f"Failed to get gateway URL, retrying in {retry_delay}s...")
+                    print(f"  ❌ 获取网关地址失败，{retry_delay}秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = 10
                     continue
 
                 self._ws_url = gateway_info.get("url", "")
                 self._shard_count = gateway_info.get("shards", 1)
                 if not self._ws_url:
-                    logger.error("Empty gateway URL, retrying in 30s...")
-                    print("  ❌ 网关地址为空，30秒后重试...")
-                    await asyncio.sleep(30)
+                    logger.error(f"Empty gateway URL, retrying in {retry_delay}s...")
+                    print(f"  ❌ 网关地址为空，{retry_delay}秒后重试...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = 10
                     continue
 
                 logger.info(f"Gateway URL: {self._ws_url}, shards: {self._shard_count}")
                 print(f"  ✅ 网关地址已获取，正在连接 WebSocket...")
 
+                # Reset retry delay on successful connection attempt
+                retry_delay = 5
+
                 # Connect WebSocket
                 await self._connect_and_listen()
+
+                # If we get here, connection was lost — reset delay for fresh attempt
+                retry_delay = 5
 
             except Exception as e:
                 self._stats["errors"] += 1
@@ -606,9 +621,11 @@ class QQQfficialBot:
                     except Exception:
                         pass
                 if self._running and self.auto_reconnect:
-                    logger.info("Retrying in 30s...")
-                    print("  ⏳ 30秒后自动重连...")
-                    await asyncio.sleep(30)
+                    disconnect_duration = time.time() - (getattr(self, '_last_connect_time', time.time()))
+                    logger.info(f"Retrying in {retry_delay}s... (disconnect_duration={disconnect_duration:.1f}s)")
+                    print(f"  ⏳ {retry_delay}秒后自动重连...")
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = 10
 
     async def _connect_and_listen(self):
         """Connect to WebSocket gateway and listen for events."""
@@ -618,13 +635,20 @@ class QQQfficialBot:
         logger.info(f"Connecting to WebSocket gateway...")
         print(f"  🔌 正在连接 WebSocket: {self._ws_url[:60]}...")
 
+        connect_start = time.time()
         async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=SSLContext())
         ) as session:
             async with session.ws_connect(self._ws_url) as ws:
                 self._ws = ws
                 self._stats["connected_at"] = datetime.now().isoformat()
-                logger.info("WebSocket connected, waiting for HELLO...")
+                self._last_connect_time = connect_start
+                connect_elapsed = time.time() - connect_start
+                conn_id = self._session_id or f"conn-{int(connect_start)}"
+                logger.info(
+                    f"WebSocket connected in {connect_elapsed:.1f}s "
+                    f"(conn_id={conn_id})"
+                )
 
                 async for msg in ws:
                     if not self._running:
@@ -634,12 +658,21 @@ class QQQfficialBot:
                         await self._on_ws_message(msg.data)
                     elif msg.type == aiohttp.WSMsgType.ERROR:
                         error = ws.exception()
-                        logger.error(f"WebSocket error: {error}")
+                        disconnect_duration = time.time() - connect_start
+                        logger.error(
+                            f"WebSocket error (conn_id={conn_id}, "
+                            f"duration={disconnect_duration:.1f}s): {error}"
+                        )
                         if self._error_handler:
                             self._error_handler(error)
                         break
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
-                        logger.info(f"WebSocket closed: {ws.close_code}")
+                        disconnect_duration = time.time() - connect_start
+                        logger.info(
+                            f"WebSocket closed (conn_id={conn_id}, "
+                            f"duration={disconnect_duration:.1f}s): "
+                            f"code={ws.close_code}"
+                        )
                         break
 
     async def _disconnect(self):
@@ -687,12 +720,12 @@ class QQQfficialBot:
             await self._handle_dispatch(data)
 
         elif op == WS_OPCODE.RECONNECT:
-            logger.info("Server requested reconnection")
+            logger.info(f"Server requested reconnection (session_id={self._session_id or 'none'})")
             self._can_reconnect = True
             raise Exception("Server requested reconnect")
 
         elif op == WS_OPCODE.INVALID_SESSION:
-            logger.warning("Invalid session, resetting")
+            logger.warning(f"Invalid session, resetting (session_id={self._session_id or 'none'})")
             self._session_id = ""
             self._last_seq = 0
 
@@ -729,13 +762,14 @@ class QQQfficialBot:
 
     async def _heartbeat_loop(self):
         """Send heartbeat at regular intervals."""
+        interval = min(self._heartbeat_interval, 15)
         while self._running and self._ws and not self._ws.closed:
             payload = {
                 "op": WS_OPCODE.HEARTBEAT,
                 "d": self._last_seq,
             }
             await self._send_ws(payload)
-            await asyncio.sleep(self._heartbeat_interval)
+            await asyncio.sleep(interval)
 
     async def _send_ws(self, payload: Dict):
         """Send a JSON message over WebSocket."""
@@ -752,6 +786,9 @@ class QQQfficialBot:
             await self._handle_ready(data.get("d", {}))
         elif event == "RESUMED":
             logger.info("Resumed successfully")
+            # Clear dedup cache on resume — we don't know which events the server
+            # will re-deliver, so start fresh to be safe
+            self._recent_msg_ids.clear()
             asyncio.create_task(self._heartbeat_loop())
 
         # Message events we care about
@@ -882,6 +919,33 @@ class QQQfficialBot:
 
     async def _dispatch_message(self, msg: QQMessage):
         """Dispatch a message to the registered handler."""
+        msg_id = msg.msg_id
+        now = time.time()
+
+        # Dedup check: skip if this msg_id was already processed recently
+        if msg_id and msg_id in self._recent_msg_ids:
+            logger.info(
+                f"[QQ DEDUP] Skipping duplicate message {msg_id} "
+                f"from {msg.sender_name}"
+            )
+            return
+
+        # Add to dedup cache
+        if msg_id:
+            self._recent_msg_ids[msg_id] = now
+
+        # Periodic cleanup of expired entries (every 100 messages)
+        if len(self._recent_msg_ids) > 100:
+            cutoff = now - self._dedup_ttl
+            expired = [
+                mid for mid, ts in self._recent_msg_ids.items()
+                if ts < cutoff
+            ]
+            for mid in expired:
+                del self._recent_msg_ids[mid]
+            if expired:
+                logger.debug(f"Dedup cache cleaned: removed {len(expired)} expired entries")
+
         self._stats["messages_received"] += 1
         logger.info(
             f"[QQ {msg.message_type.value}] "

@@ -30,6 +30,7 @@ class EventType(str, Enum):
     DIARY_WRITE = "diary_write"        # 写日记
     CRON_TICK = "cron_tick"            # 由外部 cron 注入的周期性触发
     USER_MESSAGE = "user_message"      # 用户通过 QQ 发来的消息
+    WAKE_UP = "wake_up"                  # 启动唤醒：恢复状态后自动探索
 
 
 @dataclass
@@ -128,6 +129,16 @@ def self_reflection(priority: int = 7, source: str = "scheduler") -> MindEvent:
     return MindEvent(
         type=EventType.SELF_REFLECTION,
         priority=priority,
+        payload={},
+        source=source,
+    )
+
+
+def wake_up(source: str = "startup") -> MindEvent:
+    """创建一个唤醒念头（启动后立即调度）。"""
+    return MindEvent(
+        type=EventType.WAKE_UP,
+        priority=1,  # 最高优先级
         payload={},
         source=source,
     )

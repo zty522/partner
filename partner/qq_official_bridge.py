@@ -36,6 +36,7 @@ from .task_queue import TaskQueue
 from .knowledge import KnowledgeBase
 from .journal import Journal, JournalEntry
 from .state import StateManager
+from .context_broker import ContextBroker
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,11 @@ class QQQfficialBridge:
             workspace=workspace,
         )
 
+        # 初始化 ContextBroker：打通对话上下文与研究循环
+        self.context_broker = ContextBroker(
+            workspace, self.knowledge, self.journal
+        )
+
         # Wire up LLM response generation: router uses adapter directly
         self._wire_router_llm()
 
@@ -106,6 +112,10 @@ class QQQfficialBridge:
         }
         self._force_run_triggered = False
         self._last_task_queued_at = 0  # timestamp of last task queue (suppress heartbeat double-report)
+
+        # Mind loop 健康检查
+        self._mind_health_last_qsize = -1
+        self._mind_health_stale_count = 0
 
     # ── Configuration ──────────────────────────────────────────────
 
@@ -312,6 +322,11 @@ class QQQfficialBridge:
                                 )
                                 logger.info(f"Proactive push sent to {openid}: {summary[:80]}")
 
+                except Exception:
+                    pass
+                # Periodically check mind loop health
+                try:
+                    self._ensure_mind_loop_healthy()
                 except Exception:
                     pass
                 import time
@@ -1009,7 +1024,7 @@ class QQQfficialBridge:
         cycles, generating Curiosity sub-events each time it's processed.
         """
         try:
-            from .mind import MindPool, MindEvent, EventType
+            from .mind import MindPool, MindEvent, EventType, cron_tick as _cron_tick
 
             # Extract topic from user's message
             topic = text.strip()
@@ -1034,6 +1049,13 @@ class QQQfficialBridge:
                 pool.put_threadsafe(ev)
                 logger.info(f"[QQ] Project event queued to Mind Pool: '{topic}'")
 
+                # 立即放入 CRON_TICK 强制研究循环立即处理 PROJECT 事件
+                try:
+                    pool.put_threadsafe(_cron_tick(source="qq_user:force"))
+                    logger.info("[QQ] CRON_TICK injected to force immediate mind loop processing")
+                except Exception:
+                    pass
+
             try:
                 from .journal import JournalEntry
                 self.journal.log(JournalEntry(
@@ -1050,48 +1072,6 @@ class QQQfficialBridge:
         except Exception as e:
             logger.error(f"Failed to queue project to Mind Pool: {e}")
             return "收到，不过系统暂时没法处理，等会儿再试试？"
-            cfg_path = os.path.join(self.workspace, "partner_config.json")
-            with open(cfg_path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-            scheduler = cfg.get("scheduler", {})
-            job_id = scheduler.get("cron_job_id")
-            job_name = scheduler.get("cron_job_name")
-
-            if job_id:
-                try:
-                    subprocess.Popen(
-                        ["hermes", "cron", "run", job_id],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    if job_name:
-                        subprocess.Popen(
-                            ["hermes", "cron", "run", job_name],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        )
-            elif job_name:
-                subprocess.Popen(
-                    ["hermes", "cron", "run", job_name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-        except Exception as e:
-            logger.debug(f"Immediate cron trigger failed (non-blocking): {e}")
-
-        logger.info(f"Task queued from QQ: {task['id']} — {text[:80]}")
-
-        # Also log to journal
-        try:
-            self.journal.log(JournalEntry(
-                task_id=task["id"],
-                task_type="deep_dive",
-                task_title=f"QQ任务: {text[:50]}",
-                result_summary=f"来自 {msg.sender_name or 'QQ用户'} 的任务已加入队列",
-            ))
-        except Exception:
-            pass
-
-        # Build natural conversational confirmation — let LLM handle it
-        return ""
 
     def _get_interval_minutes(self) -> int:
         """Read configured research interval from partner_config.json."""
@@ -1103,11 +1083,48 @@ class QQQfficialBridge:
         except Exception:
             return 30
 
+    def _ensure_mind_loop_healthy(self):
+        """检查 mind_loop 是否正常运行（通过监控池大小变化）。
+
+        如果连续 2 次检查（间隔约 60 秒）池大小无变化，记录告警。
+        在通知轮询线程中周期性调用。
+        """
+        try:
+            from .mind import MindPool
+            pool = MindPool.get_sync_instance()
+            if pool is None:
+                return
+
+            current_qsize = pool.qsize()
+            if self._mind_health_last_qsize == -1:
+                # 首次检查，只记录不判断
+                self._mind_health_last_qsize = current_qsize
+                self._mind_health_stale_count = 0
+                return
+
+            if current_qsize == self._mind_health_last_qsize:
+                self._mind_health_stale_count += 1
+                if self._mind_health_stale_count >= 2:
+                    logger.warning(
+                        f"[Health] Mind loop 可能挂起！池大小连续 {self._mind_health_stale_count} 次检查无变化 "
+                        f"(size={current_qsize})"
+                    )
+            else:
+                self._mind_health_stale_count = 0
+
+            self._mind_health_last_qsize = current_qsize
+        except Exception as e:
+            logger.debug(f"[Health] 健康检查异常（非致命）: {e}")
+
     def _send_reply(self, original_msg: QQMessage, reply: str):
         """Send reply back to the user."""
         if not self._bot:
             logger.error("Bot not initialized")
             return
+
+        # 沙箱模式下清除 msg_id，避免沙箱 API 拒绝 msg_id 参数
+        if self.config.is_sandbox:
+            original_msg.msg_id = ""
 
         # Schedule async send
         if self._bot.get_event_loop() and self._bot.get_event_loop().is_running():
