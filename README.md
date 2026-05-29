@@ -185,12 +185,12 @@ When the Mind Pool is empty (no active projects, no pending curiosity), the cron
 - **No hardcoded responses** — all conversation through LLM, zero templates
 - **Codebase cleanup** — 22 Python files (was 26), removed `active_plan.json`, `task_queue.json`, `send_qq_report.py` old patterns
 
-### v0.4.0 后续修复
+### v0.4.0 Hotfixes
 
-- 🔧 **QQ 消息丢失修复** — WebSocket 断连重连后自动拉取丢失消息；消息 ID 去重缓存（5分钟 TTL）；心跳间隔缩短至 15 秒；渐进式重连（5s → 10s）
-- 💬 **TASK 指令即时回复** — 沙箱模式修复（不传 msg_id 避免 40011000）；PROJECT 入队后立即注入 CRON_TICK 强制研究循环处理；Mind 循环健康检查（池大小连续 2 次无变化则告警）
-- 🧠 **对话上下文打通** — 新建 `context_broker.py`：自动从对话中提取项目关键信息（MAE、泄漏问题等）并沉淀到知识库；研究循环从 PROJECT 事件获取完整对话上下文；LLM 生成报告时使用对话背景
-- 📚 **更新 README**，完善说明
+- 🔧 **QQ message loss fix** — WebSocket reconnection pulls missed messages; message ID dedup cache (5min TTL); heartbeat interval reduced to 15s; progressive reconnection (5s → 10s)
+- 💬 **TASK instant reply** — Sandbox mode fix (skip msg_id to avoid 40011000); PROJECT events inject immediate CRON_TICK; Mind loop health check (alerts on 2 consecutive stale pool size checks)
+- 🧠 **Dialog context bridge** — New `context_broker.py`: auto-extracts project facts (MAE, leak issues, file paths) from dialog history; PROJECT events carry full dialog context; LLM reports use conversation background
+- 📚 **README updated** — Expanded documentation
 
 ---
 

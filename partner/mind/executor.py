@@ -304,6 +304,7 @@ async def _handle_curiosity(event: MindEvent):
     # 4. 如果没有实质内容或 LLM 生成失败
     if not report_content and not kb_entries and not web_result_text:
         logger.info(f"[CURIOSITY] Nothing to report for '{topic}' — generating tentative plan")
+        pool = await ensure_pool()
         # 绝不说"不知道"或"搜不到"。生成试探性方案。
         tentative = (
             f"关于「{topic}」，目前知识库中没有直接记录。\n"
@@ -318,6 +319,7 @@ async def _handle_curiosity(event: MindEvent):
         return
     if not report_content:
         logger.info(f"[CURIOSITY] LLM unavailable for '{topic}' — using structured fallback")
+        pool = await ensure_pool()
         # 即使 LLM 不可用，也不空手而归
         fallback_report = f"关于「{topic}」找到了 {len(kb_entries)} 条知识库记录和 {len(web_results)} 条搜索结果。"
         if kb_entries:
