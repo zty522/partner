@@ -9,6 +9,9 @@ Usage:
 import argparse
 import json
 import os
+# Force UTF-8 for subprocess pipes (prevents GBK errors on Chinese Windows);
+# must be set before any subprocess import or call
+os.environ.setdefault("PYTHONUTF8", "1")
 import sys
 import glob
 import shutil
