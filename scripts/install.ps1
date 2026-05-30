@@ -327,7 +327,7 @@ function Install-PartnerPackage {
         # If install failed but package is already importable (common on re-run),
         # treat it as success. The real test is whether partner actually works.
         if ($pipExitCode -ne 0) {
-            python -c "import partner" 2>$null
+            & $pythonExe -c "import partner" 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Warn "pip re-install had issues (exit $pipExitCode), but partner is already installed and importable."
             } else {
@@ -343,7 +343,7 @@ function Install-PartnerPackage {
         # If we get here, something threw unexpectedly despite the 2>$null fix
         $errMsg = $_.ToString()
         # Check if package is actually usable despite the error
-        python -c "import partner" 2>$null
+        & $pythonExe -c "import partner" 2>$null
         if ($LASTEXITCODE -eq 0) {
             Write-Warn "pip install completed with non-fatal issue: $errMsg"
             return
@@ -360,13 +360,13 @@ function Add-PythonScriptsToPath {
     #>
     # Locate Python Scripts directory
     # Method 1: find user-level Scripts via python -m site --user-site
-    $userSite = & python -m site --user-site 2>$null
+    $userSite = & $Python.Path -m site --user-site 2>$null
     $userScriptsDir = ""
     if ($userSite) {
         $userScriptsDir = Join-Path (Split-Path $userSite -Parent) "Scripts"
     }
     
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    $pythonCmd = Get-Command $Python.Path -ErrorAction SilentlyContinue
     $sysScriptsDir = if ($pythonCmd) { Join-Path (Split-Path $pythonCmd.Source -Parent) "Scripts" } else { "" }
     $pyDir = if ($pythonCmd) { Split-Path $pythonCmd.Source -Parent } else { "" }
 
