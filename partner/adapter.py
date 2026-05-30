@@ -220,11 +220,13 @@ class DirectAdapter(AgentAdapter):
 
 
 def create_adapter(backend: str, workspace_path: str) -> AgentAdapter:
-    """Factory function to create the appropriate adapter."""
+    '''Factory function to create the appropriate adapter.'''
+    if not backend:
+        backend = 'hermes'
     adapters = {
-        "hermes": HermesAdapter,
-        "direct": DirectAdapter,
+        'hermes': HermesAdapter,
+        'direct': DirectAdapter,
     }
     
-    adapter_class = adapters.get(backend, DirectAdapter)
+    adapter_class = adapters.get(backend, HermesAdapter)
     return adapter_class(workspace_path)

@@ -1211,7 +1211,13 @@ class QQQfficialBridge:
             # Generate a natural response using LLM if available
             from .adapter import create_adapter as _create_adapter
             try:
-                adapter = _create_adapter("", self.workspace)
+                _backend = "hermes"
+                _cfg_p = os.path.join(self.workspace, "partner_config.json")
+                if os.path.exists(_cfg_p):
+                    with open(_cfg_p) as _f:
+                        _cfg = __import__("json").load(_f)
+                    _backend = _cfg.get("agent", {}).get("backend", _cfg.get("backend", "hermes"))
+                adapter = _create_adapter(_backend, self.workspace)
                 if adapter:
                     _prompt = (
                         f"用户请求了研究任务，话题：{topic[:60]}。"
