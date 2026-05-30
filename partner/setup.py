@@ -181,35 +181,38 @@ class AgentInfo:
 
 def detect_hermes() -> AgentInfo:
     """Detect Hermes Agent installation."""
-    home = Path.home()
-    
-    # Check 1: ~/.hermes/ directory
-    hermes_dir = home / ".hermes"
-    if not hermes_dir.exists():
-        return AgentInfo("hermes", "Hermes Agent", "🔮", False)
-    
-    # Check 2: hermes binary
+    import shutil
     import os as _os
-    candidates = [
-        home / ".local" / "bin" / "hermes",
-        hermes_dir / "hermes-agent" / "venv" / "bin" / "hermes",
-        Path("/usr/local/bin/hermes"),
-        # Windows paths
-        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python314" / "Scripts" / "hermes.exe",
-        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python313" / "Scripts" / "hermes.exe",
-        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python312" / "Scripts" / "hermes.exe",
-        Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes",
-        Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes.cmd",
-    ]
+    home = Path.home()
 
-    hermes_bin = None
-    for c in candidates:
-        if c.exists():
-            hermes_bin = str(c)
-            break
+    # Priority 1: shutil.which — fastest, cross-platform, checks PATH
+    hermes_bin = shutil.which("hermes")
 
     if not hermes_bin:
-        # Try which (Linux/Mac) or where (Windows)
+        # Priority 2: hardcoded candidate paths
+        hermes_dir = home / ".hermes"
+        candidates = [
+            home / ".local" / "bin" / "hermes",
+            hermes_dir / "hermes-agent" / "venv" / "bin" / "hermes",
+            Path("/usr/local/bin/hermes"),
+            # Windows: pip install
+            Path(_os.environ.get("APPDATA", "")) / "Python" / "Python314" / "Scripts" / "hermes.exe",
+            Path(_os.environ.get("APPDATA", "")) / "Python" / "Python313" / "Scripts" / "hermes.exe",
+            Path(_os.environ.get("APPDATA", "")) / "Python" / "Python312" / "Scripts" / "hermes.exe",
+            # Windows: npm install
+            Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes",
+            Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes.cmd",
+            # Windows: hermes-agent self-built venv (most common)
+            Path(_os.environ.get("LOCALAPPDATA", "")) / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes",
+            Path(_os.environ.get("LOCALAPPDATA", "")) / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe",
+        ]
+        for c in candidates:
+            if c.exists():
+                hermes_bin = str(c)
+                break
+
+    if not hermes_bin:
+        # Priority 3: which/where fallback
         for cmd in ["which", "where"]:
             try:
                 result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3)
@@ -218,29 +221,30 @@ def detect_hermes() -> AgentInfo:
                     break
             except:
                 pass
-    
+
     if not hermes_bin:
-        return AgentInfo("hermes", "Hermes Agent", "🔮", False)
-    
-    # Check 3: config
-    config_path = hermes_dir / "config.yaml"
+        return AgentInfo("hermes", "Hermes Agent", "\U0001f52e", False)
+
+    # Check config
+    config_path = Path(_os.environ.get("LOCALAPPDATA", "")) / "hermes" / "config.yaml"
+    if not config_path.exists():
+        config_path = home / ".hermes" / "config.yaml"
     version = None
     if config_path.exists():
         try:
             with open(config_path) as f:
-                content = f.read()
-            # Try to extract model info
-            for line in content.split("\n"):
+                content_cfg = f.read()
+            for line in content_cfg.split("\n"):
                 if "default:" in line and "model" not in line.lower():
                     version = line.split(":")[-1].strip()
                     break
         except:
             pass
-    
+
     return AgentInfo(
         name="hermes",
         display_name="Hermes Agent",
-        emoji="🔮",
+        emoji="\U0001f52e",
         available=True,
         path=hermes_bin,
         version=version,
