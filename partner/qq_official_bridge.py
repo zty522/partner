@@ -401,10 +401,11 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-            # 3. 用 LLM 生成自然回复（绝不硬编码）
-            reply = f"收到，开始推进「{user_text[:40]}」"  # 紧急 fallback
+            # 3. 用 Hermes 生成自然回复（发完整上下文）
+            reply = None
             try:
                 from .adapter import create_adapter as _ca
+                from .project_state import read_state_md as _read_state
                 _backend = "hermes"
                 _cfg_p = os.path.join(self.workspace, "partner_config.json")
                 if os.path.exists(_cfg_p):
@@ -413,16 +414,15 @@ class QQQfficialBridge:
                     _backend = _cfg.get("agent", {}).get("backend", _cfg.get("backend", "hermes"))
                 _adapter_instance = _ca(_backend, self.workspace)
                 if _adapter_instance:
-                    _prompt = (
-                        f"用户刚刚指定了研究方向：{user_text[:80]}。\\n"
-                        f"用一句话简短确认，语气像研究伙伴一样自然。\\n"
-                        f"不要说「好的」「收到」「我来推进」「开始推进」这类机械回复。"
-                    )
-                    _r = _adapter_instance.chat(_prompt)
-                    if _r and len(_r.strip()) > 5:
+                    _state = _read_state(self.workspace, user_text[:60]) if os.path.exists(os.path.join(self.workspace, "20_records", "active_project.txt")) else ""
+                    _ctx = f"当前项目状态：{_state[:500] if _state else '暂无项目'}"
+                    _r = _adapter_instance.chat(f"{_ctx}\n\n用户说：{user_text}\n\n请自然地回应。")
+                    if _r and len(_r.strip()) > 3:
                         reply = _r.strip()
             except Exception:
                 pass
+            if not reply:
+                reply = f"收到，推进「{user_text[:40]}」"
             self._send_reply(msg, reply)
 
             # Log interaction
