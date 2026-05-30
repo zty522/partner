@@ -55,6 +55,7 @@ class QQQfficialBridgeConfig:
     # Message settings
     max_reply_length: int = 2000
     group_at_only: bool = True  # In groups, only respond when @mentioned
+    send_thinking_hint: bool = False  # 是否发送"思考中"占位消息（默认关闭）
 
     # Workspace
     workspace: str = ""
@@ -117,6 +118,13 @@ class QQQfficialBridge:
         self._mind_health_last_qsize = -1
         self._mind_health_stale_count = 0
 
+        # 去重缓存：{content_hash: timestamp}，避免同一内容在5分钟内重复发送
+        self._recent_sent: dict = {}
+
+        # 应用资源限制
+        from .resource_limiter import apply_limits
+        apply_limits()
+
     # ── Configuration ──────────────────────────────────────────────
 
     def configure(self, app_id: str, app_secret: str, is_sandbox: bool = False):
@@ -139,7 +147,8 @@ class QQQfficialBridge:
         {
             "app_id": "...",
             "app_secret": "...",
-            "is_sandbox": false
+            "is_sandbox": false,
+            "send_thinking_hint": false
         }
         """
         try:
@@ -149,6 +158,7 @@ class QQQfficialBridge:
             self.config.app_secret = data.get("app_secret", self.config.app_secret)
             self.config.is_sandbox = data.get("is_sandbox", self.config.is_sandbox)
             self.config.auto_reconnect = data.get("auto_reconnect", self.config.auto_reconnect)
+            self.config.send_thinking_hint = data.get("send_thinking_hint", self.config.send_thinking_hint)
             logger.info(f"QQ config loaded from: {config_path}")
             return True
         except Exception as e:
@@ -353,7 +363,7 @@ class QQQfficialBridge:
             from .mind.executor import set_push_callback
 
             def _push_to_qq(content: str):
-                """将 Report 内容推送到 QQ 用户。"""
+                """将 Report 内容推送到 QQ 用户（含去重和内容过滤）。"""
                 try:
                     # 安全检测：不发 raw JSON
                     content_stripped = content.strip()
@@ -362,6 +372,24 @@ class QQQfficialBridge:
                         return
                     if not content_stripped:
                         return
+
+                    # 内容过滤（调用桥接器上的 _should_send）
+                    if not self._should_send(content_stripped):
+                        logger.debug(f"[Mind] 推送被内容过滤器拦截: {content_stripped[:60]}...")
+                        return
+
+                    # 去重：检查 5 分钟内同样的内容是否已推送
+                    import hashlib as _hl
+                    h = _hl.md5(content_stripped.encode()).hexdigest()
+                    now_ts = time.time()
+                    stale = [k for k, v in self._recent_sent.items() if now_ts - v > 300]
+                    for k in stale:
+                        del self._recent_sent[k]
+                    if h in self._recent_sent:
+                        logger.debug(f"[Mind] 去重跳过重复推送: {content_stripped[:60]}...")
+                        return
+                    self._recent_sent[h] = now_ts
+
                     # 读取用户 openid
                     user_ctx_path = os.path.join(self.workspace, "state", "qq_user_context.json")
                     openid = ""
@@ -410,16 +438,9 @@ class QQQfficialBridge:
             task_title="QQ 机器人就绪",
             result_summary=f"机器人: {bot_info.name} ({bot_info.id})",
         ))
-        # Mark startup time for welcome message detection
+        # Mark startup time
         import time as _time
         self._startup_time = _time.time()
-
-    def _should_welcome(self) -> bool:
-        """Check if we should send a welcome message (first connection / restart)."""
-        import time as _time
-        startup = getattr(self, '_startup_time', 0)
-        # Send welcome if bridge just started (within 120s)
-        return _time.time() - startup < 120
 
     def _handle_error(self, error: Exception):
         """Called when an error occurs."""
@@ -456,8 +477,8 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
-            # 1. SEND "思考中，请等待..." IMMEDIATELY (non-blocking, async)
-            self._send_reply(msg, "思考中，请等待...")
+            # 1. Log that we received the message (skip sending hardcoded placeholder)
+            logger.debug(f"[QQ] Processing message from {msg.sender_name}: {user_text[:60]}")
 
             # 2. Process message in BACKGROUND THREAD (doesn't block QQ bot loop)
             #    Welcome message is handled inside the background thread.
@@ -495,13 +516,6 @@ class QQQfficialBridge:
         # Feed user message into Mind Pool (cross-thread safe, non-blocking)
         self._feed_mind_pool(user_text, msg)
         try:
-            # Welcome check: do this inside the background thread so the
-            # handler never blocks waiting for LLM
-            if self._should_welcome():
-                welcome = "刚重启完，正在后台跑。有什么需要？"
-                self._send_reply(msg, welcome)
-                return
-
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
             if special_reply:  # Has a real reply
@@ -1194,7 +1208,22 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-            return f"好，我来推进「{topic[:40]}」。有进展了跟你说。"
+            # Generate a natural response using LLM if available
+            from .adapter import create_adapter as _create_adapter
+            try:
+                adapter = _create_adapter("", self.workspace)
+                if adapter:
+                    _prompt = (
+                        f"用户请求了研究任务，话题：{topic[:60]}。"
+                        f"请用1句短口语回应，告诉用户任务已加入队列，将开始推进。"
+                        f"不要问问题，不要用\"有进展了跟你说\"。"
+                    )
+                    nat_reply = adapter.chat(_prompt)
+                    if nat_reply and len(nat_reply) > 8:
+                        return nat_reply.strip()
+            except Exception:
+                pass
+            return f"好，任务已加入队列，我来推进「{topic[:40]}」。"
 
         except Exception as e:
             logger.error(f"Failed to queue project to Mind Pool: {e}")
@@ -1256,10 +1285,75 @@ class QQQfficialBridge:
         except Exception as e:
             logger.debug(f"[Health] 健康检查异常（非致命）: {e}")
 
+    def _should_send(self, text: str) -> bool:
+        """Check if message content should be sent (filters out templates and noise).
+
+        Returns:
+            True if the message should be sent, False to skip.
+        """
+        if not text or not text.strip():
+            return False
+
+        # 禁止推送的关键词列表（硬编码模板/心跳/状态通知）
+        blocked_keywords = [
+            "系统已重启",
+            "研究进展",
+            "已完成",
+            "下一轮将在",
+            "循环中",
+            "思考中",
+            "有进展了跟你说",
+            "刚重启完",
+            "当前没有进行中的项目",
+            "当前没有活跃的项目",
+            "请等待",
+        ]
+        text_lower = text.strip().lower()
+        for kw in blocked_keywords:
+            if kw.lower() in text_lower:
+                logger.debug(f"[去重] 内容含禁止关键字'{kw}'，跳过推送: {text[:80]}")
+                return False
+
+        # 纯模板检测：如果内容只包含 emoji 和模板短语而无实质数据
+        template_patterns = [
+            "📊",
+            "⏳",
+            "🔄",
+            "📈",
+        ]
+        has_template = any(p in text for p in template_patterns)
+        has_substance = any(c in text for c in ("=", ":", "：", "MAE", "mse", "loss", "acc", "f1", "auc", "准确率", "指标", "结果", "发现"))
+        if has_template and not has_substance:
+            logger.debug(f"[去重] 纯模板内容无实质数据，跳过推送: {text[:80]}")
+            return False
+
+        return True
+
     def _send_reply(self, original_msg: QQMessage, reply: str):
-        """Send reply back to the user."""
+        """Send reply back to the user with dedup and content filtering."""
         if not self._bot:
             logger.error("Bot not initialized")
+            return
+
+        # ── 去重 ──
+        import hashlib as _hl
+        reply_stripped = reply.strip()
+        if not reply_stripped:
+            return
+        h = _hl.md5(reply_stripped.encode()).hexdigest()
+        now_ts = time.time()
+        # 清理超过 5 分钟的旧缓存
+        stale = [k for k, v in self._recent_sent.items() if now_ts - v > 300]
+        for k in stale:
+            del self._recent_sent[k]
+        if h in self._recent_sent:
+            logger.debug(f"[去重] 跳过重复回复: {reply_stripped[:60]}...")
+            return
+        self._recent_sent[h] = now_ts
+
+        # ── 内容过滤 ──
+        if not self._should_send(reply_stripped):
+            logger.debug(f"[过滤] 回复被内容过滤器拦截: {reply_stripped[:60]}...")
             return
 
         # 沙箱模式下清除 msg_id，避免沙箱 API 拒绝 msg_id 参数

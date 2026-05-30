@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] - 2026-05-30
+## [0.5.0] - 2026-05-30 (Hotfix: 多实例隔离与消息去重)
 
 ### 🚀 新增功能
 
@@ -51,6 +51,32 @@
 - **install.ps1**: Python 版本检测放宽到 3.10+（不再限制 3.10-3.12，3.14 也能直接用）
 - **install.ps1**: 修复 embeddable Python 安装 `setuptools wheel` 时警告导致安装中断的问题（`--no-warn-script-location` + `$null` 赋值替代管道）
 - **多实例管理**: `partner-manager` CLI 命令 + 实例目录 + `__main__.py` 路由 + systemd 模板 + 迁移工具
+
+### 🐛 Bugfixes (多实例隔离与消息去重)
+
+#### 📨 消息推送彻底修复
+- **移除所有硬编码回复**：删除「思考中，请等待...」「刚重启完，正在后台跑」「有进展了跟你说」「系统已重启」等所有硬编码推文，改用 LLM 生成或简洁事实性回复
+- **消息去重表**：`_send_reply` 中维护 5 分钟 MD5 去重缓存，相同内容在 5 分钟内不重复推送
+- **Report 事件去重**：`_handle_report` 中 10 分钟内容哈希去重
+- **推送内容过滤**：`_should_send()` 函数检测模板化内容（📊📈⏳等 emoji 但无实质数据），纯模板不推送
+- **Project 进展推送限流**：每 5 轮才推送一次，仅在有实质指标变化时推送
+- **空闲不推送**：移除空闲时「当前没有进行中的项目」报告推送，仅记录日志
+
+#### 🔄 无限重启防护
+- **新增 `restart_tracker.py`**：每个实例独立记录重启次数，1 小时内超过 3 次停止自动重启并发送告警
+- **`__main__.py` 启动检查**：启动前调用 `RestartTracker.record_restart()`，超过限制打印错误并退出(exit code 2)
+- **`core.py` 崩溃检测**：连续异常记录到 `10_logs/crash.log`，结合 RestartTracker 防止无限循环
+- **`state.py` 增强**：Heartbeat 增加 `crash_count` 字段，新增 `detect_crash_and_record()`
+
+#### 🛡️ 后台干扰消除
+- **新增 `resource_limiter.py`**：nice 值降低 CPU 优先级 + RLIMIT_AS 限制内存(默认 2GB)
+- **心跳文件隔离**：`/tmp/partner_idle_heartbeat.txt` 改为实例专属 `{workspace}/10_logs/idle_heartbeat.txt`
+- **空闲心跳不写 `/tmp/`**：Mind 循环空闲时不再写入全局 /tmp 目录
+- **`manager.py` 路径修正**：watchdog 读取心跳文件也指向实例隔离路径
+
+#### 📂 工作空间数据复制
+- **新增 `copy_external_data_to_workspace()`**：执行任务前将外部数据复制到 `{workspace}/99_temp/inputs/`，避免修改原始文件
+- **已在内 workspace 的文件**：直接使用原路径，不重复复制
 
 ## [0.4.0] - 2026-05-29
 

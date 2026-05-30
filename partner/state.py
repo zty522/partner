@@ -15,6 +15,7 @@ class Heartbeat:
     status: str = "idle"  # idle, working, recovering, crashed
     current_task_id: str = ""
     cycle_count: int = 0
+    crash_count: int = 0
 
 
 @dataclass
@@ -39,11 +40,15 @@ class StateManager:
     
     def heartbeat(self, status: str = "idle", task_id: str = ""):
         """Write heartbeat signal."""
+        # 保留之前的 crash_count
+        prev = self.get_heartbeat()
+        crash_count = prev.crash_count if prev else 0
         hb = Heartbeat(
             last_heartbeat=datetime.now().isoformat(),
             status=status,
             current_task_id=task_id,
             cycle_count=self.get_cycle_count() + (1 if status == "idle" else 0),
+            crash_count=crash_count,
         )
         with open(self.heartbeat_path, 'w') as f:
             json.dump(asdict(hb), f, indent=2)
@@ -72,6 +77,64 @@ class StateManager:
         if hb.status == "working":
             return not self.is_alive(timeout_minutes=5)
         return False
+
+    def detect_crash_and_record(self) -> bool:
+        """检测崩溃并记录到重启计数器。
+
+        调用 detect_crash()，如果检测到崩溃则：
+        - 记录到 RestartTracker（{workspace}/10_logs/restart_tracker.json）
+        - 更新 heartbeat 中的 crash_count
+        - 记录崩溃日志到 crash.log
+
+        Returns:
+            True 如果检测到崩溃，False 否则
+        """
+        crashed = self.detect_crash()
+        if crashed:
+            # 更新 crash_count
+            hb = self.get_heartbeat()
+            crash_count = (hb.crash_count + 1) if hb else 1
+            self.heartbeat(status="crashed")
+            # 写回 crash_count（heartbeat() 会覆盖，需要重写）
+            self._set_crash_count(crash_count)
+
+            # 记录到 RestartTracker
+            try:
+                from .restart_tracker import RestartTracker
+                # 查找 workspace: 从 state_dir 向上找
+                workspace = os.path.dirname(os.path.dirname(self.state_dir))
+                tracker = RestartTracker(workspace)
+                tracker.record_restart()
+            except Exception:
+                pass
+
+            # 记录 crash.log
+            try:
+                workspace = os.path.dirname(os.path.dirname(self.state_dir))
+                log_dir = os.path.join(workspace, "10_logs")
+                os.makedirs(log_dir, exist_ok=True)
+                crash_log = os.path.join(log_dir, "crash.log")
+                from datetime import datetime
+                with open(crash_log, "a", encoding="utf-8") as f:
+                    f.write(f"[{datetime.now().isoformat()}] Crash detected via heartbeat\n")
+            except Exception:
+                pass
+
+        return crashed
+
+    def _set_crash_count(self, count: int):
+        """直接设置 heartbeat 中的 crash_count 字段。"""
+        hb_path = self.heartbeat_path
+        if not os.path.exists(hb_path):
+            return
+        try:
+            with open(hb_path) as f:
+                data = json.load(f)
+            data["crash_count"] = count
+            with open(hb_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
     
     def get_cycle_count(self) -> int:
         hb = self.get_heartbeat()

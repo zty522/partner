@@ -26,7 +26,7 @@ MAX_CONCURRENT = 10
 SELF_PULSE_INTERVAL = 300  # 5 分钟
 
 
-async def mind_loop(pool: MindPool = None, save_path: str = ""):
+async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str = ""):
     """念头调度器主循环（带持久化 + WAKE_UP 唤醒）。
 
     永久运行，不断从池中取念头、创建 Task 执行。
@@ -37,6 +37,7 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
     Args:
         pool: MindPool 实例。为 None 时自动获取单例。
         save_path: 持久化文件路径。为空时不保存。
+        workspace: 实例工作空间路径。
     """
     if pool is None:
         pool = await MindPool.get_instance()
@@ -67,6 +68,9 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
 
     # 内置自脉冲定时器（15 分钟间隔自动注入 CRON_TICK）
     last_pulse = 0.0
+    # 空闲检测
+    last_nonempty_time = asyncio.get_event_loop().time()
+    has_logged_idle = False
 
     try:
         while True:
@@ -85,15 +89,22 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
                 ))
                 logger.info("[调度] 自脉冲 CRON_TICK 已注入")
 
-            # 如果池为空，短暂休眠 + 写空闲心跳
+            # 如果池为空，短暂休眠 + 空闲检测
             if pool.qsize() == 0:
-                try:
-                    with open("/tmp/partner_idle_heartbeat.txt", "w") as _hf:
-                        _hf.write(f"idle_since={asyncio.get_event_loop().time():.0f}")
-                except Exception:
-                    pass
+                # ── 30 分钟空闲检测 ─────────────────────────────
+                idle_duration = now - last_nonempty_time
+                if idle_duration >= 1800 and not has_logged_idle:
+                    logger.info("空闲状态 - 等待任务 (Mind Pool 连续 30 分钟为空)")
+                    has_logged_idle = True
+                elif idle_duration < 1800:
+                    has_logged_idle = False
+
                 await asyncio.sleep(0.1)
                 continue
+            else:
+                # 有事件进来，重置空闲检测
+                last_nonempty_time = now
+                has_logged_idle = False
 
             # 检查并发上限
             if len(pending_tasks) >= MAX_CONCURRENT:

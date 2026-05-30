@@ -22,8 +22,22 @@ if args.workspace:
 
 # If running with --instance-id/--workspace (manager or systemd), auto-start bridge
 if args.workspace or ('PARTNER_INSTANCE_ID' in os.environ and args.instance_id != 'default'):
-    from partner.qq_official_bridge import QQQfficialBridge
     workspace = args.workspace or os.path.join(os.path.expanduser("~"), ".partner", "instances", args.instance_id)
+
+    # ── 重启计数器检查 ──────────────────────────────────────────
+    from partner.restart_tracker import RestartTracker
+    tracker = RestartTracker(workspace)
+    tracker.record_restart()
+    if tracker.should_stop():
+        count = tracker.get_restart_count()
+        print(
+            f"Partner 实例 '{args.instance_id}' 在最近1小时内已经崩溃 "
+            f"{count} 次，已停止自动恢复。请手动检查。"
+        )
+        sys.exit(2)
+
+    # ── 启动桥接 ────────────────────────────────────────────────
+    from partner.qq_official_bridge import QQQfficialBridge
     # Look for qq_config in 00_config/ first, then workspace root
     cfg = os.path.join(workspace, "00_config", "qq_config.json")
     if not os.path.exists(cfg):

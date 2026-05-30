@@ -798,8 +798,7 @@ def _get_idle_since(instance_id: str) -> Optional[float]:
 
     检查多个可能的位置：
     1. {workspace}/20_records/idle_heartbeat.txt
-    2. {workspace}/idle_heartbeat.txt
-    3. /tmp/partner_idle_heartbeat.txt
+    2. {workspace}/10_logs/idle_heartbeat.txt
 
     Returns:
         float 时间戳，或 None（无 idle 标记）。
@@ -807,7 +806,7 @@ def _get_idle_since(instance_id: str) -> Optional[float]:
     hb_paths = [
         instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
         instance_dir(instance_id) / "idle_heartbeat.txt",
-        Path("/tmp/partner_idle_heartbeat.txt"),
+        instance_dir(instance_id) / "10_logs" / "idle_heartbeat.txt",
     ]
     for hb in hb_paths:
         if hb.exists():
@@ -930,7 +929,7 @@ def status_watch(interval: float = 5.0):
                         hb_paths = [
                             instance_dir(inst_id) / "20_records" / "idle_heartbeat.txt",
                             instance_dir(inst_id) / "idle_heartbeat.txt",
-                            Path("/tmp/partner_idle_heartbeat.txt"),
+                            instance_dir(inst_id) / "10_logs" / "idle_heartbeat.txt",
                         ]
                         for hb in hb_paths:
                             if hb.exists():

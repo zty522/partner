@@ -122,16 +122,21 @@ class Partner:
         )
 
     def start_mind(self):
-        """启动 Mind 循环，带异常捕获和自动重启。"""
+        """启动 Mind 循环，带异常捕获、空闲检测和自动重启限频。"""
         if self._mind_thread and self._mind_thread.is_alive():
             logger.warning("Mind loop 已在运行")
             return
+
+        from .restart_tracker import RestartTracker
+        tracker = RestartTracker(self.workspace)
 
         def _run():
             retry_count = 0
             max_retries_per_hour = 3
             cool_off = 120  # 冷却2分钟
             last_retry_time = 0
+            consecutive_errors = 0
+            last_idle_log = 0.0  # 空闲日志时间戳
 
             while True:
                 try:
@@ -140,19 +145,21 @@ class Partner:
                     # 初始化
                     self._mind_loop.run_until_complete(self._init_mind())
                     # 启动 mind_loop（永久运行）
-                    self._mind_loop.run_until_complete(mind_loop())
+                    self._mind_loop.run_until_complete(mind_loop(workspace=self.workspace))
                 except asyncio.CancelledError:
                     logger.info("[Core] Mind loop cancelled, exiting")
                     break
                 except Exception as e:
                     now = time.time()
+                    consecutive_errors += 1
+
                     # 重置计数器：如果距离上次重试超过1小时
                     if now - last_retry_time > 3600:
                         retry_count = 0
                     retry_count += 1
                     last_retry_time = now
 
-                    # 记录崩溃
+                    # 记录崩溃到 RestartTracker + crash.log
                     log_dir = os.path.join(
                         getattr(self, '_workspace', self.workspace),
                         "10_logs" if os.path.isdir(os.path.join(self.workspace, "10_logs"))
@@ -168,12 +175,18 @@ class Partner:
                     except Exception:
                         pass
 
-                    if retry_count > max_retries_per_hour:
+                    # 记录崩溃到重启计数器
+                    try:
+                        tracker.record_restart()
+                    except Exception:
+                        pass
+
+                    if retry_count > max_retries_per_hour or tracker.should_stop():
                         logger.critical(
                             f"[Core] Mind loop crashed {retry_count}x in 1h, stopping"
                         )
                         self._notify_admin(
-                            f"⚠️ Partner 崩溃超过{max_retries_per_hour}次/小时，已停止"
+                            f"⚠️ Partner 崩溃超过{max_retries_per_hour}次/小时，已停止自动恢复"
                         )
                         break
 
@@ -195,7 +208,7 @@ class Partner:
 
         self._mind_thread = threading.Thread(target=_run, daemon=True, name="mind-loop")
         self._mind_thread.start()
-        logger.info("🧠 Mind loop 已启动（后台线程，带异常保护）")
+        logger.info("🧠 Mind loop 已启动（后台线程，带异常保护 + 空闲检测）")
 
     def stop_mind(self):
         """停止 mind_loop。"""
@@ -220,6 +233,10 @@ class Partner:
 
     def start(self):
         """启动（后台模式）。"""
+        # 应用资源限制
+        from .resource_limiter import apply_limits
+        apply_limits()
+
         print(f"🤝 Partner is starting...")
         print(f"   Workspace: {self.workspace}")
         print(f"   Backend: {self.config.agent.backend}")

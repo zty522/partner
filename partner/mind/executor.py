@@ -35,6 +35,12 @@ _push_callback = None
 # 上一次保存的状态（用于在回复时提供结构化信息）
 _last_saved_state: Optional[Dict] = None
 
+# 报告去重缓存：{content_hash: timestamp}，10分钟内同一内容不重复推送
+_report_dedup_cache: Dict[str, float] = {}
+
+# Project 进展推送记录：{title: last_push_step}，每5轮或有实质指标变化才推送
+_project_last_push_step: Dict[str, int] = {}
+
 
 def set_push_callback(callback):
     """设置推送回调函数。
@@ -45,6 +51,46 @@ def set_push_callback(callback):
     global _push_callback
     _push_callback = callback
     logger.info(f"[MIND] Push callback registered: {callback}")
+
+
+def copy_external_data_to_workspace(source_path: str, workspace: str = None, temp_dir: str = None) -> str:
+    """将外部数据文件复制到实例工作目录。
+
+    确保外部文件被隔离到实例专属的临时目录，避免跨实例污染。
+
+    Args:
+        source_path: 源文件路径
+        workspace: 实例工作目录。为 None 时使用 executor 全局 _workspace。
+        temp_dir: 实例内临时目录，默认 {workspace}/99_temp/inputs/
+
+    Returns:
+        副本的路径（如果已在 workspace 内，则返回原路径）。
+    """
+    import shutil
+    import os
+
+    effective_workspace = workspace or _workspace
+    if not effective_workspace:
+        logger.warning("[DataCopy] 无 workspace，返回原始路径")
+        return source_path
+
+    if temp_dir is None:
+        temp_dir = os.path.join(effective_workspace, "99_temp", "inputs")
+
+    os.makedirs(temp_dir, exist_ok=True)
+
+    # 只在路径不在 workspace 内时才复制
+    if not source_path.startswith(effective_workspace):
+        dest = os.path.join(temp_dir, os.path.basename(source_path))
+        # 避免覆盖已有文件
+        if os.path.exists(dest):
+            base, ext = os.path.splitext(os.path.basename(source_path))
+            dest = os.path.join(temp_dir, f"{base}_{int(_time.time())}{ext}")
+        shutil.copy2(source_path, dest)
+        logger.info(f"[DataCopy] 复制 {source_path} → {dest}")
+        return dest
+
+    return source_path  # 已经在 workspace 内，不需要复制
 
 
 def init(workspace: str, adapter=None, knowledge=None,
@@ -607,11 +653,26 @@ async def _handle_curiosity(event: MindEvent):
 
 
 async def _handle_report(event: MindEvent):
-    """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接）。"""
+    """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接），含去重。"""
     content = event.payload.get("content", "")
     if not content:
         logger.warning(f"[REPORT] Empty content, skipping {event.id[:8]}")
         return
+
+    # ── 去重：同一内容在 10 分钟内不重复推送 ──
+    global _report_dedup_cache
+    import hashlib as _hl
+    content_stripped = content.strip()
+    h = _hl.md5(content_stripped.encode()).hexdigest()
+    now_ts = _time.time()
+    # 清理超过 10 分钟的旧缓存
+    stale = [k for k, v in _report_dedup_cache.items() if now_ts - v > 600]
+    for k in stale:
+        del _report_dedup_cache[k]
+    if h in _report_dedup_cache:
+        logger.debug(f"[REPORT] 去重跳过重复推送: {content_stripped[:60]}...")
+        return
+    _report_dedup_cache[h] = now_ts
 
     logger.info(f"[REPORT] Sending to QQ: {content[:80]}...")
 
@@ -716,18 +777,9 @@ async def _handle_cron_tick(event: MindEvent):
                 await pool.put(curiosity(topic=q, priority=8, source="cron_tick:focused_exploration"))
                 logger.info(f"[CRON] 聚焦探索: '{q[:60]}'")
 
-            # 向用户汇报：已开始聚焦探索
+            # 向用户汇报：仅日志，不推送模板文本
             topics_str = "、".join(queries[:3])
-            auto_report = (
-                f"📊 当前没有进行中的项目，已自动从最近项目瓶颈开始探索：\n"
-                f"🔍 {topics_str}\n"
-                f"🕒 有实质性发现时会主动推送。"
-            )
-            await pool.put(report(
-                content=auto_report,
-                priority=3,
-                source="cron_tick:focused_auto_idle",
-            ))
+            logger.info(f"[CRON] 空闲中已自动从最近项目瓶颈开始探索: {topics_str}")
         else:
             # 无活跃项目 → 不搜索，只记录
             logger.info(f"[CRON] 无活跃项目，空闲等待用户指令")
@@ -984,28 +1036,41 @@ async def _handle_project(event: MindEvent):
     except Exception as e:
         logger.debug(f"[PROJECT] 状态保存失败: {e}")
 
-    # 6. 主动推送进展到 QQ（每次执行后）
+    # 6. 主动推送进展到 QQ（仅每5轮或有实质指标变化时推送）
     try:
-        result_summary = (
-            f"📊 研究进展：{title[:50]}\n"
-            f"⏳ 已完成 {step + 1} 轮探索，正在深入。\n"
-        )
+        global _project_last_push_step
+        title_key = title[:60]
+        last_push = _project_last_push_step.get(title_key, -999)
+        step_diff = step - last_push
+
+        # 收集实质指标
+        import re as _re
+        actual_metrics = []
         if project_facts and isinstance(project_facts, dict):
             ctx_text = project_facts.get("context_text", "")
             if "暂无" not in ctx_text and ctx_text:
-                # 提取关键指标
-                import re
-                metrics = re.findall(r'(?:MAE|mse|loss|acc|f1|auc|r2|rmse)\s*[=：]\s*[\d.]+',
-                                     ctx_text, re.IGNORECASE)
-                if metrics:
-                    result_summary += "📈 " + ", ".join(metrics[:3]) + "\n"
-        result_summary += f"🔄 下一轮将在 {wake_delay // 60} 分钟后自动执行。"
-        await pool.put(report(
-            content=result_summary,
-            priority=4,
-            source="project:push",
-        ))
-        logger.info(f"[PROJECT] 进展已主动推送到 QQ")
+                actual_metrics = _re.findall(
+                    r'(?:MAE|mse|loss|acc|f1|auc|r2|rmse|准确率|误差|精度)'
+                    r'\s*[=：]\s*[\d.]+',
+                    ctx_text, _re.IGNORECASE
+                )
+
+        # 决定是否推送：每5轮 或 有新指标变化 或 step为0
+        should_push = (step_diff >= 5) or (step == 0) or (len(actual_metrics) > 0 and step_diff >= 1)
+
+        if should_push:
+            result_parts = [f"[项目] {title[:50]} — 第 {step + 1} 轮探索完成"]
+            if actual_metrics:
+                result_parts.append("📈 " + ", ".join(actual_metrics[:3]))
+            await pool.put(report(
+                content="\n".join(result_parts),
+                priority=4,
+                source="project:push",
+            ))
+            _project_last_push_step[title_key] = step
+            logger.info(f"[PROJECT] 已推送进展（step={step}, metrics={len(actual_metrics)}）")
+        else:
+            logger.info(f"[PROJECT] 跳过推送（step={step}, last_push_step={last_push}, diff={step_diff}）")
     except Exception as e:
         logger.debug(f"[PROJECT] 推送失败: {e}")
 
