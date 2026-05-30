@@ -374,19 +374,11 @@ class QQQfficialBridge:
     def _process_message_async(self, msg: QQMessage, user_text: str):
         """只做三件事：保存项目、确认回复、放入念头池。"""
         try:
-            # 1. 更新活跃项目
+            # 1. 更新活跃项目（自然语言 .txt）
             try:
-                from .project_manager import load, save, update_from_instruction
-                current = load(self.workspace)
-                if not current:
-                    # 没有活跃项目 → 用消息创建新项目
-                    update_from_instruction(self.workspace, user_text[:60])
-                else:
-                    # 如果用户消息看起来像新指令，更新项目
-                    for prefix in ["推进", "继续", "做", "切换", "研究", "搜索"]:
-                        if user_text.startswith(prefix):
-                            update_from_instruction(self.workspace, user_text[:60])
-                            break
+                from .project_state import set_active
+                set_active(self.workspace, user_text[:60])
+                logger.info(f"[QQ] 活跃项目已设置: {user_text[:40]}")
             except Exception:
                 pass
 
@@ -395,9 +387,8 @@ class QQQfficialBridge:
                 from .mind import MindPool, MindEvent, EventType, cron_tick
                 pool = MindPool.get_sync_instance()
                 if pool is not None:
-                    from .project_manager import load as _load_project
-                    proj = _load_project(self.workspace)
-                    proj_name = proj.get("project_name", user_text[:60]) if proj else user_text[:60]
+                    from .project_state import get_active
+                    proj_name = get_active(self.workspace) or user_text[:60]
                     ev = MindEvent(
                         type=EventType.PROJECT,
                         priority=2,
