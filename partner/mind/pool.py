@@ -1,9 +1,9 @@
-"""Mind Pool — 全局念头池。
+\"\"\"Mind Pool — 全局念头池。
 
 核心：asyncio.PriorityQueue 用于 async 环境。
 扩展：thread_safe_queue (queue.PriorityQueue) 用于跨线程投递。
 延迟：wake_after 支持 — 事件设置 wake_after 后不到时间不出队。
-"""
+\"\"\"
 
 import asyncio
 import json
@@ -19,11 +19,11 @@ logger = logging.getLogger(__name__)
 
 
 class MindPool:
-    """全局念头池单例。
+    \"\"\"全局念头池单例。
 
     支持 wake_after 延迟唤醒：事件设置 wake_after=time.time()+900
     后，900 秒内不会被 get() 取出。到时间后自动回到主队列。
-    """
+    \"\"\"
 
     _instance: Optional['MindPool'] = None
     _lock = asyncio.Lock()
@@ -47,7 +47,7 @@ class MindPool:
             cls._instance._auto_save = bool(path)
 
     def save(self):
-        """Save current pool state to JSON file."""
+        \"\"\"Save current pool state to JSON file.\"\"\"
         if not self._save_path:
             return
         try:
@@ -72,7 +72,7 @@ class MindPool:
             logger.debug(f"[MIND] Save failed: {e}")
 
     def _atexit_save(self):
-        """Save on program exit."""
+        \"\"\"Save on program exit.\"\"\"
         if self._save_path and os.path.exists(os.path.dirname(self._save_path)):
             try:
                 import json as _json
@@ -95,7 +95,7 @@ class MindPool:
                 pass
 
     async def load(self) -> int:
-        """Load saved pool state from JSON file. Returns restored count."""
+        \"\"\"Load saved pool state from JSON file. Returns restored count.\"\"\"
         if not self._save_path or not os.path.exists(self._save_path):
             return 0
         try:
@@ -164,7 +164,7 @@ class MindPool:
         cls._instance = None
 
     async def put(self, event: MindEvent):
-        """放入一个念头。如设置了 wake_after 则进入等待室。"""
+        \"\"\"放入一个念头。如设置了 wake_after 则进入等待室。\"\"\"
         if event.wake_after and event.wake_after > _time.time():
             self._waiting_room[event.id] = (event.wake_after, event)
             logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
@@ -194,7 +194,7 @@ class MindPool:
                 break
 
     async def _release_waiting(self):
-        """将等待室中到时间的事件放回主队列。"""
+        \"\"\"将等待室中到时间的事件放回主队列。\"\"\"
         now = _time.time()
         ready = [eid for eid, (wake_at, ev) in self._waiting_room.items() if wake_at <= now]
         for eid in ready:
@@ -205,27 +205,30 @@ class MindPool:
         return len(ready)
 
     async def get(self) -> Optional[MindEvent]:
-        "取出优先级最高的、已到唤醒时间的念头。Returns None if empty."
+        \"\"\"取出优先级最高的、已到唤醒时间的念头。非阻塞，用 get_nowait 避免 TimerHandle 泄漏。\"\"\"
         await self._drain_thread_queue()
         await self._release_waiting()
 
-        if self._queue.qsize() == 0:
-            return None
+        # 用 try_get_nowait 循环处理 wake_after 事件，避免递归
+        while True:
+            try:
+                event = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
 
-        event = await self._queue.get()
-        # 如果事件设置了 wake_after 但还没到，放回等待室，递归取下一个
-        if event.wake_after and event.wake_after > _time.time():
-            self._waiting_room[event.id] = (event.wake_after, event)
-            logger.debug(f"[MIND] Event {event.id[:8]} not yet due "
-                         f"(wake_after={event.wake_after:.0f}), back to waiting room")
-            return await self.get()
+            # 如果事件设置了 wake_after 但还没到，放回等待室
+            if event.wake_after and event.wake_after > _time.time():
+                self._waiting_room[event.id] = (event.wake_after, event)
+                logger.debug(f"[MIND] Event {event.id[:8]} not yet due "
+                             f"(wake_after={event.wake_after:.0f}), back to waiting room")
+                continue
 
-        self._total_get += 1
-        logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
-                    f"pri={event.priority}, topic={event.payload.get('topic', '')}")
-        if self._auto_save:
-            self.save()
-        return event
+            self._total_get += 1
+            logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
+                        f"pri={event.priority}, topic={event.payload.get('topic', '')}")
+            if self._auto_save:
+                self.save()
+            return event
 
     def qsize(self) -> int:
         return self._queue.qsize() + self._thread_queue.qsize() + len(self._waiting_room)
