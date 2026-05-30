@@ -9,17 +9,19 @@ REPO_URL="https://github.com/zty522/partner.git"
 INSTALL_DIR="${PARTNER_HOME:-$HOME/.partner}"
 PYTHON_MIN="3.10"
 PYTHON_MAX="3.12"
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+ESC=$(printf '\033' 2>/dev/null || printf '\x1b')
+GREEN="${ESC}[0;32m"
+YELLOW="${ESC}[1;33m"
+RED="${ESC}[0;31m"
+CYAN="${ESC}[0;36m"
+BOLD="${ESC}[1m"
+NC="${ESC}[0m"
 
-info()  { echo -e "${GREEN}✔${NC} $1"; }
-warn()  { echo -e "${YELLOW}⚠${NC} $1"; }
-error() { echo -e "${RED}✗${NC} $1"; }
-header(){ echo -e "\n${BOLD}${CYAN}--- $1 ---${NC}\n"; }
+# Use stderr for status so $(...) captures don't get polluted
+info()  { printf '%s[ OK ]%s %s\n' "$GREEN" "$NC" "$*" >&2; }
+warn()  { printf '%s[WARN]%s %s\n' "$YELLOW" "$NC" "$*" >&2; }
+error() { printf '%s[FAIL]%s %s\n' "$RED" "$NC" "$*" >&2; }
+header(){ printf '\n%s--- %s ---%s\n' "${BOLD}${CYAN}" "$*" "$NC" >&2; }
 
 # ── Detect OS ──
 detect_os() {
@@ -433,7 +435,7 @@ create_startup_script
 # Step 8: Done
 header "Installation complete"
 echo ""
-echo -e "${GREEN}  ✔ Partner installed successfully. Run 'partner' to start.${NC}"
+echo -e "${GREEN}  ** Partner installed successfully. Run 'partner' to start.${NC}"
 echo ""
 echo -e "${CYAN}  Installation directory: $INSTALL_DIR${NC}"
 echo ""
