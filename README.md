@@ -36,7 +36,10 @@ And it tells you everything it discovered while you were away.
 # Linux
 curl -fsSL https://raw.githubusercontent.com/zty522/partner/main/scripts/install.sh | bash
 
-# Windows — download the installer from GitHub Releases
+# Windows (PowerShell 5.1+, run as Administrator)
+powershell -Command "& { iwr -useb https://raw.githubusercontent.com/zty522/partner/main/scripts/install.ps1 } | iex"
+
+# Or download the EXE installer from GitHub Releases
 ```
 
 ### Commands
