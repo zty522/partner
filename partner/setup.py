@@ -189,26 +189,35 @@ def detect_hermes() -> AgentInfo:
         return AgentInfo("hermes", "Hermes Agent", "🔮", False)
     
     # Check 2: hermes binary
+    import os as _os
     candidates = [
         home / ".local" / "bin" / "hermes",
         hermes_dir / "hermes-agent" / "venv" / "bin" / "hermes",
         Path("/usr/local/bin/hermes"),
+        # Windows paths
+        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python314" / "Scripts" / "hermes.exe",
+        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python313" / "Scripts" / "hermes.exe",
+        Path(_os.environ.get("APPDATA", "")) / "Python" / "Python312" / "Scripts" / "hermes.exe",
+        Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes",
+        Path(_os.environ.get("APPDATA", "")) / "npm" / "hermes.cmd",
     ]
-    
+
     hermes_bin = None
     for c in candidates:
         if c.exists():
             hermes_bin = str(c)
             break
-    
+
     if not hermes_bin:
-        # Try which
-        try:
-            result = subprocess.run(["which", "hermes"], capture_output=True, text=True, timeout=3)
-            if result.returncode == 0:
-                hermes_bin = result.stdout.strip()
-        except:
-            pass
+        # Try which (Linux/Mac) or where (Windows)
+        for cmd in ["which", "where"]:
+            try:
+                result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3)
+                if result.returncode == 0:
+                    hermes_bin = result.stdout.strip().split("\n")[0].strip()
+                    break
+            except:
+                pass
     
     if not hermes_bin:
         return AgentInfo("hermes", "Hermes Agent", "🔮", False)
