@@ -1197,6 +1197,14 @@ class QQQfficialBridge:
                 except Exception:
                     pass
 
+            # 更新 active_project.json，记住用户指定的方向
+            try:
+                from .project_manager import update_from_instruction as _update_project
+                _update_project(self.workspace, text)
+                logger.info(f"[QQ] 活跃项目已更新: {text[:40]}")
+            except Exception:
+                pass
+
             try:
                 from .journal import JournalEntry
                 self.journal.log(JournalEntry(

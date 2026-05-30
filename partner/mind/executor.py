@@ -244,17 +244,33 @@ def _scan_project_for_topic(topic: str, workspace: str) -> str:
                     except Exception:
                         scanned["config"].append(rel)
 
-    # Build report
+    # Build report (no file paths exposed to user)
     parts = []
     if scanned["readme"]:
-        parts.append("README 中涉及相关信息：" + " | ".join(scanned["readme"][:3]))
+        contents = []
+        for item in scanned["readme"][:3]:
+            # item format: "path: content" — extract content only
+            if ": " in item:
+                contents.append(item.split(": ", 1)[1])
+            else:
+                contents.append(item)
+        parts.append("README 中涉及相关信息：" + " | ".join(contents))
     if scanned["code"]:
-        parts.append("相关代码文件：" + "、".join(scanned["code"][:5]))
+        parts.append(f"相关代码文件：{len(scanned["code"])} 个文件")
     if scanned["config"]:
-        parts.append("相关配置/文档：" + "、".join(scanned["config"][:5]))
+        contents = []
+        for item in scanned["config"][:3]:
+            # item format: "path: content" — extract content only  
+            if ": " in item:
+                contents.append(item.split(": ", 1)[1])
+            else:
+                parts.append(f"相关记录中发现 {len(scanned['config'])} 条信息")
+                break
+        else:
+            parts.append("相关记录：" + " | ".join(contents))
 
     if parts:
-        return f"关于「{topic}」，在项目目录中找到了以下相关内容：\n" + "\n".join(parts)
+        return f"关于「{topic}」，在项目记录中找到了以下相关内容：\n" + "\n".join(parts)
     return ""
 
 
