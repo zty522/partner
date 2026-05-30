@@ -146,7 +146,7 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
             if yn != "n":
                 print(t("cli.installing", dep="aiohttp"))
                 r = subprocess.run([sys.executable, "-m", "pip", "install", "aiohttp>=3.8"],
-                                   capture_output=True, text=True, timeout=120)
+                                   capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
                 if r.returncode == 0:
                     print(t("cli.install_ok", dep="aiohttp"))
                 else:
@@ -238,7 +238,7 @@ def cmd_update(args):
 
     # 2. git pull
     print(f"{C_YELLOW}➜ git pull{C_RESET}")
-    r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, cwd=repo_dir)
+    r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir)
     if r.returncode != 0:
         print(f"{C_RED}❌ git pull failed:{C_RESET}")
         print(r.stderr)
@@ -255,13 +255,13 @@ def cmd_update(args):
     print(f"{C_YELLOW}➜ pip install -e .{C_RESET}")
     r = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages"],
-        capture_output=True, text=True, timeout=120, cwd=repo_dir,
+        capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir,
     )
     if r.returncode != 0:
         # Retry without --break-system-packages (older pip versions)
         r = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-e", "."],
-            capture_output=True, text=True, timeout=120, cwd=repo_dir,
+            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir,
         )
     if r.returncode != 0:
         print(f"{C_RED}❌ pip install failed:{C_RESET}")

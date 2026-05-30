@@ -86,7 +86,7 @@ class HermesAdapter(AgentAdapter):
             hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
             cmd = [hermes_bin, "chat", "--query", prompt, "--quiet", "--toolsets", ""]
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=None,
+                cmd, capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
                 cwd=self.workspace,
             )
             out = result.stdout.strip()
@@ -122,7 +122,7 @@ class HermesAdapter(AgentAdapter):
             cmd = [hermes_bin, "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=None,
+                capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
                 cwd=self.workspace,
             )
             out = result.stdout.strip()

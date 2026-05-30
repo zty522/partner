@@ -221,6 +221,7 @@ def run_silent(cmd, cwd=None, timeout=30, timeout_ok=False):
         env["PYTHONUTF8"] = "1"
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
             cwd=cwd or PARTNER_DIR, creationflags=CREATION_FLAGS, env=env,
         )
         return result.stdout.strip(), result.stderr.strip(), result.returncode

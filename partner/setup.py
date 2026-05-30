@@ -275,7 +275,7 @@ def detect_hermes() -> AgentInfo:
         # Priority 3: which/where fallback
         for cmd in ["which", "where"]:
             try:
-                result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3)
+                result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
                 if result.returncode == 0:
                     hermes_bin = result.stdout.strip().split("\n")[0].strip()
                     break
@@ -328,7 +328,7 @@ def detect_claude_code() -> AgentInfo:
     
     if not claude_bin:
         try:
-            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3)
+            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
             if result.returncode == 0:
                 claude_bin = result.stdout.strip()
         except:
@@ -346,7 +346,7 @@ def detect_claude_code() -> AgentInfo:
 def detect_codex() -> AgentInfo:
     """Detect OpenAI Codex installation."""
     try:
-        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3)
+        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
         if result.returncode == 0:
             return AgentInfo("codex", "OpenAI Codex", "⚡", True, path=result.stdout.strip())
     except:
@@ -482,7 +482,7 @@ def auto_install_wcferry() -> bool:
         import subprocess
         result = subprocess.run(
             ["pip", "install", "wcferry", "pilk"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
         )
         if result.returncode == 0:
             status_ok("WeChatFerry 安装成功")
@@ -675,7 +675,7 @@ def setup_cron_hermes(workspace: str):
     
     gateway_running = False
     try:
-        result = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
         if "running" in result.stdout.lower() or "active" in result.stdout.lower():
             gateway_running = True
             status_ok("Hermes Gateway 正在运行")
@@ -688,8 +688,8 @@ def setup_cron_hermes(workspace: str):
         status_info("正在启动 Hermes Gateway...")
         try:
             # Try to install and start gateway
-            subprocess.run(["hermes", "gateway", "install"], capture_output=True, text=True, timeout=30)
-            result = subprocess.run(["hermes", "gateway", "start"], capture_output=True, text=True, timeout=30)
+            subprocess.run(["hermes", "gateway", "install"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+            result = subprocess.run(["hermes", "gateway", "start"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
             if result.returncode == 0:
                 status_ok("Hermes Gateway 已启动")
                 gateway_running = True
@@ -704,7 +704,7 @@ def setup_cron_hermes(workspace: str):
     section("设置 Cron Job", "⏰")
     
     try:
-        result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
         if "partner" in result.stdout.lower() or "autonomous-researcher" in result.stdout.lower():
             status_ok("Cron job 已存在，跳过创建")
             # Extract job ID and save to config
@@ -837,7 +837,8 @@ def json_save(path, data):
              "--skill", "partner-research",
              f"every {_interval}m",
              cron_prompt],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30,
+            encoding="utf-8", errors="replace"
         )
         if result.returncode == 0:
             status_ok(f"Cron job 已自动创建 (每 {_interval} 分钟)")
@@ -911,7 +912,7 @@ if result['summary']:
     try:
         result = _subprocess.run(
             ["hermes", "cron", "list"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
         )
         if cron_name not in result.stdout:
             _subprocess.run(
@@ -921,7 +922,7 @@ if result['summary']:
                  "--prompt", f"运行 workspace 维护脚本: python3 {cron_script}",
                  "--workdir", workspace,
                  ],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace",
             )
             status_ok(f"已设置每日 workspace 整理 (凌晨4点)")
         else:
@@ -963,7 +964,7 @@ def _ensure_qq_dependencies():
             import subprocess
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install"] + needed,
-                capture_output=True, text=True, timeout=120
+                capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
             )
             if result.returncode == 0:
                 status_ok(f"依赖安装成功: {', '.join(needed)}")
@@ -987,7 +988,7 @@ def _install_alternative(needed):
         import subprocess
         result = subprocess.run(
             [sys.executable, "-m", "pip", "install", "partner-research[qq-official]"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
         )
         if result.returncode == 0:
             status_ok("通过 partner-research[qq-official] 安装成功")
