@@ -121,12 +121,7 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
         格式化的汇报文本
     """
     if not last_state:
-        return (
-            "✅ 系统已重启，恢复运行。\n"
-            "📌 上次工作状态：未找到历史记录（全新启动或数据已清理）。\n"
-            "📋 当前计划：检查知识库和项目状态，自主规划下一步。\n"
-            "🕒 预计下次汇报：有实质性进展时主动发送。"
-        )
+        return "已恢复运行。未找到历史记录，正在检查知识库和项目状态，自主规划下一步。"
 
     raw_project = last_state.get("active_project", "未记录")
     last_action = last_state.get("last_action", "未知")
@@ -136,13 +131,9 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
 
     project = _humanize_project(raw_project)
 
-    # 如果没有活跃项目，展示简洁版本
+    # 如果没有活跃项目
     if project == "no active project":
-        return (
-            "✅ 系统已重启，恢复运行。\n"
-            "📌 没有活跃项目。等待用户指令或自动开始探索。\n"
-            "🕒 预计下次汇报：有实质性进展时主动发送。"
-        )
+        return "已恢复运行。没有活跃项目，正在检查可探索的方向。有新发现时主动通知你。"
 
     # 构建指标描述（自然语言）
     metrics_str = _humanize_metrics(metrics)
@@ -158,21 +149,18 @@ def format_restart_report(last_state: Optional[Dict]) -> str:
     if pending:
         for i, task in enumerate(pending[:3], 1):
             plan_lines.append(f"{i}. {task}")
-    elif project == "no active project":
-        plan_lines = ["1. 等待用户指令", "2. 或自动开始知识探索"]
     else:
         plan_lines = ["1. 根据上次进度继续推进", "2. 搜索相关文献寻找改进方向"]
 
     plan_str = "\n".join(plan_lines)
 
     # 对话摘要
-    dialog_str = f"\n💬 根据对话记录：{dialog}" if dialog else ""
+    dialog_str = f"。根据对话记录：{dialog}" if dialog else ""
 
     return (
-        f"✅ 系统已重启，恢复运行。\n"
-        f"📌 上次工作状态：{project}，已执行到：{progress}{dialog_str}\n"
-        f"📋 当前计划：\n{plan_str}\n"
-        f"🕒 预计下次汇报：有实质性进展时主动发送。"
+        f"已恢复运行。上次工作状态：{project}，已执行到：{progress}{dialog_str}。"
+        f"当前计划：{plan_str}。"
+        f"有实质性发现时主动通知你。"
     )
 
 
