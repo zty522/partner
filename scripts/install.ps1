@@ -286,6 +286,7 @@ function Install-PartnerPackage {
         Write-Info "Running pip install -e . ..."
         
         # Verify pip works first
+        # 2>&1 is safe here because pip --version doesn't emit WARNING to stderr
         $pipVer = & $pythonExe -m pip --version 2>&1
         if ($LASTEXITCODE -ne 0) {
             Pop-Location
@@ -293,42 +294,45 @@ function Install-PartnerPackage {
         }
         Write-Info "pip: $($pipVer.Trim())"
         
-        # Clean corrupted distributions (e.g. ~artner-research from aborted installs)
-        $siteDirs = & $pythonExe -c "
-import site
-dirs = list(site.getsitepackages())
-if site.ENABLE_USER_SITE:
-    dirs.append(site.getusersitepackages())
-for d in dirs:
-    print(d)
-" 2>&1
-        foreach ($sd in $siteDirs) {
-            $sd = $sd.Trim()
-            if ($sd -and (Test-Path $sd)) {
-                $corrupted = Get-ChildItem "$sd\~*" -Directory -ErrorAction SilentlyContinue
-                foreach ($d in $corrupted) {
-                    Remove-Item -Recurse -Force $d.FullName -ErrorAction SilentlyContinue
-                }
-                $corruptedEggs = Get-ChildItem "$sd\~*" -File -ErrorAction SilentlyContinue
-                foreach ($f in $corruptedEggs) {
-                    Remove-Item -Force $f.FullName -ErrorAction SilentlyContinue
-                }
+        # ── pip install ──
+        # PowerShell 5.1 ($ErrorActionPreference=Stop) problem:
+        #   2>&1 converts stderr lines to ErrorRecord objects, which trigger Stop
+        #   even when redirected to the output stream, causing RemoteException.
+        # Solution: use 2>$null to discard stderr, then check $LASTEXITCODE.
+        # (pip's error messages go to stdout as well when install fails.)
+        
+        # Pre-uninstall old version silently — handles "no RECORD file" error
+        # that occurs when pip tries to upgrade an editable install without a RECORD.
+        & $pythonExe -m pip uninstall -y partner-research 2>$null | Out-Null
+        
+        # Now install fresh. stderr goes to $null to avoid $ErrorActionPreference=Stop
+        # converting pip warnings into terminating errors.
+        & $pythonExe -m pip install -e . --no-warn-script-location 2>$null
+        $pipExitCode = $LASTEXITCODE
+        
+        # ── Check result ──
+        # If install failed but package is already importable (common on re-run),
+        # treat it as success. The real test is whether partner actually works.
+        if ($pipExitCode -ne 0) {
+            python -c "import partner" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Warn "pip re-install had issues (exit $pipExitCode), but partner is already installed and importable."
+            } else {
+                Pop-Location
+                Exit-Error "pip install failed (exit code: $pipExitCode). Run manually: $pythonExe -m pip install -e ."
             }
         }
         
-        $pipOutput = & $pythonExe -m pip install -e . 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Pop-Location
-            Exit-Error "pip install failed. Full output: $pipOutput"
-        }
         Write-Info "Partner package installed"
         Pop-Location
     } catch {
         Pop-Location
+        # If we get here, something threw unexpectedly despite the 2>$null fix
         $errMsg = $_.ToString()
-        # Ignore WARNING-level messages from pip stderr ($ErrorActionPreference=Stop turns them into errors)
-        if ($errMsg -match "^WARNING: ") {
-            Write-Info "Partner package installed (with warnings)"
+        # Check if package is actually usable despite the error
+        python -c "import partner" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Warn "pip install completed with non-fatal issue: $errMsg"
             return
         }
         Exit-Error "pip install failed: $errMsg"
@@ -400,7 +404,16 @@ function Add-PythonScriptsToPath {
 # ── Add to PATH ──
 function Add-PartnerToPath {
     $scriptsDir = ""
-    $pythonDir = Split-Path -Parent (Split-Path -Parent $Python.Path)
+
+    # Resolve "python" command name to a full path so Split-Path works
+    $pythonCmd = Get-Command $Python.Path -ErrorAction SilentlyContinue
+    $pythonFullPath = if ($pythonCmd) { $pythonCmd.Source } else { "" }
+    
+    if ($pythonFullPath) {
+        $pythonDir = Split-Path -Parent (Split-Path -Parent $pythonFullPath)
+    } else {
+        $pythonDir = ""
+    }
 
     # Determine Scripts directory based on where Python is
     $candidates = @(
@@ -409,8 +422,8 @@ function Add-PartnerToPath {
         "$pythonDir\..\..\Scripts"                                       # another common layout
     )
 
-    # Also check for pip-installed scripts dir
-    $pipScripts = & $Python.Path -m site --user-site 2>&1
+    # Also check for pip-installed scripts dir (use 2>$null to avoid $ErrorActionPreference=Stop)
+    $pipScripts = & $Python.Path -m site --user-site 2>$null
     if ($pipScripts -match "^(.*)\\site-packages") {
         $candidates += "$($Matches[1])\Scripts"
     }
@@ -430,9 +443,13 @@ function Add-PartnerToPath {
     if (-not $scriptsDir) {
         # Search more broadly
         foreach ($dir in @(
+            "$env:APPDATA\Python\Python314\Scripts",
+            "$env:APPDATA\Python\Python313\Scripts",
             "$env:APPDATA\Python\Python312\Scripts",
             "$env:APPDATA\Python\Python311\Scripts",
             "$env:APPDATA\Python\Python310\Scripts",
+            "$env:LOCALAPPDATA\Programs\Python\Python314\Scripts",
+            "$env:LOCALAPPDATA\Programs\Python\Python313\Scripts",
             "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts",
             "$env:LOCALAPPDATA\Programs\Python\Python311\Scripts",
             "$env:LOCALAPPDATA\Programs\Python\Python310\Scripts"
@@ -479,7 +496,7 @@ Write-Header "Installing Partner"
 $Python = Ensure-Python
 
 # Step 2: Ensure Git
-Ensure-Git
+$null = Ensure-Git
 
 # Step 3: Clone repository
 Install-Repository
