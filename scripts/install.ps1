@@ -345,8 +345,8 @@ function Add-PythonScriptsToPath {
     .SYNOPSIS
         Add Python Scripts directory to user PATH permanently.
     #>
-    # 获取 Python Scripts 目录
-    # 方法1: 通过 python -m site --user-site 定位用户级 Scripts
+    # Locate Python Scripts directory
+    # Method 1: find user-level Scripts via python -m site --user-site
     $userSite = & python -m site --user-site 2>$null
     $userScriptsDir = ""
     if ($userSite) {
@@ -366,12 +366,12 @@ function Add-PythonScriptsToPath {
     $scriptsDir = $null
     foreach ($p in $pythonPaths) {
         if ($p -and (Test-Path $p)) {
-            # 确认该目录下有 partner.exe
+            # Check if partner.exe exists in this directory
             if (Test-Path (Join-Path $p "partner.exe") -PathType Leaf) {
                 $scriptsDir = $p
                 break
             }
-            # 没有 partner.exe 但目录存在，作为后备
+            # No partner.exe but dir exists — use as fallback
             if (-not $scriptsDir) {
                 $scriptsDir = $p
             }
@@ -383,18 +383,18 @@ function Add-PythonScriptsToPath {
         return
     }
 
-    # 检查是否已在 PATH 中
+    # Check if already in PATH
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($currentPath -split ";" | Where-Object { $_ -eq $scriptsDir }) {
         Write-Info "$scriptsDir already in PATH"
         return
     }
 
-    # 添加到用户级 PATH
+    # Append to user-level PATH permanently
     $newPath = "$currentPath;$scriptsDir"
     [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
 
-    # 刷新当前会话
+    # Also update current session's PATH
     $env:Path = "$env:Path;$scriptsDir"
 
     Write-Info "Added to PATH: $scriptsDir"
@@ -521,11 +521,12 @@ Write-Host ""
 # Step 7: Interactive setup wizard
 Write-Header "Setup wizard"
 Write-Host ""
-Write-Host "  Now configure your Partner." -ForegroundColor $cCyan
-Write-Host "  You'll need your QQ Bot AppID and AppSecret from https://q.qq.com"
+Write-Host "  Now let's configure your Partner." -ForegroundColor $cCyan
+Write-Host "  You will be asked to choose language (Chinese or English) and enter your QQ Bot credentials."
+Write-Host "  Get your AppID and AppSecret from: https://q.qq.com"
 Write-Host ""
 try {
-    $setupResult = & $pythonExe -m partner setup 2>&1
+    & $Python.Path -m partner setup
     if ($LASTEXITCODE -eq 0) {
         Write-Info "Partner configured successfully!"
     } else {
