@@ -525,7 +525,7 @@ Write-Host "  Now configure your Partner." -ForegroundColor $cCyan
 Write-Host "  You'll need your QQ Bot AppID and AppSecret from https://q.qq.com"
 Write-Host ""
 try {
-    $setupResult = & partner setup </dev/tty 2>&1
+    $setupResult = & $pythonExe -m partner setup 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Info "Partner configured successfully!"
     } else {
