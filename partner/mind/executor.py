@@ -351,11 +351,12 @@ async def _handle_wake_up(event: MindEvent):
     """唤醒脉冲：启动后自动恢复研究和探索，生成结构化汇报。
 
     1. 读取 last_state.json 恢复上次上下文
-    2. 检查 state/active_plan.json 是否有活跃计划 → 生成 PROJECT 念头
-    3. 检查 Mind Pool 中已有 PROJECT → 不做额外操作
-    4. 如果没有项目 → 从知识库生成 Curiosity 探索
-    5. 检查自省时间 → 超过 2 小时生成自省
-    6. 生成详细的复工简报（含上次进度和计划）
+    2. 检查 active_project.json 是否有活跃项目 → 生成 PROJECT 念头
+    3. fallback：检查 state/active_plan.json 是否有活跃计划 → 生成 PROJECT 念头
+    4. 检查 Mind Pool 中已有 PROJECT → 不做额外操作
+    5. 如果没有项目 → 从知识库生成 Curiosity 探索
+    6. 检查自省时间 → 超过 2 小时生成自省
+    7. 生成精简的复工简报（使用 project_manager.format_status）
     """
     import time as _wt, json as _json, os as _os
     pool = await ensure_pool()
@@ -384,28 +385,51 @@ async def _handle_wake_up(event: MindEvent):
                 has_project = True
                 break
 
-    # 如果没有 PROJECT 事件，检查 active_plan.json
+    # 如果没有 PROJECT 事件，先检查 active_project.json，再检查 active_plan.json
     if not has_project and _workspace:
-        plan_path = _os.path.join(_workspace, "state", "active_plan.json")
-        if _os.path.exists(plan_path):
-            try:
-                with open(plan_path, 'r', encoding='utf-8') as f:
-                    plan = _json.load(f)
-                if plan.get("status") == "active" and plan.get("title"):
-                    await pool.put(MindEvent(
-                        type=EventType.PROJECT,
-                        priority=2,
-                        payload={
-                            "title": plan["title"],
-                            "goal": plan.get("goal", ""),
-                            "step": 0,
-                        },
-                        source="wake_up:plan_restore",
-                    ))
-                    has_project = True
-                    logger.info(f"[WAKE_UP] 从 active_plan 恢复项目: {plan['title'][:40]}")
-            except Exception as e:
-                logger.warning(f"[WAKE_UP] active_plan 读取失败: {e}")
+        # 优先检查 active_project.json
+        try:
+            from ..project_manager import load as _load_proj
+            proj = _load_proj(_workspace)
+            if proj and proj.get("project_name"):
+                proj_name = proj["project_name"]
+                await pool.put(MindEvent(
+                    type=EventType.PROJECT,
+                    priority=2,
+                    payload={
+                        "title": proj_name,
+                        "goal": proj.get("last_user_instruction", ""),
+                        "step": 0,
+                    },
+                    source="wake_up:project_restore",
+                ))
+                has_project = True
+                logger.info(f"[WAKE_UP] 从 active_project.json 恢复项目: {proj_name}")
+        except Exception as e:
+            logger.warning(f"[WAKE_UP] active_project.json 读取失败: {e}")
+
+        # fallback: active_plan.json
+        if not has_project:
+            plan_path = _os.path.join(_workspace, "state", "active_plan.json")
+            if _os.path.exists(plan_path):
+                try:
+                    with open(plan_path, 'r', encoding='utf-8') as f:
+                        plan = _json.load(f)
+                    if plan.get("status") == "active" and plan.get("title"):
+                        await pool.put(MindEvent(
+                            type=EventType.PROJECT,
+                            priority=2,
+                            payload={
+                                "title": plan["title"],
+                                "goal": plan.get("goal", ""),
+                                "step": 0,
+                            },
+                            source="wake_up:plan_restore",
+                        ))
+                        has_project = True
+                        logger.info(f"[WAKE_UP] 从 active_plan 恢复项目: {plan['title'][:40]}")
+                except Exception as e:
+                    logger.warning(f"[WAKE_UP] active_plan 读取失败: {e}")
 
     # 如果没有项目，从知识库生成探索（聚焦）
     if not has_project:
@@ -457,7 +481,7 @@ async def _handle_wake_up(event: MindEvent):
     # 生成详细的结构化复工简报
     try:
         from ..state_persistence import format_restart_report
-        restart_report = format_restart_report(last_state)
+        restart_report = format_restart_report(last_state, _workspace)
         await pool.put(report(
             content=restart_report,
             priority=3,
@@ -510,7 +534,7 @@ async def _handle_curiosity(event: MindEvent):
         web_results = _search(topic, max_results=5, workspace=_workspace)
         logger.info(f"[CURIOSITY] Web search returned {len(web_results)} results for '{topic}'")
 
-        # LLM 相关性评分（阈值 0.3），过滤不相关结果
+        # LLM 相关性评分（阈值 0.2），过滤不相关结果
         if web_results and _adapter:
             try:
                 scored = []
@@ -529,7 +553,7 @@ async def _handle_curiosity(event: MindEvent):
                         score = float(score_str.strip())
                     except (ValueError, TypeError):
                         score = 0.5  # 默认中等
-                    if score >= 0.3:
+                    if score >= 0.2:
                         scored.append(r)
                         logger.debug(f"[CURIOSITY] 结果相关: '{title[:40]}' score={score:.2f}")
                     else:
@@ -539,7 +563,7 @@ async def _handle_curiosity(event: MindEvent):
             except Exception as e:
                 logger.debug(f"[CURIOSITY] LLM评分失败，使用全部结果: {e}")
 
-        web_result_text = format_results(web_results, max_items=3)
+        web_result_text = format_results(web_results, max_items=10)
     except Exception as e:
         logger.warning(f"[CURIOSITY] Web search failed (non-fatal): {e}")
         web_result_text = ""
@@ -709,10 +733,10 @@ async def _handle_cron_tick(event: MindEvent):
     1. 自由探索知识空白
     2. 每偶数小时自省
     3. 每天 23:00 写日记
-    4. ⭐ 空闲检测：如果 Mind Pool 为空（无 PROJECT/无 Curiosity），
-       自动从 knowledge.json 生成新的 Curiosity 探索任务
+    4. ⭐ 空闲检测：无活跃 PROJECT/CURIOSITY 时，
+       检查 active_project.json 恢复项目；无项目则等待用户指令
     5. 加速等待中的 PROJECT 事件
-    6. 保存状态到 last_state.json
+    6. 保存状态到 last_state.json 和 active_project.json
     """
     pool = await ensure_pool()
     now = datetime.now()
@@ -753,10 +777,10 @@ async def _handle_cron_tick(event: MindEvent):
         ))
         logger.info(f"[CRON] Generated diary_write at hour={hour}")
 
-    # ── 4. ⭐ 空闲检测：自动生成探索任务 ──
-    # 如果池中没有任何 PROJECT 事件，且没有等待中的 Curiosity，
-    # 说明系统空闲，需要自动生成任务
+    # ── 4. ⭐ 空闲检测 ──
+    # 检查池中是否有活跃的 PROJECT/CURIOSITY
     has_any_active = False
+    skip_free_exploration = False
     for ev in getattr(pool._queue, '_queue', []):
         if hasattr(ev, 'type') and ev.type in (EventType.PROJECT, EventType.CURIOSITY):
             has_any_active = True
@@ -768,20 +792,26 @@ async def _handle_cron_tick(event: MindEvent):
                 break
 
     if not has_any_active:
-        logger.info(f"[CRON] ⭐ 检测到空闲状态，自动生成聚焦探索任务")
+        # 先检查是否有持久化的活跃项目
+        try:
+            from ..project_manager import load as _load_proj
+            active = _load_proj(_workspace) if _workspace else None
+            if active:
+                proj_name = active.get("project_name", "")
+                if proj_name:
+                    logger.info(f"[CRON] 空闲检测：从 active_project.json 恢复项目 '{proj_name}'")
+                    await pool.put(MindEvent(
+                        type=EventType.PROJECT,
+                        priority=2,
+                        payload={"title": proj_name, "goal": active.get("last_user_instruction", ""), "step": 0},
+                        source="cron_tick:resume_active_project",
+                    ))
+                    # 跳过后续的空闲探索
+                    skip_free_exploration = True
+        except Exception:
+            pass
 
-        # 使用智能聚焦查询（从项目瓶颈生成具体查询）
-        queries = await _generate_focused_queries()
-        if queries:
-            for q in queries[:2]:
-                await pool.put(curiosity(topic=q, priority=8, source="cron_tick:focused_exploration"))
-                logger.info(f"[CRON] 聚焦探索: '{q[:60]}'")
-
-            # 向用户汇报：仅日志，不推送模板文本
-            topics_str = "、".join(queries[:3])
-            logger.info(f"[CRON] 空闲中已自动从最近项目瓶颈开始探索: {topics_str}")
-        else:
-            # 无活跃项目 → 不搜索，只记录
+        if not skip_free_exploration:
             logger.info(f"[CRON] 无活跃项目，空闲等待用户指令")
             # 不搜索！不创建泛搜索任务
 
@@ -819,6 +849,15 @@ async def _handle_cron_tick(event: MindEvent):
             _save_state(_workspace, state)
             global _last_saved_state
             _last_saved_state = state
+
+        # 保存状态时，也更新 active_project.json
+        try:
+            from ..project_manager import load as _load_proj, save as _save_proj
+            current_proj = _load_proj(_workspace) if _workspace else None
+            if current_proj:
+                _save_proj(_workspace, current_proj)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1036,7 +1075,7 @@ async def _handle_project(event: MindEvent):
     except Exception as e:
         logger.debug(f"[PROJECT] 状态保存失败: {e}")
 
-    # 6. 主动推送进展到 QQ（仅每5轮或有实质指标变化时推送）
+    # 6. 主动推送进展（仅首次或发现新指标时推送）
     try:
         global _project_last_push_step
         title_key = title[:60]
@@ -1055,11 +1094,11 @@ async def _handle_project(event: MindEvent):
                     ctx_text, _re.IGNORECASE
                 )
 
-        # 决定是否推送：每5轮 或 有新指标变化 或 step为0
-        should_push = (step_diff >= 5) or (step == 0) or (len(actual_metrics) > 0 and step_diff >= 1)
+        # 决定是否推送：step==0（首次）或发现新指标
+        should_push = (step == 0) or (len(actual_metrics) > 0 and step_diff >= 1)
 
         if should_push:
-            result_parts = [f"[项目] {title[:50]} — 第 {step + 1} 轮探索完成"]
+            result_parts = [f"已完成 {title[:50]} 第 {step + 1} 轮探索"]
             if actual_metrics:
                 result_parts.append("📈 " + ", ".join(actual_metrics[:3]))
             await pool.put(report(

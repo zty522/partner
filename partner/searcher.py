@@ -9,6 +9,8 @@
 
 import logging
 import json
+import os
+import re
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -27,10 +29,139 @@ ARXIV_URL = "http://export.arxiv.org/api/query"
 SEARCH_TIMEOUT = 30  # seconds
 
 
+def generate_search_queries(topic: str, workspace: str = "") -> List[str]:
+    """从 topic 和项目知识库生成多个搜索词（不同粒度）。
+
+    1. 精确主题：原始 topic
+    2. 英文关键词：从 topic 提取的关键英文词或知识库关键词
+    3. 领域扩展：从 knowledge.json 提取的论文标题关键词
+
+    Args:
+        topic: 搜索主题（可能是中文）
+        workspace: 实例工作目录（可选，用于读取知识库）
+    Returns:
+        最多 3 个搜索 query 列表
+    """
+    queries = [topic]  # 第一个：精确主题
+
+    # 从项目 knowledge.json 提取关键词
+    keywords = _extract_keywords_from_knowledge(topic, workspace)
+    if keywords:
+        queries.append(" ".join(keywords[:5]))  # 第二个：关键词组合
+    else:
+        # 没有知识库：生成同义扩展
+        # 尝试提取英文部分
+        eng = re.findall(r'[a-zA-Z]+', topic)
+        if eng:
+            queries.append(" ".join(eng[:8]))
+        else:
+            queries.append(topic)  # fallback
+
+    # 第三个：领域泛词
+    domain_terms = _get_domain_terms(topic)
+    if domain_terms:
+        queries.append(" ".join(domain_terms))
+
+    # 去重（忽略大小写和空白差异）
+    seen = set()
+    unique = []
+    for q in queries:
+        q_normalized = q.lower().strip().replace("  ", " ")
+        if q_normalized not in seen and len(q.strip()) > 3:
+            seen.add(q_normalized)
+            unique.append(q.strip())
+
+    return unique[:3]
+
+
+def _extract_keywords_from_knowledge(topic: str, workspace: str) -> List[str]:
+    """从项目 knowledge.json 中提取关键词和论文标题。
+
+    查找与 topic 相关的项目目录，读取 knowledge.json。
+    返回提取的论文标题关键词、作者名、方法名。
+    """
+    if not workspace:
+        return []
+
+    # 查找匹配的项目目录: 20_records/projects/<project>/
+    projects_dir = os.path.join(workspace, "20_records", "projects")
+    if not os.path.isdir(projects_dir):
+        return []
+
+    keywords = []
+    topic_lower = topic.lower()
+    # 将中文括号替换为空格以便分词
+    topic_tokens = topic_lower.replace('（', ' ').replace('）', ' ') \
+                               .replace('(', ' ').replace(')', ' ').split()
+
+    for d in os.listdir(projects_dir):
+        d_lower = d.lower()
+        # 检查目录名是否与 topic 相关
+        if any(kw in d_lower for kw in topic_tokens if len(kw) > 1):
+            kb_path = os.path.join(projects_dir, d, "knowledge.json")
+            if os.path.exists(kb_path):
+                try:
+                    with open(kb_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    entries = data if isinstance(data, list) else data.get("entries", [])
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            title = entry.get("title", entry.get("content", ""))
+                            content = entry.get("content", "")
+                            # 提取英文关键词：大写开头的复合词、常见模型名
+                            eng = re.findall(
+                                r'[A-Z][a-z]+(?:_[A-Z][a-z]+)*|'
+                                r'scGPT|MAE|PLS|Transformer|RNA|CNN|LSTM|GNN|VAE|GAN|'
+                                r'BERT|GPT|Diffusion|ResNet|UNet|Autoencoder|Attention',
+                                str(title) + " " + str(content)
+                            )
+                            keywords.extend(eng[:5])
+                            # 提取作者引用
+                            authors = re.findall(r'[A-Z][a-z]+ et al\.', str(content))
+                            keywords.extend(authors[:3])
+                except Exception:
+                    pass
+            break  # 只处理第一个匹配的项目
+
+    return list(set(keywords))[:10]
+
+
+def _get_domain_terms(topic: str) -> List[str]:
+    """根据 topic 返回领域泛词。
+
+    尝试生成英文领域相关搜索词，用于扩大搜索范围。
+    """
+    topic_lower = topic.lower()
+
+    # 中文到英文领域的映射
+    domain_map = {
+        "年龄预测": ["transcriptomic age prediction", "aging transcriptomics",
+                     "gene expression aging clock", "RNA-seq age biomarker"],
+        "转录组": ["transcriptomics", "RNA-seq", "gene expression profiling"],
+        "单细胞": ["single cell", "scRNA-seq", "single-cell transcriptomics"],
+        "衰老": ["aging", "senescence", "age-related disease", "biological age"],
+        "分子生成": ["molecular generation", "de novo drug design",
+                     "molecular optimization", "generative chemistry"],
+        "agent": ["autonomous agent", "AI agent", "LLM agent", "research agent"],
+        "文献": ["literature review", "scientific discovery", "research survey"],
+        "深度学习": ["deep learning", "neural network", "representation learning"],
+        "基因": ["gene expression", "genomics", "transcriptomics"],
+    }
+
+    for ch, eng_terms in domain_map.items():
+        if ch in topic_lower:
+            return eng_terms
+
+    # 默认：直接用 topic 的英文词
+    return [topic]
+
+
 def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
-    """搜索学术文献，按优先级尝试多个后端。
+    """搜索学术文献，使用多 query 策略扩大召回。
 
     在尝试学术 API 之前，先从 dialog 上下文检查是否有用户已提供的信息。
+    然后使用 generate_search_queries() 生成多个 query 依次搜索后合并去重。
+    若结果不足 5 条，触发二次搜索放宽条件。
 
     Args:
         topic: 搜索主题
@@ -60,34 +191,83 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
         except Exception as e:
             logger.debug(f"[Searcher] Dialog context check failed (non-fatal): {e}")
 
-    # 1. 优先 Semantic Scholar
-    try:
-        results = _search_semantic_scholar(topic, max_results)
-        if results:
-            _record_knowledge(workspace, topic, results, "semantic_scholar")
-            return results
-    except Exception as e:
-        logger.warning(f"[Searcher] Semantic Scholar failed: {e}")
+    # 生成多 query
+    queries = generate_search_queries(topic, workspace)
+    logger.info(f"[Searcher] Generated {len(queries)} queries: {queries}")
 
-    # 降级：Crossref
-    try:
-        results = _search_crossref(topic, max_results)
-        if results:
-            _record_knowledge(workspace, topic, results, "crossref")
-            return results
-    except Exception as e:
-        logger.warning(f"[Searcher] Crossref failed: {e}")
+    # 依次用每个 query 搜索各后端，合并去重
+    seen_titles = set()
+    all_results = []
 
-    # 降级：ArXiv
-    try:
-        results = _search_arxiv(topic, max_results)
-        if results:
-            _record_knowledge(workspace, topic, results, "arxiv")
-            return results
-    except Exception as e:
-        logger.warning(f"[Searcher] ArXiv failed: {e}")
+    for query in queries:
+        # 为第一个 query 使用完整的 max_results，后续递减
+        query_limit = max(2, max_results - len(all_results))
+        if query_limit < 1:
+            break
 
-    return []
+        # 1. Semantic Scholar
+        try:
+            results = _search_semantic_scholar(query, query_limit)
+            for r in results:
+                title = r.get("title", "").strip().lower()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_results.append(r)
+        except Exception as e:
+            logger.warning(f"[Searcher] Semantic Scholar failed for '{query}': {e}")
+
+        # 2. Crossref
+        try:
+            results = _search_crossref(query, query_limit)
+            for r in results:
+                title = r.get("title", "").strip().lower()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_results.append(r)
+        except Exception as e:
+            logger.warning(f"[Searcher] Crossref failed for '{query}': {e}")
+
+        # 3. ArXiv
+        try:
+            results = _search_arxiv(query, query_limit)
+            for r in results:
+                title = r.get("title", "").strip().lower()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_results.append(r)
+        except Exception as e:
+            logger.warning(f"[Searcher] ArXiv failed for '{query}': {e}")
+
+    # 二次搜索：如果结果不足 5 条，放宽条件重新搜索
+    if len(all_results) < 5:
+        logger.info(f"[Searcher] Only {len(all_results)} results, triggering secondary search...")
+        # 使用原始 topic 在所有后端做放宽搜索
+        backup_query = topic
+        # 如果有英文关键词，直接用英文
+        eng_words = re.findall(r'[a-zA-Z]+', topic)
+        if eng_words:
+            backup_query = " ".join(eng_words[:5])
+
+        for backend in [_search_semantic_scholar, _search_crossref, _search_arxiv]:
+            try:
+                results = backend(backup_query, max_results)
+                for r in results:
+                    title = r.get("title", "").strip().lower()
+                    if title and title not in seen_titles:
+                        seen_titles.add(title)
+                        all_results.append(r)
+                if len(all_results) >= max_results:
+                    break
+            except Exception as e:
+                logger.warning(f"[Searcher] Secondary search backend failed: {e}")
+                continue
+
+    # 记录结果
+    if all_results:
+        _record_knowledge(workspace, topic, all_results, "multi_query")
+
+    logger.info(f"[Searcher] Total {len(all_results)} unique results for '{topic}'")
+    return all_results[:max_results]
 
 
 def _search_semantic_scholar(query: str, limit: int = 5) -> List[Dict]:
@@ -268,7 +448,7 @@ def _build_dialog_results(topic: str, facts: Dict) -> List[Dict]:
     return results
 
 
-def format_results(results: List[Dict], max_items: int = 3) -> str:
+def format_results(results: List[Dict], max_items: int = 10) -> str:
     """将搜索结果格式化为文本。"""
     if not results:
         return ""

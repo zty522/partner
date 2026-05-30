@@ -105,63 +105,30 @@ def _humanize_project(name: str) -> str:
     return name
 
 
-def format_restart_report(last_state: Optional[Dict]) -> str:
-    """根据 last_state 生成重启后结构化汇报文本。
+def format_restart_report(last_state: Optional[Dict], workspace: str = None) -> str:
+    """精简的重启汇报，使用活跃项目信息。
 
-    格式：
-    ✅ 系统已重启，恢复运行。
-    📌 上次工作状态：[项目名称]，已执行到：[具体进度]
-    📋 当前计划：[接下来 1-3 步]
-    🕒 预计下次汇报：有实质性进展时主动发送。
+    如果用 workspace 找到活跃项目，则使用 project_manager 格式化；
+    否则 fallback 到基本提示。
 
     Args:
-        last_state: load() 返回的状态字典
+        last_state: load() 返回的状态字典（保留参数用于兼容，但优先使用活跃项目）
+        workspace: 工作区路径，用于读取 active_project.json
 
     Returns:
         格式化的汇报文本
     """
-    if not last_state:
-        return "已恢复运行。未找到历史记录，正在检查知识库和项目状态，自主规划下一步。"
+    if workspace:
+        try:
+            from .project_manager import load as _load_project, format_status as _fmt_status
+            project = _load_project(workspace)
+            if project:
+                return f"已恢复运行。\n{_fmt_status(project)}"
+        except Exception:
+            pass
 
-    raw_project = last_state.get("active_project", "未记录")
-    last_action = last_state.get("last_action", "未知")
-    metrics = last_state.get("last_metrics", {})
-    pending = last_state.get("pending_tasks", [])
-    dialog = last_state.get("last_dialog_summary", "")
-
-    project = _humanize_project(raw_project)
-
-    # 如果没有活跃项目
-    if project == "no active project":
-        return "已恢复运行。没有活跃项目，正在检查可探索的方向。有新发现时主动通知你。"
-
-    # 构建指标描述（自然语言）
-    metrics_str = _humanize_metrics(metrics)
-
-    # 构建进度描述
-    if metrics_str:
-        progress = f"{last_action} {metrics_str}"
-    else:
-        progress = last_action
-
-    # 构建计划
-    plan_lines = []
-    if pending:
-        for i, task in enumerate(pending[:3], 1):
-            plan_lines.append(f"{i}. {task}")
-    else:
-        plan_lines = ["1. 根据上次进度继续推进", "2. 搜索相关文献寻找改进方向"]
-
-    plan_str = "\n".join(plan_lines)
-
-    # 对话摘要
-    dialog_str = f"。根据对话记录：{dialog}" if dialog else ""
-
-    return (
-        f"已恢复运行。上次工作状态：{project}，已执行到：{progress}{dialog_str}。"
-        f"当前计划：{plan_str}。"
-        f"有实质性发现时主动通知你。"
-    )
+    # fallback：没有活跃项目
+    return "已恢复运行。当前没有指定项目。请发送「推进 <项目名>」来开始研究。"
 
 
 def format_status_report(last_state: Optional[Dict]) -> str:

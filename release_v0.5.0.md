@@ -21,6 +21,17 @@
 ### 📂 工作空间数据复制
 - **`copy_external_data_to_workspace()`**：执行任务前将外部数据复制到 `99_temp/inputs/`
 
+### 🎯 活跃项目持久化
+- **新增 `project_manager.py`**：`active_project.json` 持久化记录项目方向
+- 重启/空闲时自动恢复活跃项目，不再遗忘
+- 启动消息精简：包含当前项目 + 具体下一步 + 预期目标
+
+### 🔍 搜索策略升级
+- **多 query 搜索**：3 个 query 合并（精确→知识库→领域泛词）
+- **知识库种子**：从 `knowledge.json` 提取论文标题/作者/方法
+- **阈值放宽**：0.3 → 0.2
+- **二次搜索**：结果不足时自动重试
+
 ### 🚀 已有功能（从之前版本继承）
 - Multi-Instance Manager with `partner-manager` CLI
 - Isolated instance directories under `~/.partner/instances/{id}/`

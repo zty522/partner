@@ -78,6 +78,19 @@
 - **新增 `copy_external_data_to_workspace()`**：执行任务前将外部数据复制到 `{workspace}/99_temp/inputs/`，避免修改原始文件
 - **已在内 workspace 的文件**：直接使用原路径，不重复复制
 
+#### 🎯 活跃项目持久化与空闲行为修正
+- **新增 `project_manager.py`**：`active_project.json` 持久化记录用户指定的方向（项目名、阶段、下一步计划），重启后自动恢复
+- **`_handle_wake_up` 优先级**：先读 `active_project.json`，再回退到 `active_plan.json`，避免遗忘项目
+- **`_handle_cron_tick` 空闲检测**：空闲时先检查 `active_project.json`，有项目则自动恢复 PROJECT 事件继续推进；无项目则仅日志记录，**不再自动搜索泛关键词**
+- **`format_restart_report` 精简**：启动消息改为通过 `project_manager.format_status()` 生成，包含项目名+具体下一步+可量化目标
+
+#### 🔍 搜索策略升级
+- **多 query 搜索**：`generate_search_queries()` 生成精确主题→知识库关键词→领域泛词 3 个 query，合并去重
+- **知识库种子**：从 `knowledge.json` 提取已有论文标题、作者、方法名作为搜索词组成部分
+- **放宽阈值**：LLM 相关性评分从 0.3 降到 0.2，更多结果保留
+- **二次搜索**：结果 < 5 条时自动用英文领域泛词重试
+- **9 个中-英领域映射**：年龄预测→transcriptomic age prediction、分子生成→molecular generation、agent→autonomous agent 等
+
 ## [0.4.0] - 2026-05-29
 
 ### 🧠 主动型智能体全面升级 — 不再被动等待指令
