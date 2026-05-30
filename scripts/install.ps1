@@ -513,7 +513,28 @@ Add-PartnerToPath
 # Step 6: Done
 Write-Header "Installation complete"
 Write-Host ""
-Write-Host "  $([char]0x2713) Partner installed successfully. Restart your terminal and run 'partner' to start." -ForegroundColor $cGreen
+Write-Host "  $([char]0x2713) Partner installed successfully." -ForegroundColor $cGreen
 Write-Host ""
 Write-Host "  Installation directory: $PartnerDir" -ForegroundColor $cCyan
+Write-Host ""
+
+# Step 7: Interactive setup wizard
+Write-Header "Setup wizard"
+Write-Host ""
+Write-Host "  Now configure your Partner." -ForegroundColor $cCyan
+Write-Host "  You'll need your QQ Bot AppID and AppSecret from https://q.qq.com"
+Write-Host ""
+try {
+    $setupResult = & partner setup </dev/tty 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Info "Partner configured successfully!"
+    } else {
+        Write-Warn "Setup exited with code $LASTEXITCODE. Run 'partner setup' later."
+    }
+} catch {
+    Write-Warn "Setup wizard failed: $_"
+    Write-Warn "You can run 'partner setup' manually later."
+}
+Write-Host ""
+Write-Host "  $([char]0x2713) All done! Restart your terminal and run 'partner' to get started." -ForegroundColor $cGreen
 Write-Host ""
