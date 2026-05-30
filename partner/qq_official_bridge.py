@@ -401,8 +401,28 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-            # 3. 回复简洁确认
-            reply = f"好，开始推进「{user_text[:40]}」"
+            # 3. 用 LLM 生成自然回复（绝不硬编码）
+            reply = f"收到，开始推进「{user_text[:40]}」"  # 紧急 fallback
+            try:
+                from .adapter import create_adapter as _ca
+                _backend = "hermes"
+                _cfg_p = os.path.join(self.workspace, "partner_config.json")
+                if os.path.exists(_cfg_p):
+                    with open(_cfg_p) as _f:
+                        _cfg = __import__("json").load(_f)
+                    _backend = _cfg.get("agent", {}).get("backend", _cfg.get("backend", "hermes"))
+                _adapter_instance = _ca(_backend, self.workspace)
+                if _adapter_instance:
+                    _prompt = (
+                        f"用户刚刚指定了研究方向：{user_text[:80]}。\\n"
+                        f"用一句话简短确认，语气像研究伙伴一样自然。\\n"
+                        f"不要说「好的」「收到」「我来推进」「开始推进」这类机械回复。"
+                    )
+                    _r = _adapter_instance.chat(_prompt)
+                    if _r and len(_r.strip()) > 5:
+                        reply = _r.strip()
+            except Exception:
+                pass
             self._send_reply(msg, reply)
 
             # Log interaction
