@@ -52,6 +52,9 @@ L = {
         "chat_partner": "Partner",
         "chat_unavailable": "对话模块暂不可用。\n\n请先运行设置向导配置 Partner。",
         "chat_error": "暂时无法处理这条消息。\n\n({msg})",
+        "no_agent_title": "⚠  当前没有可用的 AI 引擎",
+        "no_agent_desc": "对话需要 Hermes Agent 后端支持。\n请安装后再试。",
+        "btn_install_agent": "  📥  安装 Hermes Agent  ",
         "qq_banner": "  💬  通过 QQ 与 Partner 对话！",
         "qq_config_title": "连接配置",
         "qq_appid": "AppID",
@@ -739,6 +742,46 @@ class PartnerApp:
         self.chat_canvas.update_idletasks()
         self.chat_canvas.yview_moveto(1.0)
 
+    def _add_no_agent_message(self):
+        """Show a warning bubble that Hermes Agent is not installed, with an install button."""
+        import webbrowser
+        wrapper = tk.Frame(self.chat_inner, bg=T["bg2"])
+        wrapper.pack(fill=tk.X, padx=0, pady=3)
+
+        bubble = tk.Frame(wrapper, bg=T["yellow"], padx=0, pady=0,
+                          highlightbackground=T["glow"], highlightthickness=0)
+        bubble.pack(anchor=tk.W, padx=(12, 60))
+
+        # Title bar
+        hdr = tk.Frame(bubble, bg=T["yellow"])
+        hdr.pack(fill=tk.X, padx=14, pady=(10, 2))
+        tk.Label(hdr, text="Partner", bg=T["yellow"], fg="#0d1117",
+                 font=(FONT[0], 10, "bold"), anchor=tk.W).pack(side=tk.LEFT)
+
+        # Warning text
+        title_label = tk.Label(bubble, text=self._tr("no_agent_title"),
+                               bg=T["yellow"], fg="#0d1117",
+                               font=(FONT[0], 11, "bold"), wraplength=450,
+                               justify=tk.LEFT, anchor=tk.W)
+        title_label.pack(anchor=tk.W, padx=14, pady=(2, 0))
+
+        desc_label = tk.Label(bubble, text=self._tr("no_agent_desc"),
+                              bg=T["yellow"], fg="#0d1117",
+                              font=(FONT[0], 10), wraplength=450,
+                              justify=tk.LEFT, anchor=tk.W)
+        desc_label.pack(anchor=tk.W, padx=14, pady=(4, 6))
+
+        # Install button row
+        btn_row = tk.Frame(bubble, bg=T["yellow"])
+        btn_row.pack(fill=tk.X, padx=14, pady=(0, 10))
+        Btn(btn_row, text=self._tr("btn_install_agent"),
+            bg=T["accent3"], fg="white", hover_bg=T["accent"],
+            command=lambda: webbrowser.open("https://hermes-agent.nousresearch.com/docs")
+            ).pack(side=tk.LEFT)
+
+        self.chat_canvas.update_idletasks()
+        self.chat_canvas.yview_moveto(1.0)
+
     def _load_chat_history(self):
         if not self.workspace:
             return
@@ -789,6 +832,13 @@ class PartnerApp:
                         self.root.after(0, lambda r=reply: self._add_chat_message("bot", r))
                         self.root.after(0, self._hide_thinking)
                         return
+
+                # No reply from adapter — check if Hermes is installed
+                from partner.adapter import HermesAdapter as _HA
+                if not _HA.is_available():
+                    self.root.after(0, self._add_no_agent_message)
+                    self.root.after(0, self._hide_thinking)
+                    return
 
                 reply = eng.respond(text)
                 self.root.after(0, lambda r=reply: self._add_chat_message("bot", r))

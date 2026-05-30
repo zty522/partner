@@ -679,6 +679,13 @@ class QQQfficialBridge:
                 return result
         except Exception as e:
             logger.warning(f"LLM chat failed: {e}")
+
+        # Hermes not available — return user-friendly message, no silent fallback
+        from .adapter import HermesAdapter as _HA
+        if not _HA.is_available():
+            return ("⚠ Partner 目前没有可用的 AI 后端（Hermes Agent）。\n"
+                    "请管理员安装 Hermes Agent 后再试。\n"
+                    "安装文档: https://hermes-agent.nousresearch.com/docs")
         # Fallback: let caller handle (conversation.respond or router fallback)
         return None
 

@@ -28,4 +28,9 @@
 - Full pip error output shown on failure (no more hidden errors).
 - `_pth` file written without UTF-8 BOM to prevent standard library loading failure.
 
+### ⚠️ Hermes Agent Availability Detection
+- **GUI Chat Tab**: When Hermes Agent is not installed, shows a yellow warning card with "⚠ 当前没有可用的 AI 引擎" and an **📥 安装 Hermes Agent** button that opens the install docs.
+- **QQ Bot**: Returns a user-friendly message with installation link instead of silently falling back to a non-LLM response.
+- **`adapter.py`**: New `HermesAdapter.is_available()` static method to quickly detect if the Hermes CLI is on PATH.
+
 **Full Changelog**: https://github.com/zty522/partner/compare/v0.4.0...v0.5.0

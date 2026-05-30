@@ -40,6 +40,11 @@
 - **`install.ps1`**: pip install 成功后自动将 Python Scripts 目录添加到用户 PATH
 - **PATH 刷新**: 当前会话立即生效 + 提示重启终端
 
+#### ⚠️ Hermes Agent 可用性检测
+- **GUI 对话 Tab**: Hermes Agent 未安装时显示黄色警告卡片"⚠ 当前没有可用的 AI 引擎"，带 **📥 安装 Hermes Agent** 按钮，点击打开安装文档
+- **QQ 机器人**: 返回友好提示消息与安装链接，不再静默 fallback 到非 LLM 回复
+- **`adapter.py`**: 新增 `HermesAdapter.is_available()` 静态方法，快速检测 Hermes CLI 是否在 PATH 中
+
 ### ⚙️ 改进
 
 - Exe 安装器文件名为 `Partner-0.5.0-Setup.exe`，版本号与代码同步

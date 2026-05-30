@@ -154,6 +154,25 @@ class HermesAdapter(AgentAdapter):
             logger.warning(f"hermes chat error: {e}")
             return None
 
+    @staticmethod
+    def is_available() -> bool:
+        """Check if hermes CLI is available on PATH (static, no workspace needed)."""
+        import subprocess
+        import os
+        import shutil
+        try:
+            hermes_bin = shutil.which("hermes")
+            if not hermes_bin:
+                return False
+            result = subprocess.run(
+                [hermes_bin, "--version"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+
 
 class DirectAdapter(AgentAdapter):
     """Direct adapter - Partner operates without an external agent.
