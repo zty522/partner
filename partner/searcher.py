@@ -1,4 +1,6 @@
-"""Searcher — 学术搜索模块。
+"""DEPRECATED — 搜索改由 Hermes 子进程执行。
+
+Searcher — 学术搜索模块。
 
 使用 Python requests 直接调用免费学术搜索 API，
 不经过 shell/curl/hermes 子进程，避免安全软件拦截。

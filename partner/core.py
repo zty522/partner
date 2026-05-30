@@ -29,7 +29,7 @@ from .conversation import ConversationEngine
 
 from .mind import (
     MindPool, mind_loop, init_executor,
-    curiosity, report, cron_tick, user_message as user_msg_event,
+    report, cron_tick,
 )
 
 
@@ -223,11 +223,8 @@ class Partner:
 
     async def feed_user_message(self, text: str, sender_id: str = "",
                                  sender_name: str = ""):
-        """放入一个用户消息念头（由 QQ bridge 调用）。"""
-        pool = await MindPool.get_instance()
-        ev = user_msg_event(text, sender_id, sender_name)
-        await pool.put(ev)
-        logger.info(f"[核心] 用户消息已放入念头池: {text[:50]}")
+        """已废弃 - 用户消息改由 QQ bridge 直接注入 PROJECT 事件。"""
+        logger.debug(f"[核心] feed_user_message 已废弃，忽略: {text[:50]}")
 
     # ── 原有接口（保留兼容） ────────────────────────────────────
 

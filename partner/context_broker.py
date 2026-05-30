@@ -1,4 +1,6 @@
-"""Context Broker — 打通对话上下文与研究循环。
+"""DEPRECATED — 上下文由 Hermes 读取状态文件自行理解。
+
+Context Broker — 打通对话上下文与研究循环。
 
 负责在 QQ 对话与 Mind 自主研究循环之间建立桥梁：
 1. 从 dialog_history.jsonl 提取项目关键信息
