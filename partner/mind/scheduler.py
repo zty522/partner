@@ -120,6 +120,7 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 await asyncio.sleep(0.1)
                 continue
             if event is None:
+                await asyncio.sleep(0.1)
                 continue
 
             # 创建异步 Task 执行
