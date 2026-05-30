@@ -118,6 +118,7 @@ class HermesAdapter(AgentAdapter):
         """Chat via hermes subprocess."""
         import subprocess
         import shutil
+        import os
         try:
             hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
             cmd = [hermes_bin, "chat", "--query", message, "--quiet", "--toolsets", ""]
