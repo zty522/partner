@@ -69,109 +69,45 @@ class HermesAdapter(AgentAdapter):
         return [SearchResult(title="Search Result", url="", snippet=result)]
     
     def execute_task(self, prompt: str) -> str:
-        """Execute a research task via Hermes CLI chat."""
+        """Execute a task by writing a prompt file and invoking hermes.
+        
+        For MVP, this writes the prompt to a file that can be picked up
+        by the cron-triggered hermes session.
+        """
         import subprocess
+        import tempfile
         import os
-        import shutil
-
+        
+        # Write prompt to temp file
         prompt_file = os.path.join(self.workspace, "state", "current_task.md")
-        try:
-            os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
-            with open(prompt_file, 'w') as f:
-                f.write(prompt)
-        except Exception:
-            pass
-
-        try:
-            hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
-            cmd = [hermes_bin, "chat", "--query", prompt, "--quiet", "--toolsets", ""]
-            _ntflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
-                cwd=self.workspace, creationflags=_ntflags,
-            )
-            out = result.stdout.strip()
-            if result.returncode == 0 and out:
-                # Record token usage (estimate based on character count)
-                try:
-                    from .token_tracker import TokenTracker
-                    tt = TokenTracker(workspace=self.workspace, instance_id="hermes")
-                    tt.record(
-                        prompt_tokens=len(prompt) // 4,
-                        completion_tokens=len(out) // 4,
-                        model="hermes",
-                    )
-                except Exception:
-                    pass
-                return out
-            logger.warning(f"hermes execute_task returned {result.returncode}: {result.stderr[:200]}")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"hermes execute_task timed out")
-        except FileNotFoundError:
-            logger.warning(f"hermes CLI not found")
-        except Exception as e:
-            logger.warning(f"hermes execute_task error: {e}")
-
-        return ""
+        with open(prompt_file, 'w') as f:
+            f.write(prompt)
+        
+        # For MVP, return a placeholder - in production this would invoke hermes
+        return "Task queued for execution by Hermes agent."
     
     def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via hermes subprocess."""
         import subprocess
-        import shutil
-        import os
+        import shlex
         try:
-            hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
-            cmd = [hermes_bin, "chat", "--query", message, "--quiet", "--toolsets", ""]
-            _ntflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
             result = subprocess.run(
                 cmd,
-                capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
-                cwd=self.workspace, creationflags=_ntflags,
+                capture_output=True, text=True, timeout=300,
+                cwd=self.workspace,
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:
-                # Record token usage (estimate based on character count)
-                try:
-                    from .token_tracker import TokenTracker
-                    tt = TokenTracker(workspace=self.workspace, instance_id="hermes")
-                    tt.record(
-                        prompt_tokens=len(message) // 4,
-                        completion_tokens=len(out) // 4,
-                        model="hermes",
-                    )
-                except Exception:
-                    pass
                 return out
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
-            return None
+            return out or f"Error: {result.stderr[:200]}"
         except subprocess.TimeoutExpired:
-            logger.warning(f"hermes chat timed out for query: {message[:60]}")
-            return None
+            return "请求超时，请稍后再试"
         except FileNotFoundError:
-            logger.warning(f"hermes CLI not found in PATH")
-            return None
+            return "Error: agent backend not available"
         except Exception as e:
-            logger.warning(f"hermes chat error: {e}")
-            return None
-
-    @staticmethod
-    def is_available() -> bool:
-        """Check if hermes CLI is available on PATH (static, no workspace needed)."""
-        import subprocess
-        import os
-        import shutil
-        try:
-            hermes_bin = shutil.which("hermes")
-            if not hermes_bin:
-                return False
-            result = subprocess.run(
-                [hermes_bin, "--version"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+            return f"Error: {e}"
 
 
 class DirectAdapter(AgentAdapter):
@@ -220,13 +156,58 @@ class DirectAdapter(AgentAdapter):
 
 
 def create_adapter(backend: str, workspace_path: str) -> AgentAdapter:
-    '''Factory function to create the appropriate adapter.'''
-    if not backend:
-        backend = 'hermes'
+    """Factory function to create the appropriate adapter."""
     adapters = {
-        'hermes': HermesAdapter,
-        'direct': DirectAdapter,
+        "hermes": HermesAdapter,
+        "direct": DirectAdapter,
     }
     
-    adapter_class = adapters.get(backend, HermesAdapter)
+    # Try to import optional adapters
+    try:
+        from .openclaw_adapter import OpenClawAdapter
+        adapters["openclaw"] = OpenClawAdapter
+    except ImportError:
+        pass
+    
+    try:
+        from .other_adapters import AutoGPTAdapter, OpenHandsAdapter, CrewAIAdapter, GptmeAdapter
+        adapters["autogpt"] = AutoGPTAdapter
+        adapters["openhands"] = OpenHandsAdapter
+        adapters["crewai"] = CrewAIAdapter
+        adapters["gptme"] = GptmeAdapter
+    except ImportError:
+        pass
+    
+    adapter_class = adapters.get(backend, DirectAdapter)
     return adapter_class(workspace_path)
+
+
+def list_available_adapters(workspace_path: str) -> list:
+    """List all available agent adapters."""
+    all_adapters = [
+        ("hermes", "Hermes Agent", "🔮"),
+        ("openclaw", "OpenClaw (小龙虾)", "🦞"),
+        ("crewai", "CrewAI", "👥"),
+        ("autogpt", "AutoGPT", "🤖"),
+        ("openhands", "OpenHands", "👐"),
+        ("gptme", "gptme", "💻"),
+        ("codex", "OpenAI Codex", "⚡"),
+        ("claude_code", "Claude Code", "🧠"),
+        ("direct", "Direct (no agent)", "📌"),
+    ]
+    
+    result = []
+    for name, display, emoji in all_adapters:
+        try:
+            adapter = create_adapter(name, workspace_path)
+            available = adapter.is_available() if hasattr(adapter, 'is_available') else True
+        except:
+            available = False
+        result.append({
+            "name": name,
+            "display": display,
+            "emoji": emoji,
+            "available": available,
+        })
+    
+    return result

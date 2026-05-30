@@ -9,27 +9,60 @@ Usage:
 import argparse
 import json
 import os
-# Force UTF-8 for subprocess pipes (prevents GBK errors on Chinese Windows);
-# must be set before any subprocess import or call
-os.environ.setdefault("PYTHONUTF8", "1")
 import sys
-import glob
-import shutil
-from datetime import datetime
 from pathlib import Path
-
-from .i18n import lang, t, reload as i18n_reload
 
 
 def get_workspace() -> str:
-    """Get configured workspace path (delegates to setup.find_workspace).
-    Checks PARTNER_WORKSPACE env var first (for multi-instance)."""
-    # Multi-instance: env var takes priority
-    env_ws = os.environ.get('PARTNER_WORKSPACE', '')
-    if env_ws and os.path.isdir(env_ws):
-        return env_ws
-    from .setup import find_workspace as _fw
-    return _fw()
+    """Get configured workspace path."""
+    import json as _json
+    
+    # 1. Environment variable
+    ws = os.environ.get("PARTNER_WORKSPACE")
+    if ws and os.path.exists(ws):
+        return ws
+    
+    # 2. Check pointers and repo directory
+    partner_home = os.path.expanduser("~/.partner")
+    pointer_file = os.path.expanduser("~/.partner_workspace")
+
+    # 2a. Pointer file ~/.partner_workspace (new)
+    if os.path.isfile(pointer_file):
+        try:
+            with open(pointer_file) as f:
+                path = f.read().strip()
+            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+                return path
+        except OSError:
+            pass
+
+    # 2b. ~/.partner — could be a pointer file (old)
+    if os.path.isfile(partner_home):
+        try:
+            with open(partner_home) as f:
+                path = f.read().strip()
+            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+                return path
+        except OSError:
+            pass
+
+    # 2c. ~/.partner is the repo directory — check for config inside
+    if os.path.isdir(partner_home):
+        config_in_home = os.path.join(partner_home, "partner_config.json")
+        if os.path.exists(config_in_home):
+            return partner_home
+    
+    # 3. Common locations
+    candidates = [
+        os.path.expanduser("~/partner_workspace"),
+        os.path.expanduser("~/.partner_workspace"),
+    ]
+    for c in candidates:
+        config = os.path.join(c, "partner_config.json")
+        if os.path.exists(config):
+            return c
+    
+    return None
 
 
 def cmd_setup(args):
@@ -76,13 +109,12 @@ def cmd_default(args):
 def cmd_bot(args):
     workspace = args.workspace or get_workspace()
     if not workspace:
-        print(t("cli.not_configured"))
+        print("❌ Partner 未配置")
         return
     platform = args.platform
     action = args.action
-    foreground = getattr(args, 'foreground', False)
     if action == "start":
-        _bot_start(workspace, platform, foreground=foreground)
+        _bot_start(workspace, platform)
     elif action == "stop":
         _bot_stop(workspace, platform)
 
@@ -91,14 +123,14 @@ def _bot_stop(workspace, platform, quiet=False):
     pid_path = os.path.join(workspace, "state", f"{platform}_bot.pid")
     label = {"qq": "QQ"}.get(platform, platform)
     if not os.path.exists(pid_path):
-        print(t("cli.bot_not_running", label=label))
+        print(f"  ⚠ {label} 机器人未在运行")
         return
     try:
         with open(pid_path) as f:
             pid = int(f.read().strip())
         os.kill(pid, 15)
         os.remove(pid_path)
-        print(t("cli.bot_stopped", label=label, pid=pid))
+        print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
 
         # Also kill watchdog for this workspace
         import subprocess as _sp
@@ -114,96 +146,97 @@ def _bot_stop(workspace, platform, quiet=False):
             _print_commands()
     except ProcessLookupError:
         os.remove(pid_path)
-        print(t("cli.bot_process_gone", label=label))
+        print(f"  ⚠ {label} 进程已不存在，已清理")
         if not quiet:
             _print_commands()
     except Exception as e:
-        print(t("cli.stop_failed", error=str(e)))
+        print(f"  ❌ 停止失败: {e}")
     if quiet:
         print()  # blank line for spacing
 
 
-def _bot_start(workspace, platform, quiet=False, foreground=False):
+def _auto_start_instance(instance_id, workspace):
+    """Auto-start QQ bot for an instance (called by partner-manager)."""
     import subprocess
+    if not workspace:
+        # Resolve workspace from instance_id
+        workspace = os.path.expanduser(f"~/.partner/instances/{instance_id}")
+    if not os.path.exists(workspace):
+        print(f"❌ Instance workspace not found: {workspace}", file=sys.stderr)
+        sys.exit(2)
+
+    # Stop existing bot if running
+    _bot_stop(workspace, "qq", quiet=True)
+
+    # Start QQ bot
+    _bot_start(workspace, "qq", quiet=True)
+
+    # Keep the process alive (partner-manager watches this)
     import time
+    pid_path = os.path.join(workspace, "state", "qq_bot.pid")
+    try:
+        while True:
+            time.sleep(30)
+            # Check if bot is still alive
+            if os.path.exists(pid_path):
+                with open(pid_path) as f:
+                    pid = int(f.read().strip())
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                except ProcessLookupError:
+                    print(f"⚠ Bot died, restarting...", file=sys.stderr)
+                    _bot_start(workspace, "qq", quiet=True)
+            else:
+                print(f"⚠ PID file gone, restarting...", file=sys.stderr)
+                _bot_start(workspace, "qq", quiet=True)
+    except KeyboardInterrupt:
+        _bot_stop(workspace, "qq", quiet=True)
+
+
+def _bot_start(workspace, platform, quiet=False):
+    import subprocess
     label = {"qq": "QQ"}.get(platform, platform)
     pp = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if platform == "qq":
-        # Multi-instance: check 00_config/ first, then workspace root
-        cfg = os.path.join(workspace, "00_config", "qq_config.json")
+        cfg = os.path.join(workspace, "qq_config.json")
         if not os.path.exists(cfg):
-            cfg = os.path.join(workspace, "qq_config.json")
+            # Also check 00_config/ subdirectory (multi-instance layout)
+            cfg = os.path.join(workspace, "00_config", "qq_config.json")
         if not os.path.exists(cfg):
-            print(t("cli.qq_not_configured"))
+            print(f"  ❌ QQ 未配置，请先运行: partner setup")
             return
         
         # Check and auto-install dependencies
         try:
             import aiohttp
         except ImportError:
-            print(t("cli.missing_dep", dep="aiohttp"))
-            yn = input(t("cli.auto_install")).strip().lower()
+            print(f"  ⚠ 缺少 QQ 机器人依赖 (aiohttp)")
+            yn = input(f"     自动安装？[Y/n]: ").strip().lower()
             if yn != "n":
-                print(t("cli.installing", dep="aiohttp"))
+                print(f"     正在安装 aiohttp...")
                 r = subprocess.run([sys.executable, "-m", "pip", "install", "aiohttp>=3.8"],
-                                   capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace")
+                                   capture_output=True, text=True, timeout=120)
                 if r.returncode == 0:
-                    print(t("cli.install_ok", dep="aiohttp"))
+                    print(f"     ✅ aiohttp 安装成功")
                 else:
-                    print(t("cli.install_fail", error=r.stderr[:100]))
-                    print(t("cli.install_manual", dep="aiohttp"))
+                    print(f"     ❌ 安装失败: {r.stderr[:100]}")
+                    print(f"     手动安装: pip install aiohttp")
                     return
             else:
-                print(t("cli.install_skip", dep="aiohttp"))
+                print(f"     跳过，稍后手动安装: pip install aiohttp")
                 return
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
-
         cmd = [sys.executable, "-c",
             f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
-
-        # Escape backslashes in paths for -c strings (Windows: C:\Users → C:/Users)
-        # Without this, \U, \P etc. get interpreted as Unicode escapes by Python -c
-        cmd[2] = cmd[2].replace("\\", "/")
-
-        if foreground:
-            # Foreground mode: start bot, wait, write PID if alive
-            print(t("cli.connecting_bot"))
-            try:
-                proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL, start_new_session=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                )
-                # Wait up to 6s for connection, then check if alive
-                import time as _t
-                _t.sleep(6)
-                if proc.poll() is None:
-                    # Process is still running = connected successfully
-                    pidf = os.path.join(workspace, "state", "qq_bot.pid")
-                    os.makedirs(os.path.dirname(pidf), exist_ok=True)
-                    with open(pidf, "w") as f:
-                        f.write(str(proc.pid))
-                    print(t("cli.bot_connected", pid=proc.pid))
-                else:
-                    # Process exited — get output for error
-                    out = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
-                    print(out[:500] if out else t("cli.bot_connect_failed"))
-                    sys.exit(1)
-            except Exception as e:
-                print(t("cli.start_error", error=str(e)))
-                sys.exit(1)
-            return
-
-        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,)
+        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
         pidf = os.path.join(workspace, "state", "qq_bot.pid")
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
         with open(pidf, "w") as f:
             f.write(str(proc.pid))
-        print(t("cli.bot_background", label=label, pid=proc.pid))
-        print(t("cli.log_at", log=log))
-        print(t("cli.stop_hint"))
+        print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
+        print(f"     日志: {log}")
+        print(f"     停止: partner bot stop qq")
 
         # Start watchdog (process monitor + auto-restart)
         watchdog_script = os.path.join(workspace, "scripts", "bot_watchdog.py")
@@ -213,16 +246,15 @@ def _bot_start(workspace, platform, quiet=False, foreground=False):
                 [sys.executable, watchdog_script, workspace],
                 stdout=open(watchdog_log, "a"), stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
-            print(t("cli.watchdog_started"))
+            print(f"  🛡️  Watchdog 已启动 (自动守护)")
         else:
-            print(t("cli.watchdog_missing", path=watchdog_script))
+            print(f"  ⚠ Watchdog 脚本未找到: {watchdog_script}")
 
         if not quiet:
             _print_commands()
     else:
-        print(t("cli.unknown_platform", platform=platform))
+        print(f"  ❌ 未知机器人: {platform}（仅支持 qq）")
 
 
 def cmd_update(args):
@@ -238,7 +270,7 @@ def cmd_update(args):
 
     # 2. git pull
     print(f"{C_YELLOW}➜ git pull{C_RESET}")
-    r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir)
+    r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, cwd=repo_dir)
     if r.returncode != 0:
         print(f"{C_RED}❌ git pull failed:{C_RESET}")
         print(r.stderr)
@@ -255,13 +287,13 @@ def cmd_update(args):
     print(f"{C_YELLOW}➜ pip install -e .{C_RESET}")
     r = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages"],
-        capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir,
+        capture_output=True, text=True, timeout=120, cwd=repo_dir,
     )
     if r.returncode != 0:
         # Retry without --break-system-packages (older pip versions)
         r = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-e", "."],
-            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace", cwd=repo_dir,
+            capture_output=True, text=True, timeout=120, cwd=repo_dir,
         )
     if r.returncode != 0:
         print(f"{C_RED}❌ pip install failed:{C_RESET}")
@@ -332,11 +364,11 @@ def cmd_update(args):
                 pass
 
     if qq_was_running:
-        print(t("cli.bot_restarting"))
+        print(f"   🤖 QQ 机器人运行中 → 自动重启...")
         _bot_stop(workspace, "qq", quiet=True)
         _bot_start(workspace, "qq", quiet=True)
     else:
-        print(t("cli.bot_not_running_skip"))
+        print(f"   ℹ QQ 机器人未运行（跳过重启）")
     print()
 
     # 6. Check and report current work state
@@ -381,10 +413,73 @@ def cmd_update(args):
             except Exception:
                 pass
 
-        # Mind self-pulse — no external cron needed
-        print(f"   🧠 Mind自脉冲: 15分钟（无需外部 cron）")
+        # Cron check — auto-create if missing
+        try:
+            cr = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
+            if "partner-research" in cr.stdout:
+                print(f"   ⏰ Cron: 已设置")
+            else:
+                print(f"   ⏰ Cron: 未设置 → 自动创建...")
+                # Read config for interval
+                cfg_path = os.path.join(workspace, "partner_config.json")
+                interval = 30
+                try:
+                    with open(cfg_path) as f:
+                        cfg = json.load(f)
+                    interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
+                except Exception:
+                    pass
+
+                cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
+
+你的核心原则：
+1. 30 分钟是最小心跳间隔，不是执行窗口
+2. **不要停下来** — 计划完成后，立即搜索该领域最新前沿文献，
+   看有没有新的改进方向。如果有 → 创建延续计划继续研究。
+   不要等用户下指令才继续。
+
+每次心跳：
+1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
+2. 计划已完成 → 读取 goal 和结果 → 搜索该领域前沿文献 →
+   有新方向就创建延续计划，没有就检查队列
+3. 空闲 + 队列有任务 → 自动创建计划
+4. 每次心跳向 QQ 汇报当前状态
+
+用中文。只在 {workspace} 内写文件。"""
+
+                cr_create = subprocess.run(
+                    ["hermes", "cron", "create",
+                     "--name", "partner-research-cycle",
+                     f"every {interval}m",
+                     cron_prompt],
+                    capture_output=True, text=True, timeout=30,
+                )
+                if cr_create.returncode == 0:
+                    import re as _re
+                    m = _re.search(r'\[([a-f0-9-]+)\]', cr_create.stdout)
+                    if m:
+                        new_id = m.group(1)
+                        try:
+                            with open(cfg_path) as f:
+                                cfg = json.load(f)
+                            cfg.setdefault("scheduler", {})["cron_job_id"] = new_id
+                            with open(cfg_path, 'w') as f:
+                                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                        except Exception:
+                            pass
+                    print(f"   ✅ Cron 已创建（每 {interval} 分钟）")
+                    # Trigger an immediate run
+                    subprocess.run(
+                        ["hermes", "cron", "run", "partner-research-cycle", "--accept-hooks"],
+                        capture_output=True, timeout=120,
+                    )
+                    print(f"   🚀 已触发首次研究循环")
+                else:
+                    print(f"   ⚠ Cron 创建失败: {cr_create.stderr[:100]}")
+        except Exception as e:
+            print(f"   ⚠ Cron 检查失败: {e}")
     else:
-        print(f"   {t('cli.workspace_not_found')}")
+        print(f"   ℹ 未找到工作区（运行 partner setup 配置）")
         # 没工作区 → 询问是否运行 setup
         _tty = None
         try:
@@ -393,7 +488,7 @@ def cmd_update(args):
             pass
         if _tty:
             try:
-                print(f"  {C_CYAN}{t('cli.ttysetup_prompt')}{C_RESET}", end="", flush=True)
+                print(f"  {C_CYAN}是否运行配置向导？{C_RESET}[Y/n] ", end="", flush=True)
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
@@ -429,7 +524,7 @@ def cmd_update(args):
 
         if _tty:
             try:
-                print(f"\n  {C_CYAN}{t('cli.ttysetup_redetect')}{C_RESET}", end="", flush=True)
+                print(f"\n  {C_CYAN}检测到已有配置，是否运行配置向导修改？{C_RESET}[Y/n] ", end="", flush=True)
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
@@ -440,7 +535,7 @@ def cmd_update(args):
             finally:
                 _tty.close()
         else:
-            print(f"\n  {t('cli.ttysetup_detected')}")
+            print(f"\n  检测到已有配置。可稍后运行: {C_BOLD}partner setup{C_RESET}")
 
 
 def _print_commands():
@@ -462,7 +557,7 @@ def _cmd_queue_clear(args):
     from .setup import find_workspace
     workspace = find_workspace()
     if not workspace:
-        print(t("cli.not_configured"))
+        print("❌ Partner 未配置")
         return
 
     state_dir = os.path.join(workspace, "state")
@@ -472,9 +567,9 @@ def _cmd_queue_clear(args):
     try:
         with open(queue_path, 'w', encoding='utf-8') as f:
             json.dump([], f, indent=2, ensure_ascii=False)
-        print(t("cli.queue_cleared"))
+        print("  ✅ 任务队列已清空")
     except Exception as e:
-        print(t("cli.queue_clear_failed", error=str(e)))
+        print(f"  ❌ 清空失败: {e}")
         return
 
     # Reset active_plan
@@ -493,9 +588,9 @@ def _cmd_queue_clear(args):
         }
         with open(plan_path, 'w', encoding='utf-8') as f:
             json.dump(plan, f, indent=2, ensure_ascii=False)
-        print(t("cli.plan_reset"))
+        print("  ✅ 活跃计划已重置")
     except Exception as e:
-        print(t("cli.plan_reset_failed", error=str(e)))
+        print(f"  ⚠ active_plan 重置失败: {e}")
 
     print()
     print("  Commands:")
@@ -512,7 +607,7 @@ def _cmd_config_set(args):
     from .setup import find_workspace
     workspace = find_workspace()
     if not workspace:
-        print(t("cli.not_configured"))
+        print("❌ Partner 未配置")
         return
 
     cfg_path = os.path.join(workspace, "partner_config.json")
@@ -520,7 +615,7 @@ def _cmd_config_set(args):
         with open(cfg_path, 'r', encoding='utf-8') as f:
             cfg = json.load(f)
     except Exception as e:
-        print(t("cli.config_read_failed", error=str(e)))
+        print(f"❌ 读取配置失败: {e}")
         return
 
     key = args.key
@@ -530,204 +625,35 @@ def _cmd_config_set(args):
         try:
             minutes = int(value)
             if minutes < 1:
-                print(t("cli.interval_invalid"))
+                print("❌ 间隔不能小于 1 分钟")
                 return
             if "scheduler" not in cfg:
                 cfg["scheduler"] = {}
             cfg["scheduler"]["interval_minutes"] = minutes
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
-            print(t("cli.interval_set", minutes=minutes))
-            print(t("cli.interval_restart_hint"))
+            print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
+            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron edit ...")
         except ValueError:
-            print(t("cli.value_must_be_number"))
+            print("❌ value 必须是数字（分钟数）")
             return
 
     _print_commands()
 
 
-def cmd_log(args):
-    """查看研究时间线"""
-    from .recorder import Recorder
-    ws = get_workspace()
-    if not ws:
-        print("❌ 未找到工作区")
-        return 1
-    rec = Recorder(ws)
-    if args.list:
-        projects = rec.get_projects()
-        if not projects:
-            print("📂 没有项目记录")
-        else:
-            print(f"📂 项目列表 ({len(projects)}):")
-            for p in projects:
-                tl = rec.get_timeline(p, 1)
-                last_action = tl[0].get("action", "") if tl else ""
-                print(f"  • {p}" + (f" — {last_action[:40]}" if last_action else ""))
-        return 0
-    projects = [args.project] if args.project else rec.get_projects()
-    if not projects:
-        print("❌ 未指定项目且没有项目记录。使用 partner log -p <项目名>")
-        return 1
-    for proj in projects:
-        entries = rec.get_timeline(proj, args.limit)
-        if not entries:
-            print(f"📋 {proj}: 无记录")
-            continue
-        print(f"\n📋 {proj} (最近 {len(entries)} 条):")
-        print("-" * 60)
-        for e in entries:
-            ts = e.get("timestamp", "")[11:19]  # HH:MM:SS
-            action = e.get("action", "")
-            hypothesis = e.get("hypothesis", "")
-            result = e.get("result", "")
-            reflection = e.get("reflection", "")
-            next_step = e.get("next", "")
-
-            parts = [f"[{ts}]"]
-            if action:
-                parts.append(f"📌 {action}")
-            if hypothesis:
-                parts.append(f"💡 {hypothesis[:60]}")
-            if result:
-                parts.append(f"📊 {str(result)[:60]}")
-            if reflection:
-                parts.append(f"🔍 {reflection[:60]}")
-            if next_step:
-                parts.append(f"➡️ {next_step[:60]}")
-            print(" | ".join(parts))
-    return 0
-
-
-def cmd_usage(args):
-    """查看 Token 用量统计"""
-    from .token_tracker import TokenTracker
-    ws = get_workspace()
-    if not ws:
-        print("❌ 未找到工作区")
-        return 1
-    tracker = TokenTracker(workspace=ws, instance_id=args.instance or "default")
-    stats = tracker.query(period=args.period, project=args.project, instance=args.instance)
-    print(tracker.format_report(stats))
-    return 0
-
-
-def cmd_migrate_records(args):
-    """将旧版 workspace 文件迁移到 20_records/ 结构"""
-    from .recorder import Recorder
-    ws = get_workspace()
-    if not ws:
-        print("❌ 未找到工作区")
-        return 1
-    rec = Recorder(ws)
-    state_dir = os.path.join(ws, "state")
-    logs_dir = os.path.join(ws, "logs")
-
-    # 创建 10_logs/state/ 目录
-    logs_state = os.path.join(ws, "10_logs", "state")
-    os.makedirs(logs_state, exist_ok=True)
-
-    migration_log = []
-
-    # 1. 归档旧 active_plan 和 plan_archive
-    src = os.path.join(ws, "active_plan.json")
-    if os.path.exists(src):
-        dst = os.path.join(rec._archives_dir, f"active_plan_{datetime.now().strftime('%Y%m%d')}.json")
-        shutil.move(src, dst)
-        migration_log.append(f"📄 {src} → {dst}")
-
-    for f in glob.glob(os.path.join(state_dir, "plan_archive_*.json")):
-        dst = os.path.join(rec._archives_dir, os.path.basename(f))
-        shutil.move(f, dst)
-        migration_log.append(f"📄 {f} → {dst}")
-
-    # 2. 中间状态文件 → 10_logs/state/
-    state_files = ["_cycle_context.json", "capability_registry.json", "cpe_registry.json",
-                   "events.json", "last_state.json", "notifier_config.json", "task_queue.json",
-                   "idea_records.jsonl", "current_task.md"]
-    for fname in state_files:
-        fpath = os.path.join(state_dir, fname)
-        if os.path.exists(fpath):
-            dst = os.path.join(logs_state, fname)
-            shutil.move(fpath, dst)
-            migration_log.append(f"📄 {fpath} → {dst}")
-
-    # 3. 移除 state → 20_records 符号链接
-    symlink = os.path.join(ws, "state")
-    if os.path.islink(symlink):
-        os.unlink(symlink)
-        migration_log.append(f"🔗 移除符号链接 {symlink}")
-
-    # 4. 如有 knowledge.json/timeline 等 → 转换到项目记录
-    if os.path.isdir(state_dir):
-        kpath = os.path.join(state_dir, "knowledge.json")
-        if os.path.exists(kpath):
-            try:
-                with open(kpath) as f:
-                    old_knowledge = json.load(f)
-                if isinstance(old_knowledge, list):
-                    for entry in old_knowledge:
-                        cat = entry.get("category", entry.get("source", "default"))
-                        rec.add_knowledge(cat, entry.get("type", "auto"),
-                                         entry.get("title", entry.get("content", str(entry)[:200])))
-                migration_log.append(f"📄 knowledge.json → 按类别分布到项目记录")
-            except Exception as e:
-                migration_log.append(f"⚠️ knowledge.json 转换失败: {e}")
-
-    # 5. 写迁移报告
-    report_path = os.path.join(ws, "MIGRATION.md")
-    with open(report_path, "w") as f:
-        f.write(f"# Workspace 迁移报告\n\n")
-        f.write(f"迁移时间: {datetime.now().isoformat()}\n\n")
-        f.write(f"## 迁移操作\n\n")
-        for item in migration_log:
-            f.write(f"- {item}\n")
-        f.write(f"\n---\n")
-        f.write(f"✅ 迁移完成。旧版 workspace 文件已归档到 20_records/archived_plans/ 和 10_logs/state/。\n")
-
-    print(f"✅ 迁移完成！共 {len(migration_log)} 项操作")
-    for item in migration_log:
-        print(f"  {item}")
-    return 0
-
-
 def main():
-    # ── First-run language detection ──
-    config_dir = Path.home() / ".partner"
-    config_path = config_dir / "config.json"
-    detected_lang = None
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            detected_lang = cfg.get("language", None)
-        except (json.JSONDecodeError, OSError):
-            pass
-    if not detected_lang:
-        # Auto-default to English when no TTY (systemd, cron, etc.)
-        if not sys.stdin.isatty():
-            detected_lang = "en"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump({"language": detected_lang}, f, indent=2)
-        else:
-            print()
-            print(f"  {C_BOLD}{C_CYAN}{t('cli.lang_prompt_welcome')}{C_RESET}")
-            print(f"  {t('cli.lang_prompt_option')}")
-            choice = input("  Choose [1/2]: ").strip()
-            lang_code = "zh" if choice == "2" else "en"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump({"language": lang_code}, f, indent=2)
-            print(f"  {t('cli.lang_selected', lang=lang_code)}")
-            print()
-
     parser = argparse.ArgumentParser(
         prog='partner',
         description='Partner 🤝 - Your AI Research Companion',
         add_help=True,
     )
-    
+
+    # Global arguments (used by partner-manager)
+    parser.add_argument('--instance-id', dest='instance_id', default=None,
+                        help=argparse.SUPPRESS)
+    parser.add_argument('--workspace', '-w', default=None,
+                        help='工作区路径')
+
     sub = parser.add_subparsers(dest='command')
     
     # setup
@@ -745,7 +671,6 @@ def main():
     p_bot.add_argument('action', choices=['start', 'stop'], help='操作')
     p_bot.add_argument('platform', choices=['qq'], help='机器人类型')
     p_bot.add_argument('--workspace', '-w', help='工作区路径')
-    p_bot.add_argument('--foreground', action='store_true', help='前台模式（供GUI调用）')
     p_bot.set_defaults(func=cmd_bot)
 
     # update
@@ -766,30 +691,17 @@ def main():
     p_config_set.add_argument('value', help='新值')
     p_config_set.set_defaults(func=_cmd_config_set)
 
-    # log
-    p_log = sub.add_parser('log', help='查看研究时间线')
-    p_log.add_argument('--project', '-p', default='', help='项目名')
-    p_log.add_argument('--limit', '-l', type=int, default=10, help='显示条数')
-    p_log.add_argument('--list', action='store_true', help='列出所有项目')
-    p_log.set_defaults(func=cmd_log)
-
-    # usage
-    p_usage = sub.add_parser('usage', help='查看 Token 用量统计')
-    p_usage.add_argument('period', nargs='?', default='day',
-                        choices=['day', 'week', 'month'],
-                        help='统计周期 (day/week/month)')
-    p_usage.add_argument('--project', '-p', default='', help='按项目筛选')
-    p_usage.add_argument('--instance', '-i', default='', help='按实例筛选')
-    p_usage.set_defaults(func=cmd_usage)
-
-    # migrate-records
-    p_migrate = sub.add_parser('migrate-records', help='将旧版 workspace 文件迁移到 20_records/ 结构')
-    p_migrate.set_defaults(func=cmd_migrate_records)
-
     # default
     parser.set_defaults(func=cmd_default)
-    
+
     args = parser.parse_args()
+
+    # When partner-manager starts an instance: --instance-id <id> --workspace <path>
+    # No subcommand → auto-start QQ bot for that instance
+    if args.instance_id and args.command is None:
+        _auto_start_instance(args.instance_id, args.workspace)
+        return
+
     if hasattr(args, 'func'):
         args.func(args)
     else:
