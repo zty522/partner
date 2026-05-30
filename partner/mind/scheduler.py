@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # 最大并发执行数，防止念头溢出
 MAX_CONCURRENT = 10
 # 自脉冲间隔（秒）
-SELF_PULSE_INTERVAL = 15 * 60  # 15 分钟
+SELF_PULSE_INTERVAL = 300  # 5 分钟
 
 
 async def mind_loop(pool: MindPool = None, save_path: str = ""):
@@ -85,8 +85,13 @@ async def mind_loop(pool: MindPool = None, save_path: str = ""):
                 ))
                 logger.info("[调度] 自脉冲 CRON_TICK 已注入")
 
-            # 如果池为空，短暂休眠
+            # 如果池为空，短暂休眠 + 写空闲心跳
             if pool.qsize() == 0:
+                try:
+                    with open("/tmp/partner_idle_heartbeat.txt", "w") as _hf:
+                        _hf.write(f"idle_since={asyncio.get_event_loop().time():.0f}")
+                except Exception:
+                    pass
                 await asyncio.sleep(0.1)
                 continue
 

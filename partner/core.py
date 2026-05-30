@@ -9,9 +9,11 @@ Mind 系统接管了原来的 cron 驱动架构：
 
 import os
 import json
+import time
 import asyncio
 import logging
 import threading
+import traceback
 from datetime import datetime
 from typing import Optional
 
@@ -82,6 +84,24 @@ class Partner:
 
         self._cycle_count = 0
 
+    # ── 通知管理 ───────────────────────────────────────────────
+
+    def _notify_admin(self, msg: str):
+        """发送管理通知（写 notification 文件）。"""
+        try:
+            log_dir = os.path.join(
+                getattr(self, '_workspace', self.workspace),
+                "10_logs" if os.path.isdir(os.path.join(self.workspace, "10_logs"))
+                else "logs"
+            )
+            os.makedirs(log_dir, exist_ok=True)
+            ntf_path = os.path.join(log_dir, "admin_notify.log")
+            with open(ntf_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+            logger.warning(f"[NOTIFY] {msg}")
+        except Exception as e:
+            logger.error(f"[NOTIFY] 写入通知失败: {e}")
+
     # ── Mind 系统控制 ──────────────────────────────────────────
 
     async def _init_mind(self):
@@ -102,25 +122,80 @@ class Partner:
         )
 
     def start_mind(self):
-        """在后台线程启动 mind_loop。"""
+        """启动 Mind 循环，带异常捕获和自动重启。"""
         if self._mind_thread and self._mind_thread.is_alive():
             logger.warning("Mind loop 已在运行")
             return
 
         def _run():
-            self._mind_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._mind_loop)
-            try:
-                # 初始化
-                self._mind_loop.run_until_complete(self._init_mind())
-                # 启动 mind_loop
-                self._mind_loop.run_until_complete(mind_loop())
-            except Exception as e:
-                logger.error(f"Mind loop 异常退出: {e}")
+            retry_count = 0
+            max_retries_per_hour = 3
+            cool_off = 120  # 冷却2分钟
+            last_retry_time = 0
+
+            while True:
+                try:
+                    self._mind_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self._mind_loop)
+                    # 初始化
+                    self._mind_loop.run_until_complete(self._init_mind())
+                    # 启动 mind_loop（永久运行）
+                    self._mind_loop.run_until_complete(mind_loop())
+                except asyncio.CancelledError:
+                    logger.info("[Core] Mind loop cancelled, exiting")
+                    break
+                except Exception as e:
+                    now = time.time()
+                    # 重置计数器：如果距离上次重试超过1小时
+                    if now - last_retry_time > 3600:
+                        retry_count = 0
+                    retry_count += 1
+                    last_retry_time = now
+
+                    # 记录崩溃
+                    log_dir = os.path.join(
+                        getattr(self, '_workspace', self.workspace),
+                        "10_logs" if os.path.isdir(os.path.join(self.workspace, "10_logs"))
+                        else "logs"
+                    )
+                    os.makedirs(log_dir, exist_ok=True)
+                    crash_log = os.path.join(log_dir, "crash.log")
+                    try:
+                        with open(crash_log, "a", encoding="utf-8") as f:
+                            f.write(f"[{datetime.now().isoformat()}] Mind loop crashed: {e}\n")
+                            traceback.print_exc(file=f)
+                            f.write("\n")
+                    except Exception:
+                        pass
+
+                    if retry_count > max_retries_per_hour:
+                        logger.critical(
+                            f"[Core] Mind loop crashed {retry_count}x in 1h, stopping"
+                        )
+                        self._notify_admin(
+                            f"⚠️ Partner 崩溃超过{max_retries_per_hour}次/小时，已停止"
+                        )
+                        break
+
+                    wait = min(cool_off * retry_count, 300)  # 退避最长5分钟
+                    logger.warning(
+                        f"[Core] Mind loop crashed ({e}), "
+                        f"restarting in {wait}s "
+                        f"(attempt {retry_count}/{max_retries_per_hour})"
+                    )
+                    time.sleep(wait)
+                    # 重新创建事件循环
+                    if self._mind_loop and not self._mind_loop.is_closed():
+                        try:
+                            self._mind_loop.close()
+                        except Exception:
+                            pass
+                    self._mind_loop = None
+                    continue
 
         self._mind_thread = threading.Thread(target=_run, daemon=True, name="mind-loop")
         self._mind_thread.start()
-        logger.info("🧠 Mind loop 已启动（后台线程）")
+        logger.info("🧠 Mind loop 已启动（后台线程，带异常保护）")
 
     def stop_mind(self):
         """停止 mind_loop。"""

@@ -212,6 +212,92 @@ def _scan_project_for_topic(topic: str, workspace: str) -> str:
     return ""
 
 
+# ── 智能聚焦探索：从项目知识生成具体查询 ─────────────────────
+
+
+async def _generate_focused_queries() -> list:
+    """从项目knowledge和时间线生成聚焦搜索查询（替代泛关键词）。"""
+    import os as _gos, json as _gjson, glob as _gglob
+    projects_dir = _gos.path.join(_workspace, "20_records", "projects") if _workspace else ""
+    if not projects_dir or not _gos.path.isdir(projects_dir):
+        return []  # 无项目，返回空列表，不搜索
+
+    # 找最近活跃的项目（按目录mtime排序）
+    project_dirs = sorted(
+        [d for d in _gglob.glob(_gos.path.join(projects_dir, "*")) if _gos.path.isdir(d)],
+        key=_gos.path.getmtime, reverse=True
+    )
+    if not project_dirs:
+        return []
+
+    queries = []
+    latest = project_dirs[0]
+    proj_name = _gos.path.basename(latest)
+
+    # 读取 knowledge.json 获取瓶颈
+    kpath = _gos.path.join(latest, "knowledge.json")
+    if _gos.path.exists(kpath):
+        try:
+            with open(kpath) as f:
+                knowledge = _gjson.load(f)
+            entries = knowledge if isinstance(knowledge, list) else knowledge.get("entries", [])
+            for entry in entries:
+                title = entry.get("title", entry.get("topic", ""))
+                if any(kw in title.lower() for kw in
+                       ["bottleneck", "issue", "problem", "stuck", "leak", "fail", "limit", "challenge"]):
+                    queries.append(f"{proj_name} {title[:60]}")
+        except Exception:
+            pass
+
+    # 读取 timeline.jsonl 提取当前瓶颈
+    tpath = _gos.path.join(latest, "timeline.jsonl")
+    if _gos.path.exists(tpath):
+        try:
+            with open(tpath) as f:
+                lines = f.readlines()[-20:]  # 最后20行
+            for line in lines:
+                record = _gjson.loads(line)
+                for field in ["hypothesis", "result", "reflection", "next"]:
+                    val = record.get(field, "")
+                    if any(kw in str(val).lower() for kw in
+                           ["failed", "stuck", "leak", "mae", "issue", "bottleneck"]):
+                        if len(str(val)) > 10:
+                            queries.append(f"{proj_name} {str(val)[:100]}")
+                            break
+        except Exception:
+            pass
+
+    # 去重 + 限制
+    queries = list(set(queries))[:3]
+
+    # 2小时内同一query不重复（短时记忆）
+    if _workspace:
+        dedup_path = _gos.path.join(_workspace, "state", "last_search_queries.json")
+        if _gos.path.exists(dedup_path):
+            try:
+                with open(dedup_path) as f:
+                    cache = _gjson.load(f)
+                now = _time.time()
+                queries = [q for q in queries if now - cache.get(q.strip().lower(), 0) >= 7200]
+            except Exception:
+                pass
+        # 记录本次生成的查询
+        try:
+            cache = {}
+            if _gos.path.exists(dedup_path):
+                with open(dedup_path) as f:
+                    cache = _gjson.load(f)
+            for q in queries:
+                cache[q.strip().lower()] = _time.time()
+            _gos.makedirs(_gos.path.dirname(dedup_path), exist_ok=True)
+            with open(dedup_path, "w") as f:
+                _gjson.dump(cache, f, indent=2)
+        except Exception:
+            pass
+
+    return queries if queries else []
+
+
 # ── 各类型处理函数 ──────────────────────────────────────────────
 
 
@@ -275,19 +361,31 @@ async def _handle_wake_up(event: MindEvent):
             except Exception as e:
                 logger.warning(f"[WAKE_UP] active_plan 读取失败: {e}")
 
-    # 如果没有项目，从知识库生成探索
+    # 如果没有项目，从知识库生成探索（聚焦）
     if not has_project:
-        kb_topic = ""
-        if _knowledge and len(_knowledge.entries) > 0:
-            categories = _knowledge.stats().get("by_category", {})
-            if categories:
-                kb_topic = min(categories, key=categories.get)
-        if kb_topic:
-            await pool.put(curiosity(topic=kb_topic, priority=6, source="wake_up:knowledge_gap"))
-            logger.info(f"[WAKE_UP] 生成知识探索: {kb_topic}")
+        # 尝试从项目生成聚焦查询
+        focused_qs = await _generate_focused_queries()
+        if focused_qs:
+            for q in focused_qs[:2]:
+                await pool.put(curiosity(topic=q, priority=6, source="wake_up:focused_exploration"))
+                logger.info(f"[WAKE_UP] 聚焦探索: '{q[:60]}'")
         else:
-            await pool.put(curiosity(topic="最新研究进展", priority=6, source="wake_up:generic"))
-            logger.info(f"[WAKE_UP] 生成通用探索")
+            kb_topic = ""
+            if _knowledge and len(_knowledge.entries) > 0:
+                categories = _knowledge.stats().get("by_category", {})
+                if categories:
+                    kb_topic = min(categories, key=categories.get)
+            if kb_topic:
+                await pool.put(curiosity(topic=kb_topic, priority=6, source="wake_up:knowledge_gap"))
+                logger.info(f"[WAKE_UP] 生成知识探索: {kb_topic}")
+            else:
+                # 无项目、无知识库 → 不搜索，提示用户
+                logger.info(f"[WAKE_UP] 无活跃项目，空闲等待用户指令")
+                await pool.put(report(
+                    content="当前没有活跃的研究项目。请告诉我你想探索的方向，我可以进行深入搜索和研究。",
+                    priority=3,
+                    source="wake_up:ask_direction",
+                ))
 
     # 检查自省时间
     if _journal:
@@ -323,6 +421,17 @@ async def _handle_wake_up(event: MindEvent):
     except Exception as e:
         logger.warning(f"[WAKE_UP] 复工简报生成失败: {e}")
 
+    # ── WAKE_UP 续命：队列为空时注入延迟5分钟的CRON_TICK ──
+    if pool.qsize() == 0:
+        wake_at = _wt.time() + 300
+        await pool.put(MindEvent(
+            type=EventType.CRON_TICK,
+            priority=10,
+            payload={"wake_after": wake_at},
+            source="wake_up:delayed_refuel",
+        ))
+        logger.info("[WAKE_UP] 队列为空，注入延迟5分钟的CRON_TICK续命")
+
     logger.info(f"[WAKE_UP] 唤醒完成，池大小: {pool.qsize()}")
 
 
@@ -353,8 +462,38 @@ async def _handle_curiosity(event: MindEvent):
     try:
         from ..searcher import search as _search, format_results
         web_results = _search(topic, max_results=5, workspace=_workspace)
-        web_result_text = format_results(web_results, max_items=3)
         logger.info(f"[CURIOSITY] Web search returned {len(web_results)} results for '{topic}'")
+
+        # LLM 相关性评分（阈值 0.3），过滤不相关结果
+        if web_results and _adapter:
+            try:
+                scored = []
+                for r in web_results[:8]:
+                    title = r.get("title", "")
+                    snippet = r.get("snippet", "")[:200]
+                    score_prompt = (
+                        f"请评估以下搜索结果与用户查询的相关性（0~1分，只输出数字，不要其他文字）。\n"
+                        f"查询: {topic}\n"
+                        f"标题: {title}\n"
+                        f"摘要: {snippet}\n"
+                        f"相关性得分:"
+                    )
+                    score_str = _adapter.chat(score_prompt) or "0"
+                    try:
+                        score = float(score_str.strip())
+                    except (ValueError, TypeError):
+                        score = 0.5  # 默认中等
+                    if score >= 0.3:
+                        scored.append(r)
+                        logger.debug(f"[CURIOSITY] 结果相关: '{title[:40]}' score={score:.2f}")
+                    else:
+                        logger.debug(f"[CURIOSITY] 结果不相关(已过滤): '{title[:40]}' score={score:.2f}")
+                web_results = scored
+                logger.info(f"[CURIOSITY] 相关性过滤后保留 {len(web_results)} 条结果")
+            except Exception as e:
+                logger.debug(f"[CURIOSITY] LLM评分失败，使用全部结果: {e}")
+
+        web_result_text = format_results(web_results, max_items=3)
     except Exception as e:
         logger.warning(f"[CURIOSITY] Web search failed (non-fatal): {e}")
         web_result_text = ""
@@ -520,19 +659,17 @@ async def _handle_cron_tick(event: MindEvent):
     logger.info(f"[CRON] Tick received, scheduling periodic tasks. "
                 f"Pool size: {pool.qsize()}")
 
-    # 自由探索知识空白
+    # 自由探索知识空白（仅当有明确的知识覆盖弱点时才探索）
     if _knowledge and len(_knowledge.entries) > 0:
         categories = _knowledge.stats().get("by_category", {})
         if categories:
             topic = min(categories, key=categories.get)
-        else:
-            topic = "最近的研究发现"
-        await pool.put(curiosity(
-            topic=topic,
-            priority=7,
-            source="cron_tick:random_curiosity",
-        ))
-        logger.info(f"[CRON] Generated curiosity for knowledge gap: '{topic}'")
+            await pool.put(curiosity(
+                topic=topic,
+                priority=7,
+                source="cron_tick:random_curiosity",
+            ))
+            logger.info(f"[CRON] Generated curiosity for knowledge gap: '{topic}'")
 
     # 2. 每偶数小时自省一次
     hour = now.hour
@@ -570,45 +707,31 @@ async def _handle_cron_tick(event: MindEvent):
                 break
 
     if not has_any_active:
-        logger.info(f"[CRON] ⭐ 检测到空闲状态，自动生成探索任务")
+        logger.info(f"[CRON] ⭐ 检测到空闲状态，自动生成聚焦探索任务")
 
-        # 从 knowledge 中找最多 3 个待深化的主题
-        auto_topics = []
-        if _knowledge:
-            # 找覆盖最弱的类别
-            try:
-                dist = _knowledge.knowledge_distribution()
-                for item in dist.get("coverage_summary", []):
-                    if item.get("level") == "gap":
-                        auto_topics.append(item["tag"])
-                        if len(auto_topics) >= 3:
-                            break
-            except Exception:
-                pass
+        # 使用智能聚焦查询（从项目瓶颈生成具体查询）
+        queries = await _generate_focused_queries()
+        if queries:
+            for q in queries[:2]:
+                await pool.put(curiosity(topic=q, priority=8, source="cron_tick:focused_exploration"))
+                logger.info(f"[CRON] 聚焦探索: '{q[:60]}'")
 
-        if not auto_topics:
-            auto_topics = ["最新研究进展", "当前项目优化方向", "知识库未覆盖的新方向"]
-
-        for i, topic in enumerate(auto_topics[:2]):
-            await pool.put(curiosity(
-                topic=topic,
-                priority=8,
-                source="cron_tick:auto_idle",
+            # 向用户汇报：已开始聚焦探索
+            topics_str = "、".join(queries[:3])
+            auto_report = (
+                f"📊 当前没有进行中的项目，已自动从最近项目瓶颈开始探索：\n"
+                f"🔍 {topics_str}\n"
+                f"🕒 有实质性发现时会主动推送。"
+            )
+            await pool.put(report(
+                content=auto_report,
+                priority=3,
+                source="cron_tick:focused_auto_idle",
             ))
-            logger.info(f"[CRON] 空闲自动探索: '{topic}'")
-
-        # 向用户汇报：空闲，已自动开始探索
-        topics_str = "、".join(auto_topics[:3])
-        auto_report = (
-            f"📊 当前没有进行中的项目，已自动开始探索以下方向：\n"
-            f"🔍 {topics_str}\n"
-            f"🕒 有实质性发现时会主动推送。"
-        )
-        await pool.put(report(
-            content=auto_report,
-            priority=3,
-            source="cron_tick:auto_idle",
-        ))
+        else:
+            # 无活跃项目 → 不搜索，只记录
+            logger.info(f"[CRON] 无活跃项目，空闲等待用户指令")
+            # 不搜索！不创建泛搜索任务
 
     # 5. 快速路径：加速等待中的 PROJECT 事件
     now_ts = _time.time()

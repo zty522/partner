@@ -91,6 +91,17 @@ class HermesAdapter(AgentAdapter):
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:
+                # Record token usage (estimate based on character count)
+                try:
+                    from .token_tracker import TokenTracker
+                    tt = TokenTracker(workspace=self.workspace, instance_id="hermes")
+                    tt.record(
+                        prompt_tokens=len(prompt) // 4,
+                        completion_tokens=len(out) // 4,
+                        model="hermes",
+                    )
+                except Exception:
+                    pass
                 return out
             logger.warning(f"hermes execute_task returned {result.returncode}: {result.stderr[:200]}")
         except subprocess.TimeoutExpired:
@@ -116,6 +127,17 @@ class HermesAdapter(AgentAdapter):
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:
+                # Record token usage (estimate based on character count)
+                try:
+                    from .token_tracker import TokenTracker
+                    tt = TokenTracker(workspace=self.workspace, instance_id="hermes")
+                    tt.record(
+                        prompt_tokens=len(message) // 4,
+                        completion_tokens=len(out) // 4,
+                        model="hermes",
+                    )
+                except Exception:
+                    pass
                 return out
             logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
             return None

@@ -806,6 +806,27 @@ class QQQfficialBridge:
             if t.lower() == p.lower() or t.lower().startswith(p.lower()):
                 return self._handle_summary(msg)
 
+        # Token usage: /usage [day|week|month] [project=xxx] [instance=xxx]
+        if t.lower().startswith("/usage"):
+            parts = t.split()
+            period = "day"
+            project = ""
+            instance = ""
+            for p in parts[1:]:
+                if p in ("day", "week", "month"):
+                    period = p
+                elif p.startswith("project="):
+                    project = p.split("=", 1)[1]
+                elif p.startswith("instance="):
+                    instance = p.split("=", 1)[1]
+            try:
+                from .token_tracker import TokenTracker
+                tracker = TokenTracker(workspace=self.workspace, instance_id="default")
+                stats = tracker.query(period=period, project=project, instance=instance)
+                return tracker.format_report(stats)
+            except Exception as e:
+                return f"查询用量失败: {e}"
+
         return None
 
     def _clear_queue(self, msg: QQMessage) -> str:
@@ -1185,8 +1206,10 @@ class QQQfficialBridge:
     def _ensure_mind_loop_healthy(self):
         """检查 mind_loop 是否正常运行（通过监控池大小变化）。
 
-        如果连续 2 次检查（间隔约 60 秒）池大小无变化，记录告警。
-        在通知轮询线程中周期性调用。
+        新逻辑：
+        - current_qsize > 0 且连续3次不变 → 报警（可能真挂起）
+        - current_qsize == 0 → 不报警，只 debug 日志（正常空闲）
+        - qsize 从 0→>0 或 >0→0 时重置 stale_count
         """
         try:
             from .mind import MindPool
@@ -1201,15 +1224,26 @@ class QQQfficialBridge:
                 self._mind_health_stale_count = 0
                 return
 
-            if current_qsize == self._mind_health_last_qsize:
-                self._mind_health_stale_count += 1
-                if self._mind_health_stale_count >= 2:
-                    logger.warning(
-                        f"[Health] Mind loop 可能挂起！池大小连续 {self._mind_health_stale_count} 次检查无变化 "
-                        f"(size={current_qsize})"
-                    )
-            else:
+            # 当 qsize 过零点时重置 stale_count
+            if (self._mind_health_last_qsize > 0 and current_qsize == 0) or \
+               (self._mind_health_last_qsize == 0 and current_qsize > 0):
                 self._mind_health_stale_count = 0
+                self._mind_health_last_qsize = current_qsize
+                return
+
+            if current_qsize > 0:
+                if current_qsize == self._mind_health_last_qsize:
+                    self._mind_health_stale_count += 1
+                    if self._mind_health_stale_count >= 3:
+                        logger.warning(
+                            f"[Health] Mind loop 可能挂起！池大小连续 {self._mind_health_stale_count} 次检查无变化 "
+                            f"(size={current_qsize})"
+                        )
+                else:
+                    self._mind_health_stale_count = 0
+            else:
+                # 池为空 → 正常空闲，不报警
+                logger.debug(f"[Health] 池为空，正常空闲")
 
             self._mind_health_last_qsize = current_qsize
         except Exception as e:

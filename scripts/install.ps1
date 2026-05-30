@@ -335,6 +335,53 @@ for d in dirs:
     }
 }
 
+# ── Add Python Scripts to PATH ──
+function Add-PythonScriptsToPath {
+    <#
+    .SYNOPSIS
+        Add Python Scripts directory to user PATH permanently.
+    #>
+    # 获取 Python Scripts 目录
+    $pythonPaths = @(
+        # 系统 Python
+        (Join-Path (Split-Path (Get-Command python -ErrorAction SilentlyContinue).Source) "Scripts"),
+        # 嵌入式 Python
+        (Join-Path $PythonDir "Scripts"),
+        # Python 所在目录本身
+        (Split-Path (Get-Command python -ErrorAction SilentlyContinue).Source)
+    )
+
+    $scriptsDir = $null
+    foreach ($p in $pythonPaths) {
+        if ($p -and (Test-Path $p)) {
+            $scriptsDir = $p
+            break
+        }
+    }
+
+    if (-not $scriptsDir) {
+        Write-Warn "Could not find Python Scripts directory"
+        return
+    }
+
+    # 检查是否已在 PATH 中
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($currentPath -split ";" | Where-Object { $_ -eq $scriptsDir }) {
+        Write-Info "$scriptsDir already in PATH"
+        return
+    }
+
+    # 添加到用户级 PATH
+    $newPath = "$currentPath;$scriptsDir"
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+
+    # 刷新当前会话
+    $env:Path = "$env:Path;$scriptsDir"
+
+    Write-Info "Added to PATH: $scriptsDir"
+    Write-Warn "Please restart your terminal for changes to take effect."
+}
+
 # ── Add to PATH ──
 function Add-PartnerToPath {
     $scriptsDir = ""
@@ -424,6 +471,9 @@ Install-Repository
 
 # Step 4: Install via pip
 Install-PartnerPackage
+
+# Step 4b: Add Python Scripts to PATH
+Add-PythonScriptsToPath
 
 # Step 5: Add to PATH
 Add-PartnerToPath

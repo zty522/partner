@@ -4,25 +4,48 @@
 
 ### 🚀 新增功能
 
-- **多实例管理（partner-manager）**: 新增 `partner.manager` 模块和 `partner-manager` CLI 命令
-  - `partner-manager create` — 全部交互式输入（Instance ID、AppID、AppSecret），无需任何参数
-  - `partner-manager create --id age_pred --qq-config ./qq_config.json` — 也支持命令行指定
-  - `partner-manager start/stop/restart --id <name>` — 管理实例生命周期
-  - `partner-manager list` — 列出所有实例和状态
-  - `partner-manager logs --id <name> --tail 50` — 查看实例日志
-  - `partner-manager enable/disable --id <name>` — 设置/取消开机自启
-  - `partner-manager status --watch` — 交互式监控面板
-  - 每个命令执行后显示下一步提示（tip），使用更友好
-- **实例目录结构**: `~/.partner/instances/<id>/` 下分 `00_config/`、`10_logs/`、`20_records/`、`99_temp/`
-- **`__main__.py` 实例路由**: `python3 -m partner --instance-id <id> --workspace <path>` 自动启动 QQ bridge
-- **systemd 模板**: 每个实例生成独立的 `partner-<id>.service`
-- **单实例→多实例迁移**: `partner-manager migrate --workspace <path>` 无缝迁移
+#### 🧠 Mind Pool 自动续命与健康检查修复
+- **自脉冲缩至 5 分钟**: `SELF_PULSE_INTERVAL` 从 900s 改为 300s，空闲实例不再长时间无任务
+- **WAKE_UP 续命**: `_handle_wake_up` 末尾检查队列为空时自动注入延迟 5 分钟的 CRON_TICK
+- **健康检查误报修复**: `_ensure_mind_loop_healthy` 仅当队列 `>0` 且连续 3 次不变才报警；队列为 0 视为正常空闲
+- **空闲心跳**: `mind_loop` 空闲时写入 `/tmp/partner_idle_heartbeat.txt`
+
+#### 📂 Workspace 彻底重构（Timeline 标准记录）
+- **`recorder.py` 完全重写**: timeline 中心式记录，每项目包含 `timeline.jsonl`（action/hypothesis/result/reflection/next）、`experiments.csv`、`knowledge.json`
+- **`partner log` CLI 命令**: 查看项目研究时间线（`--project`、`--limit`、`--list`）
+- **`partner migrate-records` CLI 命令**: 一键迁移旧版文件到 `20_records/` 标准化结构，生成 `MIGRATION.md`
+- **清理冗余文件**: `active_plan.json`、`plan_archive_*.json` 等归档到 `archived_plans/`；中间状态文件移到 `10_logs/state/`
+
+#### 🎯 智能聚焦探索（禁止泛关键词）
+- **删除所有泛关键词**: 移除"最新研究进展"、"当前项目优化方向"等硬编码字符串
+- **基于项目瓶颈生成搜索**: 自动从 `20_records/projects/` 读取最新项目，提取 knowledge.json 和 timeline.jsonl 中的瓶颈生成 2-3 个具体搜索查询
+- **2 小时去重**: 短时记忆 `last_search_queries.json` 避免同一 query 重复搜索
+- **LLM 相关性过滤**: 搜索结果经 LLM 评分（阈值 0.3），低分丢弃
+- **无项目时静候**: 不搜索泛关键词，仅记录日志等待用户指令
+
+#### 📊 Token 用量可观测性
+- **`token_tracker.py`**: CSV 记录所有 LLM 调用（prompt_tokens、completion_tokens、model、project、instance）
+- **`/usage` QQ 命令**: 支持 `/usage [day|week|month] [project=xxx] [instance=xxx]`
+- **`partner usage` CLI 命令**: 终端查询 Token 用量统计
+- **自动打点**: `adapter.py` 中所有 LLM 调用完成后自动记录 token 用量
+
+#### 🛡️ 多实例稳定性增强
+- **`core.py` 主循环健壮性**: 全局异常捕获 + 自动重启（最多 3 次/小时，退避重试 2min→4min→5min）
+- **崩溃日志**: 写入 `10_logs/crash.log`，含完整 traceback
+- **进程守护**: `manager.py` 的 watchdog 每 30 秒检查子进程，异常退出时自动重启
+- **资源监控**: `partner-manager status --watch` 显示 CPU%、内存 MB、最后活跃时间
+- **空闲检测修正**: 无任务时进入空闲等待（保持进程存活），连续空闲超过 1 小时才退出
+
+#### 🖥️ Windows 安装体验优化
+- **`install.ps1`**: pip install 成功后自动将 Python Scripts 目录添加到用户 PATH
+- **PATH 刷新**: 当前会话立即生效 + 提示重启终端
 
 ### ⚙️ 改进
 
 - Exe 安装器文件名为 `Partner-0.5.0-Setup.exe`，版本号与代码同步
 - **install.ps1**: Python 版本检测放宽到 3.10+（不再限制 3.10-3.12，3.14 也能直接用）
 - **install.ps1**: 修复 embeddable Python 安装 `setuptools wheel` 时警告导致安装中断的问题（`--no-warn-script-location` + `$null` 赋值替代管道）
+- **多实例管理**: `partner-manager` CLI 命令 + 实例目录 + `__main__.py` 路由 + systemd 模板 + 迁移工具
 
 ## [0.4.0] - 2026-05-29
 

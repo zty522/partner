@@ -9,6 +9,7 @@
 import json
 import os
 import re
+import time
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
@@ -37,6 +38,62 @@ class ContextBroker:
         self.knowledge_custom_path = os.path.join(
             workspace, "state", "knowledge_context.json"
         )
+        # 搜索查询短时记忆（2小时内同一query不重复）
+        self.last_search_queries_path = os.path.join(
+            workspace, "state", "last_search_queries.json"
+        )
+        self._search_query_cache: Dict[str, float] = {}
+        self._load_search_query_cache()
+
+    def _load_search_query_cache(self):
+        """从 last_search_queries.json 加载查询缓存。"""
+        if os.path.exists(self.last_search_queries_path):
+            try:
+                with open(self.last_search_queries_path, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._search_query_cache = data
+            except Exception:
+                self._search_query_cache = {}
+
+    def _save_search_query_cache(self):
+        """保存查询缓存到磁盘。"""
+        try:
+            os.makedirs(os.path.dirname(self.last_search_queries_path), exist_ok=True)
+            with open(self.last_search_queries_path, "w") as f:
+                json.dump(self._search_query_cache, f, indent=2)
+        except Exception:
+            pass
+
+    def is_query_recent(self, query: str, hours: int = 2) -> bool:
+        """检查查询在指定小时内是否已使用过。
+
+        Args:
+            query: 查询字符串
+            hours: 时间窗口（默认2小时）
+
+        Returns:
+            True 如果该查询在最近 hours 小时内已使用过
+        """
+        now = time.time()
+        query_key = query.strip().lower()
+        last_ts = self._search_query_cache.get(query_key, 0)
+        return (now - last_ts) < hours * 3600
+
+    def record_search_query(self, query: str):
+        """记录一次搜索查询（用于去重）。
+
+        Args:
+            query: 已执行的查询字符串
+        """
+        query_key = query.strip().lower()
+        self._search_query_cache[query_key] = time.time()
+        # 清理超过 24 小时的旧条目
+        now = time.time()
+        stale = [k for k, v in self._search_query_cache.items() if now - v > 86400]
+        for k in stale:
+            del self._search_query_cache[k]
+        self._save_search_query_cache()
 
     # ── 对话数据加载 ─────────────────────────────────────────────
 

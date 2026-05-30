@@ -16,6 +16,7 @@ Usage:
     partner-manager start --all
     partner-manager stop --all
     partner-manager status --watch
+    partner-manager watchdog [--interval 30] [--max-restarts 3]
 """
 
 import argparse
@@ -163,6 +164,104 @@ def clean_stale_pid(instance_id: str):
         pid_file = pid_path(instance_id)
         if pid_file.exists():
             pid_file.unlink(missing_ok=True)
+
+
+def _get_instance_stats(instance_id: str) -> dict:
+    """获取实例资源使用统计."""
+    stats = {"cpu_percent": "N/A", "memory_mb": "N/A", "status": "unknown"}
+    pid_file = pid_path(instance_id)
+    if not pid_file.exists():
+        return stats
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Use psutil if available
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            stats["cpu_percent"] = proc.cpu_percent(interval=0.1)
+            stats["memory_mb"] = proc.memory_info().rss / 1024 / 1024
+            stats["status"] = proc.status()
+        except ImportError:
+            # Fallback: read /proc/[pid]/stat
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    parts = f.read().split()
+                    # utime + stime in clock ticks
+                    utime = int(parts[13])
+                    stime = int(parts[14])
+                    total_ticks = utime + stime
+                    clk_tck = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
+                    # Rough estimate
+                    stats["cpu_percent"] = round(total_ticks / clk_tck * 100, 1)
+                    stats["status"] = parts[2]  # Process state
+            except (OSError, ValueError, KeyError):
+                pass
+            try:
+                with open(f"/proc/{pid}/status") as f:
+                    for line in f:
+                        if line.startswith("VmRSS:"):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                stats["memory_mb"] = int(parts[1]) / 1024
+                            break
+            except (OSError, ValueError):
+                pass
+        # Also check if process is actually alive
+        os.kill(pid, 0)
+        if stats["status"] == "unknown":
+            stats["status"] = "running"
+    except (ProcessLookupError, OSError):
+        stats["status"] = "dead"
+    except (ValueError, OSError):
+        pass
+    return stats
+
+
+def _get_restart_count(instance_id: str) -> int:
+    """读取实例重启计数文件."""
+    restart_file = instance_dir(instance_id) / "_restart_count"
+    if restart_file.exists():
+        try:
+            data = json.loads(restart_file.read_text())
+            count = data.get("count", 0)
+            last = data.get("last_reset", 0)
+            # Reset if more than 1 hour old
+            if time.time() - last > 3600:
+                count = 0
+            return count
+        except (json.JSONDecodeError, OSError):
+            pass
+    return 0
+
+
+def _increment_restart_count(instance_id: str) -> int:
+    """增加实例重启计数并写入文件."""
+    restart_file = instance_dir(instance_id) / "_restart_count"
+    data = {"count": 1, "last_reset": time.time()}
+    if restart_file.exists():
+        try:
+            prev = json.loads(restart_file.read_text())
+            if time.time() - prev.get("last_reset", 0) > 3600:
+                data["count"] = 1
+            else:
+                data["count"] = prev.get("count", 0) + 1
+        except (json.JSONDecodeError, OSError):
+            pass
+    data["last_reset"] = time.time()
+    try:
+        restart_file.write_text(json.dumps(data))
+    except OSError:
+        pass
+    return data["count"]
+
+
+def _reset_restart_count(instance_id: str):
+    """重置实例重启计数."""
+    restart_file = instance_dir(instance_id) / "_restart_count"
+    try:
+        restart_file.write_text(json.dumps({"count": 0, "last_reset": time.time()}))
+    except OSError:
+        pass
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -622,13 +721,165 @@ def stop_all():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Status Watch (interactive monitoring)
+# Watchdog Daemon (auto-restart crashed instances)
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def status_watch(interval: float = 3.0):
+def watchdog_daemon(interval: float = 30.0, max_restarts_per_hour: int = 3):
+    """Watchdog daemon: periodically check all running instances and auto-restart crashed ones.
+
+    Tracks restart count per instance via {workspace}/_restart_count file.
+    Notifies via admin_notify.log when max restarts exceeded.
+
+    Args:
+        interval: Check interval in seconds (default 30).
+        max_restarts_per_hour: Max restarts per hour before giving up (default 3).
+    """
+    if not INSTANCES_DIR.exists():
+        print(f"{C_RED}No instances directory found.{C_RESET}")
+        print(f"  Expected: {INSTANCES_DIR}")
+        return
+
+    log_dir = PARTNER_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    notify_file = log_dir / "watchdog_notify.log"
+
+    def _log_notify(msg: str):
+        ts = datetime.now().isoformat()
+        try:
+            with open(notify_file, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {msg}\n")
+        except OSError:
+            pass
+        print(f"[{ts}] {msg}")
+
+    _log_notify(f"🔍 Watchdog started (interval={interval}s, max_restarts={max_restarts_per_hour}/h)")
+
+    try:
+        while True:
+            instances = list_instances()
+            for inst_id, status in instances.items():
+                if status == STATUS_CRASHED:
+                    # Check restart count
+                    rc = _get_restart_count(inst_id)
+                    if rc >= max_restarts_per_hour:
+                        _log_notify(
+                            f"{C_RED}⚠️  {inst_id}: crashed but restart limit "
+                            f"({max_restarts_per_hour}/h) reached, not restarting{C_RESET}"
+                        )
+                        continue
+
+                    # Clean stale PID
+                    clean_stale_pid(inst_id)
+                    # Start the instance
+                    _log_notify(f"{C_YELLOW}♻️  {inst_id}: crashed, restarting (attempt {rc+1}){C_RESET}")
+                    success = start_instance(inst_id)
+                    if success:
+                        _increment_restart_count(inst_id)
+                        _log_notify(f"{C_GREEN}✅ {inst_id}: restarted successfully{C_RESET}")
+                    else:
+                        _log_notify(f"{C_RED}❌ {inst_id}: restart failed{C_RESET}")
+
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        _log_notify("🛑 Watchdog stopped by user")
+        print()
+        print("Watchdog stopped.")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Idle Detection
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _get_idle_since(instance_id: str) -> Optional[float]:
+    """读 idle_heartbeat.txt，返回空闲开始时间戳（秒）。
+
+    检查多个可能的位置：
+    1. {workspace}/20_records/idle_heartbeat.txt
+    2. {workspace}/idle_heartbeat.txt
+    3. /tmp/partner_idle_heartbeat.txt
+
+    Returns:
+        float 时间戳，或 None（无 idle 标记）。
+    """
+    hb_paths = [
+        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "idle_heartbeat.txt",
+        Path("/tmp/partner_idle_heartbeat.txt"),
+    ]
+    for hb in hb_paths:
+        if hb.exists():
+            try:
+                content = hb.read_text().strip()
+                # Try ISO format: "idle_since=1234567890" or ISO datetime
+                if "idle_since=" in content:
+                    ts_str = content.split("idle_since=")[1].strip()
+                    return float(ts_str)
+                # Try plain ISO datetime
+                from datetime import datetime as dt
+                return dt.fromisoformat(content[:19]).timestamp()
+            except (ValueError, OSError, IndexError):
+                pass
+    return None
+
+
+def _check_idle_timeout(instance_id: str, max_idle_minutes: int = 60) -> bool:
+    """检查实例是否空闲超时。
+
+    Args:
+        instance_id: 实例 ID。
+        max_idle_minutes: 最大空闲分钟数（默认 60）。
+
+    Returns:
+        True 如果空闲超时。
+    """
+    idle_since = _get_idle_since(instance_id)
+    if idle_since is None:
+        return False
+    idle_duration = time.time() - idle_since
+    idle_minutes = idle_duration / 60
+    return idle_minutes >= max_idle_minutes
+
+
+def _write_idle_marker(instance_id: str):
+    """写入空闲标记，保持进程存活标记。"""
+    paths = [
+        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "idle_heartbeat.txt",
+    ]
+    content = f"idle_since={time.time():.0f}"
+    for p in paths:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+        except OSError:
+            pass
+
+
+def _clear_idle_marker(instance_id: str):
+    """清除空闲标记。"""
+    paths = [
+        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "idle_heartbeat.txt",
+    ]
+    for p in paths:
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Status Watch (interactive monitoring) with resource stats
+# ══════════════════════════════════════════════════════════════════════════
+
+def status_watch(interval: float = 5.0):
     """Interactive monitoring mode. Refreshes instance status every N seconds.
 
+    Shows CPU%, Memory, and last active time for each instance.
     Press Ctrl+C to exit.
     """
     if not INSTANCES_DIR.exists():
@@ -636,7 +887,7 @@ def status_watch(interval: float = 3.0):
         print(f"  Expected: {INSTANCES_DIR}")
         return
 
-    print(f"{C_BOLD}Partner Instance Monitor{C_RESET}")
+    print(f"{C_BOLD}Partner Instance Monitor (with resource stats){C_RESET}")
     print(f"{C_DIM}Refreshing every {interval}s. Press Ctrl+C to exit.{C_RESET}")
     print()
 
@@ -650,42 +901,58 @@ def status_watch(interval: float = 3.0):
             sys.stdout.flush()
 
             print(f"{C_BOLD}Partner Instance Monitor{C_RESET} — {C_DIM}{timestamp}{C_RESET}")
-            print(f"{C_DIM}─{'─' * 70}{C_RESET}")
+            print(f"{C_DIM}─{'─' * 80}{C_RESET}")
 
             if not instances:
                 print("  No instances found.")
             else:
                 print(
-                    f"{C_BOLD}{'Instance ID':<24} {'Status':<12} {'PID':<10} {'Uptime'}{C_RESET}"
+                    f"{C_BOLD}{'Instance ID':<20} {'Status':<10} {'CPU%':>6} "
+                    f"{'Mem(MB)':>8} {'Uptime':<10} {'Last Active'}{C_RESET}"
                 )
-                print(f"{C_DIM}─{'─' * 70}{C_RESET}")
+                print(f"{C_DIM}─{'─' * 80}{C_RESET}")
                 for inst_id, status in instances.items():
                     pid_str = ""
                     uptime = ""
+                    last_active = ""
+
+                    # Get resource stats
+                    stats = _get_instance_stats(inst_id)
+                    cpu_str = str(stats.get("cpu_percent", "N/A"))
+                    if isinstance(stats.get("cpu_percent"), (int, float)):
+                        cpu_str = f"{stats['cpu_percent']:>5.1f}"
+                    mem_str = str(stats.get("memory_mb", "N/A"))
+                    if isinstance(stats.get("memory_mb"), (int, float)):
+                        mem_str = f"{stats['memory_mb']:>7.0f}"
+
+                    # Read idle heartbeat
+                    if status == STATUS_RUNNING:
+                        hb_paths = [
+                            instance_dir(inst_id) / "20_records" / "idle_heartbeat.txt",
+                            instance_dir(inst_id) / "idle_heartbeat.txt",
+                            Path("/tmp/partner_idle_heartbeat.txt"),
+                        ]
+                        for hb in hb_paths:
+                            if hb.exists():
+                                try:
+                                    last_active = hb.read_text().strip()[:19]
+                                except OSError:
+                                    pass
+                                break
+
                     if status == STATUS_RUNNING:
                         try:
                             pid_file = pid_path(inst_id)
                             pid_str = pid_file.read_text().strip()
-                            # Approximate uptime from PID creation
                             pid = int(pid_str)
-                            try:
-                                import errno
-                                stat_path = f"/proc/{pid}"
-                                if os.path.exists(stat_path):
-                                    # Use PID file mtime as approximation
-                                    mtime = pid_file.stat().st_mtime
-                                    elapsed = time.time() - mtime
-                                    if elapsed < 120:
-                                        uptime = f"{elapsed:.0f}s"
-                                    elif elapsed < 7200:
-                                        uptime = f"{elapsed / 60:.0f}m"
-                                    else:
-                                        uptime = f"{elapsed / 3600:.1f}h"
-                                else:
-                                    # Windows fallback or no /proc
-                                    pass
-                            except (OSError, ValueError):
-                                pass
+                            mtime = pid_file.stat().st_mtime
+                            elapsed = time.time() - mtime
+                            if elapsed < 120:
+                                uptime = f"{elapsed:.0f}s"
+                            elif elapsed < 7200:
+                                uptime = f"{elapsed / 60:.0f}m"
+                            else:
+                                uptime = f"{elapsed / 3600:.1f}h"
                         except (OSError, ValueError):
                             pid_str = "?"
 
@@ -696,7 +963,10 @@ def status_watch(interval: float = 3.0):
                     else:
                         status_str = f"{C_DIM}{status}{C_RESET}"
 
-                    print(f"  {inst_id:<22} {status_str:<12} {pid_str:<10} {uptime}")
+                    print(
+                        f"  {inst_id:<18} {status_str:<10} {cpu_str:>6} "
+                        f"{mem_str:>8} {uptime:<10} {last_active}"
+                    )
 
             print()
             running_count = sum(1 for s in instances.values() if s == STATUS_RUNNING)
@@ -990,7 +1260,9 @@ Examples:
   partner-manager start --all
   partner-manager stop --all
   partner-manager status --watch
+  partner-manager watchdog --interval 30 --max-restarts 3
   partner-manager migrate --workspace /path/to/legacy_workspace
+
 """,
     )
 
@@ -1038,6 +1310,15 @@ Examples:
                           help="Instance ID (omit to show all)")
     p_status.add_argument("--watch", action="store_true",
                           help="Continuous monitoring mode")
+
+    # ── watchdog ──
+    p_watchdog = subparsers.add_parser("watchdog",
+                                        help="Run watchdog daemon (auto-restart crashed instances)")
+    p_watchdog.add_argument("--interval", type=float, default=30.0,
+                            help="Check interval in seconds (default: 30)")
+    p_watchdog.add_argument("--max-restarts", type=int, default=3,
+                            dest="max_restarts",
+                            help="Max restarts per hour (default: 3)")
 
     # ── enable / disable (systemd boot) ──
     p_enable = subparsers.add_parser("enable", help="Enable auto-start on boot (systemd)")
@@ -1125,6 +1406,13 @@ Examples:
             print_instance_list()
             print()
             print(f"{C_BOLD}Tip:{C_RESET} {C_CYAN}partner-manager logs --id <name> --tail 50{C_RESET} to see logs")
+
+    elif args.command == "watchdog":
+        print(f"{C_BOLD}🐾 Watchdog Daemon{C_RESET}")
+        print(f"  Interval: {args.interval}s, Max restarts/h: {args.max_restarts}")
+        print(f"{C_DIM}Press Ctrl+C to stop.{C_RESET}")
+        print()
+        watchdog_daemon(interval=args.interval, max_restarts_per_hour=args.max_restarts)
 
     elif args.command == "enable":
         enable_on_boot(args.instance_id)
