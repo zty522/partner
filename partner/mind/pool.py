@@ -210,7 +210,7 @@ class MindPool:
         await self._release_waiting()
 
         if self._queue.qsize() == 0:
-            raise asyncio.QueueEmpty
+            return None
 
         event = await self._queue.get()
         # 如果事件设置了 wake_after 但还没到，放回等待室，递归取下一个

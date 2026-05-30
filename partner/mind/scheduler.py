@@ -111,12 +111,13 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 await asyncio.sleep(0.5)
                 continue
 
-            # 取出一个念头（等待最多 1 秒）
+            # 取出一个念头（最多等 1 秒）
+            event = None
             try:
                 event = await asyncio.wait_for(pool.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-            except asyncio.QueueEmpty:
+            if event is None:
                 continue
 
             # 创建异步 Task 执行
