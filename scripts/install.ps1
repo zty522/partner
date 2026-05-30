@@ -266,7 +266,7 @@ function Install-Repository {
         Write-Info "Updating to latest version..."
         Push-Location $PartnerDir
         try {
-            & git pull --ff-only 2>&1 | Out-Null
+            $pullOutput = & git pull --ff-only 2>$null
             if ($LASTEXITCODE -eq 0) {
                 Write-Info "Repository updated to latest commit"
             } else {

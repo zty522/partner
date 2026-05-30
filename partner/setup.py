@@ -73,20 +73,51 @@ def status_warn(msg):
     print(f"    {C.YELLOW}⚠{C.RESET} {msg}")
 
 def prompt_choice(prompt, options, default=0):
-    """Ask user to choose from options (arrows + enter).
+    """Ask user to choose from options.
 
-    Pure carriage-return based approach. No cursor save/restore.
+    On Unix (termios available): arrow keys to select, Enter to confirm.
+    On Windows (no termios): numbered list + number input fallback.
     Ctrl+C to abort.
     """
     import sys
-    import termios
-    import tty
     import os
+    
+    n = len(options)
+    
+    # Check if termios is available (Unix) or fall back to Windows simple mode
+    try:
+        import termios
+        import tty
+        has_termios = True
+    except ImportError:
+        has_termios = False
+    
+    if not has_termios:
+        # Windows fallback: simple numbered list
+        print(f"  {C.BOLD}{prompt}{C.RESET}")
+        for i, opt in enumerate(options):
+            marker = "▶" if i == default else " "
+            print(f"    {C.CYAN if i == default else C.DIM}{marker} {i+1}. {opt}{C.RESET}")
+        while True:
+            try:
+                idx_str = input(f"  {C.DIM}Choose [1-{n}] (default {default+1}):{C.RESET} ").strip()
+                if not idx_str:
+                    result = default
+                    break
+                idx = int(idx_str) - 1
+                if 0 <= idx < n:
+                    result = idx
+                    break
+                print(f"    {C.RED}Invalid choice. Enter 1-{n}.{C.RESET}")
+            except (ValueError, EOFError):
+                result = default
+                break
+        print(f"\n    {C.GREEN}▶{C.RESET} {options[result]}\n")
+        return result
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     selected = default
-    n = len(options)
     # Hide cursor during selection
     sys.stdout.write("\033[?25l")
     sys.stdout.flush()
