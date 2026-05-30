@@ -110,7 +110,7 @@ class Recorder:
 
     # ── Backward compatibility ────────────────────────────────
 
-    def log_exploration(self, project: str, action: str, findings: str,
+    def log_exploration(self, project: str, action: str, findings: str = "",
                         conclusion: str = "", next_action: str = "") -> None:
         """兼容旧接口，转调 record_timeline"""
         self.record_timeline(
