@@ -2,6 +2,8 @@
 
 import json
 import os
+# Force UTF-8 for subprocess pipes (prevents GBK errors on Chinese Windows)
+os.environ.setdefault("PYTHONUTF8", "1")
 import shutil
 import socket
 import subprocess
