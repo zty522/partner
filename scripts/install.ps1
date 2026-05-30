@@ -263,6 +263,19 @@ function Ensure-Git {
 function Install-Repository {
     if (Test-Path $PartnerDir) {
         Write-Info "Repository directory exists: $PartnerDir"
+        Write-Info "Updating to latest version..."
+        Push-Location $PartnerDir
+        try {
+            & git pull --ff-only 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Info "Repository updated to latest commit"
+            } else {
+                Write-Warn "git pull failed — continuing with existing code"
+            }
+        } catch {
+            Write-Warn "git pull failed — continuing with existing code"
+        }
+        Pop-Location
         return
     }
 
