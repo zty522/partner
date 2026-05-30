@@ -85,9 +85,10 @@ class HermesAdapter(AgentAdapter):
         try:
             hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
             cmd = [hermes_bin, "chat", "--query", prompt, "--quiet", "--toolsets", ""]
+            _ntflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
-                cwd=self.workspace,
+                cwd=self.workspace, creationflags=_ntflags,
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:
@@ -120,10 +121,11 @@ class HermesAdapter(AgentAdapter):
         try:
             hermes_bin = shutil.which("hermes") or "/home/os/.local/bin/hermes"
             cmd = [hermes_bin, "chat", "--query", message, "--quiet", "--toolsets", ""]
+            _ntflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             result = subprocess.run(
                 cmd,
                 capture_output=True, text=True, timeout=None, encoding="utf-8", errors="replace",
-                cwd=self.workspace,
+                cwd=self.workspace, creationflags=_ntflags,
             )
             out = result.stdout.strip()
             if result.returncode == 0 and out:

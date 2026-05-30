@@ -12,6 +12,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Windows: suppress console windows for subprocess calls
+_NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+
 
 # ── ANSI Colors ──────────────────────────────────────────────
 
@@ -275,7 +278,7 @@ def detect_hermes() -> AgentInfo:
         # Priority 3: which/where fallback
         for cmd in ["which", "where"]:
             try:
-                result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
+                result = subprocess.run([cmd, "hermes"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
                 if result.returncode == 0:
                     hermes_bin = result.stdout.strip().split("\n")[0].strip()
                     break
@@ -328,7 +331,7 @@ def detect_claude_code() -> AgentInfo:
     
     if not claude_bin:
         try:
-            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
+            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
             if result.returncode == 0:
                 claude_bin = result.stdout.strip()
         except:
@@ -346,7 +349,7 @@ def detect_claude_code() -> AgentInfo:
 def detect_codex() -> AgentInfo:
     """Detect OpenAI Codex installation."""
     try:
-        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace")
+        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
         if result.returncode == 0:
             return AgentInfo("codex", "OpenAI Codex", "⚡", True, path=result.stdout.strip())
     except:
@@ -675,7 +678,7 @@ def setup_cron_hermes(workspace: str):
     
     gateway_running = False
     try:
-        result = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
+        result = subprocess.run(["hermes", "gateway", "status"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
         if "running" in result.stdout.lower() or "active" in result.stdout.lower():
             gateway_running = True
             status_ok("Hermes Gateway 正在运行")
@@ -688,8 +691,8 @@ def setup_cron_hermes(workspace: str):
         status_info("正在启动 Hermes Gateway...")
         try:
             # Try to install and start gateway
-            subprocess.run(["hermes", "gateway", "install"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
-            result = subprocess.run(["hermes", "gateway", "start"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+            subprocess.run(["hermes", "gateway", "install"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
+            result = subprocess.run(["hermes", "gateway", "start"], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
             if result.returncode == 0:
                 status_ok("Hermes Gateway 已启动")
                 gateway_running = True
@@ -704,7 +707,7 @@ def setup_cron_hermes(workspace: str):
     section("设置 Cron Job", "⏰")
     
     try:
-        result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
+        result = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
         if "partner" in result.stdout.lower() or "autonomous-researcher" in result.stdout.lower():
             status_ok("Cron job 已存在，跳过创建")
             # Extract job ID and save to config

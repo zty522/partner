@@ -951,7 +951,7 @@ class QQQfficialBridge:
                  "- 不要使用markdown格式，不要用**加粗**、*斜体*、列表符号等",
                  "--skills", "partner-research"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True,
+                start_new_session=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
         except Exception as e:
             logger.debug(f"Force run Hermes exec failed: {e}")
@@ -984,7 +984,7 @@ class QQQfficialBridge:
             if target:
                 subprocess.run(
                     ["hermes", "cron", "edit", target, "--schedule", f"every {minutes}m"],
-                    capture_output=True, timeout=30,
+                    capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                 )
         except Exception as e:
             logger.debug(f"Cron schedule update failed: {e}")
