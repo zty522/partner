@@ -111,11 +111,13 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 await asyncio.sleep(0.5)
                 continue
 
-            # 取出一个念头（最多等 1 秒）
+            # 取出一个念头（轮询方式，避免 wait_for 的 TimerHandle 内存泄漏）
             event = None
-            try:
-                event = await asyncio.wait_for(pool.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            if pool.qsize() > 0:
+                event = await pool.get()
+            else:
+                # 池为空，短暂休眠后继续
+                await asyncio.sleep(0.1)
                 continue
             if event is None:
                 continue

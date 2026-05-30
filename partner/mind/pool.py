@@ -205,7 +205,7 @@ class MindPool:
         return len(ready)
 
     async def get(self) -> Optional[MindEvent]:
-        """取出优先级最高的、已到唤醒时间的念头。"""
+        "取出优先级最高的、已到唤醒时间的念头。Returns None if empty."
         await self._drain_thread_queue()
         await self._release_waiting()
 
