@@ -93,27 +93,54 @@ def prompt_choice(prompt, options, default=0):
         has_termios = False
     
     if not has_termios:
-        # Windows fallback: simple numbered list
+        # Windows fallback: arrow key selection via msvcrt
+        import msvcrt
         print(f"  {C.BOLD}{prompt}{C.RESET}")
+        selected = default
+        # Print all options
         for i, opt in enumerate(options):
-            marker = "▶" if i == default else " "
-            print(f"    {C.CYAN if i == default else C.DIM}{marker} {i+1}. {opt}{C.RESET}")
-        while True:
-            try:
-                idx_str = input(f"  {C.DIM}Choose [1-{n}] (default {default+1}):{C.RESET} ").strip()
-                if not idx_str:
-                    result = default
+            cursor = "▶" if i == selected else " "
+            color = C.CYAN if i == selected else C.DIM
+            print(f"    {color}{cursor} {i+1}. {opt}{C.RESET}")
+        print(f"\033[{n}A", end="", flush=True)
+        try:
+            while True:
+                ch = msvcrt.getwch()
+                if ch == "\x03":  # Ctrl+C
+                    print("\033[J")
+                    print("\n    Aborted.")
+                    raise KeyboardInterrupt
+                if ch == "\xe0":  # Arrow key prefix
+                    ch2 = msvcrt.getwch()
+                    if ch2 == "H":  # Up
+                        selected = (selected - 1) % n
+                    elif ch2 == "P":  # Down
+                        selected = (selected + 1) % n
+                    else:
+                        continue
+                    for i, opt in enumerate(options):
+                        cursor = "▶" if i == selected else " "
+                        color = C.CYAN if i == selected else C.DIM
+                        sys.stdout.write(f"\r    {color}{cursor} {i+1}. {opt}{C.RESET}\033[K")
+                        if i < n - 1:
+                            sys.stdout.write("\033[1B")
+                    sys.stdout.write(f"\033[{n-1}A")
+                    sys.stdout.flush()
+                    continue
+                if ch == "\r":  # Enter
+                    print("\033[J")
                     break
-                idx = int(idx_str) - 1
-                if 0 <= idx < n:
-                    result = idx
-                    break
-                print(f"    {C.RED}Invalid choice. Enter 1-{n}.{C.RESET}")
-            except (ValueError, EOFError):
-                result = default
-                break
-        print(f"\n    {C.GREEN}▶{C.RESET} {options[result]}\n")
-        return result
+                if ch.isdigit():  # Number shortcut
+                    idx = int(ch) - 1
+                    if 0 <= idx < n:
+                        selected = idx
+                        print("\033[J")
+                        break
+        finally:
+            sys.stdout.write("\033[?25h")
+            sys.stdout.flush()
+        print(f"\n    {C.GREEN}▶{C.RESET} {options[selected]}\n")
+        return selected
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -629,7 +656,7 @@ print("✅ 已恢复 web/browser/delegation 工具集")
 '''
     
     skill_path = skill_dir / "SKILL.md"
-    with open(skill_path, 'w') as f:
+    with open(skill_path, 'w', encoding='utf-8') as f:
         f.write(skill_content)
     
     return str(skill_path)
