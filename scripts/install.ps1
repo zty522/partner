@@ -342,20 +342,35 @@ function Add-PythonScriptsToPath {
         Add Python Scripts directory to user PATH permanently.
     #>
     # 获取 Python Scripts 目录
-    $pythonPaths = @(
-        # 系统 Python
-        (Join-Path (Split-Path (Get-Command python -ErrorAction SilentlyContinue).Source) "Scripts"),
-        # 嵌入式 Python
-        (Join-Path $PythonDir "Scripts"),
-        # Python 所在目录本身
-        (Split-Path (Get-Command python -ErrorAction SilentlyContinue).Source)
-    )
+    # 方法1: 通过 python -m site --user-site 定位用户级 Scripts
+    $userSite = & python -m site --user-site 2>$null
+    $userScriptsDir = ""
+    if ($userSite) {
+        $userScriptsDir = Join-Path (Split-Path $userSite -Parent) "Scripts"
+    }
+    
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    $sysScriptsDir = if ($pythonCmd) { Join-Path (Split-Path $pythonCmd.Source -Parent) "Scripts" } else { "" }
+    $pyDir = if ($pythonCmd) { Split-Path $pythonCmd.Source -Parent } else { "" }
+
+    $pythonPaths = @()
+    if ($userScriptsDir) { $pythonPaths += $userScriptsDir }
+    if ($sysScriptsDir)  { $pythonPaths += $sysScriptsDir }
+    if ($pyDir)          { $pythonPaths += $pyDir }
+    if ($PythonDir)      { $pythonPaths += (Join-Path $PythonDir "Scripts") }
 
     $scriptsDir = $null
     foreach ($p in $pythonPaths) {
         if ($p -and (Test-Path $p)) {
-            $scriptsDir = $p
-            break
+            # 确认该目录下有 partner.exe
+            if (Test-Path (Join-Path $p "partner.exe") -PathType Leaf) {
+                $scriptsDir = $p
+                break
+            }
+            # 没有 partner.exe 但目录存在，作为后备
+            if (-not $scriptsDir) {
+                $scriptsDir = $p
+            }
         }
     }
 
