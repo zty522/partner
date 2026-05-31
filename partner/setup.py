@@ -12,6 +12,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .config import (
+    apply_runtime_agent_defaults,
+    load_partner_config_data,
+    resolve_partner_config_path,
+    save_partner_config_data,
+    workspace_has_partner_config,
+)
+
 # Windows: suppress console windows for subprocess calls
 _NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
@@ -716,16 +724,13 @@ def setup_cron_hermes(workspace: str):
                     job_id = line.split("[")[0].strip()
                     status_info(f"Job ID: {job_id}")
                     try:
-                        config_path = os.path.join(workspace, "partner_config.json")
-                        if os.path.exists(config_path):
-                            with open(config_path, 'r', encoding='utf-8') as f:
-                                cfg = json.load(f)
+                        if workspace_has_partner_config(workspace):
+                            cfg = load_partner_config_data(workspace)
                             if 'scheduler' not in cfg:
                                 cfg['scheduler'] = {}
                             cfg['scheduler']['cron_job_id'] = job_id
                             cfg['scheduler']['cron_job_name'] = 'partner-research-cycle'
-                            with open(config_path, 'w', encoding='utf-8') as f:
-                                json.dump(cfg, f, indent=2, ensure_ascii=False)
+                            save_partner_config_data(workspace, cfg)
                             status_ok(f"Cron job ID 已保存: {job_id}")
                     except Exception as e:
                         status_warn(f"无法保存 cron job ID: {e}")
@@ -737,10 +742,8 @@ def setup_cron_hermes(workspace: str):
     # Read interval from config (default 15)
     _interval = 15
     try:
-        _cfg_path = os.path.join(workspace, "partner_config.json")
-        if os.path.exists(_cfg_path):
-            with open(_cfg_path, 'r', encoding='utf-8') as f:
-                _cfg = json.load(f)
+        if workspace_has_partner_config(workspace):
+            _cfg = load_partner_config_data(workspace)
             _interval = _cfg.get("scheduler", {}).get("interval_minutes", 15)
     except Exception:
         pass
@@ -850,16 +853,13 @@ def json_save(path, data):
             match = re.search(r'\[([a-f0-9-]+)\]', result.stdout)
             cron_job_id = match.group(1) if match else 'partner-research-cycle'
             try:
-                config_path = os.path.join(workspace, "partner_config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f)
+                if workspace_has_partner_config(workspace):
+                    cfg = load_partner_config_data(workspace)
                     if 'scheduler' not in cfg:
                         cfg['scheduler'] = {}
                     cfg['scheduler']['cron_job_id'] = cron_job_id
                     cfg['scheduler']['cron_job_name'] = 'partner-research-cycle'
-                    with open(config_path, 'w', encoding='utf-8') as f:
-                        json.dump(cfg, f, indent=2, ensure_ascii=False)
+                    save_partner_config_data(workspace, cfg)
                     status_ok(f"Cron job ID 已保存: {cron_job_id}")
             except Exception as e:
                 status_warn(f"无法保存 cron job ID: {e}")
@@ -1333,12 +1333,13 @@ def interactive_setup():
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }
+    if selected.name == "hermes":
+        config["agent"] = apply_runtime_agent_defaults(config["agent"])
     
     if messaging_config:
         config["messaging"] = messaging_config
-    config_path = os.path.join(workspace, "partner_config.json")
-    with open(config_path, 'w') as f:
-        json.dump(config, f, indent=2)
+    config_path = resolve_partner_config_path(workspace, prefer_existing=False)
+    save_partner_config_data(workspace, config)
     status_ok(f"配置已保存: {config_path}")
 
     # ── 保存 QQ 机器人独立配置 ──
@@ -1448,13 +1449,12 @@ def show_status(workspace=None):
         status_info("运行 'partner setup' 开始配置")
         return
     
-    config_path = os.path.join(workspace, "partner_config.json")
-    if not os.path.exists(config_path):
+    if not workspace_has_partner_config(workspace):
+        config_path = resolve_partner_config_path(workspace)
         status_warn(f"未找到配置: {config_path}")
         return
-    
-    with open(config_path) as f:
-        config = json.load(f)
+
+    config = load_partner_config_data(workspace)
     
     section("配置信息", "⚙️")
     ws_cfg = config.get("workspace", {})
@@ -1595,7 +1595,7 @@ def find_workspace():
         try:
             with open(pointer_file) as f:
                 path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            if path and workspace_has_partner_config(path):
                 return path
         except OSError:
             pass
@@ -1605,15 +1605,14 @@ def find_workspace():
         try:
             with open(partner_home) as f:
                 path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            if path and workspace_has_partner_config(path):
                 return path
         except OSError:
             pass
 
     # 2c. ~/.partner is the repo directory — check for config inside
     if os.path.isdir(partner_home):
-        config_in_home = os.path.join(partner_home, "partner_config.json")
-        if os.path.exists(config_in_home):
+        if workspace_has_partner_config(partner_home):
             return partner_home
     
     # 3. Common locations
@@ -1622,7 +1621,7 @@ def find_workspace():
         os.path.expanduser("~/.partner_workspace"),
     ]
     for c in candidates:
-        if os.path.exists(os.path.join(c, "partner_config.json")):
+        if workspace_has_partner_config(c):
             return c
 
     # 4. Partner app directory itself (has config.json and partner/__init__.py)

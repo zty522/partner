@@ -12,6 +12,13 @@ import os
 import sys
 from pathlib import Path
 
+from .config import (
+    load_partner_config_data,
+    save_partner_config_data,
+    workspace_has_partner_config,
+)
+from .instance_root import resolve_instance_workspace, resolve_partner_root
+
 
 def get_workspace() -> str:
     """Get configured workspace path."""
@@ -23,7 +30,7 @@ def get_workspace() -> str:
         return ws
     
     # 2. Check pointers and repo directory
-    partner_home = os.path.expanduser("~/.partner")
+    partner_home = str(resolve_partner_root())
     pointer_file = os.path.expanduser("~/.partner_workspace")
 
     # 2a. Pointer file ~/.partner_workspace (new)
@@ -31,7 +38,7 @@ def get_workspace() -> str:
         try:
             with open(pointer_file) as f:
                 path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            if path and workspace_has_partner_config(path):
                 return path
         except OSError:
             pass
@@ -41,15 +48,14 @@ def get_workspace() -> str:
         try:
             with open(partner_home) as f:
                 path = f.read().strip()
-            if path and os.path.exists(os.path.join(path, "partner_config.json")):
+            if path and workspace_has_partner_config(path):
                 return path
         except OSError:
             pass
 
     # 2c. ~/.partner is the repo directory — check for config inside
     if os.path.isdir(partner_home):
-        config_in_home = os.path.join(partner_home, "partner_config.json")
-        if os.path.exists(config_in_home):
+        if workspace_has_partner_config(partner_home):
             return partner_home
     
     # 3. Common locations
@@ -58,8 +64,7 @@ def get_workspace() -> str:
         os.path.expanduser("~/.partner_workspace"),
     ]
     for c in candidates:
-        config = os.path.join(c, "partner_config.json")
-        if os.path.exists(config):
+        if workspace_has_partner_config(c):
             return c
     
     return None
@@ -122,15 +127,15 @@ def cmd_bot(args):
 def _bot_stop(workspace, platform, quiet=False):
     pid_path = os.path.join(workspace, "state", f"{platform}_bot.pid")
     label = {"qq": "QQ"}.get(platform, platform)
-    if not os.path.exists(pid_path):
-        print(f"  ⚠ {label} 机器人未在运行")
-        return
+    stopped_any = False
     try:
-        with open(pid_path) as f:
-            pid = int(f.read().strip())
-        os.kill(pid, 15)
-        os.remove(pid_path)
-        print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+        if os.path.exists(pid_path):
+            with open(pid_path) as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 15)
+            os.remove(pid_path)
+            print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
+            stopped_any = True
 
         # Also kill watchdog for this workspace
         import subprocess as _sp
@@ -142,15 +147,53 @@ def _bot_stop(workspace, platform, quiet=False):
         except Exception:
             pass
 
-        if not quiet:
-            _print_commands()
+        if platform == "qq":
+            try:
+                pattern = f"QQQfficialBridge\\('{workspace}'\\)"
+                r = _sp.run(
+                    ["pkill", "-f", pattern],
+                    capture_output=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    stopped_any = True
+            except Exception:
+                pass
+            try:
+                main_pattern = f"python3 -m partner --instance-id .* --workspace {workspace}"
+                r = _sp.run(
+                    ["pkill", "-f", main_pattern],
+                    capture_output=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    stopped_any = True
+            except Exception:
+                pass
+            try:
+                main_pattern = f"python -m partner --instance-id .* --workspace {workspace}"
+                r = _sp.run(
+                    ["pkill", "-f", main_pattern],
+                    capture_output=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    stopped_any = True
+            except Exception:
+                pass
+
     except ProcessLookupError:
-        os.remove(pid_path)
+        if os.path.exists(pid_path):
+            os.remove(pid_path)
         print(f"  ⚠ {label} 进程已不存在，已清理")
-        if not quiet:
-            _print_commands()
+        stopped_any = True
     except Exception as e:
         print(f"  ❌ 停止失败: {e}")
+        return
+
+    if not stopped_any:
+        print(f"  ⚠ {label} 机器人未在运行")
+        return
+
+    if not quiet:
+        _print_commands()
     if quiet:
         print()  # blank line for spacing
 
@@ -160,7 +203,7 @@ def _auto_start_instance(instance_id, workspace):
     import subprocess
     if not workspace:
         # Resolve workspace from instance_id
-        workspace = os.path.expanduser(f"~/.partner/instances/{instance_id}")
+        workspace = str(resolve_instance_workspace(instance_id))
     if not os.path.exists(workspace):
         print(f"❌ Instance workspace not found: {workspace}", file=sys.stderr)
         sys.exit(2)
@@ -421,11 +464,9 @@ def cmd_update(args):
             else:
                 print(f"   ⏰ Cron: 未设置 → 自动创建...")
                 # Read config for interval
-                cfg_path = os.path.join(workspace, "partner_config.json")
                 interval = 30
                 try:
-                    with open(cfg_path) as f:
-                        cfg = json.load(f)
+                    cfg = load_partner_config_data(workspace)
                     interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
                 except Exception:
                     pass
@@ -610,10 +651,8 @@ def _cmd_config_set(args):
         print("❌ Partner 未配置")
         return
 
-    cfg_path = os.path.join(workspace, "partner_config.json")
     try:
-        with open(cfg_path, 'r', encoding='utf-8') as f:
-            cfg = json.load(f)
+        cfg = load_partner_config_data(workspace)
     except Exception as e:
         print(f"❌ 读取配置失败: {e}")
         return
@@ -630,8 +669,7 @@ def _cmd_config_set(args):
             if "scheduler" not in cfg:
                 cfg["scheduler"] = {}
             cfg["scheduler"]["interval_minutes"] = minutes
-            with open(cfg_path, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            save_partner_config_data(workspace, cfg)
             print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
             print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron edit ...")
         except ValueError:

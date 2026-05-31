@@ -14,12 +14,13 @@ import asyncio
 import logging
 import threading
 import traceback
+from dataclasses import asdict
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from .config import PartnerConfig
+from .config import PartnerConfig, save_partner_config_data
 from .task_queue import TaskQueue, Task
 from .knowledge import KnowledgeBase
 from .journal import Journal, JournalEntry
@@ -110,7 +111,12 @@ class Partner:
 
         # 从 adapter 获取后端
         from .adapter import create_adapter
-        adapter = create_adapter(self.config.agent.backend, self.workspace)
+        adapter = create_adapter(
+            self.config.agent.backend,
+            self.workspace,
+            model=self.config.agent.model,
+            provider=self.config.agent.provider,
+        )
 
         # 初始化 executor 上下文
         init_executor(
@@ -244,8 +250,7 @@ class Partner:
             self._recover()
 
         self.state.heartbeat(status="idle")
-        config_path = os.path.join(self.workspace, "partner_config.json")
-        self.config.save(config_path)
+        save_partner_config_data(self.workspace, asdict(self.config))
         print("✅ Partner is running.")
 
     def run_cycle(self) -> Optional[str]:

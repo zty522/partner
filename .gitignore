@@ -35,6 +35,7 @@ venv/
 Thumbs.db
 
 # Partner - workspace (user data, not code)
+workspace/
 state/
 knowledge/
 logs/

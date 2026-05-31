@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -31,13 +32,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .instance_root import (
+    resolve_global_config_path,
+    resolve_instance_workspace,
+    resolve_instances_dir,
+    resolve_partner_root,
+)
+
 # ── Constants ──────────────────────────────────────────────────────────
 
 PARTNER_DIR = Path(__file__).resolve().parent.parent  # /mnt/e/work/partner
 HOME = Path.home()
-PARTNER_ROOT = HOME / ".partner"
-INSTANCES_DIR = PARTNER_ROOT / "instances"
-GLOBAL_CONFIG_PATH = PARTNER_ROOT / "global_config.json"
+PARTNER_ROOT = resolve_partner_root()
+INSTANCES_DIR = resolve_instances_dir()
+GLOBAL_CONFIG_PATH = resolve_global_config_path()
 
 INSTANCE_SUBDIRS = ["00_config", "10_logs", "20_records", "99_temp"]
 PID_FILENAME = "instance.pid"
@@ -108,7 +116,7 @@ def save_global_config(cfg: dict):
 
 def instance_dir(instance_id: str) -> Path:
     """Return the base directory for an instance."""
-    return INSTANCES_DIR / instance_id
+    return resolve_instance_workspace(instance_id)
 
 
 def instance_subdir(instance_id: str, subdir: str) -> Path:
@@ -140,12 +148,26 @@ def get_instance_status(instance_id: str) -> str:
     """Return running/stopped/crashed for a single instance."""
     pid_file = pid_path(instance_id)
     if not pid_file.exists():
+        live_pid = find_running_instance_pid(instance_id)
+        if live_pid is not None:
+            try:
+                pid_file.write_text(str(live_pid))
+            except OSError:
+                pass
+            return STATUS_RUNNING
         return STATUS_STOPPED
     try:
         pid = int(pid_file.read_text().strip())
         os.kill(pid, 0)  # Signal 0 = test existence
         return STATUS_RUNNING
     except (ProcessLookupError, OSError):
+        live_pid = find_running_instance_pid(instance_id)
+        if live_pid is not None:
+            try:
+                pid_file.write_text(str(live_pid))
+            except OSError:
+                pass
+            return STATUS_RUNNING
         # Process not found; it's crashed (PID file exists but no process)
         return STATUS_CRASHED
     except (ValueError, OSError):
@@ -164,6 +186,23 @@ def clean_stale_pid(instance_id: str):
         pid_file = pid_path(instance_id)
         if pid_file.exists():
             pid_file.unlink(missing_ok=True)
+
+
+def find_running_instance_pid(instance_id: str) -> Optional[int]:
+    """Find a live instance PID by matching the workspace in process args."""
+    workspace = str(instance_dir(instance_id))
+    pattern = re.compile(rf"python3?\s+-m\s+partner\b.*--instance-id\s+{re.escape(instance_id)}\b.*--workspace\s+{re.escape(workspace)}")
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True)
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if pattern.search(line):
+            try:
+                return int(line.strip().split(None, 1)[0])
+            except (IndexError, ValueError):
+                continue
+    return None
 
 
 def _get_instance_stats(instance_id: str) -> dict:
@@ -445,6 +484,13 @@ def start_instance(instance_id: str) -> bool:
         if proc.poll() is not None:
             # Process exited already — likely a config error
             exit_code = proc.returncode
+            live_pid = find_running_instance_pid(instance_id)
+            if exit_code == 0 and live_pid is not None:
+                pid_file.write_text(str(live_pid))
+                print(f"{C_GREEN}Instance '{instance_id}' started (PID {live_pid}).{C_RESET}")
+                print(f"  Logs: partner-manager logs --id {instance_id} --tail 50")
+                print(f"  Stop: partner-manager stop --id {instance_id}")
+                return True
             # Read last few log lines for diagnostic
             log_lines = []
             try:
@@ -501,9 +547,11 @@ def stop_instance(instance_id: str) -> bool:
     pid_file = pid_path(instance_id)
     try:
         pid = int(pid_file.read_text().strip())
-    except (ValueError, OSError) as e:
-        print(f"{C_RED}Invalid PID file for '{instance_id}': {e}{C_RESET}", file=sys.stderr)
-        return False
+    except (ValueError, OSError):
+        pid = find_running_instance_pid(instance_id)
+        if pid is None:
+            print(f"{C_RED}Invalid PID file for '{instance_id}' and no live process found.{C_RESET}", file=sys.stderr)
+            return False
 
     print(f"Stopping instance '{instance_id}' (PID {pid})...")
 
@@ -566,12 +614,15 @@ def restart_instance(instance_id: str) -> bool:
 def list_instances() -> Dict[str, str]:
     """Return {instance_id: status_string} for all known instances."""
     results: Dict[str, str] = {}
-    if not INSTANCES_DIR.exists():
-        return results
+    cfg = load_global_config()
+    configured = sorted((cfg.get("instances") or {}).keys())
+    for inst_id in configured:
+        results[inst_id] = get_instance_status(inst_id)
 
-    for item in sorted(INSTANCES_DIR.iterdir()):
-        if item.is_dir() and not item.name.startswith("."):
-            results[item.name] = get_instance_status(item.name)
+    if not results and INSTANCES_DIR.exists():
+        for item in sorted(INSTANCES_DIR.iterdir()):
+            if item.is_dir() and not item.name.startswith("."):
+                results[item.name] = get_instance_status(item.name)
 
     return results
 

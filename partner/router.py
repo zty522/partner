@@ -60,6 +60,7 @@ INTENT_RULES: List[Tuple[str, Intent, float, Optional[int]]] = [
     (r"(最近|刚才|今天)(在?干|在?做|研究|搞|忙)(了?什么|啥|什么活)", Intent.STATUS, 0.95, None),
     (r"(你在?干什么|你在?做什么|在忙什么|状态|进展如何|进展怎么样|最近在研究什么)", Intent.STATUS, 0.9, None),
     (r"(干嘛呢|忙啥|干啥|在干嘛|最近在干嘛|在忙啥)", Intent.STATUS, 0.95, None),
+    (r"(做咋样了|做得咋样了|做怎么样了|搞咋样了|弄咋样了)", Intent.STATUS, 0.98, None),
     (r"(what (have you|did you|are you)|recent|status|progress)", Intent.STATUS, 0.9, None),
     (r"(汇报|总结一下|最近的?进展)", Intent.STATUS, 0.85, None),
 

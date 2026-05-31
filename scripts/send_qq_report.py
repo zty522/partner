@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Send QQ notification for Partner cycle report — 结构化数据收集器。
+"""Send QQ notification for Partner cycle report.
 
-不再硬编码任何回复模板。从 state 文件收集结构化数据，
-输出 JSON 供 LLM 生成自然语言回复。QQ 消息也发送结构化载荷，
-LLM 在 bridge 端渲染成自然语言。
+从 state 文件收集结构化数据，
+在脚本内渲染成自然语言短汇报，
+再通过 QQ API 发出。
 
 Usage:
     python3 scripts/send_qq_report.py /path/to/partner_workspace
@@ -279,6 +279,47 @@ def collect_state_data(workspace: str) -> dict:
     return data
 
 
+def render_report_text(state_data: dict) -> str:
+    """Render structured heartbeat data into a short user-facing update."""
+    plan = state_data.get("plan") or {}
+    queue = state_data.get("queue") or {}
+    title = (plan.get("title") or "").strip()
+    summary = (plan.get("heartbeat_summary") or "").strip()
+    phases = plan.get("phases") or []
+
+    completed = [p for p in phases if p.get("status") == "completed"]
+    current = None
+    for phase in phases:
+        if phase.get("status") in ("in_progress", "pending"):
+            current = phase
+            break
+
+    lines = []
+    if title:
+        lines.append(f"我刚推进了一下「{title}」。")
+    else:
+        lines.append("我刚推进了一下当前项目。")
+
+    if summary:
+        lines.append(summary.rstrip("。") + "。")
+
+    if current and current.get("current_step"):
+        lines.append(f"现在在接着做：{current['current_step'].strip('。')}。")
+    elif completed:
+        lines.append(f"这轮已经完成了 {len(completed)} 个阶段。")
+
+    pending = int(queue.get("pending", 0) or 0)
+    if pending > 0:
+        lines.append("我会顺着这条线继续往下推，有结果了再跟你说。")
+    else:
+        lines.append("我会继续盯着这条线，有新进展再跟你说。")
+
+    text = "\n".join(lines).strip()
+    if len(text) > 500:
+        text = text[:497].rstrip() + "..."
+    return text
+
+
 def main():
     global APP_ID, APP_SECRET, IS_SANDBOX, API_BASE
 
@@ -346,18 +387,17 @@ def main():
         print(json.dumps(state_data, ensure_ascii=False))
         return
 
-    # 4. Send structured data as JSON payload via QQ API
-    #    消息内容用 JSON 格式发送，让 QQ bridge 的 LLM 渲染成自然语言
+    # 4. Send a short natural-language report via QQ API
     log(f"User last messaged {elapsed:.0f}s ago — sending structured report to {ctx['openid']}")
     try:
         token = get_access_token()
-        # 发送结构化 JSON 作为消息，bridge 端会用 LLM 渲染
-        message_json = json.dumps({"type": "partner_heartbeat", "data": state_data}, ensure_ascii=False)
-        success = send_qq_message(ctx["openid"], message_json, token)
+        message_text = render_report_text(state_data)
+        success = send_qq_message(ctx["openid"], message_text, token)
         if success:
-            log("✅ Structured report sent to QQ!")
+            log("✅ Natural-language report sent to QQ!")
             state_data["pushed"] = True
             state_data["push_reason"] = "sent"
+            state_data["rendered_message"] = message_text
         else:
             log("⚠️ Send failed — notification saved")
             state_data["pushed"] = False

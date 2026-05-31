@@ -56,60 +56,62 @@ partner update                Pull latest code + reinstall
 
 ## Core Architecture
 
-Partner is built on a **Mind Pool** — an `asyncio.PriorityQueue` of spontaneous "thought impulses" that drives all autonomous behavior. No cron scheduler, no file-based task queue, no `active_plan.json`.
+Partner now runs on **two explicit lines**:
+
+1. **Lifeline**: an autonomous `mind_loop` that keeps a project moving even when the user is away.
+2. **Interaction line**: a lightweight LLM orchestrator that replies to the user and decides whether the lifeline should be mutated.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    🤝 Partner v0.4                          │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              🧠 Mind Pool + mind_loop()              │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │   │
-│  │  │Curiosity │ │ Project  │ │  Report  │ │CronTick│  │   │
-│  │  │(explore) │ │(long-term)│ │  (push)  │ │(pulse) │  │   │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘  │   │
-│  │       │            │            │            │       │   │
-│  │       ▼            ▼            ▼            ▼       │   │
-│  │  ┌──────────────────────────────────────────────┐    │   │
-│  │  │  Waiting Room (wake_after delayed events)    │    │   │
-│  │  └──────────────────────────────────────────────┘    │   │
-│  └──────────────────────┬──────────────────────────────┘   │
-│                         │                                  │
-│  ┌──────────────────────┴──────────────────────────────┐   │
-│  │  Searcher (Semantic Scholar / Crossref / ArXiv)     │   │
-│  │  Knowledge Base │ Journal │ Self-Checker            │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │  QQ Bridge   │  │     CLI      │  │  Agent Adapter   │  │
-│  │  (Official)  │  │              │  │  (Hermes/Direct) │  │
-│  └──────────────┘  └──────────────┘  └──────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                       🤝 Partner v0.5                        │
+│                                                              │
+│  User QQ / CLI message                                       │
+│        │                                                     │
+│        ▼                                                     │
+│  InteractionOrchestrator                                     │
+│  ├─ reply_to_user                                            │
+│  └─ lifeline_action (add_task / switch_project / note / kb) │
+│        │                                                     │
+│        ▼                                                     │
+│  task_queue / state / project log / knowledge base           │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │              🧠 Mind Pool + mind_loop()               │  │
+│  │  WakeUp / Project / Report / CronTick / Waiting Room  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                     │                                        │
+│                     ▼                                        │
+│            Agent Adapter (Hermes / Direct)                  │
+│                     │                                        │
+│                     ▼                                        │
+│      Structured project result → state.md + artifact file   │
+│                     │                                        │
+│                     ▼                                        │
+│               QQ proactive progress report                  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### How It Works
 
-1. **Events are spontaneous impulses** — 10 types including Curiosity, Project, Report, CronTick, UserMessage, SelfReflection, etc. They arise from internal state.
-2. **Mind Pool** — `asyncio.PriorityQueue` collects all events. Priority determines execution order. Supports `wake_after` for delayed execution (events stay in a "waiting room" until their time comes).
-3. **mind_loop()** — permanent async daemon that pulls the highest-priority due event and spawns an execution task.
-4. **Self-pulse** — every 15 minutes the system injects a `CRON_TICK` which generates a Curiosity to explore knowledge gaps.
-5. **Project events** — user research requests become Project events that persist in the pool. Each execution generates a Curiosity sub-event, then re-queues itself with a 15-minute delay (`wake_after`). No `active_plan.json`, no cron dependency.
-6. **Reports push instantly** — Report events call `bot.send_message()` directly via callback. No file polling, no duplicates.
-7. **Academic search** — `searcher.py` uses Python `requests` to call Semantic Scholar API directly. No shell subprocesses, no `curl | python` pipelines, no security software blocking. Falls back through Crossref → ArXiv automatically.
+1. **The lifeline never waits for chat.** `mind_loop()` keeps injecting `WakeUp`, `CronTick`, `Project`, and `Report` events.
+2. **User messages do not directly control the system.** They go through `InteractionOrchestrator`, which asks an LLM for:
+   - a natural-language reply
+   - a structured mutation decision for the lifeline
+3. **The LLM does not mutate state directly.** Code applies the decision into `task_queue`, project state, logs, and knowledge records.
+4. **Project execution is step-based.** Each `Project` event asks the agent for one small structured step, then re-queues itself with `wake_after`.
+5. **Reports are pushed by code, not by raw agent output.** Partner assembles short user-facing summaries and sends them through the QQ bridge callback.
+6. **Each instance has its own writable agent runtime.** Hermes runs with a per-instance home under the workspace, so logs, auth, and caches stay isolated.
 
 ### Event Types
 
-| Type | Priority | When | What Happens |
-|------|----------|------|-------------|
-| **WakeUp** | 1 | Bot startup / restart | Restores project state, generates recovery report |
-| **UserMessage** | 1 | QQ message received | Feeds into Mind Pool + gets instant "思考中，请等待..." reply |
-| **Correction** | 2 | Executor failure | Logs error for future improvement |
-| **Report** | 3 | Curiosity / SelfCheck result | Pushes to QQ immediately via direct callback |
-| **Curiosity** | 5 | Cron tick, user question, knowledge gap | Searches academic APIs (S2/Crossref/ArXiv) via searcher.py + knowledge base |
-| **Project** | 5 | User instruction (QQ/CLI) | Self-cycling event with wake_after. First pass immediate, subsequent at 5min (QQ) / 15min (auto) |
-| **SelfReflection** | 7 | Every 2 hours | Runs SelfChecker |
-| **DiaryWrite** | 8 | Daily at 23:00 | Logs daily summary |
-| **CronTick** | 10 | Every 15 minutes (self-pulse) | Injects periodic Curiosity. Also accelerates Project events that have waited too long |
+The current autonomous loop keeps only four core execution events:
+
+| Type | Purpose |
+|------|---------|
+| **WakeUp** | Recover the active project after start/restart |
+| **Project** | Execute one concrete step for the current project |
+| **Report** | Push a concise progress update to the user |
+| **CronTick** | Periodic pulse that keeps the lifeline moving |
 
 ### Search Stack
 
@@ -156,21 +158,22 @@ Partner's behavioral creed at [docs/SOUL.md](docs/SOUL.md). Seven core principle
 ```
 partner/
 ├── mind/                   # Mind Pool system
-│   ├── event_types.py      # 10 event types + wake_after
-│   ├── pool.py             # Global PriorityQueue + waiting room
+│   ├── event_types.py      # Core events
+│   ├── pool.py             # Priority queue + waiting room
 │   ├── scheduler.py        # mind_loop() async daemon
-│   └── executor.py         # Event dispatcher + push callback
+│   └── executor.py         # Project execution + structured result handling
 ├── partner/
-│   ├── searcher.py         # Academic search (S2/Crossref/ArXiv)
-│   ├── dialog.py           # Merged: dialog_history + context
-│   ├── autocheck.py        # Merged: event_bus + self_check + notifier
-│   ├── conversation.py     # LLM-native conversation (no templates)
-│   ├── core.py             # Partner class + Mind integration
-│   ├── context_broker.py   # Dialog → Knowledge context bridge (v0.4.0)
-│   ├── qq_official_bridge.py  # QQ bot + auto-start Mind + instant reply
-│   ├── router.py           # Intent classification only (no hardcoded responses)
-│   └── ... (23 files total)
+│   ├── adapter.py          # Hermes / Direct adapter
+│   ├── core.py             # Partner class + mind loop bootstrap
+│   ├── instance_root.py    # Runtime root resolution
+│   ├── interaction_orchestrator.py  # User-message decision layer
+│   ├── project_state.py    # Project folders + state/log helpers
+│   ├── qq_official_bridge.py  # QQ bridge + interaction line
+│   ├── router.py           # Lightweight routing
+│   ├── task_queue.py       # Persistent lifeline tasks
+│   └── ... 
 ├── scripts/                # Install scripts
+├── scripts/normalize_partner_workspace.py  # Workspace normalization helper
 ├── installer/              # Windows installer
 ├── docs/                   # Documentation
 ├── README.md
@@ -184,28 +187,48 @@ partner/
 
 ## Directory Structure
 
-Partner organizes all data under `~/.partner/`:
+Partner resolves its runtime root in this order:
+
+1. `PARTNER_HOME`
+2. `~/.partner_workspace` pointer
+3. an existing `partner_workspace` directory
+4. `~/.partner` fallback
+
+Under that root, each instance has an isolated workspace:
 
 ```
-~/.partner/
-├── global_config.json           # Global configuration
+partner_workspace/
+├── global_config.json
 ├── instances/
 │   └── {instance_id}/
-│       ├── 00_config/           # Configuration files
-│       ├── 10_logs/             # Log files
-│       ├── 20_records/          # 🔥 Core records (exploration, knowledge, experiments)
-│       └── 99_temp/             # Temporary files
-├── audit.log                    # Global audit log
-└── README.md
+│       ├── 00_config/
+│       ├── 10_logs/
+│       ├── 20_records/
+│       │   ├── active_project.txt
+│       │   └── projects/
+│       │       └── {project_name}/
+│       │           ├── state.md
+│       │           ├── exploration_log.md
+│       │           ├── log.md
+│       │           └── generated artifacts...
+│       ├── logs/               # agent call traces (e.g. hermes_chat.jsonl)
+│       ├── state/              # runtime state / task queue / plan
+│       ├── system/
+│       │   └── hermes_home/    # per-instance writable Hermes runtime
+│       └── 99_temp/
 ```
 
-The `20_records/` directory is the single entry point for supervision and traceability. All exploration, knowledge, and experiment results are stored there in human-readable formats.
+For a user, the most important files are usually:
+
+- `20_records/projects/<project>/state.md`
+- `20_records/projects/<project>/exploration_log.md`
+- generated project artifacts such as `next_experiment.md` or `evaluation_framework_outline.md`
 
 ---
 
 ## Multi-Instance Management
 
-Partner supports running multiple independent instances, each with its own QQ bot account, research direction, knowledge base, and cron schedule.
+Partner supports multiple independent instances, each with its own QQ bot account, workspace, runtime state, agent cache, and project history.
 
 ### Commands
 
@@ -219,6 +242,13 @@ partner-manager logs --id age_pred --tail 50
 partner-manager start --all
 partner-manager stop --all
 ```
+
+The manager starts `python -m partner --instance-id <id> --workspace <path>`.
+Each instance auto-starts:
+
+- `Partner.start()`
+- `Partner.start_mind()`
+- QQ official bridge
 
 ### Systemd Auto-Start
 

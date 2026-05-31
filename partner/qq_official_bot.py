@@ -41,6 +41,7 @@ import logging
 import random
 import time
 import threading
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional, Dict, Any, List
@@ -162,6 +163,7 @@ class QQQfficialBot:
         self._session_id: str = ""
         self._last_seq: int = 0
         self._heartbeat_interval: float = 0
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self._ws_url: str = ""
         self._shard_count: int = 1
         self._self_id: str = ""
@@ -639,47 +641,67 @@ class QQQfficialBot:
         async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(ssl=SSLContext())
         ) as session:
-            async with session.ws_connect(self._ws_url) as ws:
-                self._ws = ws
-                self._stats["connected_at"] = datetime.now().isoformat()
-                self._last_connect_time = connect_start
-                connect_elapsed = time.time() - connect_start
-                conn_id = self._session_id or f"conn-{int(connect_start)}"
-                logger.info(
-                    f"WebSocket connected in {connect_elapsed:.1f}s "
-                    f"(conn_id={conn_id})"
-                )
+            try:
+                async with session.ws_connect(self._ws_url) as ws:
+                    self._ws = ws
+                    self._stats["connected_at"] = datetime.now().isoformat()
+                    self._last_connect_time = connect_start
+                    connect_elapsed = time.time() - connect_start
+                    conn_id = self._session_id or f"conn-{int(connect_start)}"
+                    logger.info(
+                        f"WebSocket connected in {connect_elapsed:.1f}s "
+                        f"(conn_id={conn_id})"
+                    )
 
-                async for msg in ws:
-                    if not self._running:
-                        break
+                    async for msg in ws:
+                        if not self._running:
+                            break
 
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await self._on_ws_message(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.ERROR:
-                        error = ws.exception()
-                        disconnect_duration = time.time() - connect_start
-                        logger.error(
-                            f"WebSocket error (conn_id={conn_id}, "
-                            f"duration={disconnect_duration:.1f}s): {error}"
-                        )
-                        if self._error_handler:
-                            self._error_handler(error)
-                        break
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
-                        disconnect_duration = time.time() - connect_start
-                        logger.info(
-                            f"WebSocket closed (conn_id={conn_id}, "
-                            f"duration={disconnect_duration:.1f}s): "
-                            f"code={ws.close_code}"
-                        )
-                        break
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            await self._on_ws_message(msg.data)
+                        elif msg.type == aiohttp.WSMsgType.ERROR:
+                            error = ws.exception()
+                            disconnect_duration = time.time() - connect_start
+                            logger.error(
+                                f"WebSocket error (conn_id={conn_id}, "
+                                f"duration={disconnect_duration:.1f}s): {error}"
+                            )
+                            if self._error_handler:
+                                self._error_handler(error)
+                            break
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                            disconnect_duration = time.time() - connect_start
+                            logger.info(
+                                f"WebSocket closed (conn_id={conn_id}, "
+                                f"duration={disconnect_duration:.1f}s): "
+                                f"code={ws.close_code}"
+                            )
+                            break
+            finally:
+                await self._stop_heartbeat_task()
+                self._ws = None
 
     async def _disconnect(self):
         """Disconnect from WebSocket."""
+        await self._stop_heartbeat_task()
         if self._ws and not self._ws.closed:
             await self._ws.close()
             self._ws = None
+
+    async def _stop_heartbeat_task(self):
+        """Cancel the active heartbeat task if it exists."""
+        task = self._heartbeat_task
+        self._heartbeat_task = None
+        if task and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    def _start_heartbeat_task(self):
+        """Ensure there is at most one heartbeat task."""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     # ── Internal: WS Protocol Handling ─────────────────────────────
 
@@ -711,7 +733,7 @@ class QQQfficialBot:
             else:
                 await self._ws_identify()
             # Start heartbeat
-            asyncio.create_task(self._heartbeat_loop())
+            self._start_heartbeat_task()
 
         elif op == WS_OPCODE.HEARTBEAT_ACK:
             logger.debug("Heartbeat ACK")
@@ -763,18 +785,30 @@ class QQQfficialBot:
     async def _heartbeat_loop(self):
         """Send heartbeat at regular intervals."""
         interval = min(self._heartbeat_interval, 15)
-        while self._running and self._ws and not self._ws.closed:
-            payload = {
-                "op": WS_OPCODE.HEARTBEAT,
-                "d": self._last_seq,
-            }
-            await self._send_ws(payload)
-            await asyncio.sleep(interval)
+        try:
+            while self._running and self._ws and not self._ws.closed:
+                payload = {
+                    "op": WS_OPCODE.HEARTBEAT,
+                    "d": self._last_seq,
+                }
+                await self._send_ws(payload)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Heartbeat loop failed: {e}")
+            self._can_reconnect = True
+            if self._ws and not self._ws.closed:
+                await self._ws.close()
 
     async def _send_ws(self, payload: Dict):
         """Send a JSON message over WebSocket."""
         if self._ws and not self._ws.closed:
-            await self._ws.send_str(json.dumps(payload, ensure_ascii=False))
+            try:
+                await self._ws.send_str(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                self._can_reconnect = True
+                raise
 
     # ── Internal: Event Dispatch ───────────────────────────────────
 
@@ -786,10 +820,9 @@ class QQQfficialBot:
             await self._handle_ready(data.get("d", {}))
         elif event == "RESUMED":
             logger.info("Resumed successfully")
-            # Clear dedup cache on resume — we don't know which events the server
-            # will re-deliver, so start fresh to be safe
-            self._recent_msg_ids.clear()
-            asyncio.create_task(self._heartbeat_loop())
+            # Keep recent msg_id cache across resume so server re-delivery
+            # does not trigger duplicate replies after reconnect.
+            self._start_heartbeat_task()
 
         # Message events we care about
         if event == EVENT_C2C_MESSAGE:

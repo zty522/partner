@@ -39,6 +39,9 @@ class Task:
     tags: List[str] = field(default_factory=list)
     result_summary: str = ""
     completed_at: Optional[str] = None
+    source: str = ""
+    sender_id: str = ""
+    sender_name: str = ""
 
 
 class TaskQueue:
@@ -72,6 +75,17 @@ class TaskQueue:
         self.tasks.append(task)
         self.save()
         return task.id
+
+    def find_similar_pending(self, description: str, sender_id: str = "") -> Optional[Task]:
+        normalized = " ".join((description or "").split())
+        for task in reversed(self.tasks[-50:]):
+            if task.status not in (TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value):
+                continue
+            if sender_id and task.sender_id and task.sender_id != sender_id:
+                continue
+            if " ".join((task.description or "").split()) == normalized:
+                return task
+        return None
     
     def get_next(self) -> Optional[Task]:
         """Get highest priority pending task."""

@@ -1,11 +1,17 @@
 """Agent Adapter Layer - unified interface for different agent backends."""
 
+import json
 import logging
+import os
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from typing import List, Optional
+
+
+USER_FRIENDLY_PROGRESS_REPLY = "我先继续在后台处理，晚点给你汇报进展"
 
 
 @dataclass
@@ -46,7 +52,7 @@ class AgentAdapter(ABC):
         pass
     
     @abstractmethod
-    def chat(self, message: str, max_tokens: int = None) -> str:
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         """Have a conversation (used for the check-in interface)."""
         pass
 
@@ -54,8 +60,59 @@ class AgentAdapter(ABC):
 class HermesAdapter(AgentAdapter):
     """Adapter for Hermes Agent via cronjob/subprocess."""
     
-    def __init__(self, workspace_path: str):
+    def __init__(self, workspace_path: str, model: Optional[str] = None,
+                 provider: Optional[str] = None):
         self.workspace = workspace_path
+        self.model = model
+        self.provider = provider
+
+    def _log_chat_attempt(self, payload: dict):
+        """Persist Hermes chat attempt metadata for timeout debugging."""
+        try:
+            log_dir = os.path.join(self.workspace, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "hermes_chat.jsonl")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(f"failed to write Hermes chat log: {exc}")
+
+    def _build_hermes_env(self) -> dict:
+        """Give Hermes a writable per-instance home under the workspace."""
+        env = os.environ.copy()
+        hermes_home = os.path.join(self.workspace, "system", "hermes_home")
+        hermes_logs = os.path.join(hermes_home, "logs")
+        os.makedirs(hermes_logs, exist_ok=True)
+        env["HOME"] = hermes_home
+        env["HERMES_HOME"] = hermes_home
+        env["XDG_STATE_HOME"] = os.path.join(hermes_home, ".local", "state")
+        env["XDG_CACHE_HOME"] = os.path.join(hermes_home, ".cache")
+        env["XDG_CONFIG_HOME"] = os.path.join(hermes_home, ".config")
+        os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
+        os.makedirs(env["XDG_CACHE_HOME"], exist_ok=True)
+        os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
+        self._sync_hermes_runtime_files(hermes_home)
+        return env
+
+    def _sync_hermes_runtime_files(self, hermes_home: str):
+        """Mirror the user's Hermes config/auth into the writable instance home."""
+        source_home = os.path.expanduser("~/.hermes")
+        if not os.path.isdir(source_home):
+            return
+        for filename in ("config.yaml", "auth.json", ".env"):
+            source_path = os.path.join(source_home, filename)
+            target_path = os.path.join(hermes_home, filename)
+            if not os.path.exists(source_path):
+                continue
+            try:
+                source_mtime = os.path.getmtime(source_path)
+                target_mtime = os.path.getmtime(target_path) if os.path.exists(target_path) else -1
+                if source_mtime <= target_mtime:
+                    continue
+                with open(source_path, "rb") as src, open(target_path, "wb") as dst:
+                    dst.write(src.read())
+            except OSError as exc:
+                logger.warning(f"failed to mirror Hermes runtime file {filename}: {exc}")
     
     def name(self) -> str:
         return "hermes"
@@ -86,25 +143,61 @@ class HermesAdapter(AgentAdapter):
         # For MVP, return a placeholder - in production this would invoke hermes
         return "Task queued for execution by Hermes agent."
     
-    def chat(self, message: str, max_tokens: int = None) -> str:
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         """Chat via hermes subprocess."""
         import subprocess
         import time
-        import re
 
         cmd = ["hermes", "chat", "-q", message, "-Q", "-t", ""]
+        if self.model:
+            cmd.extend(["-m", self.model])
+        if self.provider:
+            cmd.extend(["--provider", self.provider])
+        if purpose == "classify":
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
+        elif purpose == "interaction":
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
+        elif purpose == "project":
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
+
+        timeout_sec = 120
         max_retries = 2
-        timeout_sec = 120  # 2 minutes per attempt
+        if purpose == "classify":
+            timeout_sec = 45
+            max_retries = 0
+        elif purpose == "interaction":
+            timeout_sec = 35
+            max_retries = 0
+        elif purpose == "project":
+            timeout_sec = 90
+            max_retries = 0
 
         for attempt in range(max_retries + 1):
+            started_at = time.time()
             try:
                 result = subprocess.run(
                     cmd,
                     capture_output=True, text=True, timeout=timeout_sec,
                     cwd=self.workspace,
+                    env=self._build_hermes_env(),
                 )
                 out = result.stdout.strip()
                 err = (result.stderr or "").strip()
+                elapsed_ms = int((time.time() - started_at) * 1000)
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": attempt + 1,
+                    "purpose": purpose,
+                    "timeout_sec": timeout_sec,
+                    "elapsed_ms": elapsed_ms,
+                    "returncode": result.returncode,
+                    "model": self.model,
+                    "provider": self.provider,
+                    "message_chars": len(message),
+                    "stdout_preview": out[:500],
+                    "stderr_preview": err[:500],
+                    "message_preview": message[:500],
+                })
 
                 # Success
                 if result.returncode == 0 and out:
@@ -121,7 +214,7 @@ class HermesAdapter(AgentAdapter):
                         logger.warning(f"Rate limited (429), retry {attempt+1}/{max_retries} in {wait}s")
                         time.sleep(wait)
                         continue
-                    return "我这边API有点忙，晚点再聊"
+                    return USER_FRIENDLY_PROGRESS_REPLY
 
                 # Check for other API failures in stdout
                 if "API call failed" in out:
@@ -130,7 +223,7 @@ class HermesAdapter(AgentAdapter):
                         logger.warning(f"API failed, retry {attempt+1}/{max_retries} in {wait}s")
                         time.sleep(wait)
                         continue
-                    return "处理时出了点问题，稍后再试"
+                    return USER_FRIENDLY_PROGRESS_REPLY
 
                 if result.returncode != 0:
                     logger.warning(f"hermes chat exit {result.returncode}: {combined[:200]}")
@@ -138,19 +231,47 @@ class HermesAdapter(AgentAdapter):
                         time.sleep(5)
                         continue
 
-                return out or "处理时出了点问题"
+                return out or USER_FRIENDLY_PROGRESS_REPLY
 
             except subprocess.TimeoutExpired:
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": attempt + 1,
+                    "purpose": purpose,
+                    "timeout_sec": timeout_sec,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                    "returncode": None,
+                    "status": "timeout",
+                    "model": self.model,
+                    "provider": self.provider,
+                    "message_chars": len(message),
+                    "message_preview": message[:500],
+                })
                 logger.warning(f"hermes chat timeout ({timeout_sec}s), attempt {attempt+1}/{max_retries+1}")
                 if attempt < max_retries:
                     continue
-                return "处理超时了，稍后再试吧"
+                return USER_FRIENDLY_PROGRESS_REPLY
             except FileNotFoundError:
                 return "Error: agent backend not available"
             except Exception as e:
-                return f"Error: {e}"
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": attempt + 1,
+                    "purpose": purpose,
+                    "timeout_sec": timeout_sec,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                    "returncode": None,
+                    "status": "exception",
+                    "model": self.model,
+                    "provider": self.provider,
+                    "message_chars": len(message),
+                    "error": str(e),
+                    "message_preview": message[:500],
+                })
+                logger.warning(f"hermes chat exception: {e}")
+                return USER_FRIENDLY_PROGRESS_REPLY
 
-        return "处理时出了点问题"
+        return USER_FRIENDLY_PROGRESS_REPLY
 
 
 class DirectAdapter(AgentAdapter):
@@ -194,11 +315,12 @@ class DirectAdapter(AgentAdapter):
         # For MVP, just return the prompt for the cron job to handle
         return f"Task recorded: {prompt}"
     
-    def chat(self, message: str, max_tokens: int = None) -> str:
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         return "Direct mode: I can only work through scheduled tasks."
 
 
-def create_adapter(backend: str, workspace_path: str) -> AgentAdapter:
+def create_adapter(backend: str, workspace_path: str, model: Optional[str] = None,
+                   provider: Optional[str] = None) -> AgentAdapter:
     """Factory function to create the appropriate adapter."""
     adapters = {
         "hermes": HermesAdapter,
@@ -222,7 +344,10 @@ def create_adapter(backend: str, workspace_path: str) -> AgentAdapter:
         pass
     
     adapter_class = adapters.get(backend, DirectAdapter)
-    return adapter_class(workspace_path)
+    try:
+        return adapter_class(workspace_path, model=model, provider=provider)
+    except TypeError:
+        return adapter_class(workspace_path)
 
 
 def list_available_adapters(workspace_path: str) -> list:

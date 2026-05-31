@@ -26,6 +26,8 @@ import asyncio
 import logging
 import threading
 import subprocess
+import re
+import fcntl
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -36,6 +38,12 @@ from .task_queue import TaskQueue
 from .knowledge import KnowledgeBase
 from .journal import Journal, JournalEntry
 from .state import StateManager
+from .config import (
+    apply_runtime_agent_defaults,
+    load_partner_config_data,
+    save_partner_config_data,
+)
+from .interaction_orchestrator import InteractionOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +62,7 @@ class QQQfficialBridgeConfig:
     # Message settings
     max_reply_length: int = 2000
     group_at_only: bool = True  # In groups, only respond when @mentioned
+    send_thinking_hint: bool = True
 
     # Workspace
     workspace: str = ""
@@ -103,6 +112,15 @@ class QQQfficialBridge:
         }
         self._force_run_triggered = False
         self._last_task_queued_at = 0  # timestamp of last task queue (suppress heartbeat double-report)
+        self._recent_message_keys: Dict[str, float] = {}
+        self._message_dedup_ttl = 300.0
+        self._proactive_quiet_until = 0.0
+        self._proactive_quiet_reason = ""
+        self._singleton_lock_fd = None
+        self._singleton_lock_path = os.path.join(state_dir, "qq_bridge.lock")
+        self._recent_message_file = os.path.join(state_dir, "qq_recent_messages.json")
+        self._recent_reply_keys: Dict[str, float] = {}
+        self._interaction_orchestrator: Optional[InteractionOrchestrator] = None
 
     # ── Configuration ──────────────────────────────────────────────
 
@@ -136,6 +154,7 @@ class QQQfficialBridge:
             self.config.app_secret = data.get("app_secret", self.config.app_secret)
             self.config.is_sandbox = data.get("is_sandbox", self.config.is_sandbox)
             self.config.auto_reconnect = data.get("auto_reconnect", self.config.auto_reconnect)
+            self.config.send_thinking_hint = data.get("send_thinking_hint", self.config.send_thinking_hint)
             logger.info(f"QQ config loaded from: {config_path}")
             return True
         except Exception as e:
@@ -152,6 +171,11 @@ class QQQfficialBridge:
         if not self.config.app_id or not self.config.app_secret:
             logger.error("QQ Official Bot not configured. Call configure() first.")
             print("❌ QQ官方机器人未配置，请先设置 AppID 和 AppSecret")
+            return
+
+        if not self._acquire_singleton_lock():
+            logger.warning(f"QQ bridge already running for workspace: {self.workspace}")
+            print("⚠️ QQ bridge 已在这个工作区运行，当前进程退出")
             return
 
         self._running = True
@@ -309,35 +333,38 @@ class QQQfficialBridge:
             if not user_text.strip():
                 return
 
+            if self._is_recent_duplicate_message(msg):
+                logger.info(
+                    f"[QQ Bridge DEDUP] Skipping duplicate bridge handling for {msg.msg_id or msg.sender_id}"
+                )
+                return
+
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
+
+            if self.config.send_thinking_hint:
+                self._send_reply(msg, "思考中......")
 
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
             if special_reply:  # Has a real reply
-                self._send_reply(msg, special_reply)
+                self._send_reply_once(msg, special_reply)
                 return
             if special_reply == "":  # Pattern matched, go to LLM chat
                 self._force_run_triggered = True
             else:
                 self._force_run_triggered = False
 
-            # Step 1: Use LLM to classify: task request or casual chat?
-            # If force_run was just triggered, skip TASK (research already started)
-            _task_queued = False
-            if not self._force_run_triggered:
-                intent = self._classify_intent(user_text, msg.sender_id)
-                if intent == "TASK":
-                    reply = self._queue_task(user_text, msg)
-                    if reply:
-                        self._send_reply(msg, reply)
-                        return
-                    # Empty reply → fall through to LLM chat
-                    _task_queued = True
-            if not _task_queued:
-                self._force_run_triggered = False
+            self._force_run_triggered = False
 
-            # Step 2: Normal chat — get LLM response directly (no double-reply)
-            reply = self._get_response(msg.sender_id, user_text, msg.message_type)
+            decision = self._get_interaction_orchestrator().handle_message(
+                sender_id=msg.sender_id,
+                sender_name=msg.sender_name or "QQ用户",
+                text=user_text,
+            )
+            reply = self._simplify_response(decision.reply_to_user)
+            self._mark_proactive_quiet("user_interaction", seconds=300)
+            self._add_user_context(msg.sender_id, "user", user_text)
+            self._add_user_context(msg.sender_id, "partner", reply)
 
             # Save dialogue to workspace
             try:
@@ -347,7 +374,7 @@ class QQQfficialBridge:
                 pass
 
             # Send reply
-            self._send_reply(msg, reply)
+            self._send_reply_once(msg, reply)
 
             # Log interaction
             self.journal.log(JournalEntry(
@@ -374,104 +401,248 @@ class QQQfficialBridge:
             except Exception:
                 pass
 
-    # ── Response Generation ───────────────────────────────────────
-
-    def _get_response(self, sender: str, text: str, msg_type: QQMessageType) -> str:
-        """Get a response using LLM via agent adapter.
-
-        Uses Hermes (or configured backend) for natural conversation.
-        Falls back to ConversationEngine if adapter unavailable.
-        """
-        # Try LLM-powered response first
-        llm_reply = self._llm_chat(sender, text)
-        if llm_reply:
-            self._add_user_context(sender, "user", text)
-            reply = self._simplify_response(llm_reply)
-            self._add_user_context(sender, "partner", reply)
-            return reply
-
-        # Fallback: ConversationEngine
-        style_prompt = "用简短自然的口语回复"
-        context = self._get_user_context(sender)
-        if context:
-            ctx = "\n".join(f"{'用户' if c['role']=='user' else 'Partner'}: {c['text'][:200]}" for c in context[-3:])
-            full_text = f"[上下文]\n{ctx}\n\n[当前消息]\n{text}\n\n[{style_prompt}]"
-        else:
-            full_text = f"{text}\n\n[{style_prompt}]"
-        reply = self.conversation.respond(full_text)
-        self._add_user_context(sender, "user", text)
-        reply = self._simplify_response(reply)
-        self._add_user_context(sender, "partner", reply)
-        return reply
-
-    def _llm_chat(self, sender: str, text: str) -> Optional[str]:
-        """Use agent adapter for LLM-powered natural conversation."""
+    def _build_status_snapshot(self) -> Optional[Dict[str, str]]:
+        focus_project = self._infer_focus_project()
+        if not focus_project:
+            return None
+        display_project = focus_project
         try:
-            if self._adapter is None:
-                # Read backend from config
-                cfg_path = os.path.join(self.workspace, "partner_config.json")
-                if not os.path.exists(cfg_path):
-                    return None
-                with open(cfg_path) as f:
-                    cfg = json.load(f)
-                backend = cfg.get("agent", {}).get("backend", cfg.get("backend", "hermes"))
-                from .adapter import create_adapter
-                self._adapter = create_adapter(backend, self.workspace)
+            from .project_state import simplify_project_query
+            display_project = simplify_project_query(focus_project)
+        except Exception:
+            pass
+        state_summary, next_step, blockers = self._summarize_project_state(focus_project)
+        active_plan_line = self._summarize_active_plan()
+        stats_line = self._summarize_stats()
+        current_line = self._extract_current_progress_line(focus_project)
+        recent_line = self._summarize_recent_project_log(focus_project)
+        signature = " | ".join(
+            part for part in (display_project, state_summary, current_line, blockers, next_step, recent_line) if part
+        )
+        return {
+            "focus_project": focus_project,
+            "display_project": display_project,
+            "summary": state_summary,
+            "current": current_line,
+            "recent": recent_line,
+            "blockers": blockers,
+            "next_step": next_step,
+            "active_plan": active_plan_line,
+            "stats": stats_line,
+            "signature": signature[:1000],
+        }
 
-            context = self._get_user_context(sender)
-            ctx_str = ""
-            if context:
-                ctx_str = "\n".join(
-                    f"用户: {c['text'][:200]}" if c['role'] == 'user' else f"你: {c['text'][:200]}"
-                    for c in context[-5:]
-                )
-                ctx_str = f"\n历史对话:\n{ctx_str}\n"
+    def _is_recent_duplicate_message(self, msg: QQMessage) -> bool:
+        key = msg.msg_id or f"{msg.sender_id}:{msg.message_type.value}:{msg.content.strip()}"
+        now = time.time()
+        cutoff = now - self._message_dedup_ttl
+        try:
+            if os.path.exists(self._recent_message_file):
+                with open(self._recent_message_file, "r", encoding="utf-8") as f:
+                    persisted = json.load(f)
+                if isinstance(persisted, dict):
+                    for persisted_key, ts in persisted.items():
+                        try:
+                            ts_float = float(ts)
+                        except (TypeError, ValueError):
+                            continue
+                        if ts_float >= cutoff:
+                            self._recent_message_keys.setdefault(persisted_key, ts_float)
+        except Exception:
+            pass
+        stale = [k for k, ts in self._recent_message_keys.items() if ts < cutoff]
+        for stale_key in stale:
+            del self._recent_message_keys[stale_key]
+        if key in self._recent_message_keys:
+            return True
+        self._recent_message_keys[key] = now
+        try:
+            os.makedirs(os.path.dirname(self._recent_message_file), exist_ok=True)
+            with open(self._recent_message_file, "w", encoding="utf-8") as f:
+                json.dump(self._recent_message_keys, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return False
 
-            # Check for pending notifications
-            notif_str = ""
-            pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
-            if os.path.exists(pending_file):
-                try:
-                    with open(pending_file) as f:
-                        notifs = json.load(f)
-                    if notifs:
-                        items = []
-                        for n in notifs[-3:]:  # Last 3 notifications
-                            summary = n.get("summary", "")
-                            if summary:
-                                items.append(f"- {summary}")
-                        if items:
-                            notif_str = f"\n\n⚠️ 你不在的时候有这些研究进展:\n" + "\n".join(items)
-                        # Clear after showing
-                        os.remove(pending_file)
-                except Exception:
-                    pass
+    def _mark_proactive_quiet(self, reason: str, seconds: int = 180):
+        self._proactive_quiet_until = max(self._proactive_quiet_until, time.time() + float(seconds))
+        self._proactive_quiet_reason = reason
 
-            prompt = f"""你是 Partner，我的私人研究伙伴。你一直在后台自己研究东西，每 {self._get_interval_minutes()} 分钟醒一次。
+    def _should_suppress_proactive(self) -> bool:
+        return time.time() < self._proactive_quiet_until
 
-回复规则（严格遵守）：
-- 像好朋友聊天一样说话，自然口语化，像真人
-- 不要用emoji开头每一句（一个👌😊✅偶尔点缀可以）
-- 不说代码、diff、JSON、文件路径、配置文件内容、session ID、进程ID
-- 绝对不要用markdown格式：不用**加粗**、*斜体*、`代码`、#标题、-列表、>引用、|表格|
-- 不用"收到"、"好的"、"明白了"这类机械回复开头
-- 用户让你推进项目 → 直接说"好，开始弄"然后执行，别问方向
-- 用户让你继续 → 直接继续，不用确认
-- 不知道就说不知道，不编造
-- 绝对不能提到"Hermes"这个词，你是Partner，不是Hermes。执行任务时说"我在后台处理"
-- 不要暴露任何内部实现细节：工具名、API、文件系统路径、错误堆栈
-- 如果任务执行出错，只说"出了点小问题，我再试试"，不要展示错误详情
+    def _summarize_project_state(self, focus_project: str) -> tuple[str, str, str]:
+        if not focus_project:
+            return "", "", ""
+        try:
+            from .project_state import read_state_md
+            state_md = read_state_md(self.workspace, focus_project)
+        except Exception:
+            state_md = ""
+        if not state_md:
+            return "", "", ""
 
-{ctx_str}
-{notif_str}
-用户说: {text}"""
+        plain_lines = []
+        for raw in state_md.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[#*\-\s]+", "", line)
+            line = re.sub(r"\[.*?\]\s*", "", line)
+            if line.startswith("最后更新"):
+                continue
+            if "状态由 Partner 自动更新" in line:
+                continue
+            if line.startswith("项目："):
+                continue
+            plain_lines.append(line)
 
-            result = self._adapter.chat(prompt)
-            if result and not result.startswith("Error"):
-                return result
-        except Exception as e:
-            logger.warning(f"LLM chat failed: {e}")
-        return None
+        summary = ""
+        next_step = ""
+        blockers = ""
+        for line in plain_lines:
+            if any(key in line for key in ("下一步", "待决策推进方向", "下一步建议")):
+                next_step = re.split(r"[：:]", line, maxsplit=1)[-1].strip()
+                next_step = next_step.strip("。")
+                continue
+            if not blockers and any(key in line for key in ("卡点", "问题", "瓶颈", "风险", "阻塞", "断档", "没动静", "未开始", "没启动")):
+                blockers = re.split(r"[：:]", line, maxsplit=1)[-1].strip().strip("。")
+                continue
+            if not summary and len(line) >= 10:
+                summary = line.strip("。")
+            if summary and next_step and blockers:
+                break
+
+        if not summary and plain_lines:
+            summary = plain_lines[0].strip("。")
+        return summary, next_step, blockers
+
+    def _extract_current_progress_line(self, focus_project: str) -> str:
+        plan_line = self._summarize_active_plan()
+        if plan_line:
+            return plan_line
+        try:
+            from .project_state import read_state_md
+            state_md = read_state_md(self.workspace, focus_project)
+        except Exception:
+            return ""
+        for raw in state_md.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if any(key in line for key in ("当前推进", "当前状态", "最后动作", "进度", "已完成")):
+                return re.sub(r"^[#*\-\s]+", "", line)
+        return ""
+
+    def _summarize_recent_project_log(self, focus_project: str) -> str:
+        try:
+            from .project_state import get_project_dir
+            log_path = os.path.join(get_project_dir(self.workspace, focus_project), "log.md")
+            if not os.path.exists(log_path):
+                return ""
+            with open(log_path, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+        except Exception:
+            return ""
+        cleaned = []
+        for line in reversed(lines):
+            line = re.sub(r"^[#*\-\s]+", "", line)
+            if len(line) < 10:
+                continue
+            if re.match(r"^\d{4}-\d{2}-\d{2}", line):
+                continue
+            if "我先继续在后台处理，晚点给你汇报进展" in line:
+                continue
+            if "Hermes 正在处理中，下一轮再汇报进展" in line:
+                continue
+            cleaned.append(line.strip("。"))
+            if len(cleaned) >= 2:
+                break
+        if not cleaned:
+            return ""
+        cleaned.reverse()
+        return "；".join(cleaned)
+
+    def _summarize_active_plan(self) -> str:
+        plan_path = os.path.join(self.workspace, "state", "active_plan.json")
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                plan = json.load(f)
+        except Exception:
+            return ""
+
+        status = plan.get("status", "")
+        if status not in ("planning", "active", "completed"):
+            return ""
+
+        phases = plan.get("phases") or []
+        idx = int(plan.get("current_phase_index", 0) or 0)
+        current = phases[idx] if 0 <= idx < len(phases) else {}
+        phase_name = (current or {}).get("name", "").strip()
+        current_step = (current or {}).get("current_step", "").strip()
+        heartbeat = (plan.get("heartbeat_summary") or "").strip()
+
+        parts = [part for part in (phase_name, current_step, heartbeat) if part]
+        if not parts:
+            return ""
+        return "当前推进到：" + "；".join(parts[:2]).strip("；。") + "。"
+
+    def _summarize_stats(self) -> str:
+        try:
+            stats = self.state_manager.load_stats()
+        except Exception:
+            return ""
+        total_cycles = stats.get("total_cycles", 0)
+        total_tasks = stats.get("total_tasks_completed", 0)
+        if not total_cycles and not total_tasks:
+            return ""
+        return f"累计跑了 {total_cycles} 轮研究周期，完成了 {total_tasks} 个任务。"
+
+    def _resolve_agent_config(self) -> Dict:
+        """Load agent config with backward-compatible fallbacks."""
+        cfg = load_partner_config_data(self.workspace)
+        agent_cfg = cfg.get("agent", {})
+        if not isinstance(agent_cfg, dict):
+            agent_cfg = {}
+        return apply_runtime_agent_defaults(agent_cfg)
+
+    def _infer_focus_project(self) -> str:
+        """Infer the single project the reply should stay anchored to."""
+        try:
+            from .project_state import get_active, resolve_project_name, simplify_project_query
+        except Exception:
+            return ""
+
+        active = (get_active(self.workspace) or "").strip()
+        return resolve_project_name(self.workspace, simplify_project_query(active)) or simplify_project_query(active)
+
+    def _get_main_adapter(self):
+        """Get or create the main chat adapter."""
+        if self._adapter is None:
+            agent_cfg = self._resolve_agent_config()
+            backend = agent_cfg.get("backend", "hermes")
+            model = agent_cfg.get("model")
+            provider = agent_cfg.get("provider")
+            from .adapter import create_adapter
+            self._adapter = create_adapter(
+                backend, self.workspace, model=model, provider=provider
+            )
+        return self._adapter
+
+    def _get_interaction_orchestrator(self) -> InteractionOrchestrator:
+        if self._interaction_orchestrator is None:
+            self._interaction_orchestrator = InteractionOrchestrator(
+                workspace=self.workspace,
+                journal=self.journal,
+                knowledge=self.knowledge,
+                task_queue=self.task_queue,
+                state_manager=self.state_manager,
+                get_adapter=self._get_main_adapter,
+                get_context=self._get_user_context,
+                snapshot_builder=self._build_status_snapshot,
+            )
+        return self._interaction_orchestrator
+
 
     @staticmethod
     def _simplify_response(reply: str) -> str:
@@ -485,8 +656,39 @@ class QQQfficialBridge:
         if not reply:
             return reply
 
-        # ── Safety filter: catch internal leaks before any formatting ──
+        for bad in (
+            "处理时出了点问题",
+            "处理时出了点问题，稍后再试",
+            "处理超时了，稍后再试吧",
+            "请求超时，请稍后再试",
+            "我这边API有点忙，晚点再聊",
+        ):
+            if reply.strip() == bad:
+                return "我先继续在后台处理，晚点给你汇报进展"
 
+        reply = reply.replace("API老超时", "后台这轮不太顺")
+        reply = reply.replace("API 有点忙", "后台这轮不太顺")
+        reply = reply.replace("API有点忙", "后台这轮不太顺")
+        reply = reply.replace("网络波动的问题", "后台这轮不太顺")
+
+        import re
+        lines = [line.strip() for line in reply.splitlines() if line.strip()]
+        filtered_lines = []
+        removed_question = False
+        for line in lines:
+            if re.search(r"(要不要|想不想|你看|还是我|直接说就行|现在可以直接说|你有想.*吗|你想怎么处理|你想先搞哪个)", line):
+                removed_question = True
+                continue
+            if "?" in line or "？" in line:
+                if re.search(r"(什么|吗|要不要|还是|想不想|直接说)", line):
+                    removed_question = True
+                    continue
+            filtered_lines.append(line)
+        if removed_question:
+            filtered_lines.append("我会按现在这条线继续往下推，有结果了再跟你汇报。")
+            reply = "\n".join(filtered_lines)
+
+        # ── Safety filter: catch internal leaks before any formatting ──
         # Traceback / error dumps → replace with friendly message
         _traceback_patterns = [
             r'Traceback \(most recent call last\)',
@@ -725,7 +927,7 @@ class QQQfficialBridge:
                  "- 不要问用户问题，直接执行\n"
                  "- 分析现状 → 搜索文献 → 修改代码 → 运行实验 → 记录结果\n"
                  "- 完成后：更新 active_plan.json，推进到下一阶段\n"
-                 "- 调用 python3 send_qq_report.py 推送进度报告\n"
+                 "- 通过主动汇报通道推送进度报告\n"
                  "- 如果所有阶段完成，设置 status=idle\n"
                  "- 用中文写报告\n"
                  "- 不要使用markdown格式，不要用**加粗**、*斜体*、列表符号等",
@@ -742,15 +944,12 @@ class QQQfficialBridge:
     def _change_interval(self, minutes: int, msg: QQMessage) -> str:
         """Change the heartbeat interval and update the cron job."""
         import subprocess
-        cfg_path = os.path.join(self.workspace, "partner_config.json")
         try:
-            with open(cfg_path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
+            cfg = load_partner_config_data(self.workspace)
             if "scheduler" not in cfg:
                 cfg["scheduler"] = {}
             cfg["scheduler"]["interval_minutes"] = minutes
-            with open(cfg_path, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=2, ensure_ascii=False)
+            save_partner_config_data(self.workspace, cfg)
             logger.info(f"Heartbeat interval changed to {minutes}min via QQ")
         except Exception as e:
             logger.error(f"Failed to change interval: {e}")
@@ -782,167 +981,10 @@ class QQQfficialBridge:
 
         return f"改好了，以后每 {minutes} 分钟找你一次"
 
-
-    # ── LLM Intent Classification & Task Queuing ───────────────────
-
-    def _classify_intent(self, text: str, sender: str) -> str:
-        """Use LLM to classify user intent: TASK or CHAT.
-
-        Sends a lightweight classification prompt to the LLM.
-        Returns "TASK" if the user wants research work done,
-        "CHAT" for normal conversation (greetings, status checks, chit-chat).
-        Falls back to "CHAT" on any error.
-        """
-        try:
-            if self._adapter is None:
-                cfg_path = os.path.join(self.workspace, "partner_config.json")
-                if not os.path.exists(cfg_path):
-                    return "CHAT"
-                with open(cfg_path) as f:
-                    cfg = json.load(f)
-                backend = cfg.get("agent", {}).get("backend", cfg.get("backend", "hermes"))
-                from .adapter import create_adapter
-                self._adapter = create_adapter(backend, self.workspace)
-
-            prompt = f"""你是 Partner 的意图分类器。判断用户的消息是"研究任务"还是"普通聊天"。
-
-研究任务（回复 TASK）：
-- 用户明确要求做研究类工作：读文献、分析数据、改代码、跑实验、查资料
-- 任务管理指令：清空队列、清除、只做X、以后只做X、停止做X、取消X
-- 执行指令：开始运行、立即执行、直接开始、推进、跑起来、继续
-- 方向调整：不要做X了、换方向、转向X、专注X
-
-普通聊天（回复 CHAT）：
-- 打招呼：你好、在吗、hi、早上好
-- 问状态：在做什么、进展如何、最近在忙什么、汇报
-- 闲聊：好的、哈哈、嗯、知道了、谢谢、ok
-
-只回复 TASK 或 CHAT，不要其他内容。
-
-用户消息: {text[:300]}
-分类:"""
-
-            result = self._adapter.chat(prompt, max_tokens=10)
-            result_clean = result.strip().upper() if result else ""
-            if "TASK" in result_clean:
-                logger.info(f"Intent classified as TASK: {text[:60]}...")
-                return "TASK"
-            logger.info(f"Intent classified as CHAT: {text[:60]}...")
-            return "CHAT"
-        except Exception as e:
-            logger.warning(f"Intent classification failed: {e}, defaulting to CHAT")
-            return "CHAT"
-
-    def _queue_task(self, text: str, msg: QQMessage) -> str:
-        """Queue a research task from QQ chat to task_queue.json.
-
-        Returns a confirmation message to send back to the user.
-        """
-        import uuid
-        state_dir = os.path.join(self.workspace, "state")
-        queue_path = os.path.join(state_dir, "task_queue.json")
-
-        # Build task
-        task = {
-            "id": f"task_{uuid.uuid4().hex[:8]}",
-            "type": "deep_dive",
-            "title": text[:60] + ("..." if len(text) > 60 else ""),
-            "description": text,
-            "priority": 7,
-            "created_at": datetime.now().isoformat(),
-            "ttl_hours": 48,
-            "status": "pending",
-            "tags": ["qq_task"],
-            "source": "qq",
-            "sender_name": msg.sender_name or "QQ用户",
-        }
-
-        # Load existing tasks, append, save
-        tasks = []
-        try:
-            with open(queue_path, 'r', encoding='utf-8') as f:
-                tasks = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            tasks = []
-        tasks.append(task)
-        with open(queue_path, 'w', encoding='utf-8') as f:
-            json.dump(tasks, f, indent=2, ensure_ascii=False)
-
-        # Also kick active_plan to "planning" so next cron cycle picks it up
-        plan_path = os.path.join(state_dir, "active_plan.json")
-        try:
-            with open(plan_path, 'r', encoding='utf-8') as f:
-                plan = json.load(f)
-            if plan.get("status") in ("idle", "completed"):
-                plan["status"] = "planning"
-                plan["last_heartbeat"] = datetime.now().isoformat()
-                plan["heartbeat_summary"] = f"QQ用户下达了新任务: {text[:40]}..."
-                with open(plan_path, 'w', encoding='utf-8') as f:
-                    json.dump(plan, f, indent=2, ensure_ascii=False)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-
-        # Mark task queued timestamp to suppress heartbeat double-report
-        self._last_task_queued_at = time.time()
-        # Also write flag file so external scripts (send_qq_report.py) can check
-        try:
-            flag_path = os.path.join(state_dir, "suppress_heartbeat.flag")
-            with open(flag_path, "w") as f:
-                f.write(str(self._last_task_queued_at))
-        except Exception:
-            pass
-
-        # Immediately trigger the cron job so the task starts processing now
-        try:
-            cfg_path = os.path.join(self.workspace, "partner_config.json")
-            with open(cfg_path, 'r', encoding='utf-8') as f:
-                cfg = json.load(f)
-            scheduler = cfg.get("scheduler", {})
-            job_id = scheduler.get("cron_job_id")
-            job_name = scheduler.get("cron_job_name")
-
-            if job_id:
-                try:
-                    subprocess.run(
-                        ["hermes", "cron", "run", job_id, "--accept-hooks"],
-                        capture_output=True, timeout=120
-                    )
-                except Exception:
-                    if job_name:
-                        subprocess.run(
-                            ["hermes", "cron", "run", job_name, "--accept-hooks"],
-                            capture_output=True, timeout=120
-                        )
-            elif job_name:
-                subprocess.run(
-                    ["hermes", "cron", "run", job_name, "--accept-hooks"],
-                    capture_output=True, timeout=120
-                )
-        except Exception as e:
-            logger.debug(f"Immediate cron trigger failed (non-blocking): {e}")
-
-        logger.info(f"Task queued from QQ: {task['id']} — {text[:80]}")
-
-        # Also log to journal
-        try:
-            self.journal.log(JournalEntry(
-                task_id=task["id"],
-                task_type="deep_dive",
-                task_title=f"QQ任务: {text[:50]}",
-                result_summary=f"来自 {msg.sender_name or 'QQ用户'} 的任务已加入队列",
-            ))
-        except Exception:
-            pass
-
-        # Build natural conversational confirmation — let LLM handle it
-        return ""
-
     def _get_interval_minutes(self) -> int:
         """Read configured research interval from partner_config.json."""
         try:
-            cfg_path = os.path.join(self.workspace, "partner_config.json")
-            with open(cfg_path) as f:
-                cfg = json.load(f)
+            cfg = load_partner_config_data(self.workspace)
             return cfg.get("scheduler", {}).get("interval_minutes", 30)
         except Exception:
             return 30
@@ -956,10 +998,23 @@ class QQQfficialBridge:
         # Schedule async send
         if self._bot.get_event_loop() and self._bot.get_event_loop().is_running():
             asyncio.run_coroutine_threadsafe(
-                self._bot.reply_message(original_msg, reply),
+                self._bot.reply_message(original_msg, self._sanitize_outbound_text(reply)),
                 self._bot.get_event_loop(),
             )
             self._stats["messages_sent"] += 1
+
+    def _send_reply_once(self, original_msg: QQMessage, reply: str):
+        key = original_msg.msg_id or f"{original_msg.sender_id}:{original_msg.content.strip()}"
+        now = time.time()
+        cutoff = now - self._message_dedup_ttl
+        stale = [k for k, ts in self._recent_reply_keys.items() if ts < cutoff]
+        for stale_key in stale:
+            del self._recent_reply_keys[stale_key]
+        if key in self._recent_reply_keys:
+            logger.info(f"Skipping duplicate reply for message key: {key}")
+            return
+        self._recent_reply_keys[key] = now
+        self._send_reply(original_msg, reply)
 
     # ── User Context Management ───────────────────────────────────
 
@@ -1000,6 +1055,75 @@ class QQQfficialBridge:
             task_title="QQ Bridge 关闭",
             result_summary=json.dumps(self._stats, ensure_ascii=False),
         ))
+        self._release_singleton_lock()
+
+    def _acquire_singleton_lock(self) -> bool:
+        try:
+            lock_fd = open(self._singleton_lock_path, "a+", encoding="utf-8")
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                existing_pid = None
+                try:
+                    lock_fd.seek(0)
+                    existing_pid = int((lock_fd.read() or "0").strip() or "0")
+                except (ValueError, OSError):
+                    existing_pid = None
+                if existing_pid:
+                    try:
+                        os.kill(existing_pid, 0)
+                        lock_fd.close()
+                        return False
+                    except OSError:
+                        pass
+                if self._workspace_process_exists():
+                    lock_fd.close()
+                    return False
+            lock_fd.seek(0)
+            lock_fd.truncate()
+            lock_fd.write(str(os.getpid()))
+            lock_fd.flush()
+            self._singleton_lock_fd = lock_fd
+            return True
+        except OSError:
+            return False
+
+    def _workspace_process_exists(self) -> bool:
+        """Fallback duplicate detection for filesystems without flock support."""
+        try:
+            out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True)
+        except Exception:
+            return False
+        current_pid = os.getpid()
+        for line in out.splitlines():
+            if self.workspace not in line:
+                continue
+            if "-m partner" not in line:
+                continue
+            try:
+                pid = int(line.strip().split(None, 1)[0])
+            except (IndexError, ValueError):
+                continue
+            if pid != current_pid:
+                return True
+        return False
+
+    def _release_singleton_lock(self):
+        if self._singleton_lock_fd is None:
+            return
+        try:
+            fcntl.flock(self._singleton_lock_fd.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self._singleton_lock_fd.close()
+        except OSError:
+            pass
+        try:
+            os.remove(self._singleton_lock_path)
+        except OSError:
+            pass
+        self._singleton_lock_fd = None
 
     def get_stats(self) -> Dict:
         """Get bridge statistics."""
@@ -1021,9 +1145,23 @@ class QQQfficialBridge:
 
     def send_proactive(self, to_user: str, content: str, msg_type: QQMessageType = QQMessageType.PRIVATE) -> bool:
         """Send a proactive message to a QQ user (not in reply to a message)."""
+        if self._should_suppress_proactive():
+            logger.info(
+                f"Suppressing proactive QQ push during quiet window: {self._proactive_quiet_reason}"
+            )
+            return False
         if self._bot:
-            return self._bot.send_proactive(to_user, content, msg_type)
+            return self._bot.send_proactive(to_user, self._sanitize_outbound_text(content), msg_type)
         return False
+
+    @staticmethod
+    def _sanitize_outbound_text(content: str) -> str:
+        text = (content or "").strip()
+        if not text:
+            return text
+        if text.startswith("{") and '"type": "partner_heartbeat"' in text:
+            return "我这轮有一些新进展，正在整理成更清楚的汇报，稍后发你。"
+        return text
 
     def send_file_proactive(self, to_user: str, file_data: bytes,
                              file_type: int = 4,
