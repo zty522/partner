@@ -104,24 +104,45 @@ class HermesAdapter(AgentAdapter):
                     cwd=self.workspace,
                 )
                 out = result.stdout.strip()
-                if result.returncode == 0 and out:
-                    return out
+                err = (result.stderr or "").strip()
 
-                # Check for 429 rate limit in stderr
-                if "429" in (result.stderr or ""):
+                # Success
+                if result.returncode == 0 and out:
+                    # Strip session_id line from output
+                    lines = out.split("\n")
+                    clean_lines = [l for l in lines if not l.startswith("session_id:")]
+                    return "\n".join(clean_lines).strip() or out
+
+                # Check for 429 rate limit in stdout OR stderr
+                combined = f"{out}\n{err}"
+                if "429" in combined or "Too many requests" in combined:
                     if attempt < max_retries:
-                        wait = 10 * (attempt + 1)
+                        wait = 15 * (attempt + 1)
                         logger.warning(f"Rate limited (429), retry {attempt+1}/{max_retries} in {wait}s")
                         time.sleep(wait)
                         continue
                     return "我这边API有点忙，晚点再聊"
 
-                logger.warning(f"hermes chat returned {result.returncode}: {(result.stderr or '')[:200]}")
+                # Check for other API failures in stdout
+                if "API call failed" in out:
+                    if attempt < max_retries:
+                        wait = 10 * (attempt + 1)
+                        logger.warning(f"API failed, retry {attempt+1}/{max_retries} in {wait}s")
+                        time.sleep(wait)
+                        continue
+                    return "处理时出了点问题，稍后再试"
+
+                if result.returncode != 0:
+                    logger.warning(f"hermes chat exit {result.returncode}: {combined[:200]}")
+                    if attempt < max_retries:
+                        time.sleep(5)
+                        continue
+
                 return out or "处理时出了点问题"
 
             except subprocess.TimeoutExpired:
+                logger.warning(f"hermes chat timeout ({timeout_sec}s), attempt {attempt+1}/{max_retries+1}")
                 if attempt < max_retries:
-                    logger.warning(f"hermes chat timeout, retry {attempt+1}/{max_retries}")
                     continue
                 return "处理超时了，稍后再试吧"
             except FileNotFoundError:
