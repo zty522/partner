@@ -1,6 +1,19 @@
 # Changelog
 
-## [0.5.0] - 2026-05-30 (Hotfix: 多实例隔离与消息去重)
+## [0.5.0] - 2026-06-01 (Autonomous runtime refactor)
+
+### 🚀 当前 release 对应的主版本内容
+
+- 双线架构：`mind_loop` 生命线 + `InteractionOrchestrator` 交互线
+- 多实例 workspace 重构：统一到 `partner_workspace/instances/{id}/`
+- 每实例独立 Hermes runtime：隔离日志、认证、缓存
+- QQ 交互链与主动汇报链拆分，修复重复回复、原始 JSON 泄漏、旧进程残留
+- `Project` 执行改为单步结构化协议，并把结果落回项目文件
+- 用户侧和系统侧项目记录结构清理，保留自然语言探索过程文件
+
+### 📝 历史开发记录
+
+以下条目保留为开发过程中的阶段性记录，供追溯参考。
 
 ### 🚀 新增功能
 

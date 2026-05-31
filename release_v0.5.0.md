@@ -1,49 +1,54 @@
-## v0.5.0 – 多实例隔离与消息去重 Hotfix
+## v0.5.0 - Autonomous Runtime Refactor
 
-### 🐛 消息推送彻底修复
-- **移除所有硬编码回复**：「思考中，请等待...」「刚重启完」「有进展了跟你说」「系统已重启」全部删除，改用 LLM 生成或简洁事实性回复
-- **消息去重表**：`_send_reply` 中 5 分钟 MD5 去重，`_handle_report` 中 10 分钟去重
-- **推送内容过滤**：`_should_send()` 检测模板化内容，纯模板不推送
-- **Project 进展限流**：每 5 轮推送一次，仅在有实质指标变化时推送
-- **空闲不推送**：移除空闲报告推送到 QQ，仅记录日志
+This release tag is repointed to the current `main` branch implementation.
 
-### 🔄 无限重启防护
-- **新增 `restart_tracker.py`**：每个实例独立记录重启次数，1小时内超过3次停止自动重启
-- **`__main__.py` 启动检查**：超过限制打印错误并退出(exit code 2)
-- **`core.py` 崩溃检测**：连续异常记录到 `10_logs/crash.log`
-- **`state.py` 增强**：Heartbeat 增加 `crash_count` 字段
+### What changed
 
-### 🛡️ 后台干扰消除
-- **新增 `resource_limiter.py`**：nice + RLIMIT_AS 限制 CPU/内存
-- **心跳文件隔离**：`/tmp/partner_idle_heartbeat.txt` → 实例专属路径
-- **空闲心跳不写 /tmp/**：避免全局临时目录冲突
+- Rebuilt Partner around two explicit lines:
+  - `mind_loop` as the autonomous lifeline
+  - `InteractionOrchestrator` as the user-message decision layer
+- Moved runtime data to isolated multi-instance workspaces under `partner_workspace/instances/{id}/`
+- Added per-instance Hermes runtime homes so logs, auth, and caches no longer clash
+- Refactored QQ message handling to separate:
+  - user reply generation
+  - lifeline mutation decisions
+  - proactive progress reporting
+- Fixed duplicate replies, raw heartbeat JSON leakage, repeated status replies, and stale bridge processes
+- Changed project execution into small structured steps with artifact write-back:
+  - `DONE`
+  - `FINDINGS`
+  - `NEXT`
+  - `STATE_DELTA`
+  - `ARTIFACT_CONTENT`
+- Verified runtime artifact generation in real instance workspaces:
+  - `01` age prediction recovery notes
+  - `03` Acinetobacter next experiment notes
+  - `04` agent benchmark / evaluation framework notes
+- Normalized multi-instance workspace layout for both system-facing and user-facing records
 
-### 📂 工作空间数据复制
-- **`copy_external_data_to_workspace()`**：执行任务前将外部数据复制到 `99_temp/inputs/`
+### Runtime architecture
 
-### 🎯 活跃项目持久化
-- **新增 `project_manager.py`**：`active_project.json` 持久化记录项目方向
-- 重启/空闲时自动恢复活跃项目，不再遗忘
-- 启动消息精简：包含当前项目 + 具体下一步 + 预期目标
+- **Lifeline:** autonomous `mind_loop` keeps projects moving without waiting for chat
+- **Interaction line:** user messages go through a lightweight LLM that returns:
+  - a natural-language reply
+  - a structured lifeline mutation decision
+- **Execution line:** project work is executed as one small step at a time, then written back into project files
 
-### 🔍 搜索策略升级
-- **多 query 搜索**：3 个 query 合并（精确→知识库→领域泛词）
-- **知识库种子**：从 `knowledge.json` 提取论文标题/作者/方法
-- **阈值放宽**：0.3 → 0.2
-- **二次搜索**：结果不足时自动重试
+### Workspace model
 
-### 🚀 已有功能（从之前版本继承）
-- Multi-Instance Manager with `partner-manager` CLI
-- Isolated instance directories under `~/.partner/instances/{id}/`
-- APScheduler-based in-process cron (per instance)
-- Systemd template `partner@.service`
-- Mind Pool async event architecture
-- Token usage tracking (`/usage` command)
-- Windows installer improvements
+Each instance now runs from its own workspace, for example:
 
-### ⚠️ Hermes Agent Availability Detection
-- **GUI Chat Tab**: When Hermes Agent is not installed, shows a yellow warning card with "⚠ 当前没有可用的 AI 引擎" and an **📥 安装 Hermes Agent** button that opens the install docs.
-- **QQ Bot**: Returns a user-friendly message with installation link instead of silently falling back to a non-LLM response.
-- **`adapter.py`**: New `HermesAdapter.is_available()` static method to quickly detect if the Hermes CLI is on PATH.
+- `partner_workspace/instances/01`
+- `partner_workspace/instances/03`
+- `partner_workspace/instances/04`
 
-**Full Changelog**: https://github.com/zty522/partner/compare/v0.4.0...v0.5.0
+Each project keeps natural-language state and exploration records in its own folder.
+
+### Windows installer
+
+The GitHub Actions workflow for tag pushes rebuilds the Windows installer and uploads the new EXE asset to this release.
+
+### Notes
+
+- This release replaces the earlier `v0.5.0` tag contents with the current `main` implementation.
+- README has been updated to match the new dual-line runtime and workspace layout.
