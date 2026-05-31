@@ -194,14 +194,14 @@ print("\\n---\\nExecuting via Hermes Agent session...")
         elif mode == "cli":
             try:
                 result = subprocess.run(
-                    ["hermes", "chat", "-q", message],
-                    capture_output=True, text=True, timeout=300,
+                    ["hermes", "chat", "-q", message, "-Q", "-t", ""],
+                    capture_output=True, text=True, timeout=120,
                     cwd=self.workspace,
                 )
-                return result.stdout.strip() if result.returncode == 0 else f"Error: task failed"
+                return result.stdout.strip() if result.returncode == 0 else "Error: task failed"
             except subprocess.TimeoutExpired:
-                return "请求超时，请稍后再试"
+                return "处理超时了，稍后再试吧"
             except Exception as e:
-                return f"Error: chat failed"
+                return "Error: chat failed"
         else:
             return "Error: agent backend not available"

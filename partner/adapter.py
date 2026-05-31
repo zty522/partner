@@ -89,25 +89,47 @@ class HermesAdapter(AgentAdapter):
     def chat(self, message: str, max_tokens: int = None) -> str:
         """Chat via hermes subprocess."""
         import subprocess
-        import shlex
-        try:
-            cmd = ["hermes", "chat", "--query", message, "--quiet", "--toolsets", ""]
-            result = subprocess.run(
-                cmd,
-                capture_output=True, text=True, timeout=300,
-                cwd=self.workspace,
-            )
-            out = result.stdout.strip()
-            if result.returncode == 0 and out:
-                return out
-            logger.warning(f"hermes chat returned {result.returncode}: {result.stderr[:200]}")
-            return out or f"Error: {result.stderr[:200]}"
-        except subprocess.TimeoutExpired:
-            return "请求超时，请稍后再试"
-        except FileNotFoundError:
-            return "Error: agent backend not available"
-        except Exception as e:
-            return f"Error: {e}"
+        import time
+        import re
+
+        cmd = ["hermes", "chat", "-q", message, "-Q", "-t", ""]
+        max_retries = 2
+        timeout_sec = 120  # 2 minutes per attempt
+
+        for attempt in range(max_retries + 1):
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=timeout_sec,
+                    cwd=self.workspace,
+                )
+                out = result.stdout.strip()
+                if result.returncode == 0 and out:
+                    return out
+
+                # Check for 429 rate limit in stderr
+                if "429" in (result.stderr or ""):
+                    if attempt < max_retries:
+                        wait = 10 * (attempt + 1)
+                        logger.warning(f"Rate limited (429), retry {attempt+1}/{max_retries} in {wait}s")
+                        time.sleep(wait)
+                        continue
+                    return "我这边API有点忙，晚点再聊"
+
+                logger.warning(f"hermes chat returned {result.returncode}: {(result.stderr or '')[:200]}")
+                return out or "处理时出了点问题"
+
+            except subprocess.TimeoutExpired:
+                if attempt < max_retries:
+                    logger.warning(f"hermes chat timeout, retry {attempt+1}/{max_retries}")
+                    continue
+                return "处理超时了，稍后再试吧"
+            except FileNotFoundError:
+                return "Error: agent backend not available"
+            except Exception as e:
+                return f"Error: {e}"
+
+        return "处理时出了点问题"
 
 
 class DirectAdapter(AgentAdapter):
