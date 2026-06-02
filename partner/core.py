@@ -125,6 +125,7 @@ class Partner:
             knowledge=self.knowledge,
             journal=self.journal,
             state=self.state,
+            round_interval_sec=max(60, int(self.config.scheduler.interval_minutes) * 60),
         )
 
     def start_mind(self):
@@ -151,7 +152,17 @@ class Partner:
                     # 初始化
                     self._mind_loop.run_until_complete(self._init_mind())
                     # 启动 mind_loop（永久运行）
-                    self._mind_loop.run_until_complete(mind_loop(workspace=self.workspace))
+                    pulse_interval_sec = max(
+                        60,
+                        int(self.config.scheduler.interval_minutes) * 60,
+                    )
+                    self._mind_loop.run_until_complete(
+                        mind_loop(
+                            workspace=self.workspace,
+                            save_path=os.path.join(self.workspace, "state", "mind_pool.json"),
+                            pulse_interval_sec=pulse_interval_sec,
+                        )
+                    )
                 except asyncio.CancelledError:
                     logger.info("[Core] Mind loop cancelled, exiting")
                     break

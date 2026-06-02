@@ -855,6 +855,8 @@ class QQQfficialBot:
         """Handle C2C (private/one-on-one) message."""
         author = data.get("author", {})
         content = self._extract_text(data)
+        if not content.strip():
+            content = self._extract_media_hint(data)
 
         if not content.strip():
             return
@@ -878,6 +880,8 @@ class QQQfficialBot:
         """Handle GROUP_AT_MESSAGE (bot @mentioned in group)."""
         author = data.get("author", {})
         content = self._extract_text(data)
+        if not content.strip():
+            content = self._extract_media_hint(data)
 
         if not content.strip():
             return
@@ -904,6 +908,8 @@ class QQQfficialBot:
         """Handle AT_MESSAGE (bot @mentioned in guild/channel)."""
         author = data.get("author", {})
         content = self._extract_text(data)
+        if not content.strip():
+            content = self._extract_media_hint(data)
 
         if not content.strip():
             return
@@ -949,6 +955,24 @@ class QQQfficialBot:
             return content.strip()
 
         return str(content) if content else ""
+
+    def _extract_media_hint(self, data: Dict) -> str:
+        """Create a text placeholder for attachment-only messages."""
+        hints = []
+        for key, label in (
+            ("attachments", "附件"),
+            ("media", "媒体"),
+            ("image", "图片"),
+            ("images", "图片"),
+            ("video", "视频"),
+            ("file", "文件"),
+        ):
+            value = data.get(key)
+            if value:
+                hints.append(label)
+        if not hints:
+            return ""
+        return "用户分享了" + "、".join(sorted(set(hints))) + "素材。请将其作为外部内容信号记录；如果无法读取原文/OCR/ASR，就标记为待补充。"
 
     async def _dispatch_message(self, msg: QQMessage):
         """Dispatch a message to the registered handler."""

@@ -435,7 +435,12 @@ create_startup_script
 # Step 8: Done
 header "Installation complete"
 echo ""
-echo -e "${GREEN}  ** Partner installed successfully. Run 'partner' to start.${NC}"
+echo -e "${GREEN}  Partner installed successfully.${NC}"
 echo ""
 echo -e "${CYAN}  Installation directory: $INSTALL_DIR${NC}"
+echo ""
+echo "  Next steps:"
+echo "    1. partner setup"
+echo "    2. partner status"
+echo "    3. partner start"
 echo ""

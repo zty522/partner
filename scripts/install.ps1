@@ -530,6 +530,11 @@ Write-Host "  $([char]0x2713) Partner installed successfully." -ForegroundColor 
 Write-Host ""
 Write-Host "  Installation directory: $PartnerDir" -ForegroundColor $cCyan
 Write-Host ""
+Write-Host "  Next steps:"
+Write-Host "    1. partner setup"
+Write-Host "    2. partner status"
+Write-Host "    3. partner start"
+Write-Host ""
 
 # Step 7: Interactive setup wizard
 Write-Header "Setup wizard"

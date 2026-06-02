@@ -9,11 +9,14 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
+from . import i18n
 from .config import (
     load_partner_config_data,
+    resolve_partner_config_path,
     save_partner_config_data,
     workspace_has_partner_config,
 )
@@ -73,7 +76,7 @@ def get_workspace() -> str:
 def cmd_setup(args):
     """Run first-time setup."""
     from .setup import interactive_setup, detect_hermes, detect_claude_code
-    interactive_setup()
+    interactive_setup(quick=bool(getattr(args, "quick", False)))
 
 
 # ── ANSI Colors ──
@@ -92,29 +95,181 @@ def cmd_status(args):
     workspace = args.workspace or find_workspace()
     show_status(workspace)
 
+
+def _cli_txt(zh: str, en: str) -> str:
+    return zh if i18n.lang() != "en" else en
+
+
+def _print_help_menu():
+    print()
+    print(f"  {C_BOLD}{C_CYAN}{_cli_txt('Partner 命令', 'Partner Commands')}{C_RESET}")
+    print()
+    print(f"    {C_DIM}partner{C_RESET}")
+    print(f"      {_cli_txt('显示主菜单', 'Show the main menu')}")
+    print(f"    {C_DIM}partner help{C_RESET}")
+    print(f"      {_cli_txt('显示所有可用命令', 'Show all available commands')}")
+    print(f"    {C_DIM}partner setup{C_RESET}")
+    print(f"      {_cli_txt('配置 Partner，并管理实例与 QQ 机器人', 'Configure Partner, instances, and QQ bots')}")
+    print(f"    {C_DIM}partner status{C_RESET}")
+    print(f"      {_cli_txt('查看所有实例状态、QQ 配置和最近进展', 'Show all instance status, QQ config, and recent progress')}")
+    print(f"    {C_DIM}partner start{C_RESET}")
+    print(f"      {_cli_txt('启动 QQ 机器人', 'Start the QQ bot')}")
+    print(f"    {C_DIM}partner stop{C_RESET}")
+    print(f"      {_cli_txt('停止 QQ 机器人', 'Stop the QQ bot')}")
+    print(f"    {C_DIM}partner restart{C_RESET}")
+    print(f"      {_cli_txt('重启 QQ 机器人', 'Restart the QQ bot')}")
+    print(f"    {C_DIM}partner bot start qq{C_RESET}")
+    print(f"      {_cli_txt('使用兼容旧版的显式命令启动 QQ 机器人', 'Start the QQ bot with the explicit legacy command')}")
+    print(f"    {C_DIM}partner bot stop qq{C_RESET}")
+    print(f"      {_cli_txt('使用兼容旧版的显式命令停止 QQ 机器人', 'Stop the QQ bot with the explicit legacy command')}")
+    print(f"    {C_DIM}partner update{C_RESET}")
+    print(f"      {_cli_txt('更新 Partner 到最新版本', 'Update Partner to the latest version')}")
+    print(f"    {C_DIM}partner instance list{C_RESET}")
+    print(f"      {_cli_txt('列出所有 Partner 实例', 'List all Partner instances')}")
+    print()
+
+
+def cmd_help(args):
+    _print_help_menu()
+
+
+def _print_kv(label: str, value: str):
+    print(f"  {C_BOLD}{label}:{C_RESET} {value}")
+
+
+def _fmt_bool(ok: bool) -> str:
+    return f"{C_GREEN}OK{C_RESET}" if ok else f"{C_RED}Missing{C_RESET}"
+
+
+def _fmt_optional(ok: bool) -> str:
+    return f"{C_GREEN}Configured{C_RESET}" if ok else f"{C_YELLOW}Optional{C_RESET}"
+
+
+def _resolve_qq_config(workspace: str) -> str:
+    candidates = [
+        os.path.join(workspace, "00_config", "qq_config.json"),
+        os.path.join(workspace, "qq_config.json"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+def cmd_doctor(args):
+    workspace = args.workspace or get_workspace()
+    print()
+    print(f"  {C_BOLD}{C_CYAN}🩺 Partner Doctor{C_RESET}")
+    print()
+
+    python_ok = sys.version_info >= (3, 10)
+    git_ok = shutil.which("git") is not None
+    workspace_ok = bool(workspace and os.path.isdir(workspace))
+    config_ok = bool(workspace and workspace_has_partner_config(workspace))
+    qq_ok = bool(workspace and os.path.exists(_resolve_qq_config(workspace)))
+    hermes_ok = shutil.which("hermes") is not None
+    codex_ok = shutil.which("codex") is not None
+
+    _print_kv("Python", f"{sys.version.split()[0]} ({_fmt_bool(python_ok)})")
+    _print_kv("Git", _fmt_bool(git_ok))
+    _print_kv("Workspace", workspace if workspace else f"{C_YELLOW}Not configured{C_RESET}")
+    _print_kv("Config", _fmt_bool(config_ok))
+    _print_kv("QQ Config", _fmt_optional(qq_ok))
+    _print_kv("Hermes", _fmt_bool(hermes_ok))
+    _print_kv("Codex", _fmt_bool(codex_ok))
+
+    issues = []
+    if not python_ok:
+        issues.append("Python 版本过低，需要 3.10+")
+    if not git_ok:
+        issues.append("未检测到 git")
+    if not workspace_ok:
+        issues.append("未找到工作区，请先运行 partner setup")
+    elif not config_ok:
+        issues.append(f"工作区存在但缺少配置: {resolve_partner_config_path(workspace)}")
+
+    print()
+    if issues:
+        print(f"  {C_BOLD}Next Fixes:{C_RESET}")
+        for item in issues:
+            print(f"    - {item}")
+    else:
+        print(f"  {C_GREEN}环境检查通过，可以直接使用 Partner。{C_RESET}")
+        print("    推荐下一步: partner status")
+    print()
+    _print_commands()
+
+
+def _load_manager_module():
+    from . import manager
+    return manager
+
+
+def _get_default_instance_id() -> str:
+    manager = _load_manager_module()
+    cfg = manager.load_global_config()
+    default_id = str(cfg.get("default_instance") or "").strip()
+    if default_id:
+        return default_id
+    instances = manager.list_instances()
+    if len(instances) == 1:
+        return next(iter(instances.keys()))
+    return ""
+
+
+def _save_default_instance_id(instance_id: str):
+    manager = _load_manager_module()
+    cfg = manager.load_global_config()
+    cfg["default_instance"] = instance_id
+    manager.save_global_config(cfg)
+
+
+def _resolve_instance_id(value: str | None) -> str:
+    if value:
+        return value
+    default_id = _get_default_instance_id()
+    if default_id:
+        return default_id
+    return ""
+
+
+def cmd_instance(args):
+    manager = _load_manager_module()
+    action = args.instance_action
+
+    if action == "list":
+        manager.print_instance_list()
+        _print_commands()
+        return
+
 def cmd_default(args):
     """Default action: show intro + all commands."""
+    workspace = get_workspace()
+    title = _cli_txt('🤝 Partner — 你的 AI 研究伙伴', '🤝 Partner — Your AI Research Companion')
+    subtitle = _cli_txt('一个会在后台自主推进工作的 AI 研究伙伴。', 'An AI research companion that works independently in the background.')
+    intro = _cli_txt('你不用一直下命令，只需要随时来查看。', 'You do not give it commands. You just check in.')
+    workspace_label = _cli_txt('当前工作区', 'Current Workspace')
+    workspace_tip = _cli_txt("提示：运行 'partner status' 查看所有实例状态。", "Tip: run 'partner status' to inspect all instance status.")
+    not_configured = _cli_txt('尚未完成配置。', 'Not configured yet.')
+    setup_hint = _cli_txt('请先运行', 'Run')
+    setup_suffix = _cli_txt('开始配置。', 'first.')
     print()
-    print(f"  {C_BOLD}{C_CYAN}🤝 Partner — Your AI Research Companion{C_RESET}")
-    print(f"  {C_DIM}An AI research companion that works independently in the background.{C_RESET}")
-    print(f"  {C_DIM}You don't give it commands. You just check in.{C_RESET}")
+    print(f"  {C_BOLD}{C_CYAN}{title}{C_RESET}")
+    print(f"  {C_DIM}{subtitle}{C_RESET}")
+    print(f"  {C_DIM}{intro}{C_RESET}")
     print()
-    print(f"  {C_BOLD}Commands:{C_RESET}")
-    print(f"    {C_DIM}partner setup        First-time configuration wizard{C_RESET}")
-    print(f"    {C_DIM}partner status       View full status + research stats{C_RESET}")
-    print(f"    {C_DIM}partner bot start qq Start QQ bot (background){C_RESET}")
-    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner queue clear  Clear task queue / reset plan{C_RESET}")
-    print(f"    {C_DIM}partner update       Pull latest code + reinstall{C_RESET}")
-    print()
-    print(f"  {C_DIM}Or just type 'partner' anytime to see this menu.{C_RESET}")
-    print()
+    if workspace:
+        print(f"  {C_BOLD}{workspace_label}:{C_RESET} {workspace}")
+        print(f"  {C_DIM}{workspace_tip}{C_RESET}")
+    else:
+        print(f"  {C_YELLOW}{not_configured}{C_RESET} {setup_hint} {C_BOLD}partner setup{C_RESET} {setup_suffix}")
+    _print_help_menu()
 
 
 def cmd_bot(args):
     workspace = args.workspace or get_workspace()
     if not workspace:
-        print("❌ Partner 未配置")
+        print("❌ Partner 未配置，请先运行: partner setup")
         return
     platform = args.platform
     action = args.action
@@ -122,6 +277,21 @@ def cmd_bot(args):
         _bot_start(workspace, platform)
     elif action == "stop":
         _bot_stop(workspace, platform)
+
+
+def cmd_short_bot(args):
+    workspace = args.workspace or get_workspace()
+    if not workspace:
+        print("❌ Partner 未配置，请先运行: partner setup")
+        return
+    action = args.command
+    if action == "start":
+        _bot_start(workspace, "qq")
+    elif action == "stop":
+        _bot_stop(workspace, "qq")
+    elif action == "restart":
+        _bot_stop(workspace, "qq", quiet=True)
+        _bot_start(workspace, "qq")
 
 
 def _bot_stop(workspace, platform, quiet=False):
@@ -306,12 +476,32 @@ def cmd_update(args):
 
     # 1. Resolve partner repo directory
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
     print(f"{C_BOLD}🔄 Updating Partner...{C_RESET}")
     print(f"   Repo: {C_CYAN}{repo_dir}{C_RESET}")
     print()
 
     # 2. git pull
+    if not os.path.exists(os.path.join(repo_dir, ".git")):
+        print(f"{C_RED}❌ 当前目录不是 Git 仓库，无法执行 partner update{C_RESET}")
+        print(f"   请重新 clone 仓库，或手动进入正确目录后再运行。")
+        sys.exit(1)
+
+    print(f"{C_YELLOW}➜ git fetch --all --prune{C_RESET}")
+    fetch = subprocess.run(["git", "fetch", "--all", "--prune"], capture_output=True, text=True, timeout=120, cwd=repo_dir)
+    if fetch.returncode != 0:
+        print(f"{C_RED}❌ git fetch failed:{C_RESET}")
+        err = (fetch.stderr or fetch.stdout or "").strip()
+        if err:
+            print(err)
+        print("   无法连接远程仓库；请检查网络、代理或 Git 远程配置后重试。")
+        sys.exit(1)
+
+    status_r = subprocess.run(["git", "status", "-sb"], capture_output=True, text=True, timeout=30, cwd=repo_dir)
+    status_line = status_r.stdout.strip().splitlines()[0] if status_r.stdout.strip() else ""
+    if status_line:
+        print(f"   {status_line}")
+
+    print()
     print(f"{C_YELLOW}➜ git pull{C_RESET}")
     r = subprocess.run(["git", "pull"], capture_output=True, text=True, timeout=120, cwd=repo_dir)
     if r.returncode != 0:
@@ -420,6 +610,10 @@ def cmd_update(args):
         state_dir = os.path.join(workspace, "state")
         plan_path = os.path.join(state_dir, "active_plan.json")
         queue_path = os.path.join(state_dir, "task_queue.json")
+        cfg_path = resolve_partner_config_path(workspace)
+
+        print(f"   📁 工作区: {workspace}")
+        print(f"   ⚙️ 配置: {cfg_path}")
 
         # Active plan
         if os.path.exists(plan_path):
@@ -545,14 +739,7 @@ def cmd_update(args):
     print(f"{C_BOLD}{C_GREEN}✅ Partner is up to date!{C_RESET}")
     print()
     # ── Commands ──
-    print(f"  {C_BOLD}Commands:{C_RESET}")
-    print(f"    {C_DIM}partner status       Check Partner status{C_RESET}")
-    print(f"    {C_DIM}partner setup        Reconfigure{C_RESET}")
-    print(f"    {C_DIM}partner bot start qq Start QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner bot stop qq  Stop QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner update       Update to latest version{C_RESET}")
-    print(f"    {C_DIM}partner queue clear  Clear task queue{C_RESET}")
-    print()
+    _print_commands()
 
     # 8. Ask if user wants to reconfigure
     if workspace:
@@ -583,13 +770,17 @@ def _print_commands():
     """Print the standard commands menu."""
     print()
     print(f"  {C_BOLD}Commands:{C_RESET}")
-    print(f"    {C_DIM}partner status              Check Partner status{C_RESET}")
-    print(f"    {C_DIM}partner setup               Reconfigure{C_RESET}")
-    print(f"    {C_DIM}partner bot start qq        Start QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner bot stop qq         Stop QQ bot{C_RESET}")
-    print(f"    {C_DIM}partner config set interval N  Change heartbeat interval{C_RESET}")
-    print(f"    {C_DIM}partner queue clear         Clear task queue{C_RESET}")
-    print(f"    {C_DIM}partner update              Update to latest version{C_RESET}")
+    print(f"    {C_DIM}partner{C_RESET}")
+    print(f"    {C_DIM}partner help{C_RESET}")
+    print(f"    {C_DIM}partner setup{C_RESET}")
+    print(f"    {C_DIM}partner status{C_RESET}")
+    print(f"    {C_DIM}partner start{C_RESET}")
+    print(f"    {C_DIM}partner stop{C_RESET}")
+    print(f"    {C_DIM}partner restart{C_RESET}")
+    print(f"    {C_DIM}partner bot start qq{C_RESET}")
+    print(f"    {C_DIM}partner bot stop qq{C_RESET}")
+    print(f"    {C_DIM}partner update{C_RESET}")
+    print(f"    {C_DIM}partner instance list{C_RESET}")
     print()
 
 
@@ -683,10 +874,12 @@ def main():
     parser = argparse.ArgumentParser(
         prog='partner',
         description='Partner 🤝 - Your AI Research Companion',
-        add_help=True,
+        add_help=False,
     )
 
     # Global arguments (used by partner-manager)
+    parser.add_argument('-h', '--help', action='store_true', dest='show_help',
+                        help=argparse.SUPPRESS)
     parser.add_argument('--instance-id', dest='instance_id', default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument('--workspace', '-w', default=None,
@@ -698,11 +891,19 @@ def main():
     p_setup = sub.add_parser('setup', help='配置 Partner（QQ机器人等）')
     p_setup.add_argument('--status', action='store_true', help='查看状态')
     p_setup.set_defaults(func=lambda args: cmd_status(args) if args.status else cmd_setup(args))
+
+    p_help = sub.add_parser('help', help='显示完整命令帮助')
+    p_help.set_defaults(func=cmd_help)
     
     # status
     p_status = sub.add_parser('status', help='查看 Partner 状态')
     p_status.add_argument('--workspace', '-w', help='工作区路径')
     p_status.set_defaults(func=cmd_status)
+
+    for action, desc in [('start', '启动 QQ 机器人'), ('stop', '停止 QQ 机器人'), ('restart', '重启 QQ 机器人')]:
+        p_short = sub.add_parser(action, help=desc)
+        p_short.add_argument('--workspace', '-w', help='工作区路径')
+        p_short.set_defaults(func=cmd_short_bot, command=action)
 
     # bot
     p_bot = sub.add_parser('bot', help='启动/停止机器人')
@@ -715,24 +916,20 @@ def main():
     p_update = sub.add_parser('update', help='Update Partner to the latest version')
     p_update.set_defaults(func=cmd_update)
 
-    # queue
-    p_queue = sub.add_parser('queue', help='管理任务队列')
-    q_sub = p_queue.add_subparsers(dest='queue_action')
-    p_queue_clear = q_sub.add_parser('clear', help='清空任务队列')
-    p_queue_clear.set_defaults(func=lambda args: _cmd_queue_clear(args))
-
-    # config
-    p_config = sub.add_parser('config', help='配置管理')
-    c_sub = p_config.add_subparsers(dest='config_action')
-    p_config_set = c_sub.add_parser('set', help='修改配置')
-    p_config_set.add_argument('key', choices=['interval'], help='配置项')
-    p_config_set.add_argument('value', help='新值')
-    p_config_set.set_defaults(func=_cmd_config_set)
+    p_instance = sub.add_parser('instance', help='多实例管理快捷入口')
+    i_sub = p_instance.add_subparsers(dest='instance_action')
+    i_sub.required = True
+    i_sub.add_parser('list', help='列出所有实例')
+    p_instance.set_defaults(func=cmd_instance)
 
     # default
     parser.set_defaults(func=cmd_default)
 
     args = parser.parse_args()
+
+    if getattr(args, 'show_help', False):
+        cmd_help(args)
+        return
 
     # When partner-manager starts an instance: --instance-id <id> --workspace <path>
     # No subcommand → auto-start QQ bot for that instance

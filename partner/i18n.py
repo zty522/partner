@@ -62,6 +62,29 @@ def reload():
     _init()
 
 
+def set_lang(language: str):
+    """Persist language choice and reload translations."""
+    if language not in _SUPPORTED_LANGUAGES:
+        language = _DEFAULT_LANGUAGE
+    try:
+        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if _CONFIG_PATH.exists():
+            try:
+                with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        data["language"] = language
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass
+    reload()
+
+
 def lang() -> str:
     """Return the current language code ('en' or 'zh').
 

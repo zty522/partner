@@ -4,6 +4,7 @@ import json
 import os
 # Force UTF-8 for subprocess pipes (prevents GBK errors on Chinese Windows)
 os.environ.setdefault("PYTHONUTF8", "1")
+import re
 import shutil
 import socket
 import subprocess
@@ -12,6 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from . import i18n
 from .config import (
     apply_runtime_agent_defaults,
     load_partner_config_data,
@@ -19,6 +21,7 @@ from .config import (
     save_partner_config_data,
     workspace_has_partner_config,
 )
+from .instance_root import resolve_global_config_path, resolve_instance_workspace, resolve_partner_root
 
 # Windows: suppress console windows for subprocess calls
 _NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -58,7 +61,7 @@ def line(char="─", width=60, color=C.DIM):
 def banner():
     """Print the Partner banner."""
     print()
-    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET} {C.DIM}v0.3.0{C.RESET}")
+    print(f"  {C.BOLD}{C.CYAN}🤝 Partner{C.RESET}")
     print(f"  {C.DIM}Your AI Research Companion{C.RESET}")
     line("━", 50, C.CYAN)
     print()
@@ -84,6 +87,67 @@ def status_info(msg):
 
 def status_warn(msg):
     print(f"    {C.YELLOW}⚠{C.RESET} {msg}")
+
+
+def _is_zh() -> bool:
+    return i18n.lang() != "en"
+
+
+def _txt(zh: str, en: str) -> str:
+    return zh if _is_zh() else en
+
+
+def _choose_language():
+    current = i18n.lang()
+    print()
+    print(f"  {C.BOLD}{_txt('请选择语言 / Choose Language', 'Choose Language / 请选择语言')}{C.RESET}")
+    print(f"    1. 中文")
+    print(f"    2. English")
+    prompt = "  选择 [1/2, 回车保持当前]: " if _is_zh() else "  Choose [1/2, Enter to keep current]: "
+    try:
+        answer = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer == "1":
+        i18n.set_lang("zh")
+    elif answer == "2":
+        i18n.set_lang("en")
+    elif current not in {"zh", "en"}:
+        i18n.set_lang("zh")
+    current_label = "中文" if i18n.lang() == "zh" else "English"
+    print(f"    {C.GREEN}▶{C.RESET} {_txt('当前语言', 'Current language')}: {current_label}")
+
+
+def _fmt_ts_short(value: str) -> str:
+    if not value:
+        return "未知"
+    text = str(value).strip()
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return text[:16]
+
+
+def _minutes_since(value: str):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0, int((now - dt).total_seconds() // 60))
+    except ValueError:
+        return None
+
+
+def _health_label(minutes_since: int | None, interval: int) -> str:
+    if minutes_since is None:
+        return f"{C.YELLOW}未知{C.RESET}"
+    if minutes_since <= max(interval * 2, 10):
+        return f"{C.GREEN}正常{C.RESET}"
+    if minutes_since <= max(interval * 6, 30):
+        return f"{C.YELLOW}偏久未更新{C.RESET}"
+    return f"{C.RED}可能已停滞{C.RESET}"
 
 def prompt_choice(prompt, options, default=0):
     """Ask user to choose from options.
@@ -568,7 +632,7 @@ def register_hermes_skill(workspace: str) -> str:
     skill_content = f'''---
 name: partner
 description: "Partner 🤝 - 自主研究伙伴。用户提到 partner 时激活。Partner 在后台自主运行，Hermes 只负责传递指令（用 execute_code 写 task_queue.json），绝不替 Partner 做研究（禁止 delegate_task/web_search/read_file）。"
-version: 0.3.0
+version: 0.6.0
 author: Partner Team
 tags: [partner, autonomous, research, companion]
 ---
@@ -1003,52 +1067,406 @@ def _install_alternative(needed):
     status_info(f"  pip install {' '.join(needed)}")
 
 
-def interactive_setup():
+def _load_json_if_exists(path: str) -> dict:
+    try:
+        if path and os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _discover_existing_setup_context() -> dict:
+    """Prefer the current multi-instance workspace and default instance as setup defaults."""
+    partner_root = str(resolve_partner_root())
+    ctx = {
+        "partner_root": partner_root,
+        "default_instance_id": "",
+        "instance_workspace": "",
+        "workspace_config": {},
+        "instance_config": {},
+        "qq_config": {},
+        "wechat_config": {},
+        "global_config": {},
+    }
+
+    global_cfg = _load_json_if_exists(str(resolve_global_config_path()))
+    ctx["global_config"] = global_cfg
+    default_instance_id = (global_cfg.get("default_instance") or "").strip()
+    if not default_instance_id:
+        instances = global_cfg.get("instances", {})
+        if isinstance(instances, dict) and instances:
+            default_instance_id = next(iter(instances.keys()))
+    ctx["default_instance_id"] = default_instance_id
+
+    if default_instance_id:
+        inst_ws = str(resolve_instance_workspace(default_instance_id))
+        ctx["instance_workspace"] = inst_ws
+        ctx["instance_config"] = _load_json_if_exists(resolve_partner_config_path(inst_ws))
+        ctx["qq_config"] = (
+            _load_json_if_exists(os.path.join(inst_ws, "00_config", "qq_config.json"))
+            or _load_json_if_exists(os.path.join(inst_ws, "qq_config.json"))
+        )
+        ctx["wechat_config"] = (
+            _load_json_if_exists(os.path.join(inst_ws, "00_config", "wechat_config.json"))
+            or _load_json_if_exists(os.path.join(inst_ws, "wechat_config.json"))
+        )
+
+    if not ctx["qq_config"]:
+        instances = global_cfg.get("instances", {})
+        if isinstance(instances, dict):
+            for instance_id in instances:
+                inst_ws = str(resolve_instance_workspace(instance_id))
+                qq_cfg = (
+                    _load_json_if_exists(os.path.join(inst_ws, "00_config", "qq_config.json"))
+                    or _load_json_if_exists(os.path.join(inst_ws, "qq_config.json"))
+                )
+                if qq_cfg:
+                    ctx["qq_config"] = qq_cfg
+                    break
+
+    if workspace_has_partner_config(partner_root):
+        ctx["workspace_config"] = _load_json_if_exists(resolve_partner_config_path(partner_root))
+
+    return ctx
+
+
+def _build_agent_config_for_setup(selected_agent: AgentInfo, existing_agent: dict | None = None) -> dict:
+    """Build a clean agent config for the selected backend."""
+    existing_agent = existing_agent if isinstance(existing_agent, dict) else {}
+    if selected_agent.name == "hermes":
+        return apply_runtime_agent_defaults({
+            "backend": "hermes",
+            "model": existing_agent.get("model"),
+            "provider": existing_agent.get("provider"),
+        })
+
+    return {
+        "backend": selected_agent.name,
+        "model": None,
+        "provider": None,
+        "classifier_backend": selected_agent.name,
+        "classifier_model": None,
+        "classifier_provider": None,
+    }
+
+
+def _sync_multi_instance_defaults(
+    partner_root: str,
+    selected_agent: AgentInfo,
+    interval_minutes: int,
+):
+    """Propagate global setup choices to all configured instances."""
+    global_cfg_path = str(resolve_global_config_path())
+    global_cfg = _load_json_if_exists(global_cfg_path)
+    instances = global_cfg.get("instances", {})
+    if not isinstance(instances, dict) or not instances:
+        return 0
+
+    updated = 0
+    for instance_id, meta in instances.items():
+        if not isinstance(meta, dict):
+            continue
+        inst_ws = str(resolve_instance_workspace(instance_id))
+        if not os.path.isdir(inst_ws):
+            continue
+        inst_cfg = _load_json_if_exists(resolve_partner_config_path(inst_ws))
+        if not inst_cfg:
+            inst_cfg = {
+                "name": "Partner",
+                "workspace": {"path": inst_ws, "readonly_dirs": []},
+                "agent": {},
+                "scheduler": {},
+            }
+        inst_cfg.setdefault("workspace", {})
+        inst_cfg["workspace"]["path"] = inst_ws
+        inst_cfg["agent"] = _build_agent_config_for_setup(
+            selected_agent,
+            inst_cfg.get("agent", {}),
+        )
+        inst_cfg.setdefault("scheduler", {})
+        inst_cfg["scheduler"]["interval_minutes"] = interval_minutes
+        inst_cfg["scheduler"]["max_tasks_per_cycle"] = 1
+        inst_cfg["scheduler"]["heartbeat_timeout_minutes"] = 60
+        save_partner_config_data(inst_ws, inst_cfg)
+
+        meta["agent_backend"] = selected_agent.name
+        meta["interval_minutes"] = interval_minutes
+        updated += 1
+
+    if updated:
+        with open(global_cfg_path, "w", encoding="utf-8") as f:
+            json.dump(global_cfg, f, indent=2, ensure_ascii=False)
+    return updated
+
+
+def _default_workspace_for_setup(existing: dict, old_config: dict) -> str:
+    """Return the workspace root shown by setup, never an instance dir in multi-instance mode."""
+    partner_root = existing.get("partner_root") or str(resolve_partner_root())
+    global_instances = (existing.get("global_config") or {}).get("instances", {})
+    if isinstance(global_instances, dict) and global_instances:
+        return partner_root
+
+    workspace_cfg = old_config.get("workspace", {})
+    if isinstance(workspace_cfg, dict) and workspace_cfg.get("path"):
+        return workspace_cfg["path"]
+    return partner_root
+
+
+def _prompt_instance_id() -> str:
+    prompt = _txt("实例 ID: ", "Instance ID: ")
+    try:
+        return input(f"  {prompt}").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _prompt_qq_fields(existing: dict | None = None) -> dict:
+    existing = existing or {}
+    app_id = prompt_input(_txt("AppID", "AppID"), existing.get("app_id", ""))
+    old_secret_display = "******" if existing.get("app_secret") else ""
+    app_secret = prompt_input(_txt("AppSecret", "AppSecret"), old_secret_display)
+    if app_secret == "******" and existing.get("app_secret"):
+        app_secret = existing["app_secret"]
+    sandbox_default = 0 if existing.get("is_sandbox", True) else 1
+    sandbox = prompt_choice(
+        _txt("环境？", "Environment?"),
+        [
+            _txt("沙箱环境（测试）", "Sandbox (test)"),
+            _txt("正式环境", "Production"),
+        ],
+        default=sandbox_default,
+    )
+    return {
+        "app_id": app_id,
+        "app_secret": app_secret,
+        "is_sandbox": sandbox == 0,
+    }
+
+
+def _write_instance_qq_config(instance_id: str, qq_config: dict):
+    from . import manager
+    cfg_path = manager.qq_config_path(instance_id)
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "app_id": qq_config["app_id"],
+            "app_secret": qq_config["app_secret"],
+            "is_sandbox": qq_config.get("is_sandbox", False),
+            "auto_reconnect": True,
+        }, f, indent=2, ensure_ascii=False)
+
+
+def _register_instance_meta(instance_id: str):
+    from . import manager
+    cfg = manager.load_global_config()
+    cfg.setdefault("instances", {})
+    cfg["instances"][instance_id] = {
+        "enabled": True,
+        "working_dir": str(resolve_instance_workspace(instance_id)),
+        "qq_config": "00_config/qq_config.json",
+        "agent_backend": "hermes",
+        "interval_minutes": 30,
+    }
+    manager.save_global_config(cfg)
+
+
+def _delete_instance(instance_id: str) -> bool:
+    from . import manager
+    inst_dir = resolve_instance_workspace(instance_id)
+    if not inst_dir.exists():
+        return False
+    try:
+        manager.stop_instance(instance_id)
+    except Exception:
+        pass
+    shutil.rmtree(inst_dir, ignore_errors=True)
+    cfg = manager.load_global_config()
+    if isinstance(cfg.get("instances"), dict):
+        cfg["instances"].pop(instance_id, None)
+    if cfg.get("default_instance") == instance_id:
+        cfg["default_instance"] = ""
+    manager.save_global_config(cfg)
+    return True
+
+
+def manage_instances():
+    from . import manager
+
+    while True:
+        print()
+        section(_txt("实例管理", "Instance Management"), "🧩")
+        _print_instance_list_localized()
+        print()
+        options = [
+            _txt("创建实例", "Create instance"),
+            _txt("删除实例", "Delete instance"),
+            _txt("配置 QQ 机器人", "Configure QQ bot"),
+            _txt("返回", "Back"),
+        ]
+        choice = prompt_choice(_txt("选择操作：", "Choose an action:"), options, default=0)
+        if choice == 0:
+            instance_id = _prompt_instance_id()
+            if not instance_id:
+                status_warn(_txt("实例 ID 不能为空", "Instance ID is required"))
+                continue
+            if manager.instance_exists(instance_id):
+                status_warn(_txt(f"实例已存在: {instance_id}", f"Instance already exists: {instance_id}"))
+                continue
+            inst = resolve_instance_workspace(instance_id)
+            inst.mkdir(parents=True, exist_ok=True)
+            for sub in manager.INSTANCE_SUBDIRS:
+                (inst / sub).mkdir(parents=True, exist_ok=True)
+            _register_instance_meta(instance_id)
+            status_ok(_txt(f"实例已创建: {instance_id}", f"Instance created: {instance_id}"))
+            if prompt_choice(_txt("现在配置 QQ 机器人？", "Configure QQ bot now?"), [_txt("是", "Yes"), _txt("否", "No")], default=0) == 0:
+                qq_config = _prompt_qq_fields()
+                if qq_config.get("app_id") and qq_config.get("app_secret"):
+                    _write_instance_qq_config(instance_id, qq_config)
+                    status_ok(_txt("QQ 配置已保存", "QQ config saved"))
+        elif choice == 1:
+            instance_id = _prompt_instance_id()
+            if not instance_id:
+                continue
+            confirm = prompt_choice(
+                _txt(f"删除实例 {instance_id}？", f"Delete instance {instance_id}?"),
+                [_txt("删除", "Delete"), _txt("取消", "Cancel")],
+                default=1,
+            )
+            if confirm == 0:
+                if _delete_instance(instance_id):
+                    status_ok(_txt(f"实例已删除: {instance_id}", f"Instance deleted: {instance_id}"))
+                else:
+                    status_warn(_txt(f"未找到实例: {instance_id}", f"Instance not found: {instance_id}"))
+        elif choice == 2:
+            instance_id = _prompt_instance_id()
+            if not instance_id or not manager.instance_exists(instance_id):
+                status_warn(_txt("实例不存在", "Instance not found"))
+                continue
+            existing = {}
+            qq_path = manager.qq_config_path(instance_id)
+            if qq_path.exists():
+                try:
+                    with open(qq_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    existing = {}
+            qq_config = _prompt_qq_fields(existing)
+            if qq_config.get("app_id") and qq_config.get("app_secret"):
+                _write_instance_qq_config(instance_id, qq_config)
+                status_ok(_txt(f"{instance_id} 的 QQ 配置已保存", f"Saved QQ config for {instance_id}"))
+        else:
+            return
+
+
+def _pick_agent_for_quick_setup(available: list, old_backend: str):
+    if old_backend:
+        for agent in available:
+            if agent.name == old_backend:
+                return agent
+    preferred = ["hermes", "codex", "claude_code"]
+    for name in preferred:
+        for agent in available:
+            if agent.name == name:
+                return agent
+    return available[0]
+
+
+def _tail_lines(path: str, max_lines: int = 5) -> list[str]:
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = [line.rstrip() for line in f.readlines()]
+        return [line for line in lines[-max_lines:] if line.strip()]
+    except OSError:
+        return []
+
+
+def _find_recent_log_summary(workspace: str) -> dict:
+    log_dirs = [
+        os.path.join(workspace, "logs"),
+        os.path.join(workspace, "10_logs"),
+    ]
+    candidates = []
+    for log_dir in log_dirs:
+        if not os.path.isdir(log_dir):
+            continue
+        for name in os.listdir(log_dir):
+            path = os.path.join(log_dir, name)
+            if os.path.isfile(path):
+                try:
+                    candidates.append((os.path.getmtime(path), path))
+                except OSError:
+                    pass
+    if not candidates:
+        return {}
+
+    candidates.sort(reverse=True)
+    latest_path = candidates[0][1]
+    lines = _tail_lines(latest_path, max_lines=5)
+    error_line = ""
+    for line in reversed(lines):
+        if re.search(r"(traceback|error|exception|failed|crash|cannot|denied|timeout)", line, re.I):
+            error_line = line.strip()
+            break
+    return {
+        "path": latest_path,
+        "lines": lines[-3:],
+        "error_line": error_line,
+    }
+
+
+def _print_instance_list_localized():
+    from . import manager
+    instances = manager.list_instances()
+    if not instances:
+        print(f"    {_txt('还没有实例', 'No instances yet')}")
+        return
+    for instance_id, status in sorted(instances.items()):
+        running_text = _txt("在运行", "Running") if status == manager.STATUS_RUNNING else _txt("未运行", "Not running")
+        qq_paths = [
+            os.path.join(str(resolve_instance_workspace(instance_id)), "00_config", "qq_config.json"),
+            os.path.join(str(resolve_instance_workspace(instance_id)), "qq_config.json"),
+        ]
+        qq_text = _txt("已配置", "Configured") if any(os.path.exists(p) for p in qq_paths) else _txt("未配置", "Not configured")
+        print(f"    {instance_id}  |  {_txt('状态', 'Status')}: {running_text}  |  QQ: {qq_text}")
+
+
+def interactive_setup(quick: bool = False):
     """Main setup wizard."""
+    _choose_language()
     banner()
+    if quick:
+        status_info("快速模式：使用默认值，尽量减少提问。后续可运行 partner setup 进入完整向导。")
+
+    mode = prompt_choice(
+        _txt("请选择要执行的操作：", "Choose what you want to do:"),
+        [
+            _txt("配置 Partner", "Configure Partner"),
+            _txt("管理实例和 QQ 机器人", "Manage instances and QQ bots"),
+        ],
+        default=0,
+    )
+    if mode == 1:
+        manage_instances()
+        return
 
     # ── Load existing config ──
-    old_workspace = find_workspace()
-    old_config = {}
-    old_qq_cfg = {}
-    old_wx_cfg = {}
+    existing = _discover_existing_setup_context()
+    old_workspace = existing.get("partner_root") or find_workspace()
+    old_config = existing.get("workspace_config") or existing.get("instance_config") or {}
+    old_qq_cfg = existing.get("qq_config") or {}
+    old_wx_cfg = existing.get("wechat_config") or {}
     if old_workspace:
-        old_cfg_path = os.path.join(old_workspace, "partner_config.json")
-        if os.path.exists(old_cfg_path):
-            try:
-                with open(old_cfg_path) as f:
-                    old_config = json.load(f)
-            except Exception:
-                pass
-        old_qq_path = os.path.join(old_workspace, "qq_config.json")
-        if os.path.exists(old_qq_path):
-            try:
-                with open(old_qq_path) as f:
-                    old_qq_cfg = json.load(f)
-            except Exception:
-                pass
-        old_wx_path = os.path.join(old_workspace, "wechat_config.json")
-        if os.path.exists(old_wx_path):
-            try:
-                with open(old_wx_path) as f:
-                    old_wx_cfg = json.load(f)
-            except Exception:
-                pass
-        status_info(f"发现已有配置: {old_workspace}")
-        status_info("将以上次配置为基础，可逐项修改")
-        
-        # Run workspace migration (non-destructive restructuring)
-        from .workspace_manager import migrate_workspace
-        migrate_actions = migrate_workspace(old_workspace)
-        for a in migrate_actions[:5]:
-            status_info(a)
-        if len(migrate_actions) > 5:
-            status_info(f"...还有 {len(migrate_actions)-5} 项调整")
+        status_info(_txt(f"发现已有配置: {old_workspace}", f"Existing setup found: {old_workspace}"))
+        status_info(_txt("将以上次配置为基础，可逐项修改", "Previous settings were detected and can be updated"))
     else:
-        status_info("未发现已有配置，开始全新配置")
+        status_info(_txt("未发现已有配置，开始全新配置", "No existing setup found. Starting fresh"))
 
     # ── Step 1: Detect Agents ──
-    section("检测已安装的 Agent", "🔍")
+    section(_txt("检测已安装的 Agent", "Detect Installed Agents"), "🔍")
     
     agents = [
         detect_hermes(),
@@ -1064,19 +1482,19 @@ def interactive_setup():
         status_ok(f"{a.emoji} {a.display_name}  {info}")
     
     for a in unavailable:
-        status_fail(f"{a.emoji} {a.display_name}  {C.DIM}未安装{C.RESET}")
+        status_fail(f"{a.emoji} {a.display_name}  {C.DIM}{_txt('未安装', 'Not installed')}{C.RESET}")
     
     if not available:
         print()
-        status_warn("没有检测到已安装的 Agent")
-        status_info("请先安装其中一个：")
+        status_warn(_txt("没有检测到已安装的 Agent", "No supported agent was detected"))
+        status_info(_txt("请先安装其中一个：", "Please install one of these first:"))
         print(f"      • Hermes Agent: {C.UNDER}https://hermes-agent.nousresearch.com{C.RESET}")
         print(f"      • Claude Code:  {C.UNDER}https://claude.ai/code{C.RESET}")
         print()
         return
     
     # ── Step 2: Select Agent ──
-    section("选择 Agent 后端", "⚙️")
+    section(_txt("选择 Agent 后端", "Choose Agent Backend"), "⚙️")
 
     old_backend = old_config.get("backend") or old_config.get("agent", {}).get("backend")
     old_agent_idx = 0
@@ -1086,42 +1504,37 @@ def interactive_setup():
                 old_agent_idx = i
                 break
 
-    if len(available) == 1:
+    if quick:
+        selected = _pick_agent_for_quick_setup(available, old_backend)
+        status_info(_txt(f"快速模式自动选择: {selected.emoji} {selected.display_name}", f"Quick mode auto-selected: {selected.emoji} {selected.display_name}"))
+    elif len(available) == 1:
         selected = available[0]
-        status_info(f"自动选择: {selected.emoji} {selected.display_name}")
+        status_info(_txt(f"自动选择: {selected.emoji} {selected.display_name}", f"Auto-selected: {selected.emoji} {selected.display_name}"))
     else:
         options = [f"{a.emoji} {a.display_name}" for a in available]
-        idx = prompt_choice("选择要使用的 Agent：", options, default=old_agent_idx)
+        idx = prompt_choice(_txt("选择要使用的 Agent：", "Choose an agent:"), options, default=old_agent_idx)
         selected = available[idx]
     
-    print(f"\n    {C.GREEN}▶{C.RESET} 使用 {C.BOLD}{selected.emoji} {selected.display_name}{C.RESET}")
+    print(f"\n    {C.GREEN}▶{C.RESET} {_txt('使用', 'Using')} {C.BOLD}{selected.emoji} {selected.display_name}{C.RESET}")
     
     # ── Step 3: Agent Config ──
-    section("Agent 配置", "🔧")
+    section(_txt("Agent 配置", "Agent Configuration"), "🔧")
     
     if selected.config_path:
-        status_info(f"配置文件: {selected.config_path}")
+        status_info(_txt(f"配置文件: {selected.config_path}", f"Config file: {selected.config_path}"))
         if selected.version:
-            status_info(f"默认模型: {selected.version}")
-        
-        reconfigure = prompt_choice("是否需要重新配置 Agent 的 API？", [
-            "使用当前配置（推荐）",
-            "重新配置"
-        ], default=0)
-        
-        if reconfigure == 1:
-            status_info("请手动编辑配置文件后重新运行 setup")
-            print(f"    {C.DIM}{selected.config_path}{C.RESET}")
-            return
+            status_info(_txt(f"默认模型: {selected.version}", f"Default model: {selected.version}"))
     else:
-        status_warn("未找到配置文件")
+        if selected.name == "codex":
+            status_info(_txt("Codex 使用当前 CLI 登录态，无需单独配置文件", "Codex uses the current CLI login session; no extra config file is needed"))
+        else:
+            status_warn(_txt("未找到配置文件", "Config file not found"))
     
     # ── Step 4: Workspace ──
     section("创建工作区", "📂")
     
-    old_ws_path = old_config.get("workspace", {}).get("path", "") if isinstance(old_config.get("workspace"), dict) else ""
-    default_ws = old_ws_path or os.path.expanduser("~/partner_workspace")
-    workspace = prompt_input("工作区路径", default_ws)
+    default_ws = _default_workspace_for_setup(existing, old_config)
+    workspace = default_ws if quick else prompt_input("工作区路径", default_ws)
     workspace = os.path.expanduser(workspace)
     
     # Create workspace structure
@@ -1173,6 +1586,8 @@ def interactive_setup():
     if selected.name == "hermes":
         skill_path = register_hermes_skill(workspace)
         status_ok(f"技能已注册: {skill_path}")
+    elif selected.name == "codex":
+        status_ok("CodexAdapter 已启用，可在配置中作为 agent backend 使用")
     else:
         status_info(f"{selected.display_name} 集成即将推出")
     
@@ -1180,7 +1595,7 @@ def interactive_setup():
     # ── Step 5b: WSL Bridge ──
     from .wsl_bridge import is_wsl, get_windows_drives, get_windows_user_dirs
     
-    if is_wsl():
+    if is_wsl() and not quick:
         section("WSL Bridge (Windows 文件访问)", "🌉")
         status_info("检测到 WSL 环境，可以访问 Windows 文件系统")
         
@@ -1258,55 +1673,66 @@ def interactive_setup():
         if v == old_interval:
             interval_default = i
             break
-    interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=interval_default)
-    interval_minutes = interval_values[interval_idx]
+    if quick:
+        interval_minutes = old_interval if old_interval in interval_values else 30
+        status_info(f"快速模式默认研究频率: 每 {interval_minutes} 分钟")
+    else:
+        interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=interval_default)
+        interval_minutes = interval_values[interval_idx]
     status_info(f"研究频率: 每 {interval_minutes} 分钟")
 
     # ── Step 6a: QQ 官方机器人 ──
     messaging_config = {}
 
     has_qq = bool(old_qq_cfg.get("app_id"))
-    qq_default = 1 if has_qq else 1  # 有旧配置默认选"保持"，无旧配置默认选"跳过"
-    if has_qq:
+    if quick and has_qq:
+        messaging_config["qq"] = {
+            "type": "official",
+            "app_id": old_qq_cfg["app_id"],
+            "app_secret": old_qq_cfg["app_secret"],
+            "is_sandbox": old_qq_cfg.get("is_sandbox", False),
+        }
+        status_ok(f"快速模式保留 QQ 配置: {old_qq_cfg['app_id']}")
+    elif quick:
+        status_info("快速模式跳过 QQ 配置。需要时可稍后运行 partner setup 补充。")
+    elif has_qq:
         qq_prompt = f"修改 QQ 机器人配置？（当前: {old_qq_cfg['app_id']}）"
         qq_options = ["修改配置", "保持现有不变", "删除配置"]
     else:
         qq_prompt = "是否连接 QQ 官方机器人？"
         qq_options = ["连接（需要从 q.qq.com 获取 AppID + AppSecret）", "跳过"]
 
-    qq_enable = prompt_choice(qq_prompt, qq_options, default=0)
+    qq_enable = prompt_choice(qq_prompt, qq_options, default=1 if has_qq else 1)
 
-    if (has_qq and qq_enable == 0) or (not has_qq and qq_enable == 0):
-        if has_qq and qq_enable == 1:
-            # Keep existing
+    if has_qq and qq_enable == 1:
+        messaging_config["qq"] = {
+            "type": "official",
+            "app_id": old_qq_cfg["app_id"],
+            "app_secret": old_qq_cfg["app_secret"],
+            "is_sandbox": old_qq_cfg.get("is_sandbox", False),
+        }
+        status_ok(f"QQ 配置保持不变: {old_qq_cfg['app_id']}")
+    elif qq_enable == 0:
+        qq_app_id = prompt_input("AppID", old_qq_cfg.get("app_id", ""))
+        old_secret_display = "******" if old_qq_cfg.get("app_secret") else ""
+        qq_app_secret = prompt_input("AppSecret", old_secret_display)
+        if qq_app_secret == "******" and old_qq_cfg.get("app_secret"):
+            qq_app_secret = old_qq_cfg["app_secret"]
+        qq_sandbox_default = 0 if old_qq_cfg.get("is_sandbox", True) else 1
+        qq_sandbox = prompt_choice("环境？", [
+            "沙箱环境（测试用）",
+            "正式环境（需要审核上线）"
+        ], default=qq_sandbox_default)
+        if qq_app_id and qq_app_secret:
             messaging_config["qq"] = {
                 "type": "official",
-                "app_id": old_qq_cfg["app_id"],
-                "app_secret": old_qq_cfg["app_secret"],
-                "is_sandbox": old_qq_cfg.get("is_sandbox", False),
+                "app_id": qq_app_id,
+                "app_secret": qq_app_secret,
+                "is_sandbox": (qq_sandbox == 0),
             }
-            status_ok(f"QQ 配置保持不变: {old_qq_cfg['app_id']}")
-        elif qq_enable == 0:
-            qq_app_id = prompt_input("AppID", old_qq_cfg.get("app_id", ""))
-            old_secret_display = "******" if old_qq_cfg.get("app_secret") else ""
-            qq_app_secret = prompt_input("AppSecret", old_secret_display)
-            if qq_app_secret == "******" and old_qq_cfg.get("app_secret"):
-                qq_app_secret = old_qq_cfg["app_secret"]
-            qq_sandbox_default = 0 if old_qq_cfg.get("is_sandbox", True) else 1
-            qq_sandbox = prompt_choice("环境？", [
-                "沙箱环境（测试用）",
-                "正式环境（需要审核上线）"
-            ], default=qq_sandbox_default)
-            if qq_app_id and qq_app_secret:
-                messaging_config["qq"] = {
-                    "type": "official",
-                    "app_id": qq_app_id,
-                    "app_secret": qq_app_secret,
-                    "is_sandbox": (qq_sandbox == 0),
-                }
-                status_ok(f"QQ 官方机器人已配置: {qq_app_id}")
-            else:
-                status_warn("QQ 机器人配置已跳过")
+            status_ok(f"QQ 官方机器人已配置: {qq_app_id}")
+        else:
+            status_warn("QQ 机器人配置已跳过")
     elif has_qq and qq_enable == 2:
         status_info("QQ 机器人配置已删除")
 
@@ -1320,11 +1746,7 @@ def interactive_setup():
             "path": workspace,
             "readonly_dirs": readonly_dirs,
         },
-        "agent": {
-            "backend": selected.name,
-            "model": None,
-            "provider": None,
-        },
+        "agent": _build_agent_config_for_setup(selected, old_config.get("agent", {})),
         "scheduler": {
             "interval_minutes": interval_minutes,
             "max_tasks_per_cycle": 1,
@@ -1333,8 +1755,6 @@ def interactive_setup():
         "setup_time": datetime.now().isoformat(),
         "agent_path": selected.path,
     }
-    if selected.name == "hermes":
-        config["agent"] = apply_runtime_agent_defaults(config["agent"])
     
     if messaging_config:
         config["messaging"] = messaging_config
@@ -1342,10 +1762,19 @@ def interactive_setup():
     save_partner_config_data(workspace, config)
     status_ok(f"配置已保存: {config_path}")
 
+    synced_instances = _sync_multi_instance_defaults(
+        partner_root=workspace,
+        selected_agent=selected,
+        interval_minutes=interval_minutes,
+    )
+    if synced_instances:
+        status_ok(f"多实例默认设置已同步到 {synced_instances} 个实例")
+
     # ── 保存 QQ 机器人独立配置 ──
     qq_cfg = messaging_config.get("qq", {})
     if qq_cfg.get("type") == "official":
-        qq_cfg_path = os.path.join(workspace, "qq_config.json")
+        qq_cfg_path = os.path.join(workspace, "00_config", "qq_config.json")
+        os.makedirs(os.path.dirname(qq_cfg_path), exist_ok=True)
         with open(qq_cfg_path, "w", encoding="utf-8") as f:
             json.dump({
                 "app_id": qq_cfg["app_id"],
@@ -1361,7 +1790,7 @@ def interactive_setup():
         _ensure_qq_dependencies()
     
     # ── 自动后台启动机器人 ──
-    if qq_cfg.get("type") == "official":
+    if qq_cfg.get("type") == "official" and not quick:
         auto_start = prompt_choice("是否现在后台启动 QQ 机器人？", [
             "启动（推荐）",
             "稍后手动启动"
@@ -1393,6 +1822,8 @@ def interactive_setup():
                 with open(pid_path, "w") as f:
                     f.write(str(proc.pid))
                 status_ok(f"QQ 机器人已后台启动 (PID: {proc.pid})")
+    elif qq_cfg.get("type") == "official":
+        status_info("快速模式保留 QQ 配置，但不自动启动。需要时运行 partner start")
     else:
         status_info("未配置 QQ 机器人，跳过自动启动")
     
@@ -1419,19 +1850,23 @@ def interactive_setup():
     # ── Done ──
     print()
     line("━", 50, C.GREEN)
-    print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner Setup Complete!{C.RESET}\n")
+    print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner {'Quick Setup' if quick else 'Setup'} Complete!{C.RESET}\n")
     print(f"  {C.BOLD}Usage:{C.RESET}")
     print(f"    1. Open {selected.emoji} {selected.display_name}")
     print(f"    2. Say: {C.CYAN}'partner, what have you been doing?'{C.RESET}")
     print(f"    3. Or: {C.CYAN}'partner, research XXX'{C.RESET}")
     print(f"    4. Partner will run autonomously in the background\n")
     print(f"  {C.BOLD}Commands:{C.RESET}")
-    print(f"    {C.DIM}partner status       Check Partner status{C.RESET}")
-    print(f"    {C.DIM}partner setup        Reconfigure{C.RESET}")
-    print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
-    print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
-    print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
-    print(f"    {C.DIM}partner queue clear  Clear task queue{C.RESET}")
+    print(f"    {C.DIM}partner{C.RESET}")
+    print(f"    {C.DIM}partner setup{C.RESET}")
+    print(f"    {C.DIM}partner status{C.RESET}")
+    print(f"    {C.DIM}partner start{C.RESET}")
+    print(f"    {C.DIM}partner stop{C.RESET}")
+    print(f"    {C.DIM}partner restart{C.RESET}")
+    print(f"    {C.DIM}partner bot start qq{C.RESET}")
+    print(f"    {C.DIM}partner bot stop qq{C.RESET}")
+    print(f"    {C.DIM}partner update{C.RESET}")
+    print(f"    {C.DIM}partner instance list{C.RESET}")
     print()
 
 
@@ -1440,141 +1875,84 @@ def interactive_setup():
 def show_status(workspace=None):
     """Show Partner status with nice formatting."""
     banner()
-    
-    if not workspace:
-        workspace = find_workspace()
-    
-    if not workspace:
-        status_warn("Partner 未配置")
-        status_info("运行 'partner setup' 开始配置")
-        return
-    
-    if not workspace_has_partner_config(workspace):
-        config_path = resolve_partner_config_path(workspace)
-        status_warn(f"未找到配置: {config_path}")
+    from . import manager
+
+    root = resolve_partner_root()
+    cfg = manager.load_global_config()
+    instances = cfg.get("instances", {}) if isinstance(cfg.get("instances"), dict) else {}
+    if not instances:
+        status_warn(_txt("还没有配置任何实例", "No instances are configured yet"))
+        status_info(_txt("运行 partner setup 来创建和管理实例", "Run partner setup to create and manage instances"))
         return
 
-    config = load_partner_config_data(workspace)
-    
-    section("配置信息", "⚙️")
-    ws_cfg = config.get("workspace", {})
-    ws_path = ws_cfg.get("path", workspace) if isinstance(ws_cfg, dict) else workspace
-    agent_cfg = config.get("agent", {})
-    backend = agent_cfg.get("backend", config.get("backend", "unknown"))
-    status_info(f"工作区: {ws_path}")
-    status_info(f"后端: {backend}")
-    
-    section("研究统计", "📊")
+    section(_txt("实例状态", "Instance Status"), "🧭")
+    for instance_id in sorted(instances.keys()):
+        instance_ws = str(resolve_instance_workspace(instance_id))
+        state_dir = os.path.join(instance_ws, "state")
+        plan_path = os.path.join(state_dir, "active_plan.json")
+        heartbeat_path = os.path.join(state_dir, "heartbeat.json")
+        stats_path = os.path.join(state_dir, "stats.json")
+        qq_paths = [
+            os.path.join(instance_ws, "00_config", "qq_config.json"),
+            os.path.join(instance_ws, "qq_config.json"),
+        ]
+        qq_configured = any(os.path.exists(path) for path in qq_paths)
+        runtime_status = manager.get_instance_status(instance_id)
+        running_text = _txt("在运行", "Running") if runtime_status == manager.STATUS_RUNNING else _txt("未运行", "Not running")
+        hb = ""
+        summary = ""
+        cycles = 0
+        if os.path.exists(plan_path):
+            try:
+                with open(plan_path, "r", encoding="utf-8") as f:
+                    plan = json.load(f)
+                hb = plan.get("last_heartbeat", "")
+                summary = plan.get("heartbeat_summary", "")
+            except Exception:
+                pass
+        elif os.path.exists(heartbeat_path):
+            try:
+                with open(heartbeat_path, "r", encoding="utf-8") as f:
+                    heartbeat = json.load(f)
+                hb = heartbeat.get("last_heartbeat", "")
+            except Exception:
+                pass
+        if os.path.exists(stats_path):
+            try:
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+                cycles = int(stats.get("total_cycles", 0))
+            except Exception:
+                pass
 
-    state_dir = os.path.join(workspace, "state")
-    
-    stats_path = os.path.join(state_dir, "stats.json")
-    if os.path.exists(stats_path):
-        with open(stats_path) as f:
-            stats = json.load(f)
-        print(f"    ⏱  研究周期: {C.BOLD}{stats.get('total_cycles', 0)}{C.RESET}")
-        print(f"    📋 完成任务: {C.BOLD}{stats.get('total_tasks_completed', 0)}{C.RESET}")
-    
-    kb_path = os.path.join(state_dir, "knowledge.json")
-    if os.path.exists(kb_path):
-        with open(kb_path) as f:
-            kb = json.load(f)
-        entries = kb.get("entries", []) if isinstance(kb, dict) else kb
-        print(f"    📚 知识条目: {C.BOLD}{len(entries)}{C.RESET}")
-    
-    tq_path = os.path.join(state_dir, "task_queue.json")
-    if os.path.exists(tq_path):
-        with open(tq_path) as f:
-            tasks = json.load(f)
-        pending = sum(1 for t in tasks if t.get("status") == "pending")
-        print(f"    ⏳ 待执行:   {C.BOLD}{pending}{C.RESET}")
-
-    # ── Active plan (new heartbeat model) ──
-    plan_path = os.path.join(state_dir, "active_plan.json")
-    if os.path.exists(plan_path):
-        with open(plan_path) as f:
-            plan = json.load(f)
-        status_map = {"idle": "空闲", "planning": "规划中", "active": "执行中",
-                      "completed": "已完成", "paused": "已暂停"}
-        raw_status = plan.get("status", "idle")
-        display_status = status_map.get(raw_status, raw_status)
-        hb = plan.get("last_heartbeat", "")
-        summary = plan.get("heartbeat_summary", "")
-        print(f"    💓 心跳:     {hb[:16] if hb else '未知'}")
-        print(f"    📶 状态:     {C.BOLD}{display_status}{C.RESET}")
+        print(f"  {C.BOLD}{_txt('实例', 'Instance')} {instance_id}{C.RESET}")
+        print(f"    {_txt('运行状态', 'Runtime')}: {running_text}")
+        print(f"    QQ: {_txt('已配置', 'Configured') if qq_configured else _txt('未配置', 'Not configured')}")
+        print(f"    {_txt('工作区', 'Workspace')}: {instance_ws}")
+        if hb:
+            print(f"    {_txt('最近心跳', 'Last heartbeat')}: {_fmt_ts_short(hb)}")
+        print(f"    {_txt('研究周期', 'Cycles')}: {cycles}")
         if summary:
-            print(f"    📝 摘要:     {summary[:50]}")
-    else:
-        # Fallback to old heartbeat.json
-        hb_path = os.path.join(state_dir, "heartbeat.json")
-        if os.path.exists(hb_path):
-            with open(hb_path) as f:
-                hb = json.load(f)
-            print(f"    💓 最后心跳: {hb.get('last_heartbeat', 'unknown')[:16]}")
-            s = hb.get('status', 'unknown')
-            print(f"    📶 状态:     {C.BOLD}{s}{C.RESET}")
-
-    # ── Interval ──
-    interval = config.get("scheduler", {}).get("interval_minutes", 15)
-    print(f"    ⏰ 间隔:     {C.BOLD}每 {interval} 分钟{C.RESET}")
-    print(f"    📌 修改:     {C.DIM}partner config set interval N{C.RESET}")
-    
-    section("使用方法", "💡")
-    backend = config.get('backend', 'hermes')
-    if backend == 'hermes':
-        print(f"    打开 Hermes，说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
-    else:
-        print(f"    在 {backend} 中说：{C.CYAN}'partner 最近在研究什么？'{C.RESET}")
-    
-    # ── 机器人状态 ──
-    messaging = config.get("messaging", {})
-    
-    qq_config_path = os.path.join(workspace, "qq_config.json")
-    has_qq_bot = bool(messaging.get("qq")) or os.path.exists(qq_config_path)
-    
-    if has_qq_bot:
-        section("机器人状态", "🤖")
-        for platform, label, cfg_path in [("qq", "QQ", qq_config_path)]:
-            cfg = messaging.get(platform, {})
-            if not cfg and not os.path.exists(cfg_path):
-                continue
-            pid_path = os.path.join(state_dir, f"{platform}_bot.pid")
-            running = False
-            if os.path.exists(pid_path):
-                try:
-                    with open(pid_path) as f:
-                        pid = int(f.read().strip())
-                    try:
-                        os.kill(pid, 0)
-                        running = True
-                    except OSError:
-                        running = False
-                except (ValueError, OSError):
-                    running = False
-            if running:
-                print(f"    {C.GREEN}●{C.RESET} {label} 机器人: 运行中 (PID: {pid})")
-                print(f"      停止: partner bot stop {platform}")
-                log_path = os.path.join(workspace, "logs", f"{platform}_bot.log")
-                if os.path.exists(log_path):
-                    print(f"      日志: {log_path}")
-            else:
-                print(f"    {C.DIM}○{C.RESET} {label} 机器人: 已配置但未运行")
-                log_path = os.path.join(workspace, "logs", f"{platform}_bot.log")
-                if os.path.exists(log_path):
-                    print(f"      日志: {log_path}")
-                if os.path.exists(cfg_path):
-                    print(f"      启动: partner bot start {platform}")
+            print(f"    {_txt('最近摘要', 'Recent summary')}: {summary[:100]}")
+        recent_log = _find_recent_log_summary(instance_ws)
+        if recent_log.get("error_line"):
+            print(f"    {_txt('最近错误', 'Recent error')}: {recent_log['error_line'][:120]}")
+        print()
 
     # ── Commands ──
     print()
     line("─", 48, C.DIM)
     print(f"  {C.BOLD}Commands:{C.RESET}")
-    print(f"    {C.DIM}partner status       Check Partner status{C.RESET}")
-    print(f"    {C.DIM}partner setup        Reconfigure{C.RESET}")
-    print(f"    {C.DIM}partner bot start qq Start QQ bot{C.RESET}")
-    print(f"    {C.DIM}partner bot stop qq  Stop QQ bot{C.RESET}")
-    print(f"    {C.DIM}partner update       Update to latest version{C.RESET}")
-    print(f"    {C.DIM}partner queue clear  Clear task queue{C.RESET}")
+    print(f"    {C.DIM}partner{C.RESET}")
+    print(f"    {C.DIM}partner setup{C.RESET}")
+    print(f"    {C.DIM}partner status{C.RESET}")
+    print(f"    {C.DIM}partner start{C.RESET}")
+    print(f"    {C.DIM}partner stop{C.RESET}")
+    print(f"    {C.DIM}partner restart{C.RESET}")
+    print(f"    {C.DIM}partner bot start qq{C.RESET}")
+    print(f"    {C.DIM}partner bot stop qq{C.RESET}")
+    print(f"    {C.DIM}partner update{C.RESET}")
+    print(f"    {C.DIM}partner instance list{C.RESET}")
 
     print()
 
@@ -1583,61 +1961,19 @@ def find_workspace():
     """Find Partner workspace."""
     # 1. Environment variable
     ws = os.environ.get("PARTNER_WORKSPACE")
-    if ws and os.path.exists(ws):
+    if ws and workspace_has_partner_config(ws):
         return ws
-    
-    # 2. Check pointers and repo directory
-    partner_home = os.path.expanduser("~/.partner")
-    pointer_file = os.path.expanduser("~/.partner_workspace")
 
-    # 2a. Pointer file ~/.partner_workspace (new, avoids colliding with repo dir)
-    if os.path.isfile(pointer_file):
-        try:
-            with open(pointer_file) as f:
-                path = f.read().strip()
-            if path and workspace_has_partner_config(path):
-                return path
-        except OSError:
-            pass
-
-    # 2b. ~/.partner — could be a pointer file (old)
-    if os.path.isfile(partner_home):
-        try:
-            with open(partner_home) as f:
-                path = f.read().strip()
-            if path and workspace_has_partner_config(path):
-                return path
-        except OSError:
-            pass
-
-    # 2c. ~/.partner is the repo directory — check for config inside
-    if os.path.isdir(partner_home):
-        if workspace_has_partner_config(partner_home):
-            return partner_home
-    
-    # 3. Common locations
+    root = str(resolve_partner_root())
     candidates = [
+        root,
         os.path.expanduser("~/partner_workspace"),
         os.path.expanduser("~/.partner_workspace"),
+        os.path.join(root, "instances", "default"),
     ]
-    for c in candidates:
-        if workspace_has_partner_config(c):
-            return c
-
-    # 4. Partner app directory itself (has config.json and partner/__init__.py)
-    partner_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.isfile(os.path.join(partner_dir, "partner", "__init__.py")):
-        return partner_dir
-    cfg_in_partner = os.path.join(partner_dir, "config.json")
-    if os.path.exists(cfg_in_partner):
-        try:
-            with open(cfg_in_partner) as f:
-                data = json.load(f)
-            ws = data.get("workspace", "")
-            if ws and os.path.isfile(os.path.join(ws, "partner", "__init__.py")):
-                return ws
-        except Exception:
-            pass
+    for candidate in candidates:
+        if candidate and workspace_has_partner_config(candidate):
+            return candidate
 
     return None
 

@@ -154,7 +154,7 @@ class AgentConfig:
 @dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
-    interval_minutes: int = 15
+    interval_minutes: int = 30
     max_tasks_per_cycle: int = 1
     heartbeat_timeout_minutes: int = 60
 

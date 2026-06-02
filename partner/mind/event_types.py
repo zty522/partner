@@ -10,7 +10,8 @@
   7  = 低
   10 = 最低（心跳）
 
-保留的事件类型：PROJECT, REPORT, CRON_TICK, WAKE_UP
+保留的事件类型：PROJECT, REPORT, CRON_TICK, WAKE_UP, REFLECTION,
+CROSS_PROJECT, MEMORY_CONSOLIDATE, CONTENT_DIGEST, CONTENT_PATROL
 """
 
 from dataclasses import dataclass, field
@@ -26,6 +27,11 @@ class EventType(str, Enum):
     REPORT = "report"                  # 汇报：向用户推送进展或结果
     CRON_TICK = "cron_tick"            # 由外部 cron 注入的周期性触发
     WAKE_UP = "wake_up"                # 启动唤醒：恢复状态后自动探索
+    REFLECTION = "reflection"          # 独立长反思：跨轮次整理失败/边界/策略
+    CROSS_PROJECT = "cross_project"    # 默认网络：跨项目迁移和旧失败重解释
+    MEMORY_CONSOLIDATE = "memory_consolidate"  # 记忆压缩：保持 prompt 轻量
+    CONTENT_DIGEST = "content_digest"  # 外部内容消化：用户分享/自巡游素材 → 假设/灵感
+    CONTENT_PATROL = "content_patrol"  # 受控巡游：公开内容入口 → content_feed
 
 
 @dataclass
@@ -92,6 +98,33 @@ def wake_up(source: str = "startup") -> MindEvent:
     return MindEvent(
         type=EventType.WAKE_UP,
         priority=1,  # 最高优先级
+        payload={},
+        source=source,
+    )
+
+
+def reflection(source: str = "self_pulse") -> MindEvent:
+    return MindEvent(
+        type=EventType.REFLECTION,
+        priority=7,
+        payload={},
+        source=source,
+    )
+
+
+def cross_project(source: str = "self_pulse") -> MindEvent:
+    return MindEvent(
+        type=EventType.CROSS_PROJECT,
+        priority=8,
+        payload={},
+        source=source,
+    )
+
+
+def memory_consolidate(source: str = "self_pulse") -> MindEvent:
+    return MindEvent(
+        type=EventType.MEMORY_CONSOLIDATE,
+        priority=9,
         payload={},
         source=source,
     )

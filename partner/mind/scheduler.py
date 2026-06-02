@@ -1,7 +1,7 @@
 """Mind Scheduler — 念头调度器。
 
 核心循环 `mind_loop()`：
-1. 内置 15 分钟自脉冲（无需外部 cron）
+1. 内置自脉冲（默认 30 分钟，用于健康检查/恢复，不是 OS 自启动）
 2. 不断从念头池中取出优先级最高的念头
 3. 创建 asyncio.Task 去执行（不阻塞循环）
 4. 当池为空时短暂休眠（0.1 秒）
@@ -22,16 +22,19 @@ logger = logging.getLogger(__name__)
 
 # 最大并发执行数，防止念头溢出
 MAX_CONCURRENT = 10
-# 自脉冲间隔（秒）
-SELF_PULSE_INTERVAL = 300  # 5 分钟
+# 自脉冲间隔（秒）。Partner 进程启动后才生效；断电后的进程启动
+# 需要依赖 Windows 启动项/任务计划，启动后 WAKE_UP 会立即恢复活跃项目。
+SELF_PULSE_INTERVAL = 1800  # 30 分钟
 
 
-async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str = ""):
+async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str = "",
+                    pulse_interval_sec: int = SELF_PULSE_INTERVAL):
     """念头调度器主循环（带持久化 + WAKE_UP 唤醒）。
 
     永久运行，不断从池中取念头、创建 Task 执行。
     当池为空时短暂休眠避免 CPU 空转。
     内置自脉冲定时器，无需外部 cron 注入 CRON_TICK。
+    注意：它不能负责电脑开机后的进程启动，只负责进程已运行后的自检。
     启动时恢复持久化事件并注入 WAKE_UP 唤醒脉冲。
 
     Args:
@@ -66,7 +69,7 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
     except Exception as e:
         logger.warning(f"[调度] WAKE_UP 注入失败: {e}")
 
-    # 内置自脉冲定时器（15 分钟间隔自动注入 CRON_TICK）
+    # 内置自脉冲定时器（30 分钟间隔自动注入 CRON_TICK）
     last_pulse = 0.0
     # 空闲检测
     last_nonempty_time = asyncio.get_event_loop().time()
@@ -77,9 +80,9 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
             # 清理已完成的 task
             pending_tasks = {t for t in pending_tasks if not t.done()}
 
-            # ── 自脉冲：每 15 分钟自动注入 CRON_TICK ──
+            # ── 自脉冲：每 30 分钟自动注入 CRON_TICK ──
             now = asyncio.get_event_loop().time()
-            if now - last_pulse >= SELF_PULSE_INTERVAL:
+            if now - last_pulse >= pulse_interval_sec:
                 last_pulse = now
                 await pool.put(MindEvent(
                     type=EventType.CRON_TICK,

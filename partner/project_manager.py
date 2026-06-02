@@ -149,6 +149,6 @@ def format_status(project_data: Optional[Dict]) -> str:
         for i, a in enumerate(actions[:3], 1):
             parts.append(f"  {i}. {a}")
     else:
-        parts.append("下一步：等待你的进一步指示。")
+        parts.append("下一步：根据项目状态选择一个最小动作继续推进。")
 
     return "\n".join(parts)

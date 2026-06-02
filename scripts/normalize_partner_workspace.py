@@ -140,8 +140,9 @@ def build_user_and_system_views(instance_dir: Path):
         "",
         "建议优先看：",
         "- `current_project/` 当前项目",
+        "- `reports/` 自动生成的阶段汇报 PPT/PDF",
         "- `projects/` 每个项目的可读视图",
-        "- 每个项目里的 `project_overview.md`、`state.md`、`exploration_log.md`",
+        "- 每个项目里的 `project_overview.md`、`state.md`、`exploration_log.md`、`reports/`",
     ]
     ensure_text(user_dir / "README.md", "\n".join(user_readme) + "\n")
     ensure_link(user_dir / "current_project", active_dir)
@@ -172,6 +173,7 @@ def ensure_project_files(project_dir: Path):
         "- `state.md`: 当前项目状态摘要",
         "- `exploration_log.md`: 用自然语言记录探索过程",
         "- `log.md`: 原始执行日志（保留兼容）",
+        "- `reports/`: 阶段汇报 PPT/PDF",
     ]
     other_files = sorted([p.name for p in project_dir.iterdir() if p.is_file() and p.name not in {"project_overview.md"}])
     if other_files:

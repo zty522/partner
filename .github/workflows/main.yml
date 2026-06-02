@@ -19,7 +19,7 @@ jobs:
         run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'
       - uses: softprops/action-gh-release@v2
         with:
-          name: v0.5.0 - Autonomous Runtime Refactor
-          body_path: release_v0.5.0.md
+          name: v0.6.0 - Long-Term Research Partner
+          body_path: release_v0.6.0.md
           files: installer/output/*.exe
           overwrite_files: true

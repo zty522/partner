@@ -1,6 +1,6 @@
 #!/bin/bash
 # Partner Release Script
-# Usage: ./release.sh v0.3.0 "添加微信/QQ支持"
+# Usage: ./release.sh v0.6.0 "Long-term research partner"
 
 set -e
 
@@ -9,7 +9,7 @@ MESSAGE=$2
 
 if [ -z "$VERSION" ] || [ -z "$MESSAGE" ]; then
     echo "Usage: ./release.sh <version> <message>"
-    echo "Example: ./release.sh v0.3.0 '添加微信/QQ支持'"
+    echo "Example: ./release.sh v0.6.0 'Long-term research partner'"
     exit 1
 fi
 

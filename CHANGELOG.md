@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0] - 2026-06-02 (Long-term research partner)
+
+### Added
+
+- Continuous project lifeline: active projects can keep creating their own follow-up project steps after each round.
+- Long-term research memory: project cards, lessons, user ideas, risk events, growth events, and transfer candidates.
+- Research habits: minimal closed-loop execution, evidence-first outputs, leakage checks, memory consolidation, reflection, and report deduplication.
+- Brain-inspired runtime model: hippocampus-like episodes, synapse-like method memory, prefrontal project contracts, amygdala-like risk checks, cerebellum-like habits, and default-mode reflection.
+- Stage report generation: Markdown reports can be converted into PPTX and PDF under `user/reports/<project>/` and `user/current_project/reports/`.
+- Content feed groundwork for user-shared articles, posts, videos, links, screenshots, and public content signals.
+- Codex adapter support alongside Hermes and Direct mode.
+- Windows desktop launcher and GUI asset updates.
+
+### Changed
+
+- README rewritten in English to describe the current Partner architecture and usage.
+- GitHub release workflow updated for `v0.6.0`.
+- Project brief and research memory cleanup strengthened to reduce prompt bloat and file-list noise.
+- User-facing QQ reports are more aggressively filtered to avoid internal errors, repeated fallback text, and file-operation pseudo-progress.
+- Setup/runtime version metadata updated to `0.6.0`.
+
 ## [0.5.0] - 2026-06-01 (Autonomous runtime refactor)
 
 ### 🚀 当前 release 对应的主版本内容

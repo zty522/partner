@@ -341,6 +341,8 @@ class QQQfficialBridge:
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
 
+            shared_content = self._record_shared_content_signal(msg, user_text)
+
             if self.config.send_thinking_hint:
                 self._send_reply(msg, "思考中......")
 
@@ -361,6 +363,8 @@ class QQQfficialBridge:
                 sender_name=msg.sender_name or "QQ用户",
                 text=user_text,
             )
+            if shared_content:
+                self._nudge_content_digest(shared_content)
             reply = self._simplify_response(decision.reply_to_user)
             self._mark_proactive_quiet("user_interaction", seconds=300)
             self._add_user_context(msg.sender_id, "user", user_text)
@@ -537,7 +541,7 @@ class QQQfficialBridge:
     def _summarize_recent_project_log(self, focus_project: str) -> str:
         try:
             from .project_state import get_project_dir
-            log_path = os.path.join(get_project_dir(self.workspace, focus_project), "log.md")
+            log_path = os.path.join(get_project_dir(self.workspace, focus_project), "trace_detail.md")
             if not os.path.exists(log_path):
                 return ""
             with open(log_path, "r", encoding="utf-8") as f:
@@ -552,6 +556,8 @@ class QQQfficialBridge:
             if re.match(r"^\d{4}-\d{2}-\d{2}", line):
                 continue
             if "我先继续在后台处理，晚点给你汇报进展" in line:
+                continue
+            if "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__" in line:
                 continue
             if "Hermes 正在处理中，下一轮再汇报进展" in line:
                 continue
@@ -656,15 +662,22 @@ class QQQfficialBridge:
         if not reply:
             return reply
 
+        if reply.strip() == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
+            return "收到，我会按当前主线继续推进。"
+
         for bad in (
             "处理时出了点问题",
             "处理时出了点问题，稍后再试",
             "处理超时了，稍后再试吧",
             "请求超时，请稍后再试",
             "我这边API有点忙，晚点再聊",
+            "我先继续在后台处理，晚点给你汇报进展",
+            "目前正在看你的项目信息，还没有确定具体方向。你这边有什么想做的，可以直接跟我说，我来安排推进。",
         ):
             if reply.strip() == bad:
-                return "我先继续在后台处理，晚点给你汇报进展"
+                return "收到，我会按当前主线继续推进。"
+        if re.search(r"(还没有确定具体方向|没有确定具体方向|你这边有什么想做|有什么想做的|可以直接跟我说|我来安排推进|我这轮还在继续推进)", reply):
+            return "我正在按当前 workspace 的主线继续推进，会把结果写进项目记录。"
 
         reply = reply.replace("API老超时", "后台这轮不太顺")
         reply = reply.replace("API 有点忙", "后台这轮不太顺")
@@ -676,7 +689,7 @@ class QQQfficialBridge:
         filtered_lines = []
         removed_question = False
         for line in lines:
-            if re.search(r"(要不要|想不想|你看|还是我|直接说就行|现在可以直接说|你有想.*吗|你想怎么处理|你想先搞哪个)", line):
+            if re.search(r"(要不要|想不想|你看|还是我|直接说就行|现在可以直接说|你有想.*吗|你想怎么处理|你想先搞哪个|有啥想继续搞|随时说|随时告诉我|你想让我|你要我|请选择|给我方向|你这边有什么想做|有什么想做的|直接跟我说|我来安排推进)", line):
                 removed_question = True
                 continue
             if "?" in line or "？" in line:
@@ -685,7 +698,7 @@ class QQQfficialBridge:
                     continue
             filtered_lines.append(line)
         if removed_question:
-            filtered_lines.append("我会按现在这条线继续往下推，有结果了再跟你汇报。")
+            filtered_lines.append("我会按现在这条线继续往下推。")
             reply = "\n".join(filtered_lines)
 
         # ── Safety filter: catch internal leaks before any formatting ──
@@ -707,7 +720,7 @@ class QQQfficialBridge:
 
         # DANGEROUS COMMAND / heredoc warnings
         if re.search(r'DANGEROUS COMMAND|script execution via heredoc|PYEOF', reply):
-            return "好，开始弄了，有进展了跟你说"
+            return "这轮遇到命令安全拦截，我会改用更安全的方式继续推进。"
 
         # Expose "Hermes" as internal architecture name
         reply = re.sub(r'Hermes\s*(正在|正在处理|在处理|正在处理中)', r'我\1', reply)
@@ -728,7 +741,7 @@ class QQQfficialBridge:
 
         # "Hermes 正在处理中，下一轮再汇报进展。" — generic catch
         if re.match(r'^.*正在处理中.*汇报进展.*$', reply.strip()):
-            return "在弄了，有进展了跟你说"
+            return "当前主线还在推进中。"
 
         # ── Markdown formatting ──
 
@@ -981,6 +994,43 @@ class QQQfficialBridge:
 
         return f"改好了，以后每 {minutes} 分钟找你一次"
 
+    def _record_shared_content_signal(self, msg: QQMessage, user_text: str) -> Optional[dict]:
+        """Record links/social/video/article shares into the content feed."""
+        try:
+            from .content_feed import record_shared_content
+            project = self._infer_focus_project() or ""
+            return record_shared_content(
+                self.workspace,
+                text=user_text,
+                project=project,
+                sender=msg.sender_name or msg.sender_id,
+                source="qq_user_share",
+                raw=msg.raw,
+            )
+        except Exception as exc:
+            logger.debug(f"failed to record shared content: {exc}")
+            return None
+
+    def _nudge_content_digest(self, item: dict):
+        """Wake the mind loop to digest a newly shared external content item."""
+        try:
+            from .mind.event_types import EventType, MindEvent
+            from .mind.pool import MindPool
+            pool = MindPool.get_sync_instance()
+            if not pool:
+                return
+            pool.put_threadsafe(MindEvent(
+                type=EventType.CONTENT_DIGEST,
+                priority=3,
+                payload={
+                    "content_id": item.get("id", ""),
+                    "project": item.get("project", ""),
+                },
+                source="qq:shared_content",
+            ))
+        except Exception as exc:
+            logger.debug(f"failed to nudge content digest: {exc}")
+
     def _get_interval_minutes(self) -> int:
         """Read configured research interval from partner_config.json."""
         try:
@@ -1159,8 +1209,19 @@ class QQQfficialBridge:
         text = (content or "").strip()
         if not text:
             return text
+        if text == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
+            return "收到，我会按当前主线继续推进。"
+        if "我先继续在后台处理，晚点给你汇报进展" in text:
+            text = text.replace("我先继续在后台处理，晚点给你汇报进展", "我会按当前主线继续推进。")
+        if "处理超时了，稍后再试吧" in text:
+            text = text.replace("处理超时了，稍后再试吧", "本轮还在推进中。")
+        text = re.sub(
+            r"(有啥想继续搞|随时说|随时告诉我|你想让我|你要我|要不要|请选择|给我方向).*",
+            "我会按当前主线继续推进。",
+            text,
+        ).strip()
         if text.startswith("{") and '"type": "partner_heartbeat"' in text:
-            return "我这轮有一些新进展，正在整理成更清楚的汇报，稍后发你。"
+            return "我这轮有一些新进展，正在整理成更清楚的汇报。"
         return text
 
     def send_file_proactive(self, to_user: str, file_data: bytes,

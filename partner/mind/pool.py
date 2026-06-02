@@ -65,6 +65,7 @@ class MindPool:
                 d = self._event_to_dict(ev)
                 d["wake_after"] = wake_at
                 data.append(d)
+            data = self._dedupe_event_dicts(data)
             os.makedirs(os.path.dirname(self._save_path), exist_ok=True)
             with open(self._save_path, "w", encoding="utf-8") as f:
                 _json.dump(data, f, ensure_ascii=False, indent=2)
@@ -89,6 +90,7 @@ class MindPool:
                     d = self._event_to_dict(ev)
                     d["wake_after"] = wake_at
                     data.append(d)
+                data = self._dedupe_event_dicts(data)
                 with open(self._save_path, "w", encoding="utf-8") as f:
                     _json.dump(data, f, ensure_ascii=False, indent=2)
             except Exception:
@@ -102,6 +104,7 @@ class MindPool:
             import json as _json
             with open(self._save_path, "r", encoding="utf-8") as f:
                 data = _json.load(f)
+            data = self._dedupe_event_dicts(data if isinstance(data, list) else [])
             count = 0
             for d in data:
                 ev = self._dict_to_event(d)
@@ -147,6 +150,60 @@ class MindPool:
             wake_after=d.get("wake_after"),
         )
 
+    @staticmethod
+    def _dedupe_key_from_dict(d: dict) -> tuple | None:
+        if not isinstance(d, dict):
+            return None
+        payload = d.get("payload") or {}
+        event_type = str(d.get("type", "")).lower()
+        if event_type == "project":
+            title = str(payload.get("title") or "").strip()
+            if not title:
+                return None
+            return ("project", title)
+        if event_type == "content_digest":
+            content_id = str(payload.get("content_id") or "").strip()
+            project = str(payload.get("project") or "").strip()
+            if content_id:
+                return ("content_digest", content_id)
+            if project:
+                return ("content_digest_project", project)
+        return None
+
+    @classmethod
+    def _dedupe_event_dicts(cls, rows: list[dict]) -> list[dict]:
+        """Keep one pending PROJECT per project title; keep the earliest wake."""
+        best_by_key = {}
+        out = []
+        for row in rows or []:
+            key = cls._dedupe_key_from_dict(row)
+            if not key:
+                out.append(row)
+                continue
+            current = best_by_key.get(key)
+            if current is None:
+                best_by_key[key] = row
+                continue
+            cur_wake = current.get("wake_after") or 0
+            row_wake = row.get("wake_after") or 0
+            if row_wake and (not cur_wake or row_wake < cur_wake):
+                best_by_key[key] = row
+        out.extend(best_by_key.values())
+        return out
+
+    def _has_duplicate_event(self, event: MindEvent) -> bool:
+        d = self._event_to_dict(event)
+        key = self._dedupe_key_from_dict(d)
+        if not key:
+            return False
+        for ev in list(getattr(self._queue, "_queue", [])):
+            if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
+                return True
+        for _, (_, ev) in self._waiting_room.items():
+            if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
+                return True
+        return False
+
     @classmethod
     async def get_instance(cls) -> 'MindPool':
         if cls._instance is None:
@@ -165,6 +222,9 @@ class MindPool:
 
     async def put(self, event: MindEvent):
         """放入一个念头。如设置了 wake_after 则进入等待室。"""
+        if self._has_duplicate_event(event):
+            logger.info(f"[MIND] SKIP duplicate event type={event.type.value} payload={event.payload}")
+            return
         if event.wake_after and event.wake_after > _time.time():
             self._waiting_room[event.id] = (event.wake_after, event)
             logger.info(f"[MIND] PUT event_type={event.type.value}, id={event.id[:8]}, "
@@ -178,6 +238,9 @@ class MindPool:
             self.save()
 
     def put_threadsafe(self, event: MindEvent):
+        if self._has_duplicate_event(event):
+            logger.info(f"[MIND] SKIP duplicate event type={event.type.value} payload={event.payload} [threadsafe]")
+            return
         self._thread_queue.put(event)
         self._total_put += 1
         logger.info(f"[MIND] PUT(event_type={event.type.value}, id={event.id[:8]}, "

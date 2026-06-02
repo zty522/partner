@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 import threading
+import webbrowser
+import ctypes
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 from datetime import datetime
@@ -74,6 +76,10 @@ L = {
         "logs_title": "探索记录",
         "btn_reload": "  ⟳  刷新  ",
         "last_update": "最后更新: {time}",
+        "lang_toggle": "EN",
+        "setup_title": "连接 Partner",
+        "setup_sub": "选择本机工作区，或接入 Linux / WSL 上正在运行的 Partner。",
+        "chat_remote_readonly": "当前连接的是 Linux / WSL 端 Partner 工作区。Windows 桌面端暂时只提供查看，不直接接管聊天与运行。",
     },
     "en": {
         "app_title": "Partner",
@@ -114,6 +120,10 @@ L = {
         "logs_title": "Records",
         "btn_reload": "  ⟳  Refresh  ",
         "last_update": "Last updated: {time}",
+        "lang_toggle": "中文",
+        "setup_title": "Connect Partner",
+        "setup_sub": "Choose a local workspace or connect to a Partner already running on Linux / WSL.",
+        "chat_remote_readonly": "This window is connected to a Linux / WSL Partner workspace. The Windows desktop app is currently view-only for status and records.",
     },
 }
 
@@ -127,33 +137,40 @@ def tr(key, lang="zh", **kw):
 
 # ── Modern Theme ──
 T = {
-    "bg":        "#0d1117",
-    "bg2":       "#161b22",
-    "bg3":       "#21262d",
-    "card":      "#161b22",
-    "card_hl":   "#30363d",
-    "accent":    "#58a6ff",
-    "accent2":   "#79c0ff",
-    "accent3":   "#1f6feb",
-    "accent_h":  "#79c0ff",
-    "green":     "#3fb950",
-    "yellow":    "#d29922",
-    "red":       "#f85149",
-    "blue":      "#58a6ff",
-    "pink":      "#f778ba",
-    "txt":       "#c9d1d9",
-    "txt2":      "#8b949e",
-    "txt3":      "#484f58",
-    "border":    "#21262d",
-    "input_bg":  "#0d1117",
-    "chat_user": "#1f6feb",
-    "chat_bot":  "#21262d",
-    "glow":      "#0d1117",
+    "bg":        "#0a0d12",
+    "bg2":       "#10151d",
+    "bg3":       "#171e28",
+    "card":      "#121923",
+    "card_hl":   "#1d2735",
+    "accent":    "#69b1ff",
+    "accent2":   "#9bc8ff",
+    "accent3":   "#2f7cf6",
+    "accent_h":  "#8cc2ff",
+    "green":     "#44c38a",
+    "yellow":    "#f0b35a",
+    "red":       "#ff6b6b",
+    "blue":      "#69b1ff",
+    "pink":      "#ff8cb3",
+    "txt":       "#eef4ff",
+    "txt2":      "#99a7bf",
+    "txt3":      "#627086",
+    "border":    "#1e2937",
+    "input_bg":  "#0c1219",
+    "chat_user": "#2f7cf6",
+    "chat_bot":  "#182230",
+    "glow":      "#0c1219",
+    "side":      "#0f141d",
 }
 
 FONT = ("Segoe UI Variable Text", "Microsoft YaHei UI", "Segoe UI", "TkDefaultFont")
 FONT_MONO = ("Cascadia Mono", "Cascadia Code", "Consolas", "monospace")
-FONT_HEADING = ("Segoe UI Variable Display", "Segoe UI", "TkDefaultFont")
+FONT_HEADING = ("Segoe UI Variable Display", "Microsoft YaHei UI", "Segoe UI", "TkDefaultFont")
+
+FONT_SIZE_BASE = 12
+FONT_SIZE_SMALL = 10
+FONT_SIZE_BODY = 13
+FONT_SIZE_TITLE = 16
+FONT_SIZE_HERO = 28
 
 
 # ── Dual Installation Check ──────────────────────────────
@@ -222,6 +239,215 @@ def center_window(win, w, h):
     win.geometry(f"{w}x{h}+{x}+{y}")
 
 
+def setup_dpi_awareness(root=None):
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    if root is not None:
+        try:
+            dpi = root.winfo_fpixels("1i")
+            root.tk.call("tk", "scaling", max(1.6, dpi / 72.0))
+        except Exception:
+            try:
+                root.tk.call("tk", "scaling", 1.75)
+            except Exception:
+                pass
+
+
+def is_wsl_unc_path(path):
+    if not path:
+        return False
+    norm = str(path).replace("/", "\\")
+    return norm.startswith("\\\\wsl$\\")
+
+
+def detect_wsl_distros():
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-l", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=CREATION_FLAGS,
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def linux_path_to_unc(linux_path, distro_name):
+    if not linux_path or not distro_name:
+        return ""
+    clean = linux_path.strip().replace("/", "\\").lstrip("\\")
+    return f"\\\\wsl$\\{distro_name}\\{clean}"
+
+
+def save_gui_bridge_settings(data):
+    path = os.path.expanduser("~/.partner_gui_bridge.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def load_gui_bridge_settings():
+    path = os.path.expanduser("~/.partner_gui_bridge.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def load_json_file(path):
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def read_text_file(path):
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def count_jsonl_lines(path):
+    if not path or not os.path.exists(path):
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def parse_iso(ts):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def format_relative_time(ts):
+    dt = parse_iso(ts)
+    if not dt:
+        return "-"
+    delta = datetime.now(dt.tzinfo) - dt if dt.tzinfo else datetime.now() - dt
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return "刚刚"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} 分钟前"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时前"
+    days = hours // 24
+    return f"{days} 天前"
+
+
+def format_duration(ts):
+    dt = parse_iso(ts)
+    if not dt:
+        return "-"
+    delta = datetime.now(dt.tzinfo) - dt if dt.tzinfo else datetime.now() - dt
+    total_hours = max(0, int(delta.total_seconds() // 3600))
+    days, hours = divmod(total_hours, 24)
+    if days > 0:
+        return f"{days}天 {hours}小时"
+    if hours > 0:
+        return f"{hours}小时"
+    minutes = max(1, int(delta.total_seconds() // 60))
+    return f"{minutes}分钟"
+
+
+def format_tokens(value):
+    if not value:
+        return "0"
+    if value >= 1000000:
+        return f"{value / 1000000:.1f}M"
+    if value >= 1000:
+        return f"{value / 1000:.1f}k"
+    return str(value)
+
+
+def summarize_markdown(md_text):
+    if not md_text:
+        return ""
+    lines = []
+    for raw in md_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            line = line[2:]
+        lines.append(line)
+    return lines[0][:140] if lines else ""
+
+
+def read_token_usage(instance_dir):
+    total = 0
+    today = 0
+    csv_path = os.path.join(instance_dir, "20_records", "metrics", "token_usage.csv")
+    if os.path.exists(csv_path):
+        try:
+            import csv
+            today_key = datetime.now().date().isoformat()
+            with open(csv_path, "r", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    tokens = int(row.get("total_tokens", 0) or 0)
+                    total += tokens
+                    if (row.get("timestamp", "") or "").startswith(today_key):
+                        today += tokens
+        except Exception:
+            total = 0
+            today = 0
+    if total:
+        return total, today
+
+    log_path = os.path.join(instance_dir, "logs", "hermes_chat.jsonl")
+    if not os.path.exists(log_path):
+        return 0, 0
+    today_key = datetime.now().date().isoformat()
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                tokens = int(row.get("total_tokens_est") or 0)
+                total += tokens
+                if (row.get("ts", "") or "").startswith(today_key):
+                    today += tokens
+    except Exception:
+        return 0, 0
+    return total, today
+
+
 # ════════════════════════════════════════════════════════════════
 #  UI Components
 # ════════════════════════════════════════════════════════════════
@@ -238,7 +464,7 @@ class AccentCard(tk.Frame):
             h = tk.Frame(body, bg=T["card"])
             h.pack(fill=tk.X, padx=18, pady=(14, 2))
             tk.Label(h, text=title, bg=T["card"], fg=accent_color or T["accent2"],
-                     font=(FONT_HEADING[0], 11, "bold"), anchor=tk.W).pack(side=tk.LEFT)
+                     font=(FONT_HEADING[0], FONT_SIZE_TITLE, "bold"), anchor=tk.W).pack(side=tk.LEFT)
         self.body = body
 
 
@@ -267,7 +493,7 @@ class Btn(tk.Frame):
         hover_fg = hover_fg or "#ffffff"
         super().__init__(parent, bg=bg, **kw)
         self._label = tk.Label(self, text=text, bg=bg, fg=fg,
-                               font=(FONT[0], 10), cursor="hand2", padx=16, pady=7)
+                               font=(FONT[0], FONT_SIZE_BASE), cursor="hand2", padx=18, pady=10)
         self._label.pack()
         self._bg = bg
         self._fg = fg
@@ -297,10 +523,15 @@ class PartnerApp:
     def __init__(self, root):
         self.root = root
         self._lang = "zh"
+        setup_dpi_awareness(self.root)
         self.root.title(tr("app_title", self._lang))
-        self.root.minsize(920, 680)
+        self.root.minsize(1180, 820)
         self.root.configure(bg=T["bg"])
-        center_window(self.root, 1100, 760)
+        center_window(self.root, 1360, 920)
+        try:
+            self.root.option_add("*Font", f"{{{FONT[0]}}} {FONT_SIZE_BASE}")
+        except Exception:
+            pass
 
         # Dual install check
         conflict = check_conflicting_installation()
@@ -316,6 +547,8 @@ class PartnerApp:
             )
 
         self.workspace = find_workspace()
+        self.bridge_settings = load_gui_bridge_settings()
+        self.workspace_mode = "wsl" if is_wsl_unc_path(self.workspace) else "local"
         self._auto_refresh_id = None
         self._build_ui()
 
@@ -357,50 +590,39 @@ class PartnerApp:
         for w in main.winfo_children():
             w.destroy()
 
-        # ── Header ──
-        hdr = tk.Frame(main, bg=T["bg"])
-        hdr.pack(fill=tk.X, pady=(0, 12))
+        shell = tk.Frame(main, bg=T["bg"])
+        shell.pack(fill=tk.BOTH, expand=True)
 
-        lf = tk.Frame(hdr, bg=T["bg"])
-        lf.pack(side=tk.LEFT)
-        badge = tk.Canvas(lf, width=32, height=32, bg=T["accent3"],
-                          highlightthickness=0)
-        badge.pack(side=tk.LEFT, padx=(0, 10))
-        badge.create_oval(3, 3, 29, 29, fill=T["accent"], outline="")
-        badge.create_text(16, 16, text="P", fill="white",
-                          font=(FONT_HEADING[0], 15, "bold"))
+        side = tk.Frame(shell, bg=T["side"], width=250, highlightbackground=T["border"], highlightthickness=1)
+        side.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 16))
+        side.pack_propagate(False)
 
-        tk.Label(lf, text="Partner", bg=T["bg"], fg=T["txt"],
-                 font=(FONT_HEADING[0], 22, "bold")).pack(side=tk.LEFT)
+        brand = tk.Frame(side, bg=T["side"])
+        brand.pack(fill=tk.X, padx=18, pady=(18, 18))
+        badge = tk.Canvas(brand, width=40, height=40, bg=T["side"], highlightthickness=0)
+        badge.pack(side=tk.LEFT, padx=(0, 12))
+        badge.create_oval(3, 3, 37, 37, fill=T["accent3"], outline="")
+        badge.create_text(20, 20, text="P", fill="white", font=(FONT_HEADING[0], 18, "bold"))
+        title_wrap = tk.Frame(brand, bg=T["side"])
+        title_wrap.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(title_wrap, text="Partner", bg=T["side"], fg=T["txt"],
+                 font=(FONT_HEADING[0], 24, "bold"), anchor=tk.W).pack(anchor=tk.W)
+        mode_text = "Linux / WSL 已连接" if self.workspace_mode == "wsl" else "Windows 本地工作区"
+        tk.Label(title_wrap, text=mode_text, bg=T["side"], fg=T["txt2"],
+                 font=(FONT[0], FONT_SIZE_SMALL), anchor=tk.W).pack(anchor=tk.W, pady=(2, 0))
 
-        rf = tk.Frame(hdr, bg=T["bg"])
-        rf.pack(side=tk.RIGHT)
+        side_status = tk.Frame(side, bg=T["bg3"])
+        side_status.pack(fill=tk.X, padx=18, pady=(0, 18))
+        top_line = tk.Frame(side_status, bg=T["bg3"])
+        top_line.pack(fill=tk.X, padx=12, pady=(10, 4))
+        self.dot_canvas = tk.Canvas(top_line, width=12, height=12, bg=T["bg3"], highlightthickness=0)
+        self.dot_canvas.pack(side=tk.LEFT, padx=(0, 8))
+        self.dot_id = self.dot_canvas.create_oval(1, 1, 11, 11, fill=T["txt3"], outline="", width=0)
+        self.hdr_status = tk.Label(top_line, text="", bg=T["bg3"], fg=T["txt2"], font=(FONT[0], FONT_SIZE_BASE))
+        self.hdr_status.pack(side=tk.LEFT)
 
-        lang_text = tr("lang_toggle", self._lang)
-        self.lang_btn = tk.Label(rf, text=lang_text, bg=T["bg3"], fg=T["txt2"],
-                                 font=(FONT[0], 10), cursor="hand2", padx=10, pady=3)
-        self.lang_btn.pack(side=tk.RIGHT, padx=(8, 0))
-        self.lang_btn.bind("<Button-1>", lambda e: self._toggle_lang())
-        self.lang_btn.bind("<Enter>", lambda e: self.lang_btn.configure(bg=T["card_hl"]))
-        self.lang_btn.bind("<Leave>", lambda e: self.lang_btn.configure(bg=T["bg3"]))
-
-        self.dot_canvas = tk.Canvas(rf, width=12, height=12, bg=T["bg"],
-                                    highlightthickness=0)
-        self.dot_canvas.pack(side=tk.RIGHT, padx=(0, 6))
-        self.dot_id = self.dot_canvas.create_oval(1, 1, 11, 11,
-            fill=T["txt3"], outline="", width=0)
-
-        self.hdr_status = tk.Label(rf, text="", bg=T["bg"], fg=T["txt3"],
-                                   font=(FONT[0], 10))
-        self.hdr_status.pack(side=tk.RIGHT)
-
-        # ── Tab Bar ──
-        self._tab_frame = tk.Frame(main, bg=T["bg"])
-        self._tab_frame.pack(fill=tk.X, pady=(0, 0))
-
-        tab_bar = tk.Frame(self._tab_frame, bg=T["bg2"], height=40)
-        tab_bar.pack(fill=tk.X)
-        tab_bar.pack_propagate(False)
+        self._tab_frame = tk.Frame(side, bg=T["side"])
+        self._tab_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
 
         self._tabs = [
             (self._tr("tab_dashboard"), "📊"),
@@ -413,13 +635,14 @@ class PartnerApp:
 
         for idx, (name, icon) in enumerate(self._tabs):
             is_active = (idx == 0)
-            tab_bg = T["card"] if is_active else T["bg2"]
-            tab_fg = T["txt"] if is_active else T["txt3"]
-            btn = tk.Frame(tab_bar, bg=tab_bg, cursor="hand2")
-            btn.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 0))
-            label = tk.Label(btn, text=f"  {icon}  {name}  ",
+            tab_bg = T["card_hl"] if is_active else T["side"]
+            tab_fg = T["txt"] if is_active else T["txt2"]
+            btn = tk.Frame(self._tab_frame, bg=tab_bg, cursor="hand2")
+            btn.pack(fill=tk.X, pady=4)
+            label = tk.Label(btn, text=f"  {icon}  {name}",
                              bg=tab_bg, fg=tab_fg,
-                             font=(FONT[0], 10), padx=12)
+                             font=(FONT[0], 13, "bold" if is_active else "normal"),
+                             padx=18, pady=14, anchor=tk.W)
             label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 
             def make_handler(i):
@@ -432,14 +655,14 @@ class PartnerApp:
                     if i != self._active_tab:
                         for c in e.widget.winfo_children():
                             if isinstance(c, tk.Label):
-                                c.configure(bg=T["card"])
-                        e.widget.configure(bg=T["card"])
+                                c.configure(bg=T["bg3"])
+                        e.widget.configure(bg=T["bg3"])
                 def on_leave(e):
                     if i != self._active_tab:
                         for c in e.widget.winfo_children():
                             if isinstance(c, tk.Label):
-                                c.configure(bg=T["bg2"])
-                        e.widget.configure(bg=T["bg2"])
+                                c.configure(bg=T["side"])
+                        e.widget.configure(bg=T["side"])
                 return on_enter, on_leave
             enter_fn, leave_fn = make_hover(idx)
             btn.bind("<Enter>", enter_fn)
@@ -449,7 +672,35 @@ class PartnerApp:
 
             self._tab_buttons.append(btn)
 
-            content = tk.Frame(main, bg=T["bg"])
+        side_footer = tk.Frame(side, bg=T["side"])
+        side_footer.pack(side=tk.BOTTOM, fill=tk.X, padx=18, pady=18)
+        lang_text = tr("lang_toggle", self._lang)
+        self.lang_btn = tk.Label(side_footer, text=lang_text, bg=T["bg3"], fg=T["txt2"],
+                                 font=(FONT[0], FONT_SIZE_BASE), cursor="hand2", padx=14, pady=8)
+        self.lang_btn.pack(side=tk.LEFT)
+        self.lang_btn.bind("<Button-1>", lambda e: self._toggle_lang())
+        self.lang_btn.bind("<Enter>", lambda e: self.lang_btn.configure(bg=T["card_hl"]))
+        self.lang_btn.bind("<Leave>", lambda e: self.lang_btn.configure(bg=T["bg3"]))
+
+        action_btn = Btn(side_footer, text="连接设置", command=self._show_setup)
+        action_btn.pack(side=tk.RIGHT)
+
+        content_shell = tk.Frame(shell, bg=T["bg"])
+        content_shell.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        topbar = tk.Frame(content_shell, bg=T["bg"])
+        topbar.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(topbar, text="Desktop Control Surface", bg=T["bg"], fg=T["txt3"],
+                 font=(FONT[0], FONT_SIZE_BASE)).pack(anchor=tk.W)
+        self.page_title = tk.Label(topbar, text=self._tabs[0][0], bg=T["bg"], fg=T["txt"],
+                                   font=(FONT_HEADING[0], FONT_SIZE_HERO, "bold"))
+        self.page_title.pack(anchor=tk.W, pady=(4, 0))
+
+        content_host = tk.Frame(content_shell, bg=T["bg"])
+        content_host.pack(fill=tk.BOTH, expand=True)
+
+        for idx, _ in enumerate(self._tabs):
+            content = tk.Frame(content_host, bg=T["bg"])
             if idx != 0:
                 content.pack_forget()
             else:
@@ -477,13 +728,15 @@ class PartnerApp:
         self._tab_contents[self._active_tab].pack_forget()
         self._tab_contents[idx].pack(fill=tk.BOTH, expand=True)
         for i, btn in enumerate(self._tab_buttons):
-            bg = T["card"] if i == idx else T["bg2"]
-            fg = T["txt"] if i == idx else T["txt3"]
+            bg = T["card_hl"] if i == idx else T["side"]
+            fg = T["txt"] if i == idx else T["txt2"]
             for child in btn.winfo_children():
                 if isinstance(child, tk.Label):
-                    child.configure(bg=bg, fg=fg)
+                    child.configure(bg=bg, fg=fg, font=(FONT[0], 13, "bold" if i == idx else "normal"))
             btn.configure(bg=bg)
         self._active_tab = idx
+        if hasattr(self, "page_title"):
+            self.page_title.config(text=self._tabs[idx][0])
         if idx == 0:
             self._refresh_dashboard()
 
@@ -539,121 +792,244 @@ class PartnerApp:
                      font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
         return card
 
+    def _metric_pill(self, parent, label, value, accent=None):
+        pill = tk.Frame(parent, bg=T["bg3"], padx=10, pady=8)
+        tk.Label(pill, text=label, bg=T["bg3"], fg=T["txt2"],
+                 font=(FONT[0], 9)).pack(anchor=tk.W)
+        tk.Label(pill, text=value, bg=T["bg3"], fg=accent or T["txt"],
+                 font=(FONT_HEADING[0], 12, "bold")).pack(anchor=tk.W, pady=(2, 0))
+        return pill
+
+    def _collect_dashboard_snapshot(self):
+        ws = self.workspace
+        snapshot = {
+            "workspace": ws,
+            "workspace_summary": load_json_file(os.path.join(ws, "state", "stats.json")) if ws else {},
+            "global_config": load_json_file(os.path.join(ws, "global_config.json")) if ws else {},
+            "instances": [],
+            "alerts": [],
+            "source": "wsl" if is_wsl_unc_path(ws) else "local",
+        }
+
+        from partner.adapter import HermesAdapter as _HA
+        hermes = _HA.detect_installation()
+        snapshot["hermes"] = hermes
+        if not hermes["available"]:
+            snapshot["alerts"].append(("error", "未检测到 Hermes，聊天和自动研究无法启动。"))
+        elif hermes["issues"]:
+            snapshot["alerts"].append(("warn", "Hermes 已找到，但配置不完整，部分功能可能不可用。"))
+
+        instances_cfg = (snapshot["global_config"].get("instances") or {}) if ws else {}
+        if instances_cfg:
+            for instance_id, cfg in sorted(instances_cfg.items()):
+                instance_dir = cfg.get("working_dir") or os.path.join(ws, "instances", instance_id)
+                snapshot["instances"].append(self._collect_instance_snapshot(instance_id, instance_dir, cfg))
+        elif ws:
+            snapshot["instances"].append(self._collect_instance_snapshot("default", ws, {}))
+
+        if not snapshot["instances"]:
+            snapshot["alerts"].append(("warn", "当前还没有可展示的 Partner 实例。"))
+        if snapshot["source"] == "wsl":
+            snapshot["alerts"].append(("warn", "当前是 Linux / WSL 工作区连接模式。Windows 端主要用于查看状态、日志和项目进展。"))
+        return snapshot
+
+    def _collect_instance_snapshot(self, instance_id, instance_dir, cfg):
+        plan = load_json_file(os.path.join(instance_dir, "state", "active_plan.json"))
+        heartbeat = load_json_file(os.path.join(instance_dir, "state", "heartbeat.json"))
+        active_project = load_json_file(os.path.join(instance_dir, "20_records", "active_project.json"))
+        knowledge = load_json_file(os.path.join(instance_dir, "state", "knowledge.json"))
+        summary_md = read_text_file(os.path.join(instance_dir, "user", "current_project", "summary.md"))
+        journal_count = count_jsonl_lines(os.path.join(instance_dir, "state", "journal.jsonl"))
+        token_total, token_today = read_token_usage(instance_dir)
+
+        phases = plan.get("phases") or []
+        completed = sum(1 for p in phases if p.get("status") == "completed")
+        total_phases = len(phases)
+        focus = (
+            active_project.get("project_name")
+            or plan.get("title")
+            or plan.get("goal")
+            or "尚未明确研究方向"
+        )
+        current_action = (
+            plan.get("heartbeat_summary")
+            or active_project.get("current_phase")
+            or summarize_markdown(summary_md)
+            or "等待下一步指令"
+        )
+        knowledge_entries = (knowledge.get("meta") or {}).get("total_entries")
+        if knowledge_entries is None:
+            knowledge_entries = len(knowledge.get("entries") or [])
+
+        status = heartbeat.get("status") or plan.get("status") or "idle"
+        status_map = {
+            "alive": ("在线", T["green"]),
+            "working": ("执行中", T["green"]),
+            "active": ("推进中", T["green"]),
+            "planning": ("规划中", T["yellow"]),
+            "completed": ("已完成", T["accent2"]),
+            "idle": ("空闲", T["txt2"]),
+        }
+        status_text, status_color = status_map.get(status, (status, T["txt2"]))
+
+        if knowledge_entries >= 8 or completed >= 4:
+            growth = "成长快，已形成稳定经验"
+        elif knowledge_entries >= 3 or completed >= 2:
+            growth = "持续积累中"
+        elif journal_count > 0:
+            growth = "刚起步，已有探索痕迹"
+        else:
+            growth = "尚未形成经验沉淀"
+
+        return {
+            "id": instance_id,
+            "dir": instance_dir,
+            "backend": cfg.get("agent_backend", "hermes"),
+            "enabled": cfg.get("enabled", True),
+            "interval_minutes": cfg.get("interval_minutes", 30),
+            "focus": focus,
+            "status_text": status_text,
+            "status_color": status_color,
+            "current_action": current_action,
+            "plan_title": plan.get("title") or "",
+            "last_heartbeat": heartbeat.get("last_heartbeat") or plan.get("last_heartbeat") or "",
+            "run_duration": format_duration(plan.get("created_at") or heartbeat.get("last_heartbeat")),
+            "last_seen": format_relative_time(heartbeat.get("last_heartbeat") or plan.get("last_heartbeat")),
+            "cycle_count": heartbeat.get("cycle_count") or 0,
+            "crash_count": heartbeat.get("crash_count") or 0,
+            "progress_text": f"{completed}/{total_phases} 阶段" if total_phases else ("已完成" if plan.get("status") == "completed" else "未拆分阶段"),
+            "progress_pct": int((completed / total_phases) * 100) if total_phases else (100 if plan.get("status") == "completed" else 0),
+            "knowledge_entries": knowledge_entries,
+            "journal_count": journal_count,
+            "growth": growth,
+            "token_total": token_total,
+            "token_today": token_today,
+            "summary": summarize_markdown(summary_md),
+        }
+
     def _refresh_dashboard(self):
         self._set_dot(T["yellow"])
         self.hdr_status.config(text="刷新中…")
         threading.Thread(target=self._do_refresh_dash, daemon=True).start()
 
     def _do_refresh_dash(self):
-        ws = self.workspace
-        state_dir = os.path.join(ws, "state") if ws else None
-
-        # Read state files
-        plan, hb, stats, qqcfg = {}, {}, {}, {}
-        if state_dir:
-            for fname, target in [("active_plan.json", plan), ("heartbeat.json", hb),
-                                   ("stats.json", stats)]:
-                fp = os.path.join(state_dir, fname)
-                if os.path.exists(fp):
-                    try:
-                        with open(fp) as fh:
-                            target.update(json.load(fh))
-                    except: pass
-        qqp = os.path.join(ws or "", "qq_config.json")
-        if os.path.exists(qqp):
-            try:
-                with open(qqp) as fh:
-                    qqcfg.update(json.load(fh))
-            except: pass
-
-        smap = {"idle": "空闲", "active": "运行中", "planning": "规划中",
-                "completed": "已完成", "working": "工作中", "alive": "在线"}
-        qq_alive = hb.get("qq_bot_alive", False)
-        hb_st = hb.get("status", "unknown")
+        snapshot = self._collect_dashboard_snapshot()
 
         def _update():
             for w in self._dash_inner.winfo_children():
                 w.destroy()
 
-            # ── Top row: QQ + Partner status ──
-            tr = tk.Frame(self._dash_inner, bg=T["bg"])
-            tr.pack(fill=tk.X, padx=0, pady=(0, 8))
+            instances = snapshot["instances"]
+            total_instances = len(instances)
+            active_instances = sum(1 for item in instances if item["status_color"] == T["green"])
+            total_tokens = sum(item["token_total"] for item in instances)
+            today_tokens = sum(item["token_today"] for item in instances)
 
-            appid = qqcfg.get("app_id", "未配置")
-            masked = appid[:4] + "****" if len(appid) > 4 else appid
-            self._status_card(tr, "🤖", "QQ 机器人", T["blue"], [
-                ("状态", "运行中" if qq_alive else "已停止", T["green"] if qq_alive else T["red"]),
-                ("AppID", masked, T["txt2"]),
-                ("沙箱", "是" if qqcfg.get("is_sandbox") else "否", T["txt2"]),
-            ], dot=True, dot_green=qq_alive).pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+            hero = tk.Frame(self._dash_inner, bg=T["accent3"], padx=18, pady=18)
+            hero.pack(fill=tk.X, pady=(0, 10))
+            tk.Label(hero, text="研究伙伴总览", bg=T["accent3"], fg="white",
+                     font=(FONT_HEADING[0], 18, "bold")).pack(anchor=tk.W)
+            tk.Label(
+                hero,
+                text="只展示用户真正关心的内容：配置了多少个 partner、分别在做什么、推进到哪一步、近期是否有异常。",
+                bg=T["accent3"],
+                fg="#dbeafe",
+                font=(FONT[0], 10),
+                wraplength=900,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, pady=(6, 14))
+            hero_metrics = tk.Frame(hero, bg=T["accent3"])
+            hero_metrics.pack(fill=tk.X)
+            self._metric_pill(hero_metrics, "已配置 Partner", str(total_instances), "#ffffff").pack(side=tk.LEFT, padx=(0, 10))
+            self._metric_pill(hero_metrics, "当前活跃", str(active_instances), "#9ae6b4").pack(side=tk.LEFT, padx=(0, 10))
+            self._metric_pill(hero_metrics, "累计 Token", format_tokens(total_tokens), "#fde68a").pack(side=tk.LEFT, padx=(0, 10))
+            self._metric_pill(hero_metrics, "今日 Token", format_tokens(today_tokens), "#fbcfe8").pack(side=tk.LEFT)
 
-            pst = smap.get(hb_st, hb_st)
-            pcol = T["green"] if hb_st in ("alive", "working") else T["yellow"]
-            self._status_card(tr, "🧠", "Partner 状态", T["pink"], [
-                ("状态", pst, pcol),
-                ("心跳", hb.get("last_heartbeat", "")[11:19] or "-", T["txt2"]),
-                ("周期", str(stats.get("total_cycles", 0)), T["txt2"]),
-                ("任务", str(stats.get("total_tasks_completed", 0)), T["txt2"]),
-            ], dot=True, dot_green=hb_st in ("alive", "working")).pack(
-                side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+            sys_card = tk.Frame(self._dash_inner, bg=T["card"],
+                                highlightbackground=T["border"], highlightthickness=1)
+            sys_card.pack(fill=tk.X, pady=(0, 10))
+            tk.Label(sys_card, text="系统健康", bg=T["card"], fg=T["accent2"],
+                     font=(FONT_HEADING[0], 12, "bold")).pack(anchor=tk.W, padx=14, pady=(12, 8))
+            hermes = snapshot["hermes"]
+            hermes_status = "已检测到" if hermes["available"] else "未检测到"
+            hermes_color = T["green"] if hermes["available"] else T["red"]
+            rows = [
+                ("Hermes", hermes_status, hermes_color),
+                ("来源", "Linux / WSL" if snapshot["source"] == "wsl" else "Windows 本地", T["txt"]),
+                ("执行文件", hermes.get("executable") or "未找到", T["txt2"]),
+                ("配置文件", hermes.get("config_path") or "未找到", T["txt2"]),
+                ("工作区", (snapshot["workspace"] or "-").replace("/", "\\"), T["accent2"]),
+            ]
+            for label, value, color in rows:
+                row = tk.Frame(sys_card, bg=T["card"])
+                row.pack(fill=tk.X, padx=14, pady=2)
+                tk.Label(row, text=label, bg=T["card"], fg=T["txt2"],
+                         font=(FONT[0], 10), width=8, anchor=tk.W).pack(side=tk.LEFT)
+                tk.Label(row, text=value, bg=T["card"], fg=color,
+                         font=(FONT_MONO[0], 9) if label != "Hermes" else (FONT[0], 10, "bold"),
+                         anchor=tk.W).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            if snapshot["alerts"]:
+                for level, text in snapshot["alerts"]:
+                    bg = "#2b1d1d" if level == "error" else "#2d2617"
+                    fg = T["red"] if level == "error" else T["yellow"]
+                    warn = tk.Frame(sys_card, bg=bg)
+                    warn.pack(fill=tk.X, padx=14, pady=(8, 0))
+                    tk.Label(warn, text=text, bg=bg, fg=fg, font=(FONT[0], 10),
+                             wraplength=860, justify=tk.LEFT).pack(anchor=tk.W, padx=12, pady=10)
 
-            # ── Plan card ──
-            pst2 = smap.get(plan.get("status", "idle"), plan.get("status", "idle"))
-            pcol2 = T["green"] if plan.get("status") == "active" else T["yellow"]
-            pc = tk.Frame(self._dash_inner, bg=T["card"],
-                          highlightbackground=T["border"], highlightthickness=1)
-            pc.pack(fill=tk.X, padx=0, pady=(0, 8))
-            tk.Label(pc, text="📋  当前计划", bg=T["card"], fg=T["green"],
-                     font=(FONT_HEADING[0], 12, "bold"), anchor=tk.W).pack(
-                         anchor=tk.W, padx=14, pady=(10, 4))
-            pf = tk.Frame(pc, bg=T["card"])
-            pf.pack(fill=tk.X, padx=14, pady=(0, 4))
-            tk.Label(pf, text="状态:", bg=T["card"], fg=T["txt2"],
-                     font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(pf, text=pst2, bg=T["card"], fg=pcol2,
-                     font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT, padx=(0, 20))
-            tk.Label(pf, text="创建:", bg=T["card"], fg=T["txt2"],
-                     font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT, padx=(0, 4))
-            tk.Label(pf, text=(plan.get("created_at") or "")[:10] or "-",
-                     bg=T["card"], fg=T["txt"], font=(FONT[0], 10)).pack(side=tk.LEFT)
+            for item in instances:
+                card = tk.Frame(self._dash_inner, bg=T["card"],
+                                highlightbackground=T["border"], highlightthickness=1)
+                card.pack(fill=tk.X, pady=(0, 10))
 
-            summary = plan.get("heartbeat_summary") or plan.get("goal") or ""
-            if summary:
-                sr = tk.Frame(pc, bg=T["card"])
-                sr.pack(fill=tk.X, padx=14, pady=(4, 10))
-                tk.Label(sr, text="摘要:", bg=T["card"], fg=T["txt2"],
-                         font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT, anchor=tk.N)
-                tk.Label(sr, text=summary[:300], bg=T["card"], fg=T["txt"],
-                         font=(FONT[0], 10), anchor=tk.W, wraplength=550).pack(
-                             side=tk.LEFT, fill=tk.X, expand=True)
+                hdr = tk.Frame(card, bg=T["card"])
+                hdr.pack(fill=tk.X, padx=14, pady=(12, 6))
+                tk.Label(hdr, text=f"Partner {item['id']}", bg=T["card"], fg=T["txt"],
+                         font=(FONT_HEADING[0], 14, "bold")).pack(side=tk.LEFT)
+                tk.Label(hdr, text=item["status_text"], bg=T["card"], fg=item["status_color"],
+                         font=(FONT[0], 10, "bold"), padx=10, pady=3).pack(side=tk.RIGHT)
 
-            # ── Workspace card ──
-            wc = tk.Frame(self._dash_inner, bg=T["card"],
-                          highlightbackground=T["border"], highlightthickness=1)
-            wc.pack(fill=tk.X, padx=0, pady=(0, 8))
-            tk.Label(wc, text="📁  工作区", bg=T["card"], fg=T["yellow"],
-                     font=(FONT_HEADING[0], 12, "bold"), anchor=tk.W).pack(
-                         anchor=tk.W, padx=14, pady=(10, 4))
-            wf = tk.Frame(wc, bg=T["card"])
-            wf.pack(fill=tk.X, padx=14, pady=(0, 4))
-            tk.Label(wf, text="路径:", bg=T["card"], fg=T["txt2"],
-                     font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT)
-            tk.Label(wf, text=(ws or "-").replace("/", "\\"), bg=T["card"],
-                     fg=T["accent2"], font=(FONT_MONO[0], 9), anchor=tk.W).pack(
-                         side=tk.LEFT, padx=(6, 0))
+                tk.Label(card, text=item["focus"], bg=T["card"], fg=T["accent2"],
+                         font=(FONT[0], 11, "bold"), wraplength=900, justify=tk.LEFT).pack(
+                             anchor=tk.W, padx=14)
+                tk.Label(card, text=item["current_action"], bg=T["card"], fg=T["txt"],
+                         font=(FONT[0], 10), wraplength=900, justify=tk.LEFT).pack(
+                             anchor=tk.W, padx=14, pady=(6, 10))
 
-            wf2 = tk.Frame(wc, bg=T["card"])
-            wf2.pack(fill=tk.X, padx=14, pady=(4, 10))
-            parts = []
-            for sub in ["projects", "knowledge", "ideas", "dialogue"]:
-                p = os.path.join(ws, sub) if ws else None
-                if p and os.path.exists(p):
-                    cnt = len(os.listdir(p))
-                    parts.append(f"{sub}: {cnt}")
-            tk.Label(wf2, text="  |  ".join(parts) or "(空)", bg=T["card"], fg=T["txt"],
-                     font=(FONT[0], 10), anchor=tk.W).pack(side=tk.LEFT)
+                metrics = tk.Frame(card, bg=T["card"])
+                metrics.pack(fill=tk.X, padx=14)
+                self._metric_pill(metrics, "运行时长", item["run_duration"], item["status_color"]).pack(side=tk.LEFT, padx=(0, 8))
+                self._metric_pill(metrics, "最近心跳", item["last_seen"], T["txt"]).pack(side=tk.LEFT, padx=(0, 8))
+                self._metric_pill(metrics, "Cycles", str(item["cycle_count"]), T["txt"]).pack(side=tk.LEFT, padx=(0, 8))
+                self._metric_pill(metrics, "今日 Token", format_tokens(item["token_today"]), T["yellow"]).pack(side=tk.LEFT, padx=(0, 8))
+                self._metric_pill(metrics, "累计 Token", format_tokens(item["token_total"]), T["accent2"]).pack(side=tk.LEFT)
 
-            self._set_dot(T["green"] if qq_alive else T["yellow"])
+                prog = tk.Frame(card, bg=T["card"])
+                prog.pack(fill=tk.X, padx=14, pady=(10, 4))
+                tk.Label(prog, text="项目推进", bg=T["card"], fg=T["txt2"],
+                         font=(FONT[0], 10)).pack(side=tk.LEFT)
+                tk.Label(prog, text=item["progress_text"], bg=T["card"], fg=T["txt"],
+                         font=(FONT[0], 10, "bold")).pack(side=tk.LEFT, padx=(8, 0))
+                bar_wrap = tk.Frame(card, bg=T["bg3"], height=8)
+                bar_wrap.pack(fill=tk.X, padx=14)
+                bar_wrap.pack_propagate(False)
+                bar = tk.Frame(bar_wrap, bg=item["status_color"], width=max(24, int(8.6 * item["progress_pct"])))
+                bar.pack(side=tk.LEFT, fill=tk.Y)
+
+                foot = tk.Frame(card, bg=T["card"])
+                foot.pack(fill=tk.X, padx=14, pady=(10, 12))
+                left = tk.Frame(foot, bg=T["card"])
+                left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                tk.Label(left, text=f"学习/成长：{item['growth']}", bg=T["card"], fg=T["green"],
+                         font=(FONT[0], 10)).pack(anchor=tk.W)
+                tk.Label(left, text=f"经验条目 {item['knowledge_entries']} · 探索记录 {item['journal_count']} · 崩溃 {item['crash_count']}",
+                         bg=T["card"], fg=T["txt2"], font=(FONT[0], 9)).pack(anchor=tk.W, pady=(4, 0))
+                if item["summary"]:
+                    tk.Label(left, text=f"项目摘要：{item['summary']}", bg=T["card"], fg=T["txt2"],
+                             font=(FONT[0], 9), wraplength=860, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+
+            dot_color = T["green"] if hermes["available"] and active_instances else (T["yellow"] if hermes["available"] else T["red"])
+            self._set_dot(dot_color)
             now = datetime.now().strftime("%H:%M:%S")
             self.hdr_status.config(text=f"刷新于 {now}")
             self.status_bar.config(text=f"最后刷新: {now}")
@@ -744,7 +1120,8 @@ class PartnerApp:
 
     def _add_no_agent_message(self):
         """Show a warning bubble that Hermes Agent is not installed, with an install button."""
-        import webbrowser
+        from partner.adapter import HermesAdapter as _HA
+        diag = _HA.detect_installation()
         wrapper = tk.Frame(self.chat_inner, bg=T["bg2"])
         wrapper.pack(fill=tk.X, padx=0, pady=3)
 
@@ -765,7 +1142,12 @@ class PartnerApp:
                                justify=tk.LEFT, anchor=tk.W)
         title_label.pack(anchor=tk.W, padx=14, pady=(2, 0))
 
-        desc_label = tk.Label(bubble, text=self._tr("no_agent_desc"),
+        detail = ""
+        if diag.get("issues"):
+            detail = "\n\n" + "；".join(diag["issues"])
+        elif diag.get("executable"):
+            detail = f"\n\n已找到: {diag['executable']}"
+        desc_label = tk.Label(bubble, text=self._tr("no_agent_desc") + detail,
                               bg=T["yellow"], fg="#0d1117",
                               font=(FONT[0], 10), wraplength=450,
                               justify=tk.LEFT, anchor=tk.W)
@@ -799,6 +1181,9 @@ class PartnerApp:
         self.thinking_label.master.pack_forget()
 
     def _send_chat(self, event=None):
+        if self.workspace_mode == "wsl":
+            self._add_chat_message("bot", self._tr("chat_remote_readonly"))
+            return
         text = self.chat_input.get().strip()
         if not text:
             return
@@ -857,6 +1242,16 @@ class PartnerApp:
     def _build_tab_qq(self):
         f = self._tab_contents[2]
         f.configure(bg=T["bg"])
+
+        if self.workspace_mode == "wsl":
+            card = tk.Frame(f, bg=T["card"], highlightbackground=T["border"], highlightthickness=1)
+            card.pack(fill=tk.X, pady=(0, 8))
+            tk.Label(card, text="Linux / WSL 运行中的 QQ 机器人", bg=T["card"], fg=T["accent2"],
+                     font=(FONT_HEADING[0], 14, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 6))
+            tk.Label(card, text="当前连接的是 Linux 端 Partner 工作区。Windows 桌面端不直接启动或停止 QQ 机器人；请在 Linux / WSL 端继续管理运行。",
+                     bg=T["card"], fg=T["txt2"], font=(FONT[0], 10), wraplength=780, justify=tk.LEFT).pack(
+                         anchor=tk.W, padx=18, pady=(0, 16))
+            return
 
         # Top: add new bot
         top = tk.Frame(f, bg=T["bg"])
@@ -1344,22 +1739,54 @@ class PartnerApp:
     # ════════════════════════════════════════════════════════════════
 
     def _show_setup(self):
+        from partner.config import save_partner_config_data
+        from partner.setup import save_workspace_pointer
+
         win = tk.Toplevel(self.root)
         win.title(self._tr("setup_title"))
         win.configure(bg=T["bg"])
         win.transient(self.root)
         win.grab_set()
         win.resizable(True, True)
-        center_window(win, 600, 680)
+        center_window(win, 720, 820)
 
         tk.Label(win, text=self._tr("setup_title"), bg=T["bg"], fg=T["accent2"],
-                 font=(FONT_HEADING[0], 20, "bold")).pack(pady=(20, 2))
+                 font=(FONT_HEADING[0], 22, "bold")).pack(pady=(20, 2))
         tk.Label(win, text=self._tr("setup_sub"), bg=T["bg"],
                  fg=T["txt3"], font=(FONT[0], 10)).pack(pady=(0, 20))
 
-        s1 = AccentCard(win, title="1. 选择工作区文件夹", accent_color=T["green"])
+        mode_var = tk.StringVar(value="wsl" if self.workspace_mode == "wsl" else "local")
+        current_distro = (self.bridge_settings.get("wsl_distro") or "").strip()
+        distros = detect_wsl_distros()
+        if not current_distro and distros:
+            current_distro = distros[0]
+        distro_var = tk.StringVar(value=current_distro)
+        linux_path_default = self.bridge_settings.get("linux_workspace") or "/mnt/e/work/partner_workspace"
+        linux_path_var = tk.StringVar(value=linux_path_default)
+        local_default = self.workspace if self.workspace_mode == "local" and self.workspace else os.path.expanduser("~/partner_workspace")
+        ws_var = tk.StringVar(value=local_default)
+
+        s0 = AccentCard(win, title="1. 连接方式", accent_color=T["accent2"])
+        s0.pack(fill=tk.X, padx=28, pady=(0, 12))
+        mode_wrap = tk.Frame(s0.body, bg=T["card"])
+        mode_wrap.pack(fill=tk.X, padx=18, pady=(6, 14))
+        for val, label, desc in [
+            ("local", "Windows 本地工作区", "这个桌面端直接管理本机上的 Partner"),
+            ("wsl", "连接 Linux / WSL 中的 Partner", "读取 Linux / WSL 工作区里的实例状态、项目和日志"),
+        ]:
+            card = tk.Frame(mode_wrap, bg=T["bg3"], highlightbackground=T["border"], highlightthickness=1)
+            card.pack(fill=tk.X, pady=5)
+            top = tk.Frame(card, bg=T["bg3"])
+            top.pack(fill=tk.X, padx=12, pady=(10, 4))
+            tk.Radiobutton(top, text=label, variable=mode_var, value=val,
+                           bg=T["bg3"], fg=T["txt"], selectcolor=T["input_bg"],
+                           activebackground=T["bg3"], activeforeground=T["accent2"],
+                           font=(FONT[0], 10, "bold")).pack(anchor=tk.W)
+            tk.Label(card, text=desc, bg=T["bg3"], fg=T["txt2"], font=(FONT[0], 9),
+                     wraplength=600, justify=tk.LEFT).pack(anchor=tk.W, padx=16, pady=(0, 12))
+
+        s1 = AccentCard(win, title="2. Windows 本地工作区", accent_color=T["green"])
         s1.pack(fill=tk.X, padx=28, pady=(0, 12))
-        ws_var = tk.StringVar(value=self.workspace or os.path.expanduser("~/partner_workspace"))
         ws_row = tk.Frame(s1.body, bg=T["card"])
         ws_row.pack(fill=tk.X, padx=18, pady=(4, 14))
         ws_entry = Input(ws_row, textvariable=ws_var)
@@ -1368,7 +1795,23 @@ class PartnerApp:
             filedialog.askdirectory(title=self._tr("setup_title")) or ws_var.get())
             ).pack(side=tk.LEFT, padx=(10, 0))
 
-        s2 = AccentCard(win, title="2. AI 后端", accent_color=T["blue"])
+        s1b = AccentCard(win, title="3. Linux / WSL 工作区", accent_color=T["yellow"])
+        s1b.pack(fill=tk.X, padx=28, pady=(0, 12))
+        tk.Label(s1b.body, text="推荐直接连接 WSL 中正在运行的 Partner 根目录，例如 `/mnt/e/work/partner_workspace`。Windows 端会转换成 `\\\\wsl$` 路径。", bg=T["card"], fg=T["txt2"], font=(FONT[0], 9), wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=18, pady=(6, 8))
+        distro_row = tk.Frame(s1b.body, bg=T["card"])
+        distro_row.pack(fill=tk.X, padx=18, pady=(0, 8))
+        tk.Label(distro_row, text="WSL 发行版", bg=T["card"], fg=T["txt2"], width=10, anchor=tk.W).pack(side=tk.LEFT)
+        distro_entry = Input(distro_row, textvariable=distro_var)
+        distro_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+        if distros:
+            tk.Label(s1b.body, text=f"已检测到: {', '.join(distros[:4])}", bg=T["card"], fg=T["txt3"], font=(FONT[0], 9)).pack(anchor=tk.W, padx=18, pady=(0, 4))
+        linux_row = tk.Frame(s1b.body, bg=T["card"])
+        linux_row.pack(fill=tk.X, padx=18, pady=(0, 14))
+        tk.Label(linux_row, text="Linux 路径", bg=T["card"], fg=T["txt2"], width=10, anchor=tk.W).pack(side=tk.LEFT)
+        linux_entry = Input(linux_row, textvariable=linux_path_var)
+        linux_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=6)
+
+        s2 = AccentCard(win, title="4. AI 后端", accent_color=T["blue"])
         s2.pack(fill=tk.X, padx=28, pady=(0, 12))
         backend_var = tk.StringVar(value="hermes")
         for val, label in [("hermes", "🤖  Hermes Agent（推荐）"),
@@ -1378,7 +1821,7 @@ class PartnerApp:
                           activebackground=T["card"], activeforeground=T["accent2"],
                           font=(FONT[0], 10)).pack(anchor=tk.W, padx=24, pady=3)
 
-        s3 = AccentCard(win, title="3. QQ 机器人（可选）", accent_color=T["pink"])
+        s3 = AccentCard(win, title="5. QQ 机器人（可选）", accent_color=T["pink"])
         s3.pack(fill=tk.X, padx=28, pady=(0, 12))
         tk.Label(s3.body, text="填入 QQ 开放平台的 AppID 和 AppSecret，也可稍后配置。",
                  bg=T["card"], fg=T["txt3"], font=(FONT[0], 9)).pack(anchor=tk.W, padx=18)
@@ -1400,27 +1843,60 @@ class PartnerApp:
                  font=(FONT[0], 10)).pack(pady=(4, 0))
 
         def do_setup():
-            ws = ws_var.get().strip()
-            if not ws:
-                messagebox.showerror("Error", "请选择工作区文件夹")
-                return
-            os.makedirs(ws, exist_ok=True)
-            status_var.set("正在创建工作区…")
-            win.update()
-            for sub in ["state", "logs", "data"]:
-                os.makedirs(os.path.join(ws, sub), exist_ok=True)
-            config = {"workspace": ws, "backend": backend_var.get(),
-                      "created": datetime.now().isoformat()}
-            with open(os.path.join(ws, "config.json"), "w") as fh:
-                json.dump(config, fh, indent=2)
+            mode = mode_var.get()
             qq_id = setup_qq_id.get().strip()
             qq_pw = setup_qq_pw.get().strip()
-            if qq_id:
-                qq_cfg = {"mode": "official", "app_id": qq_id, "app_secret": qq_pw}
-                with open(os.path.join(ws, "qq_config.json"), "w") as fh:
-                    json.dump(qq_cfg, fh, indent=2)
+            final_ws = ""
+
+            if mode == "local":
+                ws = ws_var.get().strip()
+                if not ws:
+                    messagebox.showerror("Error", "请选择工作区文件夹")
+                    return
+                os.makedirs(ws, exist_ok=True)
+                status_var.set("正在创建本地工作区…")
+                win.update()
+                for sub in ["state", "logs", "data", "00_config"]:
+                    os.makedirs(os.path.join(ws, sub), exist_ok=True)
+                config = {
+                    "workspace": {"path": ws, "readonly_dirs": []},
+                    "agent": {"backend": backend_var.get()},
+                    "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
+                    "name": "Partner",
+                }
+                save_partner_config_data(ws, config)
+                if qq_id:
+                    qq_cfg = {"mode": "official", "app_id": qq_id, "app_secret": qq_pw}
+                    with open(os.path.join(ws, "00_config", "qq_config.json"), "w", encoding="utf-8") as fh:
+                        json.dump(qq_cfg, fh, indent=2, ensure_ascii=False)
+                final_ws = ws
+            else:
+                distro = distro_var.get().strip()
+                linux_path = linux_path_var.get().strip()
+                if not distro or not linux_path:
+                    messagebox.showerror("Error", "请填写 WSL 发行版和 Linux 工作区路径")
+                    return
+                unc_path = linux_path_to_unc(linux_path, distro)
+                if not unc_path:
+                    messagebox.showerror("Error", "无法生成 WSL 路径")
+                    return
+                status_var.set("正在连接 Linux / WSL 工作区…")
+                win.update()
+                save_gui_bridge_settings({
+                    "mode": "wsl",
+                    "wsl_distro": distro,
+                    "linux_workspace": linux_path,
+                    "unc_workspace": unc_path,
+                    "saved_at": datetime.now().isoformat(),
+                })
+                final_ws = unc_path
+
+            save_workspace_pointer(final_ws)
+            qq_id = setup_qq_id.get().strip()
             status_var.set("设置完成！")
-            self.workspace = ws
+            self.workspace = final_ws
+            self.workspace_mode = "wsl" if mode == "wsl" else "local"
+            self.bridge_settings = load_gui_bridge_settings()
             win.after(600, win.destroy)
             self._rebuild_ui()
 
@@ -1432,6 +1908,12 @@ class PartnerApp:
 
 
 def main():
+    if os.name == "nt":
+        try:
+            from partner.gui_qt import launch as launch_qt
+            raise SystemExit(launch_qt())
+        except ImportError:
+            pass
     root = tk.Tk()
     app = PartnerApp(root)
     app.run()
