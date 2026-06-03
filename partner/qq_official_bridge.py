@@ -366,6 +366,8 @@ class QQQfficialBridge:
             if shared_content:
                 self._nudge_content_digest(shared_content)
             reply = self._simplify_response(decision.reply_to_user)
+            if not (reply or "").strip():
+                reply = "agent 这轮还没返回可用结果，我会继续等它完成。"
             self._mark_proactive_quiet("user_interaction", seconds=300)
             self._add_user_context(msg.sender_id, "user", user_text)
             self._add_user_context(msg.sender_id, "partner", reply)
@@ -662,8 +664,10 @@ class QQQfficialBridge:
         if not reply:
             return reply
 
+        agent_pending_reply = "agent 这轮还没返回可用结果，我会继续等它完成。"
+
         if reply.strip() == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
-            return "收到，我会按当前主线继续推进。"
+            return agent_pending_reply
 
         for bad in (
             "处理时出了点问题",
@@ -675,14 +679,9 @@ class QQQfficialBridge:
             "目前正在看你的项目信息，还没有确定具体方向。你这边有什么想做的，可以直接跟我说，我来安排推进。",
         ):
             if reply.strip() == bad:
-                return "收到，我会按当前主线继续推进。"
+                return agent_pending_reply
         if re.search(r"(还没有确定具体方向|没有确定具体方向|你这边有什么想做|有什么想做的|可以直接跟我说|我来安排推进|我这轮还在继续推进)", reply):
-            return "我正在按当前 workspace 的主线继续推进，会把结果写进项目记录。"
-
-        reply = reply.replace("API老超时", "后台这轮不太顺")
-        reply = reply.replace("API 有点忙", "后台这轮不太顺")
-        reply = reply.replace("API有点忙", "后台这轮不太顺")
-        reply = reply.replace("网络波动的问题", "后台这轮不太顺")
+            return agent_pending_reply
 
         import re
         lines = [line.strip() for line in reply.splitlines() if line.strip()]
@@ -698,7 +697,6 @@ class QQQfficialBridge:
                     continue
             filtered_lines.append(line)
         if removed_question:
-            filtered_lines.append("我会按现在这条线继续往下推。")
             reply = "\n".join(filtered_lines)
 
         # ── Safety filter: catch internal leaks before any formatting ──
@@ -716,11 +714,11 @@ class QQQfficialBridge:
         ]
         for pat in _traceback_patterns:
             if re.search(pat, reply, re.MULTILINE):
-                return "处理时出了点小问题，我再试试"
+                return "程序这轮没有连上 agent，稍后会自动重试。"
 
         # DANGEROUS COMMAND / heredoc warnings
         if re.search(r'DANGEROUS COMMAND|script execution via heredoc|PYEOF', reply):
-            return "这轮遇到命令安全拦截，我会改用更安全的方式继续推进。"
+            return "程序这轮没有连上 agent，稍后会自动重试。"
 
         # Expose "Hermes" as internal architecture name
         reply = re.sub(r'Hermes\s*(正在|正在处理|在处理|正在处理中)', r'我\1', reply)
@@ -741,7 +739,7 @@ class QQQfficialBridge:
 
         # "Hermes 正在处理中，下一轮再汇报进展。" — generic catch
         if re.match(r'^.*正在处理中.*汇报进展.*$', reply.strip()):
-            return "当前主线还在推进中。"
+            return "agent 这轮还没返回可用结果，我会继续等它完成。"
 
         # ── Markdown formatting ──
 
@@ -1021,7 +1019,7 @@ class QQQfficialBridge:
                 return
             pool.put_threadsafe(MindEvent(
                 type=EventType.CONTENT_DIGEST,
-                priority=3,
+                priority=1,
                 payload={
                     "content_id": item.get("id", ""),
                     "project": item.get("project", ""),
@@ -1201,7 +1199,11 @@ class QQQfficialBridge:
             )
             return False
         if self._bot:
-            return self._bot.send_proactive(to_user, self._sanitize_outbound_text(content), msg_type)
+            sanitized = self._sanitize_outbound_text(content)
+            if not sanitized:
+                logger.info("Suppressing empty/low-value proactive QQ push")
+                return False
+            return self._bot.send_proactive(to_user, sanitized, msg_type)
         return False
 
     @staticmethod
@@ -1210,18 +1212,18 @@ class QQQfficialBridge:
         if not text:
             return text
         if text == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
-            return "收到，我会按当前主线继续推进。"
+            return ""
         if "我先继续在后台处理，晚点给你汇报进展" in text:
-            text = text.replace("我先继续在后台处理，晚点给你汇报进展", "我会按当前主线继续推进。")
+            text = text.replace("我先继续在后台处理，晚点给你汇报进展", "")
         if "处理超时了，稍后再试吧" in text:
-            text = text.replace("处理超时了，稍后再试吧", "本轮还在推进中。")
+            text = text.replace("处理超时了，稍后再试吧", "")
         text = re.sub(
             r"(有啥想继续搞|随时说|随时告诉我|你想让我|你要我|要不要|请选择|给我方向).*",
-            "我会按当前主线继续推进。",
+            "",
             text,
         ).strip()
         if text.startswith("{") and '"type": "partner_heartbeat"' in text:
-            return "我这轮有一些新进展，正在整理成更清楚的汇报。"
+            return ""
         return text
 
     def send_file_proactive(self, to_user: str, file_data: bytes,

@@ -36,6 +36,14 @@ from ..research_memory import (
     should_run_periodic,
     write_reflection_artifacts,
 )
+from ..research_guardrails import (
+    apply_round_guardrails,
+    build_mind_context,
+    ensure_baseline_and_metric_contracts,
+    ensure_mind_files,
+    improve_user_report,
+    should_send_user_report,
+)
 from ..content_feed import (
     build_content_feed_context,
     build_patrol_prompt_context,
@@ -83,6 +91,17 @@ def _clip(text: str, limit: int) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _dedupe_text_list(items: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for item in items or []:
+        text = _clip(str(item), 260)
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
 def _is_internal_fallback_text(text: str) -> bool:
     stripped = (text or "").strip()
     return any(
@@ -119,6 +138,10 @@ def _is_low_value_user_visible_text(text: str) -> bool:
         r"可以直接跟我说",
         r"我来安排推进",
         r"本轮执行结束，正在依据状态文件整理下一步",
+        r"本轮执行结束，正在整理",
+        r"正在整理成更清楚的汇报",
+        r"已继续整理证据",
+        r"下一轮会优先落到可验证动作",
         r"我这轮还在继续推进",
         r"我会按现在这条线继续往下推",
         r"有结果了再.*汇报",
@@ -807,8 +830,12 @@ def _append_breakthrough_queue(workspace: str, title: str, *, reason: str,
 def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int) -> tuple[str, str]:
     """Return a single-step objective and preferred output artifact."""
     from ..project_state import get_project_dir, load_project_guardrail, read_project_brief
+    from ..stage_report import maybe_stage_report_objective
 
     project_dir = get_project_dir(workspace, title)
+    stage_objective, stage_path = maybe_stage_report_objective(workspace, title, step)
+    if stage_objective and stage_path:
+        return stage_objective, stage_path
     title_lc = title.lower()
     state_lc = (state_md or "").lower()
     guardrail = load_project_guardrail(workspace, title)
@@ -985,6 +1012,7 @@ def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int
         )
 
     content_items = get_open_content_items(workspace, project=title, limit=1)
+    content_items = [item for item in content_items if bool(item.get("should_nudge_project", False))]
     if content_items:
         item = content_items[0]
         return (
@@ -1126,6 +1154,8 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
     guardrail_prompt = f"{guardrail_block}\n" if guardrail_block else ""
     research_context = build_research_context(workspace, title)
     research_prompt = f"{research_context}\n" if research_context else ""
+    mind_context = build_mind_context(workspace, title)
+    mind_prompt = f"{mind_context}\n" if mind_context else ""
     content_context = build_content_feed_context(workspace, project=title)
     content_prompt = f"{content_context}\n" if content_context else ""
     project_brief = read_project_brief(workspace, title, max_chars=1600)
@@ -1147,6 +1177,7 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
         f"{guardrail_prompt}"
         f"{brief_prompt}"
         f"{research_prompt}"
+        f"{mind_prompt}"
         f"{content_prompt}"
         f"目标：{objective}\n"
         f"状态摘要：{state_snapshot}\n"
@@ -1157,7 +1188,10 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
         f"把长期研究记忆当作启发和边界，不要机械复述；如果某方法在本项目失败，只记录边界，不要认为它在所有项目都失败；"
         f"如果项目看起来已经完成，不要输出归档/等待/不再推进；必须转入复盘、误差分析、失败边界、跨项目迁移、外部内容消化或下一突破口中的一个实际动作；"
         f"关键数字必须来自本地文件或本轮实际输出；没有证据就标为 hypothesis；用户汇报要分清 verified/inferred/next；"
-        f"不要问用户，不要给选项，不要碰 /mnt/e/work/biomni*；不要输出 tool_call、function、terminal、read_file、write_file 标签；"
+        f"如果遇到 API key/预算/账号/真实数据/源目录等外部阻塞，可以明确写出 BLOCKER，但 NEXT 必须同时给出不依赖该资源的替代推进动作；"
+        f"内容巡游类项目不能因为 GitHub README 容易获取就替代用户分享内容，GitHub 只能作为证据渠道；"
+        f"simulation/dry-run/proxy/synthetic/toy data 必须明确标注，不能写成真实 API、真实最佳或真实突破；"
+        f"不要让用户做选择题，不要碰 /mnt/e/work/biomni*；不要输出 tool_call、function、terminal、read_file、write_file 标签；"
         f"DONE/FINDINGS/NEXT 必须写内容进展和判断，不要把“更新某文件、文件数、字节数、目录结构”当作成果；"
         f"不要描述你'打算检查环境'，不要先说你要去看什么，直接给最终正文。"
         f"把状态摘要视为可信输入，除非目标明确要求，否则不要再重复检查这些文件是否存在。\n"
@@ -1637,11 +1671,11 @@ def _build_round_report_prompt(title: str, ctx: dict) -> str:
         f"- 只用“本轮执行结果”和“状态摘要”判断内容进展，不要复述长日志。\n"
         f"- 不要提具体文件名、路径、写入/更新/创建了哪个 .md、字节数或目录结构；用户只关心完成了什么内容判断、发现了什么、下一步做什么。\n"
         f"- 以“状态摘要”为当前事实来源；除非这里明确显示缺失，否则不要声称文件不存在或状态丢失。\n"
-        f"- 如果本轮没有形成明确新结果，只能说“本轮执行结束，正在依据状态文件整理下一步”，不要脑补清理、丢失、损坏。\n"
+        f"- 如果本轮没有形成明确新结果，不要生成汇报；返回空字符串。\n"
         f"- 直接像对用户汇报一样说话，用中文。\n"
-        f"- 必须说明现在在做什么、本轮发生了什么、下一步是什么。\n"
+        f"- 只有在有实质发现、风险、阻塞、突破或用户需要知道的习惯变化时才汇报。\n"
+        f"- 有内容时说明现在在做什么、本轮发生了什么、下一步是什么。\n"
         f"- 如果“最近成长事件”非空，要用一句话说明我这次改变了什么判断习惯或推进习惯。\n"
-        f"- 如果本轮超时或没有产出，也要如实说，但只用一句短说明。\n"
         f"- 不要输出 JSON，不要用标题，不要问用户下一步，不要给选项。\n"
         f"- 不要说“待你指示/等待用户/请告知/随时告诉我”；如果项目完成，就说已进入归档或反思状态。\n"
         f"- 控制在 80-160 字。\n"
@@ -1657,42 +1691,8 @@ def _strip_state_prefix(line: str) -> str:
 
 
 def _build_round_report_fallback(title: str, project_outcome: str) -> str:
-    ctx = _collect_report_context(_workspace, title, project_outcome)
-    lines = [f"本轮围绕「{title}」推进。"]
-
-    outcome = _clip((project_outcome or "").strip(), 90)
-    if outcome:
-        lines.append(outcome)
-
-    state_lines = []
-    for raw in (ctx.get("state_snapshot") or "").splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("# 项目：") or stripped.startswith("最后更新:"):
-            continue
-        if re.search(r"^[- ]*/|关键目录|目录结构|\.md\b|\.py\b|data, scripts|tree_search", stripped):
-            continue
-        if _is_internal_fallback_text(stripped):
-            continue
-        cleaned = _strip_state_prefix(stripped)
-        if cleaned:
-            state_lines.append(cleaned)
-        if len(state_lines) >= 2:
-            break
-
-    if state_lines:
-        if len(state_lines) >= 1:
-            lines.append(f"当前状态：{_clip(state_lines[0], 100)}")
-        if len(state_lines) >= 2:
-            lines.append(f"下一步：{_clip(state_lines[1], 100)}")
-    else:
-        files = (ctx.get("files") or "").strip()
-        if files and files != "（暂无项目文件）":
-            lines.append("已继续整理证据，下一轮会优先落到可验证动作。")
-
-    text = _sanitize_user_report_text("\n".join(lines).strip())
-    if _is_low_value_user_visible_text(text) or _is_file_operation_report(text):
-        return ""
-    return text
+    """LLM 生成报告失败时，返回空字符串，不发送硬编码 fallback。"""
+    return ""
 
 
 def _generate_round_report(title: str, project_outcome: str) -> str:
@@ -1904,6 +1904,8 @@ async def _handle_project(event: MindEvent):
     )
     title = resolve_project_name(_workspace, title) or title
     set_active(_workspace, title)
+    ensure_mind_files(_workspace, title)
+    ensure_baseline_and_metric_contracts(_workspace, title)
 
     # 1. 读取项目状态
     state_md = read_state_md(_workspace, title)
@@ -2109,6 +2111,25 @@ async def _handle_project(event: MindEvent):
             parsed["evidence"] = "source_lookup_attempt.md"
             parsed["files"] = "source_lookup_attempt.md"
             parsed["artifact_content"] = forced_artifact_text
+        guardrail_result = {"issues": [], "report_type": "low_value", "progress_score": 0}
+        if parsed and not hermes_response.strip() == USER_FRIENDLY_PROGRESS_REPLY:
+            guardrail_result = apply_round_guardrails(
+                _workspace,
+                title,
+                parsed,
+                hermes_response=hermes_response,
+            )
+            parsed = guardrail_result.get("parsed") or parsed
+            guardrail_issues = list(guardrail_result.get("issues") or [])
+            if guardrail_issues:
+                audit_issues = _dedupe_text_list((audit_issues or []) + guardrail_issues)
+                _append_breakthrough_queue(
+                    _workspace,
+                    title,
+                    reason="研究守门检查触发",
+                    next_action=parsed.get("next_action") or "先做 baseline/metric/evidence 审计，再继续推进。",
+                    source_result=parsed,
+                )
         new_state = _merge_state_delta(
             existing_state=state_md,
             title=title,
@@ -2254,6 +2275,7 @@ async def _handle_project(event: MindEvent):
 
         # 4. 推送至 QQ
         pool = await ensure_pool()
+        report_type = str(guardrail_result.get("report_type") or "low_value")
         round_outcome = push_text
         if parsed and (
             not round_outcome
@@ -2261,23 +2283,38 @@ async def _handle_project(event: MindEvent):
             or _is_file_operation_report(round_outcome)
         ):
             round_outcome = _extract_content_report_from_parsed(parsed)
+        round_outcome = improve_user_report(round_outcome, report_type)
         if repaired_stalled_result:
             logger.info("[PROJECT] Skip user-facing report: internal stalled-result repair")
             round_outcome = ""
         elif not round_outcome:
             if invalid_structured_reply:
-                round_outcome = "本轮执行结束，正在依据状态文件整理下一步。"
-                logger.info("[PROJECT] No user-facing progress push: invalid structured reply")
+                logger.info("[PROJECT] Skip user-facing report: invalid structured reply")
+                round_outcome = ""
             elif timed_out_or_stalled:
                 logger.info("[PROJECT] Skip user-facing report: model stalled or backend unavailable")
                 round_outcome = ""
-        report_text = _generate_round_report(title, round_outcome)
+        allow_artifact_report = bool(
+            parsed
+            and artifact_written
+            and not timed_out_or_stalled
+            and not repaired_stalled_result
+            and round_outcome
+            and report_type == "low_value"
+        )
+        if parsed and not should_send_user_report(report_type) and not allow_artifact_report:
+            logger.info(f"[REPORT] Skip proactive report by priority gate: {report_type}")
+            round_outcome = ""
+        elif allow_artifact_report:
+            logger.info("[REPORT] Allow artifact-backed startup report despite low_value gate")
+        report_text = _generate_round_report(title, round_outcome) if round_outcome else ""
         if (timed_out_or_stalled or repaired_stalled_result) and not round_outcome:
             report_text = ""
         used_fallback_report = False
         if not report_text:
-            report_text = _build_round_report_fallback(title, round_outcome)
+            report_text = _build_round_report_fallback(title, round_outcome) if round_outcome else ""
             used_fallback_report = bool(report_text)
+        report_text = improve_user_report(report_text, report_type)
         if report_text:
             await pool.put(MindEvent(
                 type=EventType.REPORT,
@@ -2289,6 +2326,12 @@ async def _handle_project(event: MindEvent):
 
         # 5. 将自身放回等待室。CRON_TICK 是恢复/健康检查；项目生命线按状态推进。
         next_step = event.payload.get("step", 0) + 1
+        active_now = get_active_project_name()
+        if active_now and active_now != title:
+            logger.info(f"[PROJECT] Not re-queueing stale project '{title}', active is '{active_now}'")
+            logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                        f"title='{title[:40]}'")
+            return
         if (
             parsed
             and not audit_issues
@@ -2340,6 +2383,7 @@ async def _handle_report(event: MindEvent):
     """
     content = event.payload.get("content", "")
     content = _sanitize_user_report_text(content)
+    content = improve_user_report(content, "meaningful_progress")
     if not content:
         logger.warning(f"[REPORT] Empty content, skipping {event.id[:8]}")
         return
@@ -2474,8 +2518,8 @@ async def _handle_cron_tick(event: MindEvent):
     except Exception as exc:
         logger.debug(f"[CRON] content patrol check failed: {exc}")
 
-    from ..project_state import get_active
-    active_name = get_active(_workspace)
+    from ..project_state import recover_active_from_plan
+    active_name = recover_active_from_plan(_workspace)
     digests = await _enqueue_open_content_digests(
         pool,
         source="cron_tick:open_content_digest",
@@ -2613,17 +2657,27 @@ async def _handle_content_digest(event: MindEvent):
     item = items[0]
     project_label = project or "通用研究"
     urls = " ".join(item.get("urls") or [])
+    intent = str(item.get("intent") or "general_learning")
+    access_status = str(item.get("access_status") or "unknown")
+    scope = str(item.get("scope") or ("project" if project else "general"))
     prompt = (
         "你是 Partner 的外部内容消化模块。用户可能分享了小红书、B站、公众号、知乎或其他内容。\n"
-        "你的任务不是相信它，而是把它变成可验证的研究信号。\n"
+        "你的任务不是相信它，也不是强行把它并入当前项目，而是先判断它应如何被学习和记录。\n"
+        "内容分四类：project_instruction=用户明确要求用于项目；project_reference=和当前项目明显相关；"
+        "general_learning=用户随手分享的科普/长文/视频，只作为通用学习；access_limited=正文不可读。\n"
+        "如果是 general_learning：不要写“对当前项目的启发”，改写为“可选的远距离启发”，不要触发项目主线变化。\n"
+        "如果是 access_limited/link_only/metadata_only：不能编造正文观点，只能说明可见线索和需要用户补截图/正文。\n"
         "请输出中文，严格包含四段：\n"
         "1. 内容要点：只基于给定文本/链接线索，不能编造平台原文\n"
-        "2. 对当前项目的启发：写 1-3 条 hypothesis\n"
+        "2. 学习定位：说明这是项目指令、项目参考、普通学习，还是访问受限材料\n"
         "3. 风险与不确定性：比如营销内容、断章取义、链接不可读、缺少证据\n"
-        "4. 下一步最小动作：一条可执行、可落盘的动作\n"
+        "4. 下一步最小动作：一条可执行、可落盘的动作；若正文不可读，动作应是记录限制并转向公开替代来源\n"
         "不要问用户，不要把分享内容当事实结论。\n\n"
         f"当前项目：{project_label}\n"
         f"平台：{item.get('platform', 'unknown')}\n"
+        f"内容意图：{intent}\n"
+        f"访问状态：{access_status}\n"
+        f"学习范围：{scope}\n"
         f"来源：{item.get('source', '')}\n"
         f"文本：{item.get('text', '')}\n"
         f"链接：{urls or '无'}\n"
@@ -2640,18 +2694,30 @@ async def _handle_content_digest(event: MindEvent):
         logger.warning("[CONTENT] digest returned tool-call text; using safe fallback")
         content = ""
     if not content:
-        content = (
-            "内容已记录，但本轮没有形成可靠摘要。下一步应先读取用户分享的原始文本或链接，"
-            "只把它作为 hypothesis，不作为事实证据。"
-        )
+        if access_status in {"access_limited", "link_only", "metadata_only"}:
+            content = (
+                "1. 内容要点：当前只能看到链接或少量元数据，不能确认正文观点。\n"
+                "2. 学习定位：先作为访问受限材料记录，不改动项目主线。\n"
+                "3. 风险与不确定性：正文不可读，不能把标题或平台卡片当证据。\n"
+                "4. 下一步最小动作：把限制写入学习日志，并从公开可访问来源寻找相近主题补充。"
+            )
+        else:
+            content = (
+                "1. 内容要点：内容已记录，但本轮没有形成可靠摘要。\n"
+                "2. 学习定位：先作为普通学习材料保留，不改动项目主线。\n"
+                "3. 风险与不确定性：缺少足够证据，不能作为事实结论。\n"
+                "4. 下一步最小动作：后续只在明确相关时再转成项目 hypothesis。"
+            )
     try:
         from ..research_memory import record_user_signal, record_episode
-        record_user_signal(_workspace, project, f"外部内容启发：{item.get('text','')}", kind="user_idea")
+        signal_kind = "user_idea" if intent in {"project_instruction", "project_reference"} else "external_learning"
+        signal_project = project if signal_kind == "user_idea" else ""
+        record_user_signal(_workspace, signal_project, f"外部内容学习：{item.get('text','')}", kind=signal_kind)
         record_episode(
             _workspace,
-            project,
+            signal_project,
             "外部内容已消化",
-            evidence=urls or item.get("platform", "unknown"),
+            evidence=f"{item.get('platform', 'unknown')} / {intent} / {access_status} / {urls}",
             lesson=content[:260],
             risk="external_content_uncertain",
             links=item.get("urls") or [],
@@ -2662,9 +2728,16 @@ async def _handle_content_digest(event: MindEvent):
     path = os.path.join(_workspace, "system", "content_feed", "digests.md")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"## {datetime.now().isoformat(timespec='seconds')} {project_label}\n")
+        f.write(f"## {datetime.now().isoformat(timespec='seconds')} {project_label} [{intent}/{access_status}]\n")
         f.write(content.strip() + "\n\n")
-    if project:
+    if intent in {"general_learning", "access_limited"} or scope == "general":
+        user_mind_dir = os.path.join(_workspace, "user", "partner_mind")
+        os.makedirs(user_mind_dir, exist_ok=True)
+        learning_path = os.path.join(user_mind_dir, "general_learning_journal.md")
+        with open(learning_path, "a", encoding="utf-8") as f:
+            f.write(f"## {datetime.now().isoformat(timespec='seconds')} [{item.get('platform','unknown')}] {intent}/{access_status}\n")
+            f.write(content.strip() + "\n\n")
+    if project and bool(item.get("should_nudge_project", False)):
         pool = await ensure_pool()
         await pool.put(MindEvent(
             type=EventType.PROJECT,
@@ -2787,8 +2860,8 @@ async def _handle_wake_up(event: MindEvent):
     pool = await ensure_pool()
     logger.info(f"[WAKE_UP] 唤醒脉冲开始执行，池大小: {pool.qsize()}")
 
-    from ..project_state import get_active
-    active_name = get_active(_workspace)
+    from ..project_state import recover_active_from_plan
+    active_name = recover_active_from_plan(_workspace)
     digests = await _enqueue_open_content_digests(
         pool,
         source="wake_up:open_content_digest",

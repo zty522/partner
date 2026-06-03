@@ -248,6 +248,55 @@ class MindPool:
         if self._auto_save:
             self.save()
 
+    def drop_project_events_except(self, keep_title: str) -> int:
+        """Drop pending PROJECT events for other titles after a user switches focus."""
+        keep = (keep_title or "").strip()
+        removed = 0
+
+        def should_drop(ev: MindEvent) -> bool:
+            event_type = ev.type.value if hasattr(ev.type, "value") else str(ev.type)
+            if event_type != "project":
+                return False
+            title = str((ev.payload or {}).get("title") or "").strip()
+            return bool(title and keep and title != keep)
+
+        kept = []
+        while True:
+            try:
+                ev = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if should_drop(ev):
+                removed += 1
+            else:
+                kept.append(ev)
+        for ev in kept:
+            self._queue.put_nowait(ev)
+
+        kept_thread = []
+        while True:
+            try:
+                ev = self._thread_queue.get_nowait()
+            except queue.Empty:
+                break
+            if should_drop(ev):
+                removed += 1
+            else:
+                kept_thread.append(ev)
+        for ev in kept_thread:
+            self._thread_queue.put(ev)
+
+        for eid, (_, ev) in list(self._waiting_room.items()):
+            if should_drop(ev):
+                self._waiting_room.pop(eid, None)
+                removed += 1
+
+        if removed:
+            logger.info(f"[MIND] Dropped {removed} stale project event(s), keep={keep}")
+            if self._auto_save:
+                self.save()
+        return removed
+
     async def _drain_thread_queue(self):
         while True:
             try:

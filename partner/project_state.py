@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 GENERIC_PROJECT_NAMES = {
     "",
+    "当前项目",
     "你自己决定",
     "当前项目优化方向",
     "最新研究进展",
@@ -301,14 +302,23 @@ def resolve_project_name(workspace: str, preferred_name: Optional[str] = None) -
                 continue
             score = os.path.getmtime(best_path)
             combined = f"{dirname}\n{state_title}\n{state_text[:400]}"
+            matched_preferred = False
             if preferred and preferred in combined:
                 score += 10_000_000
+                matched_preferred = True
             if preferred and any(token and token in combined for token in re.split(r"[\s,，。/]+", preferred) if len(token) >= 2):
                 score += 5_000_000
-            candidates.append((score, label))
+                matched_preferred = True
+            candidates.append((score, label, matched_preferred))
 
     if candidates:
         candidates.sort(key=lambda item: item[0], reverse=True)
+        if preferred:
+            for _, label, matched_preferred in candidates:
+                if matched_preferred:
+                    return label
+            if not is_generic_project_name(preferred):
+                return preferred
         return candidates[0][1]
 
     if preferred and not is_generic_project_name(preferred):
@@ -425,6 +435,39 @@ def _ensure_project_workspace_files(project_dir: str, project_name: str):
                 "evidence": [],
                 "open_questions": [],
             }, f, ensure_ascii=False, indent=2)
+
+    # User-visible project journey files. These are intentionally separate from
+    # internal trace/state files so users can see how Partner thinks, learns and
+    # changes behavior over time.
+    workspace = _workspace_from_project_dir(project_dir)
+    if workspace:
+        user_project_dir = os.path.join(workspace, "user", "projects", safe_project_name(project_name))
+        os.makedirs(user_project_dir, exist_ok=True)
+        for filename, title in (
+            ("research_journey.md", "Research Journey"),
+            ("growth_journal.md", "Growth Journal"),
+            ("habit_applications.md", "Habit Applications"),
+            ("reflection_log.md", "Reflection Log"),
+            ("breakthroughs.md", "Breakthroughs"),
+            ("insight_log.md", "Insight Log"),
+            ("mind_status.md", "Mind Status"),
+        ):
+            path = os.path.join(user_project_dir, filename)
+            if not os.path.exists(path):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(f"# {project_name} {title}\n\n")
+
+
+def safe_project_name(project_name: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff-]+", "_", project_name or "project").strip("_") or "project"
+
+
+def _workspace_from_project_dir(project_dir: str) -> str:
+    marker = os.path.join("20_records", "projects")
+    normalized = os.path.normpath(project_dir)
+    if marker not in normalized:
+        return ""
+    return normalized.split(marker, 1)[0].rstrip(os.sep)
 
 
 def get_state_path(workspace: str, project_name: str) -> str:
@@ -584,7 +627,19 @@ def update_project_brief_from_round(workspace: str, project_name: str, parsed: d
     updated = sanitize_project_brief_text(existing, project_name)
     if step_done:
         updated = replace_section(updated, "最近有效进展", step_done)
-        updated = replace_section(updated, "当前最佳结果", step_done)
+        round_text = "\n".join(
+            [
+                step_done,
+                next_action,
+                "；".join(findings),
+                str(parsed.get("state_delta") or ""),
+            ]
+        )
+        if (
+            re.search(r"(当前最佳|新最佳|best|优于|显著提升|突破)", round_text, re.I)
+            and not re.search(r"(合成|模拟|simulation|proxy|代理分数|不可比|hypothesis|可疑|不可信)", round_text, re.I)
+        ):
+            updated = replace_section(updated, "当前最佳结果", step_done)
     bottlenecks = [x for x in findings if re.search(r"(瓶颈|失败|没有提升|差于|不稳定|偏差|卡住|缺失|噪声)", x)]
     if bottlenecks:
         updated = replace_section(updated, "当前瓶颈", "；".join(bottlenecks[:2]))
@@ -801,6 +856,45 @@ def get_active(workspace: str) -> Optional[str]:
         return resolve_project_name(workspace, name) or (name if name else None)
     except Exception:
         return None
+
+
+def recover_active_from_plan(workspace: str) -> Optional[str]:
+    """Recover active_project.txt from active_plan.json when the marker is missing.
+
+    This is intentionally generic: after a crash, migration, or workspace cleanup,
+    active_plan.json may still contain the current research thread while
+    active_project.txt is gone. WAKE_UP/CRON should not treat that as "no project".
+    """
+    current = get_active(workspace)
+
+    plan = _read_active_plan(workspace)
+    if not plan:
+        if current and not is_generic_project_name(current):
+            return current
+        return None
+    status = str(plan.get("status") or "").strip().lower()
+    if status in {"", "idle", "done", "completed", "closed"}:
+        if current and not is_generic_project_name(current):
+            return current
+        return None
+
+    candidates = [
+        str(plan.get("title") or "").strip(),
+        str(plan.get("project") or "").strip(),
+        str(plan.get("goal") or "").strip(),
+    ]
+    for candidate in candidates:
+        name = _clip_project_title(candidate)
+        name = simplify_project_query(name)
+        if name and not is_generic_project_name(name):
+            resolved = resolve_project_name(workspace, name) or name
+            if current != resolved:
+                set_active(workspace, resolved)
+                logger.info(f"[State] 从 active_plan 恢复活跃项目: {resolved}")
+            return get_active(workspace) or resolved
+    if current and not is_generic_project_name(current):
+        return current
+    return None
 
 
 def append_log(workspace: str, project_name: str, entry: str):

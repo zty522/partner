@@ -34,6 +34,19 @@ def _system_path(workspace: str, *parts: str) -> str:
     return path
 
 
+def _workspace_root(workspace: str) -> str:
+    norm = os.path.normpath(workspace)
+    if os.path.basename(os.path.dirname(norm)) == "instances":
+        return os.path.dirname(os.path.dirname(norm))
+    return norm
+
+
+def _shared_path(workspace: str, *parts: str) -> str:
+    path = os.path.join(_workspace_root(workspace), "shared_mind", *parts)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
 def _state_path(workspace: str, *parts: str) -> str:
     path = os.path.join(workspace, "state", *parts)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -360,6 +373,24 @@ def record_growth_event(workspace: str, project: str, trigger: str, learned: str
     memory = load_memory(workspace)
     memory.setdefault("growth_events", []).append(row)
     _append_jsonl(_system_path(workspace, "growth", "growth_events.jsonl"), row)
+    _append_jsonl(_shared_path(workspace, "system", "growth_events.jsonl"), {
+        **row,
+        "instance": os.path.basename(os.path.normpath(workspace)),
+    })
+    shared_journal = _shared_path(workspace, "user", "shared_growth_journal.md")
+    if not os.path.exists(shared_journal) or os.path.getsize(shared_journal) == 0:
+        with open(shared_journal, "w", encoding="utf-8") as f:
+            f.write("# Shared Partner Growth Journal\n\n")
+    with open(shared_journal, "a", encoding="utf-8") as f:
+        f.write(
+            f"## {_now()} | {category or 'learning'}\n\n"
+            f"- 实例：{os.path.basename(os.path.normpath(workspace))}\n"
+            f"- 项目：{project or '通用'}\n"
+            f"- 触发：{_clip(trigger, 180)}\n"
+            f"- 学到：{_clip(learned, 220)}\n"
+            f"- 以后改变：{_clip(behavior_change, 220)}\n"
+            f"- 证据：{_clip(evidence, 220)}\n\n"
+        )
     save_memory(workspace, memory)
 
 
@@ -546,6 +577,9 @@ def ensure_habits(workspace: str) -> dict[str, Any]:
             "关键数字必须有 evidence 文件",
             "失败要记录条件和适用边界",
             "用户/老师灵感进入 idea_inbox",
+            "用户分享内容先分项目指令/项目参考/普通学习/访问受限",
+            "访问受限平台不绕过限制、不编造正文，转向截图/正文请求或公开替代来源",
+            "数据/API/账号/预算缺失时记录 blocker，同时继续无阻塞分支",
             "完成项进入 done，不空转",
             "重复动作先去重再换突破口",
         ],

@@ -26,6 +26,7 @@ from .project_state import (
 )
 from .research_memory import record_episode, record_growth_event, record_user_signal
 from .research_memory import record_risk_event
+from .research_guardrails import record_user_signal_to_mind
 from .content_feed import record_shared_content
 from .state import StateManager
 from .task_queue import TaskQueue, Task
@@ -105,9 +106,8 @@ class InteractionOrchestrator:
             "",
             text,
         ).strip()
-        if removed:
-            suffix = "我会按当前主线继续推进，并把下一步结果写进 workspace。"
-            text = f"{text}\n{suffix}".strip() if text else suffix
+        if removed and not text:
+            return ""
         return text
 
     @staticmethod
@@ -116,25 +116,44 @@ class InteractionOrchestrator:
         return bool(re.search(r"(在做什么|做什么内容|现在.*做啥|现在.*干嘛|进展|做咋样|做到哪|运行.*怎样|什么状态)", raw))
 
     @staticmethod
-    def _status_reply_from_snapshot(snapshot: dict) -> str:
-        project = (snapshot.get("display_project") or snapshot.get("focus_project") or "当前项目").strip()
-        current = (snapshot.get("current") or snapshot.get("summary") or snapshot.get("active_plan") or "").strip()
-        recent = (snapshot.get("recent") or "").strip()
-        next_step = (snapshot.get("next_step") or "").strip()
-        blockers = (snapshot.get("blockers") or "").strip()
-        lines = [f"现在主要在推进「{project}」。"]
-        if current:
-            lines.append(f"当前状态：{current[:160]}")
-        if recent:
-            lines.append(f"最近动作：{recent[:160]}")
-        if blockers:
-            lines.append(f"当前卡点：{blockers[:140]}")
-        if next_step:
-            lines.append(f"下一步：{next_step[:160]}")
-        if len(lines) == 1:
-            lines.append("我已经读取当前 workspace，会先从已有状态和最近日志里找一个最小推进点继续做。")
-        lines.append("我会继续自己推进，不会等你选方向。")
-        return "\n".join(lines)
+    def _is_external_content_share(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        if re.search(r"(mp\.weixin\.qq\.com|xiaohongshu\.com|bilibili\.com|zhihu\.com|小红书|公众号|B站|视频|推文|卡片消息|图文H5|jump_url|外部分享)", raw, re.I):
+            return True
+        return len(raw) >= 260 and bool(re.search(r"(研究|发现|机制|论文|文章|推文|视频|启发|方向)", raw))
+
+    @staticmethod
+    def _is_project_start_or_research_request(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        return bool(re.search(
+            r"(我想做|想做一个|做一个|继续研究|继续推进|长期关注|开始研究|启动|小项目|demo|调研一下|先调研)",
+            raw,
+            re.I,
+        ))
+
+    @staticmethod
+    def _infer_project_title_from_user_text(text: str) -> str:
+        raw = (text or "").strip()
+        lower = raw.lower()
+        if re.search(r"(年龄预测|生物年龄|age prediction|biological age)", raw, re.I):
+            return "公开数据年龄预测"
+        if re.search(r"(前沿\s*agent|agent.*前沿|agent.*发展|benchmark|长期科研伙伴)", raw, re.I):
+            return "前沿 agent 研究"
+        if re.search(r"(生物.*AI|AI.*生物|AI for Biology|BioAgent|蛋白|单细胞|自动化科研)", raw, re.I):
+            return "生物与 AI 交叉内容巡游"
+        if re.search(r"(分子生成|药物分子|smiles|molecule generation|drug)", raw, re.I):
+            return "通用药物分子生成"
+        if "deepseek" in lower:
+            return "前沿 agent 研究"
+        match = re.search(r"(?:我想做|想做一个|做一个|继续研究|继续推进|长期关注)(?P<title>[^。！？\n]{2,40})", raw)
+        if match:
+            title = re.sub(r"(小项目|demo|项目|方向|的内容|。|，|,).*", "", match.group("title")).strip()
+            return title[:30] if title else ""
+        return ""
 
     def handle_message(self, sender_id: str, sender_name: str, text: str) -> InteractionDecision:
         self._record_user_research_signal(text)
@@ -169,6 +188,7 @@ class InteractionOrchestrator:
             return
         try:
             record_user_signal(self.workspace, target, raw, kind=kind)
+            record_user_signal_to_mind(self.workspace, target or "当前项目", raw, kind=kind)
         except Exception as exc:
             logger.debug(f"failed to record user research signal: {exc}")
 
@@ -195,6 +215,81 @@ class InteractionOrchestrator:
             return f"方向已纠正：后续按「{mainline}」推进，旧方向会从当前主线里排除。"
         return "方向已纠正，我会按这条边界更新当前主线，后续不再沿错误方向推进。"
 
+    def _project_start_reply(self, adapter: object, text: str, title: str, snapshot: dict) -> str:
+        """Generate a natural user reply while code handles reliable lifeline enqueue."""
+        prompt = f"""你是 Partner，用户刚给你启动/推进了一个长期研究方向。
+请只回复一小段自然中文，2 句以内。
+
+要求：
+- 不要像模板，不要说“收到，我会把...作为当前主线”这类固定句
+- 不要问用户下一步，不要让用户选择
+- 简短说明你理解的方向，以及你接下来会先从哪里切入
+- 不暴露内部机制、lifeline、active_plan、workspace 等词
+
+用户消息：
+{text}
+
+系统识别到的项目方向：{title}
+当前已有项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+"""
+        try:
+            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
+        except Exception as exc:
+            logger.debug(f"project-start reply LLM failed: {exc}")
+            raw = ""
+        reply = self._sanitize_reply_to_user(raw)
+        if reply:
+            return reply[:260]
+        return "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
+
+    def _status_reply_with_llm(self, adapter: object, text: str, snapshot: dict) -> str:
+        prompt = f"""你是 Partner，用户在问你当前进展。
+请基于下面状态写一段自然中文，80-180 字。
+
+要求：
+- 不要模板化，不要输出字段名，不要说 workspace、active_plan、FINDINGS、NEXT
+- 只讲用户关心的：现在在研究什么、真正完成了什么判断、下一步会做什么
+- 如果状态里没有实质进展，就坦诚说还没有可靠新结论，但不要问用户下一步
+- 不要暴露内部日志、文件名、路径、JSON、队列、cron、backend
+
+用户消息：{text}
+当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+状态摘要：{snapshot.get('summary', '')}
+当前推进：{snapshot.get('current', '') or snapshot.get('active_plan', '')}
+最近完成：{snapshot.get('recent', '')}
+卡点：{snapshot.get('blockers', '')}
+下一步：{snapshot.get('next_step', '')}
+"""
+        try:
+            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
+        except Exception as exc:
+            logger.debug(f"status reply LLM failed: {exc}")
+            raw = ""
+        reply = self._sanitize_reply_to_user(raw)
+        return reply[:320] if reply else "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
+
+    def _content_share_reply_with_llm(self, adapter: object, text: str, snapshot: dict) -> str:
+        prompt = f"""用户刚分享了一条外部内容，可能是公众号、小红书、B站、知乎链接或长文本。
+请以 Partner 的口吻回复一小段自然中文，2 句以内。
+
+要求：
+- 明确表示你会把这条内容当作研究信号来消化
+- 不要假装已经读完整链接；如果只是卡片/链接，就说会先基于可见标题摘要判断
+- 不要问用户下一步，不要暴露 content_feed、workspace、队列等内部词
+- 不要使用固定模板
+
+当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+用户分享内容：
+{text[:1200]}
+"""
+        try:
+            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
+        except Exception as exc:
+            logger.debug(f"content-share reply LLM failed: {exc}")
+            raw = ""
+        reply = self._sanitize_reply_to_user(raw)
+        return reply[:260] if reply else "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
+
     def _decide(self, sender_id: str, text: str) -> InteractionDecision:
         snapshot = self.snapshot_builder() or {}
         context = self.get_context(sender_id) or []
@@ -202,9 +297,32 @@ class InteractionOrchestrator:
 
         if self._is_status_query(text):
             return InteractionDecision(
-                reply_to_user=self._status_reply_from_snapshot(snapshot),
+                reply_to_user=self._status_reply_with_llm(adapter, text, snapshot),
                 need_lifeline_update=False,
                 lifeline_action="none",
+            )
+
+        if self._is_external_content_share(text):
+            return InteractionDecision(
+                reply_to_user=self._content_share_reply_with_llm(adapter, text, snapshot),
+                need_lifeline_update=False,
+                lifeline_action="none",
+            )
+
+        if self._is_project_start_or_research_request(text):
+            title = self._infer_project_title_from_user_text(text) or text[:40]
+            return InteractionDecision(
+                reply_to_user=self._project_start_reply(adapter, text, title, snapshot),
+                need_lifeline_update=True,
+                lifeline_action="add_task",
+                target_project=title,
+                task_title=title,
+                task_description=(
+                    f"用户启动/推进方向：{text}\n"
+                    "不要等待用户拆步骤。先自主调研背景、数据/资料来源和已有方法，"
+                    "再选择一个最小可验证动作推进；有阻塞就记录并切到无阻塞分支。"
+                ),
+                priority=2,
             )
 
         if self._mentions_risk_or_quality_signal(text):
@@ -290,9 +408,8 @@ class InteractionOrchestrator:
         if decision:
             return decision
 
-        fallback_reply = self._status_reply_from_snapshot(snapshot) if snapshot else "收到，我会基于当前 workspace 继续推进，并把下一步结果写进去。"
         return InteractionDecision(
-            reply_to_user=fallback_reply,
+            reply_to_user="__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
             need_lifeline_update=bool(re.search(r"(继续|推进|重建|恢复|研究|补充|整理|写进|复制)", text)),
             lifeline_action="add_task" if re.search(r"(继续|推进|重建|恢复|研究|补充|整理|写进|复制)", text) else "none",
             task_title=text[:50],
@@ -318,8 +435,7 @@ class InteractionOrchestrator:
             return None
         reply = self._sanitize_reply_to_user(data.get("reply_to_user") or "")
         if not reply:
-            snapshot = self.snapshot_builder() or {}
-            reply = self._status_reply_from_snapshot(snapshot) if snapshot else "收到，我会按当前主线继续推进。"
+            reply = "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
         priority = data.get("priority", 6)
         try:
             priority = max(1, min(10, int(priority)))
@@ -397,6 +513,7 @@ class InteractionOrchestrator:
         if action == "switch_project":
             target = decision.target_project or decision.task_title or raw_text[:30]
             set_active(self.workspace, target)
+            self._drop_stale_project_events(target)
             if decision.note:
                 append_log(self.workspace, target, decision.note)
             self._touch_active_plan(target, f"用户要求切换并推进：{target}")
@@ -428,6 +545,8 @@ class InteractionOrchestrator:
             target = decision.target_project or get_active(self.workspace) or ""
             if target:
                 set_active(self.workspace, target)
+            if target and decision.priority <= 2:
+                self._drop_stale_project_events(target)
             description = decision.task_description or raw_text
             if decision.priority <= 2 or self._mentions_risk_or_quality_signal(raw_text):
                 self._append_breakthrough_queue(
@@ -559,6 +678,16 @@ class InteractionOrchestrator:
             ))
         except Exception as exc:
             logger.debug(f"failed to nudge project event: {exc}")
+
+    def _drop_stale_project_events(self, keep_title: str):
+        try:
+            from .mind.pool import MindPool
+
+            pool = MindPool.get_sync_instance()
+            if pool:
+                pool.drop_project_events_except(keep_title)
+        except Exception as exc:
+            logger.debug(f"failed to drop stale project events: {exc}")
 
     @staticmethod
     def _extract_paths(text: str) -> list[str]:

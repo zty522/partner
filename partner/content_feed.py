@@ -74,6 +74,74 @@ def infer_platform(text: str, urls: list[str] | None = None) -> str:
     return "unknown"
 
 
+def _non_url_text(text: str) -> str:
+    return re.sub(URL_RE, " ", text or "").strip()
+
+
+def infer_access_status(text: str, platform: str = "", urls: list[str] | None = None) -> str:
+    """Classify how much real content Partner can see.
+
+    This is intentionally conservative: if a platform card/link is not readable
+    from the message itself, Partner should not infer the missing body.
+    """
+    raw = text or ""
+    compact = re.sub(r"\s+", " ", _non_url_text(raw))
+    probe = f"{raw} {' '.join(urls or [])}".lower()
+    if re.search(r"(仅支持.*app|app\s*内查看|打开.*app|复制.*打开|验证码|captcha|登录后|需要登录|403|无法访问|不可访问|正文获取限制)", probe, re.I):
+        return "access_limited"
+    if platform == "xiaohongshu" and re.search(r"(xhslink|xiaohongshu\.com/(?:discovery|explore|user|search)|小红书)", probe):
+        if len(compact) < 180:
+            return "access_limited"
+    if platform in {"wechat", "bilibili", "zhihu"} and urls and len(compact) < 120:
+        return "metadata_only"
+    if urls and len(compact) < 80:
+        return "link_only"
+    if len(compact) >= 220:
+        return "text_available"
+    return "metadata_only"
+
+
+def _project_relevance(project: str, text: str) -> bool:
+    project_raw = project or ""
+    raw = (text or "").lower()
+    checks = [
+        (("agent", "智能体", "前沿", "评测"), ("agent", "deepseek", "benchmark", "工具", "多智能体", "swe-bench", "评测", "openclaw")),
+        (("分子", "药物", "生成"), ("smiles", "selfies", "vae", "vq-vae", "reinvent", "autodock", "docking", "分子", "药物", "生成")),
+        (("bio", "ai", "交叉", "生物"), ("bio", "biology", "protein", "蛋白", "单细胞", "分子", "基因", "agent", "ai")),
+        (("年龄", "预测", "衰老"), ("age", "aging", "年龄", "衰老", "biomarker", "甲基化", "表观")),
+    ]
+    for project_needles, text_needles in checks:
+        if any(x in project_raw.lower() for x in project_needles):
+            return any(x in raw for x in text_needles)
+    return False
+
+
+def infer_content_intent(
+    text: str,
+    project: str = "",
+    platform: str = "",
+    urls: list[str] | None = None,
+    access_status: str = "",
+) -> str:
+    """Separate instruction, project reference, casual learning, and inaccessible links."""
+    access_status = access_status or infer_access_status(text, platform, urls)
+    compact = _non_url_text(text)
+    raw = (text or "").lower()
+    if access_status == "access_limited" and len(compact) < 180:
+        return "access_limited"
+    directive = re.search(
+        r"(尝试|试试|加入|纳入|加进去|用这个|改成|测试|验证|推进|研究|分析|帮我|你可以|"
+        r"结合|继续|参考这个|按这个|做一下|看看.*能不能|把.*放进|把.*加入)",
+        text or "",
+    )
+    if directive:
+        return "project_instruction" if project else "general_instruction"
+    if project and _project_relevance(project, raw):
+        return "project_reference"
+    # 用户随手分享的长文/科普/视频，不应自动改变项目主线。
+    return "general_learning"
+
+
 def looks_like_external_content(text: str, raw: Any = None) -> bool:
     if extract_urls(text):
         return True
@@ -147,6 +215,9 @@ def record_shared_content(
         return None
     urls = extract_urls(text)
     platform = infer_platform(text, urls)
+    access_status = infer_access_status(text, platform, urls)
+    intent = infer_content_intent(text, project, platform, urls, access_status)
+    should_nudge_project = intent in {"project_instruction", "project_reference"} and access_status != "access_limited"
     feed = _load_feed(workspace)
     item = {
         "id": f"cf_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}",
@@ -155,6 +226,10 @@ def record_shared_content(
         "sender": sender,
         "project": project or "",
         "platform": platform,
+        "intent": intent,
+        "access_status": access_status,
+        "scope": "project" if intent in {"project_instruction", "project_reference"} else "general",
+        "should_nudge_project": should_nudge_project,
         "urls": urls,
         "text": _clip(text, 1200),
         "raw_hint": _raw_hint(raw),
@@ -170,6 +245,10 @@ def record_shared_content(
         existing["project"] = existing.get("project") or item["project"]
         existing["sender"] = existing.get("sender") or item["sender"]
         existing["source"] = existing.get("source") or item["source"]
+        existing.setdefault("intent", item["intent"])
+        existing.setdefault("access_status", item["access_status"])
+        existing.setdefault("scope", item["scope"])
+        existing.setdefault("should_nudge_project", item["should_nudge_project"])
         _save_feed(workspace, feed)
         return existing
     feed.setdefault("items", []).append(item)
@@ -282,7 +361,10 @@ def build_patrol_prompt_context(workspace: str, limit_chars: int = 1800) -> str:
 
 
 def build_content_feed_context(workspace: str, project: str = "", limit_chars: int = 1000) -> str:
-    items = get_open_content_items(workspace, project=project, limit=3)
+    items = [
+        item for item in get_open_content_items(workspace, project=project, limit=6)
+        if bool(item.get("should_nudge_project", False))
+    ][:3]
     if not items:
         return ""
     lines = ["外部内容素材（用户/自巡游未消化信号）："]
@@ -290,6 +372,7 @@ def build_content_feed_context(workspace: str, project: str = "", limit_chars: i
         urls = " ".join(item.get("urls") or [])
         lines.append(
             f"- id={item.get('id')} platform={item.get('platform','unknown')} "
+            f"intent={item.get('intent','unknown')} access={item.get('access_status','unknown')} "
             f"source={item.get('source','')} text={_clip(item.get('text',''), 180)}"
             + (f" urls={urls}" if urls else "")
         )
@@ -311,7 +394,8 @@ def _write_user_summary(workspace: str, feed: dict[str, Any]):
         urls = " ".join(item.get("urls") or [])
         lines.append(
             f"- [{item.get('time')}] {item.get('platform','unknown')} "
-            f"{item.get('status','open')}：{_clip(item.get('text',''), 160)}"
+            f"{item.get('status','open')} / {item.get('intent','unknown')} / {item.get('access_status','unknown')}："
+            f"{_clip(item.get('text',''), 160)}"
             + (f" {urls}" if urls else "")
         )
     with open(path, "w", encoding="utf-8") as f:
