@@ -91,7 +91,18 @@ def _run_instance_mode(argv: list[str]):
             return bridge.send_proactive(openid, content, QQMessageType.PRIVATE)
 
         set_push_callback(_push_to_last_user)
-        bridge.start()
+        try:
+            bridge.start()
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"QQ bridge failed, keeping Partner mind loop alive: {exc}")
+        print("QQ bridge stopped or unavailable; Partner mind loop remains running.")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            sys.exit(0)
         return
 
     print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}; running without QQ bridge.")
