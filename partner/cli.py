@@ -612,7 +612,20 @@ def cmd_update(args):
     print(f"{C_GREEN}   ✅ git pull completed{C_RESET}")
     print()
 
-    # 3. pip install -e .
+    # 3. Remove stale editable metadata, then pip install -e .
+    print(f"{C_YELLOW}➜ cleaning old partner-research installs{C_RESET}")
+    for _ in range(3):
+        old = subprocess.run(
+            [sys.executable, "-m", "pip", "show", "partner-research"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if old.returncode != 0:
+            break
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "-y", "partner-research"],
+            capture_output=True, text=True, timeout=120,
+        )
+
     print(f"{C_YELLOW}➜ pip install -e .{C_RESET}")
     r = subprocess.run(
         [sys.executable, "-m", "pip", "install", "-e", ".", "--break-system-packages"],
@@ -634,6 +647,24 @@ def cmd_update(args):
     if last_line:
         print(f"   {last_line}")
     print(f"{C_GREEN}   ✅ pip install completed{C_RESET}")
+
+    verify = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import importlib.metadata as m, partner, pathlib; "
+            "print(m.version('partner-research')); "
+            "print(pathlib.Path(partner.__file__).resolve())"
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if verify.returncode == 0:
+        lines = [x.strip() for x in verify.stdout.splitlines() if x.strip()]
+        if lines:
+            print(f"   Version: {lines[0]}")
+        if len(lines) > 1:
+            print(f"   Import: {lines[1]}")
+    else:
+        print(f"{C_YELLOW}   ⚠ 安装后 import 校验失败，请重新打开终端或运行: hash -r{C_RESET}")
     print()
 
     # 4. Read and print latest CHANGELOG.md entry
