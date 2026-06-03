@@ -56,7 +56,14 @@ class StateManager:
     def get_heartbeat(self) -> Optional[Heartbeat]:
         try:
             with open(self.heartbeat_path) as f:
-                return Heartbeat(**json.load(f))
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            allowed = set(Heartbeat.__dataclass_fields__.keys())
+            cleaned = {k: v for k, v in data.items() if k in allowed}
+            if "current_task" in data and "current_task_id" not in cleaned:
+                cleaned["current_task_id"] = data.get("current_task", "")
+            return Heartbeat(**cleaned)
         except (FileNotFoundError, json.JSONDecodeError):
             return None
     

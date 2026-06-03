@@ -74,7 +74,7 @@ def _record_runtime_event(workspace: str, save_path: str, event: MindEvent, stat
     _write_json(hb_path, {
         "last_heartbeat": now,
         "status": status,
-        "current_task": event.type.value if hasattr(event.type, "value") else str(event.type),
+        "current_task_id": event.type.value if hasattr(event.type, "value") else str(event.type),
         "cycle_count": cycle_count,
         "crash_count": int(prev_hb.get("crash_count") or 0),
     })
