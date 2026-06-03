@@ -1158,6 +1158,7 @@ def _sync_multi_instance_defaults(
     partner_root: str,
     selected_agent: AgentInfo,
     interval_minutes: int,
+    root_config: dict | None = None,
 ):
     """Propagate global setup choices to all configured instances."""
     global_cfg_path = str(resolve_global_config_path())
@@ -1183,6 +1184,13 @@ def _sync_multi_instance_defaults(
             }
         inst_cfg.setdefault("workspace", {})
         inst_cfg["workspace"]["path"] = inst_ws
+        if root_config:
+            inst_cfg["workspace"]["readonly_dirs"] = (
+                root_config.get("workspace", {}).get("readonly_dirs", [])
+            )
+            if root_config.get("messaging"):
+                inst_cfg["messaging"] = root_config.get("messaging")
+            inst_cfg["name"] = root_config.get("name", inst_cfg.get("name", "Partner"))
         inst_cfg["agent"] = _build_agent_config_for_setup(
             selected_agent,
             inst_cfg.get("agent", {}),
@@ -1766,6 +1774,7 @@ def interactive_setup(quick: bool = False):
         partner_root=workspace,
         selected_agent=selected,
         interval_minutes=interval_minutes,
+        root_config=config,
     )
     if synced_instances:
         status_ok(f"多实例默认设置已同步到 {synced_instances} 个实例")
@@ -1783,6 +1792,14 @@ def interactive_setup(quick: bool = False):
                 "auto_reconnect": True,
             }, f, indent=2, ensure_ascii=False)
         status_ok(f"QQ 机器人配置已写入: {qq_cfg_path}")
+        try:
+            from . import manager
+            global_cfg = manager.load_global_config()
+            instances = global_cfg.get("instances", {}) if isinstance(global_cfg.get("instances"), dict) else {}
+            for instance_id in instances:
+                _write_instance_qq_config(str(instance_id), qq_cfg)
+        except Exception:
+            pass
 
     # ── 安装 QQ 依赖 ──
     if qq_cfg.get("type") == "official":
@@ -1801,26 +1818,41 @@ def interactive_setup(quick: bool = False):
 
             if qq_cfg.get("type") == "official":
                 import subprocess
-                qq_log = os.path.join(workspace, "logs", "qq_bot.log")
-                # Escape backslashes in paths for -c string (Windows)
-                _pp = partner_pkg.replace("\\", "/")
-                _ws = workspace.replace("\\", "/")
+                try:
+                    from . import manager
+                    global_cfg = manager.load_global_config()
+                    instances = global_cfg.get("instances", {}) if isinstance(global_cfg.get("instances"), dict) else {}
+                    default_id = str(global_cfg.get("default_instance") or next(iter(instances.keys()), "01"))
+                    runtime_workspace = str(resolve_instance_workspace(default_id))
+                    if not os.path.isdir(runtime_workspace):
+                        runtime_workspace = workspace
+                except Exception:
+                    default_id = "default"
+                    runtime_workspace = workspace
+                qq_log = os.path.join(runtime_workspace, "logs", "qq_bot.log")
+                os.makedirs(os.path.dirname(qq_log), exist_ok=True)
                 cmd = [
-                    sys.executable, "-c",
-                    f"import sys; sys.path.insert(0, '{_pp}'); "
-                    f"from partner.qq_official_bridge import QQQfficialBridge; "
-                    f"b = QQQfficialBridge('{_ws}'); "
-                    f"b.load_config_from_file('{qq_cfg_path}'.replace('\\\\','/')); "
-                    f"b.start()"
+                    sys.executable, "-m", "partner",
+                    "--instance-id", default_id,
+                    "--workspace", runtime_workspace,
                 ]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = partner_pkg + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
                 proc = subprocess.Popen(
                     cmd, stdout=open(qq_log, "w"), stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
                     start_new_session=True,
+                    env=env,
                 )
-                pid_path = os.path.join(workspace, "state", "qq_bot.pid")
+                pid_path = os.path.join(runtime_workspace, "state", "qq_bot.pid")
+                os.makedirs(os.path.dirname(pid_path), exist_ok=True)
                 with open(pid_path, "w") as f:
                     f.write(str(proc.pid))
+                try:
+                    with open(os.path.join(runtime_workspace, "instance.pid"), "w") as f:
+                        f.write(str(proc.pid))
+                except OSError:
+                    pass
                 status_ok(f"QQ 机器人已后台启动 (PID: {proc.pid})")
     elif qq_cfg.get("type") == "official":
         status_info("快速模式保留 QQ 配置，但不自动启动。需要时运行 partner start")

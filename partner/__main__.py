@@ -32,7 +32,7 @@ def _run_instance_mode(argv: list[str]):
 
     workspace = args.workspace or str(resolve_instance_workspace(args.instance_id))
 
-    from partner.config import PartnerConfig, resolve_partner_config_path
+    from partner.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data
     from partner.core import Partner
     from partner.mind import set_push_callback
     from partner.qq_official_bridge import QQQfficialBridge, QQMessageType
@@ -49,6 +49,20 @@ def _run_instance_mode(argv: list[str]):
         )
 
     cfg_path = resolve_partner_config_path(workspace)
+    if not os.path.exists(cfg_path):
+        root_workspace = str(resolve_instance_workspace(args.instance_id).parent.parent)
+        root_cfg_path = resolve_partner_config_path(root_workspace)
+        if os.path.exists(root_cfg_path):
+            try:
+                with open(root_cfg_path, "r", encoding="utf-8") as f:
+                    root_cfg = json.load(f)
+                root_cfg.setdefault("workspace", {})
+                root_cfg["workspace"]["path"] = workspace
+                save_partner_config_data(workspace, root_cfg)
+                cfg_path = resolve_partner_config_path(workspace)
+                print(f"Recovered missing instance config from {root_cfg_path}")
+            except Exception as exc:
+                print(f"Failed to recover instance config from {root_cfg_path}: {exc}")
     partner_cfg = PartnerConfig.load(cfg_path)
     partner_cfg.workspace.path = workspace
     partner = Partner(partner_cfg)
