@@ -73,6 +73,36 @@ def get_workspace() -> str:
     return None
 
 
+def _resolve_runtime_workspace(workspace: str | None = None) -> str | None:
+    """Resolve commands like `partner start` to an actual instance workspace.
+
+    `get_workspace()` may return the multi-instance root. Runtime commands must
+    run against an instance directory, otherwise QQ starts but status checks a
+    different path.
+    """
+    explicit = bool(workspace)
+    ws = workspace or get_workspace()
+    if explicit:
+        return ws
+    try:
+        manager = _load_manager_module()
+        cfg = manager.load_global_config()
+        default_id = str(cfg.get("default_instance") or "").strip()
+        instances = cfg.get("instances", {}) if isinstance(cfg.get("instances"), dict) else {}
+        if default_id:
+            inst_ws = str(resolve_instance_workspace(default_id))
+            if workspace_has_partner_config(inst_ws):
+                return inst_ws
+        if len(instances) == 1:
+            only_id = next(iter(instances.keys()))
+            inst_ws = str(resolve_instance_workspace(str(only_id)))
+            if workspace_has_partner_config(inst_ws):
+                return inst_ws
+    except Exception:
+        pass
+    return ws
+
+
 def cmd_setup(args):
     """Run first-time setup."""
     from .setup import interactive_setup, detect_hermes, detect_claude_code
@@ -92,7 +122,7 @@ C_RED = "\033[31m"
 def cmd_status(args):
     """Check Partner status with full detail."""
     from .setup import show_status, find_workspace
-    workspace = args.workspace or find_workspace()
+    workspace = _resolve_runtime_workspace(args.workspace) or find_workspace()
     show_status(workspace)
 
 
@@ -267,7 +297,7 @@ def cmd_default(args):
 
 
 def cmd_bot(args):
-    workspace = args.workspace or get_workspace()
+    workspace = _resolve_runtime_workspace(args.workspace)
     if not workspace:
         print("❌ Partner 未配置，请先运行: partner setup")
         return
@@ -280,7 +310,7 @@ def cmd_bot(args):
 
 
 def cmd_short_bot(args):
-    workspace = args.workspace or get_workspace()
+    workspace = _resolve_runtime_workspace(args.workspace)
     if not workspace:
         print("❌ Partner 未配置，请先运行: partner setup")
         return
@@ -346,6 +376,12 @@ def _bot_stop(workspace, platform, quiet=False):
                 )
                 if r.returncode == 0:
                     stopped_any = True
+            except Exception:
+                pass
+            try:
+                instance_pid = os.path.join(workspace, "instance.pid")
+                if os.path.exists(instance_pid):
+                    os.remove(instance_pid)
             except Exception:
                 pass
 
@@ -460,6 +496,12 @@ def _bot_start(workspace, platform, quiet=False):
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
         with open(pidf, "w") as f:
             f.write(str(proc.pid))
+        instance_pidf = os.path.join(workspace, "instance.pid")
+        try:
+            with open(instance_pidf, "w") as f:
+                f.write(str(proc.pid))
+        except OSError:
+            pass
         print(f"  ✅ {label} 已后台启动，研究引擎同步运行 (PID: {proc.pid})")
         print(f"     日志: {log}")
         print(f"     停止: partner bot stop qq")
@@ -474,7 +516,7 @@ def _bot_start(workspace, platform, quiet=False):
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )
             print(f"  🛡️  Watchdog 已启动 (自动守护)")
-        else:
+        elif not quiet:
             print(f"  ⚠ Watchdog 脚本未找到: {watchdog_script}")
 
         if not quiet:
