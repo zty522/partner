@@ -87,20 +87,46 @@ def _resolve_runtime_workspace(workspace: str | None = None) -> str | None:
     try:
         manager = _load_manager_module()
         cfg = manager.load_global_config()
-        default_id = str(cfg.get("default_instance") or "").strip()
         instances = cfg.get("instances", {}) if isinstance(cfg.get("instances"), dict) else {}
+
+        def _usable_instance(instance_id: str) -> str:
+            inst_ws = str(resolve_instance_workspace(instance_id))
+            if not os.path.isdir(inst_ws):
+                return ""
+            qq_cfgs = (
+                os.path.join(inst_ws, "00_config", "qq_config.json"),
+                os.path.join(inst_ws, "qq_config.json"),
+            )
+            if workspace_has_partner_config(inst_ws) or any(os.path.exists(p) for p in qq_cfgs):
+                return inst_ws
+            return inst_ws if os.path.isdir(os.path.join(inst_ws, "state")) else ""
+
+        default_id = str(cfg.get("default_instance") or "").strip()
         if default_id:
-            inst_ws = str(resolve_instance_workspace(default_id))
-            if workspace_has_partner_config(inst_ws):
+            inst_ws = _usable_instance(default_id)
+            if inst_ws:
                 return inst_ws
         if len(instances) == 1:
             only_id = next(iter(instances.keys()))
-            inst_ws = str(resolve_instance_workspace(str(only_id)))
-            if workspace_has_partner_config(inst_ws):
+            inst_ws = _usable_instance(str(only_id))
+            if inst_ws:
+                return inst_ws
+        if "01" in instances:
+            inst_ws = _usable_instance("01")
+            if inst_ws:
                 return inst_ws
     except Exception:
         pass
     return ws
+
+
+def _root_workspace_if_different(runtime_workspace: str | None) -> str | None:
+    root = str(resolve_partner_root())
+    if runtime_workspace and os.path.abspath(root) == os.path.abspath(runtime_workspace):
+        return None
+    if workspace_has_partner_config(root) or os.path.isdir(os.path.join(root, "instances")):
+        return root
+    return None
 
 
 def cmd_setup(args):
@@ -304,8 +330,14 @@ def cmd_bot(args):
     platform = args.platform
     action = args.action
     if action == "start":
+        root_ws = _root_workspace_if_different(workspace)
+        if root_ws:
+            _bot_stop(root_ws, platform, quiet=True)
         _bot_start(workspace, platform)
     elif action == "stop":
+        root_ws = _root_workspace_if_different(workspace)
+        if root_ws:
+            _bot_stop(root_ws, platform, quiet=True)
         _bot_stop(workspace, platform)
 
 
@@ -316,10 +348,19 @@ def cmd_short_bot(args):
         return
     action = args.command
     if action == "start":
+        root_ws = _root_workspace_if_different(workspace)
+        if root_ws:
+            _bot_stop(root_ws, "qq", quiet=True)
         _bot_start(workspace, "qq")
     elif action == "stop":
+        root_ws = _root_workspace_if_different(workspace)
+        if root_ws:
+            _bot_stop(root_ws, "qq", quiet=True)
         _bot_stop(workspace, "qq")
     elif action == "restart":
+        root_ws = _root_workspace_if_different(workspace)
+        if root_ws:
+            _bot_stop(root_ws, "qq", quiet=True)
         _bot_stop(workspace, "qq", quiet=True)
         _bot_start(workspace, "qq")
 
@@ -635,7 +676,7 @@ def cmd_update(args):
     workspace = None
     try:
         from .setup import find_workspace as _fw
-        workspace = _fw()
+        workspace = _resolve_runtime_workspace(_fw())
     except Exception:
         pass
 
