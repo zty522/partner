@@ -11,7 +11,10 @@
 """
 
 import asyncio
+import json
 import logging
+import os
+from datetime import datetime
 from typing import Optional
 
 from .pool import MindPool
@@ -25,6 +28,64 @@ MAX_CONCURRENT = 10
 # 自脉冲间隔（秒）。Partner 进程启动后才生效；断电后的进程启动
 # 需要依赖 Windows 启动项/任务计划，启动后 WAKE_UP 会立即恢复活跃项目。
 SELF_PULSE_INTERVAL = 1800  # 30 分钟
+
+
+def _state_dir(workspace: str, save_path: str = "") -> str:
+    if workspace:
+        return os.path.join(workspace, "state")
+    if save_path:
+        return os.path.dirname(save_path)
+    return ""
+
+
+def _read_json(path: str, default: dict) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else dict(default)
+    except Exception:
+        return dict(default)
+
+
+def _write_json(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _record_runtime_event(workspace: str, save_path: str, event: MindEvent, status: str, ok: bool = True) -> None:
+    """Keep old status/stats files meaningful for the new mind-loop runtime."""
+    state_dir = _state_dir(workspace, save_path)
+    if not state_dir:
+        return
+    now = datetime.now().isoformat()
+    hb_path = os.path.join(state_dir, "heartbeat.json")
+    stats_path = os.path.join(state_dir, "stats.json")
+    prev_hb = _read_json(hb_path, {})
+    prev_stats = _read_json(stats_path, {"total_cycles": 0, "total_tasks_completed": 0})
+    cycle_count = int(prev_hb.get("cycle_count") or 0)
+    total_cycles = int(prev_stats.get("total_cycles") or 0)
+    total_done = int(prev_stats.get("total_tasks_completed") or 0)
+    if status == "idle":
+        cycle_count += 1
+        total_cycles += 1
+        if ok:
+            total_done += 1
+    _write_json(hb_path, {
+        "last_heartbeat": now,
+        "status": status,
+        "current_task": event.type.value if hasattr(event.type, "value") else str(event.type),
+        "cycle_count": cycle_count,
+        "crash_count": int(prev_hb.get("crash_count") or 0),
+    })
+    _write_json(stats_path, {
+        **prev_stats,
+        "total_cycles": total_cycles,
+        "total_tasks_completed": total_done,
+        "last_event_type": event.type.value if hasattr(event.type, "value") else str(event.type),
+        "last_event_ok": bool(ok),
+        "last_heartbeat": now,
+    })
 
 
 async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str = "",
@@ -52,6 +113,14 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
 
     pending_tasks: set[asyncio.Task] = set()
     logger.info("🧠 Mind Loop 启动")
+    if workspace or save_path:
+        _record_runtime_event(
+            workspace,
+            save_path,
+            MindEvent(type=EventType.WAKE_UP, priority=0, payload={}, source="startup"),
+            "running",
+            ok=True,
+        )
 
     # 从持久化文件恢复事件
     try:
@@ -127,8 +196,9 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 continue
 
             # 创建异步 Task 执行
+            _record_runtime_event(workspace, save_path, event, "working", ok=True)
             task = asyncio.create_task(
-                _run_event_safely(event),
+                _run_event_safely(event, workspace=workspace, save_path=save_path),
                 name=f"mind_{event.id[:8]}",
             )
             pending_tasks.add(task)
@@ -143,12 +213,15 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
         raise
 
 
-async def _run_event_safely(event: MindEvent):
+async def _run_event_safely(event: MindEvent, workspace: str = "", save_path: str = ""):
     """安全执行一个念头（不抛出异常）。"""
     try:
         await execute_event(event)
+        _record_runtime_event(workspace, save_path, event, "idle", ok=True)
     except asyncio.CancelledError:
         logger.info(f"[调度] 念头 {event.id[:8]} 执行被取消")
+        _record_runtime_event(workspace, save_path, event, "cancelled", ok=False)
     except Exception as e:
         logger.error(f"[调度] 念头 {event.id[:8]} 抛出未捕获异常: {e}",
                      exc_info=True)
+        _record_runtime_event(workspace, save_path, event, "error", ok=False)

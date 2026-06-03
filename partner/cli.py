@@ -440,14 +440,27 @@ def _bot_start(workspace, platform, quiet=False):
                 return
         log = os.path.join(workspace, "logs", "qq_bot.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
-        cmd = [sys.executable, "-c",
-            f"import sys; sys.path.insert(0,'{pp}'); from partner.qq_official_bridge import QQQfficialBridge; b=QQQfficialBridge('{workspace}'); b.load_config_from_file('{cfg}'); b.start()"]
-        proc = subprocess.Popen(cmd, stdout=open(log,"w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        # Start the full Partner runtime, not just the QQ bridge. The runtime
+        # launches mind_loop() and then attaches QQ for user messages/reports.
+        instance_id = os.path.basename(os.path.normpath(workspace)) or _get_default_instance_id() or "default"
+        cmd = [
+            sys.executable, "-m", "partner",
+            "--instance-id", instance_id,
+            "--workspace", workspace,
+        ]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = pp + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=open(log, "w"), stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True,
+            env=env,
+        )
         pidf = os.path.join(workspace, "state", "qq_bot.pid")
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
         with open(pidf, "w") as f:
             f.write(str(proc.pid))
-        print(f"  ✅ {label} 已后台启动 (PID: {proc.pid})")
+        print(f"  ✅ {label} 已后台启动，研究引擎同步运行 (PID: {proc.pid})")
         print(f"     日志: {log}")
         print(f"     停止: partner bot stop qq")
 
