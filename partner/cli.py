@@ -557,8 +557,6 @@ def _bot_start(workspace, platform, quiet=False):
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )
             print(f"  🛡️  Watchdog 已启动 (自动守护)")
-        elif not quiet:
-            print(f"  ⚠ Watchdog 脚本未找到: {watchdog_script}")
 
         if not quiet:
             _print_commands()
