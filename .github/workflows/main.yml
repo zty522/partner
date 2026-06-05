@@ -12,14 +12,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install Python build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pyinstaller build
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
+      - name: Build Python packages
+        run: python -m build
+      - name: Build desktop app
+        run: python -m PyInstaller --clean --noconfirm PartnerDesktop.spec
       - name: Build installer
         shell: cmd
         run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'
       - uses: softprops/action-gh-release@v2
         with:
-          name: v0.6.0 - Long-Term Research Partner
-          body_path: release_v0.6.0.md
-          files: installer/output/*.exe
+          name: v0.7.0 - Event-Driven Partner Runtime
+          body_path: release_v0.7.0.md
+          files: |
+            installer/output/*.exe
+            dist/partner_research-0.7.0*
           overwrite_files: true
