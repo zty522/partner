@@ -34,7 +34,7 @@ def _run_instance_mode(argv: list[str]):
 
     from partner.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data
     from partner.core import Partner
-    from partner.mind import set_push_callback
+    from partner.mind import set_file_push_callback, set_push_callback
     from partner.qq_official_bridge import QQQfficialBridge, QQMessageType
     from partner.restart_tracker import RestartTracker
 
@@ -88,9 +88,33 @@ def _run_instance_mode(argv: list[str]):
             if not openid:
                 print("QQ proactive push skipped: missing openid in qq_user_context.json")
                 return False
-            return bridge.send_proactive(openid, content, QQMessageType.PRIVATE)
+            return bridge.send_proactive(openid, content, QQMessageType.PRIVATE, bypass_quiet=True)
 
         set_push_callback(_push_to_last_user)
+
+        def _push_file_to_last_user(file_data: bytes, filename: str = "", caption: str = ""):
+            ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
+            try:
+                with open(ctx_path, "r", encoding="utf-8") as f:
+                    ctx = json.load(f)
+            except Exception as exc:
+                print(f"QQ proactive file push skipped: no qq_user_context.json ({exc})")
+                return False
+            openid = ctx.get("openid")
+            if not openid:
+                print("QQ proactive file push skipped: missing openid in qq_user_context.json")
+                return False
+            text = caption or filename or "Partner 阶段汇报"
+            return bridge.send_file_proactive(
+                openid,
+                file_data,
+                4,
+                QQMessageType.PRIVATE,
+                text_content=text,
+                file_name=filename,
+            )
+
+        set_file_push_callback(_push_file_to_last_user)
         try:
             bridge.start()
         except KeyboardInterrupt:

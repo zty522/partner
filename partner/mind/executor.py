@@ -11,12 +11,13 @@ import logging
 import os
 import re
 import time as _time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from .event_types import MindEvent, EventType, report
 from .pool import MindPool
 from ..adapter import USER_FRIENDLY_PROGRESS_REPLY
+from ..outbound_policy import prefix_event_notice
 from ..research_memory import (
     append_strategy_memory,
     build_cross_project_context,
@@ -24,6 +25,7 @@ from ..research_memory import (
     build_research_context,
     consolidate_research_memory,
     ensure_habits,
+    get_recent_growth_events,
     get_open_idea,
     mark_periodic_run,
     mark_idea_processed,
@@ -42,8 +44,12 @@ from ..research_guardrails import (
     ensure_baseline_and_metric_contracts,
     ensure_mind_files,
     improve_user_report,
+    is_literature_reference_task,
+    maybe_pause_after_literature_report,
+    maybe_pause_project_for_quality_gate,
     should_send_user_report,
 )
+from ..user_text_safety import has_internal_diff, strip_internal_diff
 from ..content_feed import (
     build_content_feed_context,
     build_patrol_prompt_context,
@@ -65,6 +71,7 @@ _running_projects: set[str] = set()
 
 # 推送回调：msg(str) -> None
 _push_callback = None
+_file_push_callback = None
 
 # 报告去重缓存：{content_hash: timestamp}，10分钟内同一内容不重复推送
 _report_dedup_cache: dict = {}
@@ -82,6 +89,70 @@ def _state_dir() -> str:
     path = os.path.join(_workspace or ".", "state")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
+                                  event_kind: str = "", priority: int = 3,
+                                  source: str = "", parent_id: str = "",
+                                  force_send: bool = True,
+                                  bypass_rate_limit: bool = False) -> None:
+    text = prefix_event_notice(content, event_type.value if isinstance(event_type, EventType) else str(event_type), event_kind=event_kind)
+    if not text:
+        return
+    pool = await ensure_pool()
+    await pool.put(MindEvent(
+        type=EventType.REPORT,
+        priority=priority,
+        payload={
+            "content": text,
+            "force_send": bool(force_send),
+            "bypass_rate_limit": bool(bypass_rate_limit),
+            "visible_event_type": event_type.value if isinstance(event_type, EventType) else str(event_type),
+            "visible_event_kind": event_kind,
+        },
+        source=source,
+        parent_id=parent_id or None,
+    ))
+
+
+def _record_growth_event_visible(*args, notify: bool = True, **kwargs):
+    record_growth_event(*args, **kwargs)
+    if not notify:
+        return
+    try:
+        project = str(args[1] if len(args) > 1 else kwargs.get("project") or "当前项目")
+        learned = str(kwargs.get("learned") or (args[3] if len(args) > 3 else "") or "").strip()
+        _schedule_background_report(
+            prefix_event_notice(
+                f"已写入一条可复用经验：{_clip(learned, 120) if learned else '后续会按这次经验调整判断和推进方式。'}",
+                EventType.HABIT_UPDATE.value,
+                event_kind=project,
+            )
+        )
+    except Exception as exc:
+        logger.debug(f"[GROWTH] failed to enqueue visible growth notice: {exc}")
+
+
+def _schedule_background_report(content: str):
+    if not content:
+        return
+    try:
+        pool = MindPool.get_sync_instance()
+        ev = MindEvent(
+            type=EventType.REPORT,
+            priority=3,
+            payload={
+                "content": content,
+                "force_send": True,
+                "bypass_rate_limit": True,
+                "visible_event_type": EventType.HABIT_UPDATE.value,
+            },
+            source="growth:visible_notice",
+        )
+        if pool is not None:
+            pool.put_threadsafe(ev)
+    except Exception as exc:
+        logger.debug(f"[REPORT] failed to schedule background report: {exc}")
 
 
 def _clip(text: str, limit: int) -> str:
@@ -113,6 +184,16 @@ def _is_internal_fallback_text(text: str) -> bool:
             "Error: agent backend not available",
             "Reached maximum iterations",
             "tirith security scanner",
+            "没有提供实际的图片",
+            "没有提供实际的截图",
+            "没有提供图片",
+            "没有收到图片",
+            "未提供图片",
+            "请您上传具体的图片",
+            "请上传具体的图片",
+            "cannot access the image",
+            "image was not provided",
+            "please upload",
         )
     )
 
@@ -292,6 +373,43 @@ def _recent_report_seen(sig: str, ttl_sec: int = 21600) -> bool:
     return bool(seen and now - seen <= ttl_sec)
 
 
+def _blocker_report_allowed(title: str, issues: list[str], ttl_sec: int = 21600) -> bool:
+    """Rate-limit repeated blocker reports by project and blocker category."""
+    if not issues:
+        return False
+    categories: list[str] = []
+    for issue in issues:
+        text = str(issue)
+        if re.search(r"api|key|预算|账号|token", text, re.I):
+            categories.append("api_budget_account")
+        elif re.search(r"真实数据|源目录|样本|数据集", text, re.I):
+            categories.append("data_source")
+        elif re.search(r"simulation|模拟|dry-run|真实 API", text, re.I):
+            categories.append("simulation_real_boundary")
+        else:
+            categories.append(_semantic_report_signature(text)[:60])
+    key = _semantic_report_signature(title + "|" + "|".join(sorted(set(categories))))
+    path = os.path.join(_state_dir(), "blocker_report_history.json")
+    now = _time.time()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    last = float(data.get(key) or 0)
+    if last and now - last <= ttl_sec:
+        return False
+    data[key] = now
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return True
+
+
 def _report_min_interval_sec() -> int:
     raw = os.getenv("PARTNER_REPORT_MIN_INTERVAL_SEC", "").strip()
     if raw:
@@ -299,12 +417,30 @@ def _report_min_interval_sec() -> int:
             return max(0, int(raw))
         except Exception:
             pass
-    return 600
+    return 300
+
+
+def _is_startup_report_step(step: int) -> bool:
+    """Early project phase: keep the user visibly oriented."""
+    try:
+        return 0 <= int(step) <= 2
+    except Exception:
+        return False
+
+
+def _is_startup_transition_step(step: int) -> bool:
+    try:
+        return int(step) == 3
+    except Exception:
+        return False
 
 
 def _sanitize_user_report_text(text: str) -> str:
     """Remove internal agent/runtime noise before user-facing delivery."""
     if not text:
+        return ""
+    text = strip_internal_diff(text)
+    if not text or has_internal_diff(text):
         return ""
     if re.search(r"<\s*/?\s*(tool_call|function|parameter)\b|<function=|</function>|<parameter=", text, re.I):
         return ""
@@ -323,6 +459,8 @@ def _sanitize_user_report_text(text: str) -> str:
             continue
         if re.match(r"(?i)^session_id:", stripped):
             continue
+        if has_internal_diff(stripped):
+            continue
         lines.append(raw.rstrip())
     cleaned = "\n".join(lines).strip()
     cleaned = re.sub(r"(最终){4,}", "最终", cleaned)
@@ -333,6 +471,20 @@ def _sanitize_user_report_text(text: str) -> str:
         cleaned,
     )
     return cleaned
+
+
+def _strip_tool_call_noise(text: str) -> str:
+    """Remove raw tool-call transcripts from backend output before parsing/reporting."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL | re.I)
+    cleaned = re.sub(r"<function=[^>\n]+>.*?</function>", "", cleaned, flags=re.DOTALL | re.I)
+    cleaned = re.sub(r"<parameter=[^>\n]+>.*?</parameter>", "", cleaned, flags=re.DOTALL | re.I)
+    cleaned = re.sub(r"(?m)^<tool_call>.*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^<function=[^>\n]+>.*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^<parameter=[^>\n]+>.*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^.*</(?:tool_call|function|parameter)>.*$", "", cleaned)
+    return cleaned.strip()
 
 
 def _project_event_title(ev) -> str:
@@ -358,6 +510,22 @@ def _has_project_event(pool, title: str = "", include_running: bool = True) -> b
         ev_title = _project_event_title(ev)
         if ev_title and (not title or ev_title == title):
             return True
+    thread_queue = getattr(pool, "_thread_queue", None)
+    if thread_queue is not None:
+        try:
+            with thread_queue.mutex:
+                thread_events = list(thread_queue.queue)
+        except Exception:
+            thread_events = []
+        for ev in thread_events:
+            ev_title = _project_event_title(ev)
+            if ev_title and (not title or ev_title == title):
+                return True
+    if include_running:
+        for ev in getattr(pool, "_inflight", {}).values():
+            ev_title = _project_event_title(ev)
+            if ev_title and (not title or ev_title == title):
+                return True
     for _, ev in getattr(pool, "_waiting_room", {}).items():
         if isinstance(ev, tuple) and len(ev) == 2:
             ev = ev[1]
@@ -422,6 +590,137 @@ def _active_recur_wake_after() -> float | None:
     if delay <= 0:
         return None
     return _time.time() + delay
+
+
+def _delivery_mode(payload: dict | None) -> str:
+    mode = str((payload or {}).get("delivery_mode") or "research_project").strip()
+    return mode if mode in {"research_project", "reference_brief", "direct_deliverable", "audit_only"} else "research_project"
+
+
+def _is_one_shot_delivery(mode: str) -> bool:
+    return mode in {"reference_brief", "direct_deliverable", "audit_only"}
+
+
+def _stop_after_completion(payload: dict | None) -> bool:
+    payload = payload or {}
+    if bool(payload.get("stop_after_completion")):
+        return True
+    return _is_one_shot_delivery(_delivery_mode(payload))
+
+
+def _delivery_policy(mode: str, user_request: str) -> str:
+    request = _clip(user_request or "", 900)
+    if mode == "reference_brief":
+        return (
+            "\n本轮交付模式：reference_brief（参考资料/文献简报）。"
+            f"\n用户原始请求：{request or '按当前任务描述整理参考资料'}"
+            "\n必须围绕用户原始请求找资料、读摘要/正文/元数据、总结方法路线和引用线索。"
+            "\n禁止自动进入实验、建模、调参、生成模拟数据、写 pipeline 或把“下一阶段可做”当成本轮成果。"
+            "\n完成一版可读简报后应暂停，不要自动扩展成长期项目。"
+        )
+    if mode == "direct_deliverable":
+        return (
+            "\n本轮交付模式：direct_deliverable（直接交付）。"
+            f"\n用户原始请求：{request or '按用户点名交付物直接完成'}"
+            "\n只完成用户点名的表格/文件/翻译/整理/转换/导出等交付物。"
+            "\n如果用户要 Excel/表格/文件，必须实际生成或修改该文件；不要把健壮性测试、长期项目推进或阶段汇报当作成果。"
+            "\n禁止自动搜索文献、做阶段 PPT/PDF、开新实验、创建长期路线图。"
+            "\n完成交付物后暂停，除非用户明确要求继续。"
+        )
+    if mode == "audit_only":
+        return (
+            "\n本轮交付模式：audit_only（证据/风险审计）。"
+            f"\n用户原始风险信号：{request or '按当前风险信号审计'}"
+            "\n先审计证据、数据泄露、过拟合、路径真实性或结论可信度。"
+            "\n审计未通过前禁止继续调参、宣称最佳结果、进入下一阶段实验或包装成果。"
+        )
+    return (
+        "\n本轮交付模式：research_project（长期科研项目）。"
+        "\n可以持续推进，但每一步仍必须根据上下文选择一个最小动作，不要机械走固定流程。"
+    )
+
+
+def _delivery_objective_override(workspace: str, title: str, mode: str, user_request: str) -> tuple[str, str] | None:
+    if mode == "research_project":
+        return None
+    from ..project_state import get_project_dir
+
+    project_dir = get_project_dir(workspace, title)
+    request = _clip(user_request or f"围绕「{title}」完成用户点名交付", 900)
+    if mode == "reference_brief":
+        return (
+            f"只完成用户要求的参考资料/文献方法简报：{request}。"
+            "必须优先找相关文献/资料并形成可读汇报，交付后暂停，不进入实验或下一阶段项目推进。",
+            os.path.join(project_dir, "reference_brief.md"),
+        )
+    if mode == "direct_deliverable":
+        return (
+            f"只完成用户点名的直接交付物：{request}。"
+            "如果需要改文件就直接改；如果需要整理表格/Excel/CSV，就必须生成对应实际文件并在 FILES 写明。"
+            "不要只写说明；不要生成额外项目路线或阶段报告。",
+            os.path.join(project_dir, "direct_deliverable.md"),
+        )
+    if mode == "audit_only":
+        return (
+            f"只做用户指出问题的证据/风险审计：{request}。"
+            "审计未通过前禁止继续优化、调参或宣称新最佳。",
+            os.path.join(project_dir, "audit_result.md"),
+        )
+    return None
+
+
+def _selector_objective_override(workspace: str, title: str, payload: dict | None) -> tuple[str, str] | None:
+    payload = payload or {}
+    if not _stop_after_completion(payload):
+        return None
+    event_kind = str(payload.get("event_kind") or "one_shot_event").strip() or "one_shot_event"
+    user_request = str(payload.get("user_request") or "").strip()
+    from ..project_state import get_project_dir
+
+    project_dir = get_project_dir(workspace, title)
+    safe_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", event_kind).strip("_") or "one_shot_event"
+    return (
+        f"只执行 selector 选中的这个 event：{event_kind}。用户原始请求：{user_request or title}。"
+        "完成用户点名交付后停止自动续跑；不要生成阶段汇报/PPT/PDF，除非用户明确要求。",
+        os.path.join(project_dir, f"{safe_kind}_result.md"),
+    )
+
+
+def _build_one_shot_project_prompt(workspace: str, title: str, state_md: str, step: int,
+                                   event_payload: dict | None, artifact_path: str) -> str:
+    """Slim executor prompt for user-directed one-shot deliverables.
+
+    These events should behave like a direct assistant action, not a long
+    research lifecycle. Keep the prompt small and require real file outputs when
+    the user asked for a file.
+    """
+    event_payload = event_payload or {}
+    user_request = _clip(str(event_payload.get("user_request") or title), 1200)
+    event_kind = str(event_payload.get("event_kind") or "one_shot_event").strip() or "one_shot_event"
+    artifact_hint = os.path.basename(artifact_path) if artifact_path else "one_shot_result.md"
+    state_snapshot = _compact_state_snapshot(state_md)
+    return (
+        f"你是 Partner 的轻量执行器。本轮不是长期科研项目推进，只完成用户这一次明确交付。\n"
+        f"项目/任务名：{title}\n"
+        f"event_kind：{event_kind}\n"
+        f"用户原始请求：{user_request}\n"
+        f"当前状态摘要：\n{state_snapshot}\n\n"
+        "执行规则：\n"
+        "1. 只做用户点名的最小交付，不要自动做阶段汇报、PPT/PDF、长期路线图、健壮性测试或下一轮扩展。\n"
+        "2. 如果用户要求 Excel/CSV/PPT/PDF/图片/文档，必须实际生成对应文件，不能只写说明。\n"
+        "3. 若任务依赖地点、日期范围、文件路径等关键参数，用户没给就不要擅自补；应说明缺失参数并停止。\n"
+        "4. 若需要联网获取公开数据，优先使用无需账号/API key 的公开来源；如果失败，换一个可用公开来源或说明真实限制。\n"
+        "5. 不要把内部工具调用、diff、trace、代码片段原样当作给用户看的汇报。\n"
+        "6. 完成后停止，不要继续排队下一步。\n\n"
+        "必须按以下结构输出：\n"
+        "ACTION: <一个动作类型，例如 create_file / summarize / modify_file / lookup>\n"
+        "DONE: <一句话说明实际完成了什么>\n"
+        "FINDINGS: <1-3 条关键结果；没有就写 EMPTY>\n"
+        "NEXT: <写 已完成，等待用户查看/继续>\n"
+        "STATE_DELTA: <对状态的简短更新>\n"
+        f"FILES: <真实生成/修改的文件路径，多个用 ; 分隔；没有文件写 EMPTY。结果摘要可写入 {artifact_hint}>\n"
+        f"ARTIFACT_CONTENT:\n<写入 {artifact_hint} 的简短摘要或说明；不要写长篇报告>\n"
+    )
 
 
 def _cap_project_waiting_delay(pool, title: str, max_delay_sec: int) -> bool:
@@ -849,6 +1148,34 @@ def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int
         brief_text = ""
 
     hot_text = brief_text + "\n" + state_md
+    if mainline or allowed_scope or forbidden_scope or guardrail.get("completion_criteria"):
+        alignment_path = os.path.join(project_dir, "contract_alignment.md")
+        boundary_path = os.path.join(project_dir, "scope_boundary_audit.md")
+        deliverable_path = os.path.join(project_dir, "contract_deliverable.md")
+        allowed_text = "；".join([mainline] + allowed_scope[:6]).strip("；") or "用户原始要求"
+        forbidden_text = "；".join(forbidden_scope[:8]) or "用户未要求的新方向"
+        criteria_text = "；".join([str(x).strip() for x in (guardrail.get("completion_criteria") or []) if str(x).strip()][:8])
+        if not os.path.exists(alignment_path):
+            return (
+                "先做任务合同对齐，不推进新实验或新方向。"
+                f"本轮只根据用户原始要求和项目合同写清：允许范围={allowed_text}；禁止范围={forbidden_text}；"
+                f"完成标准={criteria_text or '直接满足用户点名交付物'}。"
+                "同时列出当前已有产物哪些回答了用户问题、哪些属于越界或下一阶段建议。",
+                alignment_path,
+            )
+        if not os.path.exists(boundary_path):
+            return (
+                "执行通用边界审计。只检查当前项目是否偏离用户合同："
+                f"允许范围={allowed_text}；禁止范围={forbidden_text}。"
+                "把每个已有主要结论标成 in_scope / next_phase / out_of_scope，并说明需要从用户汇报中降级或删除的内容。",
+                boundary_path,
+            )
+        return (
+            "只补齐合同内交付物，不自动扩展。"
+            f"当前允许范围：{allowed_text}。禁止范围：{forbidden_text}。"
+            "如果合同内交付物已经足够，产物应写成最终交付摘要和暂停理由；不要为了继续推进而发明下一阶段。",
+            deliverable_path,
+        )
     path_audit_path = os.path.join(project_dir, "path_reality_check.md")
     path_audit_text = _read_text(path_audit_path, 5000) if os.path.exists(path_audit_path) else ""
     code_missing_paths = _code_generated_missing_paths(project_dir)
@@ -881,6 +1208,34 @@ def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int
     breakthrough_queue = _read_breakthrough_queue(workspace, title)
     if breakthrough_queue:
         latest_queue = _clip(breakthrough_queue[-1200:], 1200)
+        if re.search(r"(open\s*\|\s*evidence_audit|证据文件.*不存在|证据不足|不可复查|补齐.*证据|evidence_audit)", latest_queue, re.I):
+            audit_path = os.path.join(project_dir, "evidence_audit.md")
+            queue_path = _breakthrough_queue_path(workspace, title)
+            if os.path.exists(audit_path) and _path_mtime(audit_path) >= _path_mtime(queue_path):
+                logger.info("[PROJECT] evidence_audit 队列已有更新后的审计文件，跳过重复审计目标")
+            else:
+                return (
+                    "优先执行 breakthrough_queue.md 最新 evidence_audit 项。"
+                    "本轮禁止继续 improvement/tuning/Optuna/Stacking，也禁止把任何指标写成已确认最佳。"
+                    "必须先补齐或复核被引用的证据文件、运行日志和最小复现实验；"
+                    "若完整复跑太慢，先做小样本/单模型复现来验证数据管线和评估协议。"
+                    "输出必须区分 verified / inferred / hypothesis，并给出审计通过前的下一步。",
+                    audit_path,
+                )
+        if re.search(r"(交互特征选择泄露|fold\s*内选择|fold内选择|feature selection.*fold|选择流程.*泄露)", latest_queue, re.I):
+            leak_fix_path = os.path.join(project_dir, "fold_internal_feature_selection_fix.md")
+            queue_path = _breakthrough_queue_path(workspace, title)
+            if os.path.exists(leak_fix_path) and _path_mtime(leak_fix_path) >= _path_mtime(queue_path):
+                logger.info("[PROJECT] fold 内特征选择修复已有更新后的产物，跳过重复目标")
+            else:
+                return (
+                    "优先执行 breakthrough_queue.md 最新方法泄露修复项。"
+                    "本轮不要继续 Optuna/Stacking，也不要把旧 v3 指标继续包装成最终结果。"
+                    "必须把特征选择流程改成每个 CV fold 内只用训练折选择 top features / interaction features，"
+                    "再在测试折评估；对比 full-data selection 与 fold-internal selection 的 MAE/R2，"
+                    "判断原结果是否被轻微抬高。输出 verified / inferred / remaining_risk。",
+                    leak_fix_path,
+                )
         if re.search(r"(数据泄露|泄露|leakage|data leak|不可信|太好|异常好|过拟合)", latest_queue, re.I):
             audit_path = os.path.join(project_dir, "data_leakage_audit.md")
             queue_path = _breakthrough_queue_path(workspace, title)
@@ -977,6 +1332,42 @@ def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int
             os.path.join(project_dir, "progress_quality_audit.md"),
         )
 
+    open_idea = get_open_idea(workspace, title)
+    if open_idea:
+        idea_text = str(open_idea.get("content") or open_idea.get("idea") or "").strip()
+        if re.search(r"(发展图景|未来趋势|roadmap|技术发展|agent)", idea_text, re.I):
+            return (
+                "优先处理用户未消化想法：基于当前 workspace 已有文档，不大范围重新搜索，"
+                "总结“当前 Agent 技术发展图景与未来趋势”。需要先读取本地评测框架/gap/roadmap，"
+                "可写一个小脚本辅助整理关键词；最后把结论落盘成一份可读文档。",
+                os.path.join(project_dir, "agent_tech_landscape.md"),
+            )
+        if re.search(r"(脂肪肝|TMEM41B|CLCC1|VLDL|MASH|内质网|磷脂翻转)", idea_text, re.I):
+            return (
+                "优先处理用户刚分享的脂肪肝/CLCC1/TMEM41B 相关长文。"
+                "本轮不要继续旧突破队列或模板扩展；只做一个最小闭环："
+                "提取核心科学主张，标注哪些是原文可见、哪些需要原始论文核验，"
+                "判断它更像健康建议、科普机制解读还是待验证研究假设，"
+                "列出可查证关键词/可能原始论文线索/夸大风险，并说明是否应纳入当前健康建议可靠性评估框架。",
+                os.path.join(project_dir, "user_shared_fatty_liver_claim_audit.md"),
+            )
+        return (
+            f"优先处理用户未消化想法：{_clip(idea_text, 260)}。只做一个最小闭环，并把处理结果落盘。",
+            os.path.join(project_dir, "idea_response.md"),
+        )
+
+    content_items = get_open_content_items(workspace, project=title, limit=1)
+    content_items = [item for item in content_items if bool(item.get("should_nudge_project", False))]
+    if content_items:
+        item = content_items[0]
+        visible = str(item.get("visible_body") or item.get("text") or "")
+        return (
+            "优先消化用户/自巡游分享的外部内容素材。不要把它当成事实结论；"
+            f"本轮聚焦这条材料：{_clip(visible, 260)}。"
+            "先提炼核心主张、证据风险、和当前项目的关系、一个可验证的最小动作，并把结果落盘。",
+            os.path.join(project_dir, "external_content_digest.md"),
+        )
+
     if breakthrough_queue:
         return (
             "优先执行项目目录里的 breakthrough_queue.md 最新 open 项。"
@@ -994,31 +1385,6 @@ def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int
             "只做去重和转向：统计已有化合物/脚本的唯一有效结果，写清为什么重复下载没有形成真实增量，"
             "并给出下一步非重复最小动作（例如合并唯一SMILES、训练集质量审计、VAE训练前置条件）。",
             os.path.join(project_dir, "repetition_break.md"),
-        )
-
-    open_idea = get_open_idea(workspace, title)
-    if open_idea:
-        idea_text = str(open_idea.get("content") or open_idea.get("idea") or "").strip()
-        if re.search(r"(发展图景|未来趋势|roadmap|技术发展|agent)", idea_text, re.I):
-            return (
-                "优先处理用户未消化想法：基于当前 workspace 已有文档，不大范围重新搜索，"
-                "总结“当前 Agent 技术发展图景与未来趋势”。需要先读取本地评测框架/gap/roadmap，"
-                "可写一个小脚本辅助整理关键词；最后把结论落盘成一份可读文档。",
-                os.path.join(project_dir, "agent_tech_landscape.md"),
-            )
-        return (
-            f"优先处理用户未消化想法：{_clip(idea_text, 260)}。只做一个最小闭环，并把处理结果落盘。",
-            os.path.join(project_dir, "idea_response.md"),
-        )
-
-    content_items = get_open_content_items(workspace, project=title, limit=1)
-    content_items = [item for item in content_items if bool(item.get("should_nudge_project", False))]
-    if content_items:
-        item = content_items[0]
-        return (
-            "优先消化用户/自巡游分享的外部内容素材。不要把它当成事实结论；先提炼它可能启发的研究假设、"
-            "和当前项目的关系、一个可验证的最小动作，并把结果落盘。",
-            os.path.join(project_dir, "external_content_digest.md"),
         )
 
     reflection_objective, reflection_path = maybe_reflection_objective(workspace, title, step)
@@ -1144,12 +1510,36 @@ def _detect_plan_only_response(parsed: dict, hermes_response: str) -> bool:
     return False
 
 
-def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) -> tuple[str, str]:
-    from ..project_state import format_project_guardrail_for_prompt, read_project_brief
+def _build_project_prompt(workspace: str, title: str, state_md: str, step: int,
+                          event_payload: dict | None = None) -> tuple[str, str]:
+    from ..project_state import format_project_guardrail_for_prompt, load_project_guardrail, read_project_brief
 
-    objective, artifact_path = _choose_micro_objective(workspace, title, state_md, step)
+    event_payload = event_payload or {}
+    mode = _delivery_mode(event_payload)
+    user_request = str(event_payload.get("user_request") or "").strip()
+    event_kind = str(event_payload.get("event_kind") or "").strip()
+    stop_after = _stop_after_completion(event_payload)
+    override = _selector_objective_override(workspace, title, event_payload)
+    if not override:
+        override = _delivery_objective_override(workspace, title, mode, user_request)
+    if override:
+        objective, artifact_path = override
+    else:
+        objective, artifact_path = _choose_micro_objective(workspace, title, state_md, step)
+    if stop_after:
+        return _build_one_shot_project_prompt(
+            workspace=workspace,
+            title=title,
+            state_md=state_md,
+            step=step,
+            event_payload=event_payload,
+            artifact_path=artifact_path,
+        ), artifact_path
+    delivery_policy = _delivery_policy(mode, user_request)
+    literature_task = is_literature_reference_task(workspace, title)
     artifact_hint = os.path.basename(artifact_path) if artifact_path else "（优先补充现有项目文档或状态）"
     state_snapshot = _compact_state_snapshot(state_md)
+    guardrail = load_project_guardrail(workspace, title)
     guardrail_block = format_project_guardrail_for_prompt(workspace, title)
     guardrail_prompt = f"{guardrail_block}\n" if guardrail_block else ""
     research_context = build_research_context(workspace, title)
@@ -1160,17 +1550,50 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
     content_prompt = f"{content_context}\n" if content_context else ""
     project_brief = read_project_brief(workspace, title, max_chars=1600)
     brief_prompt = f"项目热简报：\n{project_brief}\n" if project_brief else ""
+    has_scope_contract = bool(
+        guardrail.get("current_mainline")
+        or guardrail.get("allowed_scope")
+        or guardrail.get("forbidden_scope")
+        or guardrail.get("completion_criteria")
+    )
     
     # 规划循环检测：如果连续多轮都是纯规划，强制要求执行
     plan_count = _plan_loop_counter.get(title, 0)
     execution_enforcement = ""
-    if plan_count >= 2:
+    if plan_count >= 2 and not has_scope_contract:
         execution_enforcement = (
             "\n⚠️ 执行警告：你已经连续 {} 轮只产出计划/方案而没有实际执行。"
             "\n本轮必须用 terminal 工具实际执行一个动作（运行代码、复制文件、下载数据等），"
             "不能只写文档。如果目标需要先写方案，写完后立即执行它。"
             "\n禁止本轮输出以\"设计了\"、\"规划了\"、\"方案\"开头的完成描述。"
         ).format(plan_count)
+    contract_boundary = ""
+    if has_scope_contract:
+        allowed_text = "；".join(
+            [str(guardrail.get("current_mainline") or "").strip()]
+            + [str(x).strip() for x in (guardrail.get("allowed_scope") or []) if str(x).strip()]
+        ).strip("；")
+        forbidden_text = "；".join(str(x).strip() for x in (guardrail.get("forbidden_scope") or []) if str(x).strip())
+        criteria_text = "；".join(str(x).strip() for x in (guardrail.get("completion_criteria") or []) if str(x).strip())
+        contract_boundary = (
+            "\n任务合同硬边界：必须以用户原始要求为准，不得把自主下一阶段当成当前任务。"
+            f"允许/主线：{allowed_text or '按用户原始要求'}。"
+            f"禁止/越界：{forbidden_text or '用户没有要求的新方向'}。"
+            f"完成标准：{criteria_text or '直接满足用户点名交付物'}。"
+            "DONE/FINDINGS 必须说明本轮如何服务这些合同条款。"
+            "如果合同内交付物已经满足，NEXT 允许写“暂停等待用户评估/确认是否进入下一阶段”；"
+            "不要为了通用推进规则继续发明新任务。"
+        )
+    completion_rule = (
+        "如果项目看起来已经完成，不要输出归档/等待/不再推进；必须转入复盘、误差分析、失败边界、跨项目迁移、外部内容消化或下一突破口中的一个实际动作；"
+        if not has_scope_contract
+        else "如果任务合同内交付物已经完成，不要自动寻找下一突破口；应总结交付内容、标出边界，并暂停等待用户评估是否进入下一阶段；"
+    )
+    next_rule = (
+        "NEXT: <下一步，必须是可执行动作；禁止写 无/等待新指令/项目已完成/关闭>\n"
+        if not has_scope_contract
+        else "NEXT: <若合同内交付物未完成，写合同内补漏动作；若已完成，允许写 暂停等待用户评估/确认是否进入下一阶段>\n"
+    )
     
     prompt = (
         f"你是项目执行器，持续推进项目「{title}」。\n"
@@ -1179,22 +1602,31 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
         f"{research_prompt}"
         f"{mind_prompt}"
         f"{content_prompt}"
+        f"{delivery_policy}\n"
+        f"selector 选择的 event_kind：{event_kind or 'project_step'}；"
+        f"本次完成后是否停止自动续跑：{'yes' if stop_after else 'no'}。\n"
         f"目标：{objective}\n"
         f"状态摘要：{state_snapshot}\n"
         f"建议产物：{artifact_hint}\n"
-        f"行动集合：run_experiment/read_paper/inspect_result/update_report/debug_pipeline/summarize_failure/"
-        f"test_transfer_method/write_ppt_section/refresh_project_brief/process_idea。\n"
-        f"规则：每轮必须从行动集合里选一个 ACTION，只做一个最小闭环；优先用本地内容；默认不联网；只允许 HTTPS；禁止 curl|bash / curl|python；"
+        f"候选行动集合：run_experiment/read_paper/inspect_result/update_report/debug_pipeline/summarize_failure/"
+        f"test_transfer_method/write_ppt_section/refresh_project_brief/process_idea/direct_edit。\n"
+        f"规则：每轮必须根据交付模式和上下文从候选行动集合里选一个 ACTION，只做一个最小闭环；"
+        f"不要按固定顺序执行所有动作；简单交付就直接交付，长期项目才持续推进；"
+        f"优先用本地内容；默认不联网；只允许 HTTPS；禁止 curl|bash / curl|python；"
+        f"如果是新项目、陌生领域、资料依赖任务或用户明确要求调研，先用 read_paper/process_idea 做项目起步卡：目标、重点难点、常见做法/资料路线、最小闭环；"
+        f"如果任务不需要背景核验，不要机械搜索文献，直接推进最小可验证动作；"
         f"把长期研究记忆当作启发和边界，不要机械复述；如果某方法在本项目失败，只记录边界，不要认为它在所有项目都失败；"
-        f"如果项目看起来已经完成，不要输出归档/等待/不再推进；必须转入复盘、误差分析、失败边界、跨项目迁移、外部内容消化或下一突破口中的一个实际动作；"
+        f"{completion_rule}"
         f"关键数字必须来自本地文件或本轮实际输出；没有证据就标为 hypothesis；用户汇报要分清 verified/inferred/next；"
         f"如果遇到 API key/预算/账号/真实数据/源目录等外部阻塞，可以明确写出 BLOCKER，但 NEXT 必须同时给出不依赖该资源的替代推进动作；"
         f"内容巡游类项目不能因为 GitHub README 容易获取就替代用户分享内容，GitHub 只能作为证据渠道；"
         f"simulation/dry-run/proxy/synthetic/toy data 必须明确标注，不能写成真实 API、真实最佳或真实突破；"
         f"不要让用户做选择题，不要碰 /mnt/e/work/biomni*；不要输出 tool_call、function、terminal、read_file、write_file 标签；"
+        f"禁止创建、修改或写入 Hermes skills/SKILL.md/system/hermes_home/skills；新方法、新框架、新习惯必须写到 Partner 项目目录或 user/partner_mind，而不是注册成 Hermes skill；"
         f"DONE/FINDINGS/NEXT 必须写内容进展和判断，不要把“更新某文件、文件数、字节数、目录结构”当作成果；"
         f"不要描述你'打算检查环境'，不要先说你要去看什么，直接给最终正文。"
         f"把状态摘要视为可信输入，除非目标明确要求，否则不要再重复检查这些文件是否存在。\n"
+        f"{contract_boundary}"
         f"执行要求：你有 terminal、file、web 工具可用。"
         f"如果本轮目标涉及运行代码、复制文件、下载数据、执行分析，必须用 terminal 工具实际执行，"
         f"不能只设计方案或写计划文件。先执行，再总结结果。\n"
@@ -1204,7 +1636,7 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
         f"DONE: <本轮完成>\n"
         f"FINDINGS: <最多两条发现，用；分隔>\n"
         f"EVIDENCE: <证据文件/输出路径；没有则写 hypothesis>\n"
-        f"NEXT: <下一步，必须是可执行动作；禁止写 无/等待新指令/项目已完成/关闭>\n"
+        f"{next_rule}"
         f"FILES: <本轮写入或更新的文件；没有则写 EMPTY>\n"
         f"STATE_DELTA: <3-6行状态增量，纯文本，不要重写整份 state.md>\n"
         f"ARTIFACT_CONTENT: <如果建议产物不是空，就直接给这个文件的正文；若无则写 EMPTY>\n"
@@ -1212,16 +1644,22 @@ def _build_project_prompt(workspace: str, title: str, state_md: str, step: int) 
     return prompt, artifact_path
 
 
-def _looks_like_stalled_project_result(parsed: dict) -> bool:
+def _looks_like_stalled_project_result(parsed: dict, *, allow_contract_pause: bool = False) -> bool:
     if not parsed:
         return False
     text = "\n".join(
         str(parsed.get(k) or "")
         for k in ("step_done", "next_action", "state_delta", "evidence", "files")
     )
-    if re.search(r"(项目已完成|项目已关闭|已关闭|项目关闭|归档状态|不再进行|等待新指令|等待用户|NEXT:\s*无)", text):
+    if allow_contract_pause:
+        text_for_stall = re.sub(r"(暂停)?等待用户(?:评估|确认)?[^。\n]*(?:下一阶段|继续|进入|是否)[^。\n]*", "", text)
+    else:
+        text_for_stall = text
+    if re.search(r"(项目已完成|项目已关闭|已关闭|项目关闭|归档状态|不再进行|等待新指令|等待用户|NEXT:\s*无)", text_for_stall):
         return True
     next_action = str(parsed.get("next_action") or "").strip()
+    if allow_contract_pause and re.fullmatch(r"(暂停)?等待用户(?:评估|确认)?.*(?:下一阶段|继续|进入|是否).*", next_action, re.I):
+        return False
     if not next_action or re.fullmatch(r"(无|暂无|没有|无需|等待.*|已完成|关闭|N/?A|EMPTY)", next_action, re.I):
         return True
     evidence = str(parsed.get("evidence") or "").strip().lower()
@@ -1636,7 +2074,7 @@ def _sanitize_project_log_for_report(text: str, max_chars: int = 900) -> str:
     return _clip(cleaned, max_chars)
 
 
-def _collect_report_context(workspace: str, title: str, project_outcome: str) -> dict:
+def _collect_report_context(workspace: str, title: str, project_outcome: str, step: int = 0) -> dict:
     from ..project_state import get_project_dir, read_state_md
 
     project_dir = get_project_dir(workspace, title)
@@ -1657,28 +2095,44 @@ def _collect_report_context(workspace: str, title: str, project_outcome: str) ->
         "files": ", ".join(files[:8]) if files else "（暂无项目文件）",
         "project_outcome": project_outcome or "本轮已执行完成",
         "growth_context": growth_context_for_report(workspace, title),
+        "step": step,
+        "startup_phase": _is_startup_report_step(step),
+        "startup_transition": _is_startup_transition_step(step),
     }
 
 
 def _build_round_report_prompt(title: str, ctx: dict) -> str:
+    runtime_context = ""
+    try:
+        from ..runtime_monitor import compact_runtime_context
+
+        runtime_context = compact_runtime_context(_workspace)
+    except Exception:
+        runtime_context = ""
     return (
         f"你是 Partner 的用户汇报器。请根据本地状态，给用户发一条自然语言进展汇报。\n"
         f"项目：{title}\n"
+        f"当前轮次：step {ctx.get('step', 0)}\n"
         f"本轮执行结果：{ctx['project_outcome']}\n"
         f"状态摘要：\n{ctx['state_snapshot']}\n"
         f"{ctx.get('growth_context') or ''}\n"
+        f"{runtime_context}\n"
         f"要求：\n"
         f"- 只用“本轮执行结果”和“状态摘要”判断内容进展，不要复述长日志。\n"
         f"- 不要提具体文件名、路径、写入/更新/创建了哪个 .md、字节数或目录结构；用户只关心完成了什么内容判断、发现了什么、下一步做什么。\n"
         f"- 以“状态摘要”为当前事实来源；除非这里明确显示缺失，否则不要声称文件不存在或状态丢失。\n"
-        f"- 如果本轮没有形成明确新结果，不要生成汇报；返回空字符串。\n"
+        f"- 如果这是 step 0-2 的起步阶段，要更主动汇报：说明你对用户指令的理解、项目目标、初始框架/当前情况、下一步切入点。\n"
+        f"- 如果这是 step 3 左右，说明项目已开始顺利推进；后续只在出现实质进展、问题、阶段报告/PPT/PDF 时汇报。\n"
+        f"- 如果不是起步阶段且本轮没有形成明确新结果，不要生成汇报；返回空字符串。\n"
+        f"- 非起步阶段的指标轻微变化、小幅调参、普通文档整理、重复审计，只落到 workspace，不要生成汇报。\n"
         f"- 直接像对用户汇报一样说话，用中文。\n"
-        f"- 只有在有实质发现、风险、阻塞、突破或用户需要知道的习惯变化时才汇报。\n"
+        f"- 只有在有较大实质发现、关键风险、阻塞、突破或用户需要知道的习惯变化时才汇报。\n"
         f"- 有内容时说明现在在做什么、本轮发生了什么、下一步是什么。\n"
         f"- 如果“最近成长事件”非空，要用一句话说明我这次改变了什么判断习惯或推进习惯。\n"
+        f"- 如果运行消耗摘要显示失败较多、耗时异常长或 token 很高，可以用一句话提醒；否则不要主动谈成本。\n"
         f"- 不要输出 JSON，不要用标题，不要问用户下一步，不要给选项。\n"
         f"- 不要说“待你指示/等待用户/请告知/随时告诉我”；如果项目完成，就说已进入归档或反思状态。\n"
-        f"- 控制在 80-160 字。\n"
+        f"- 起步阶段控制在 120-260 字；稳定阶段控制在 80-160 字。\n"
     )
 
 
@@ -1695,10 +2149,10 @@ def _build_round_report_fallback(title: str, project_outcome: str) -> str:
     return ""
 
 
-def _generate_round_report(title: str, project_outcome: str) -> str:
+def _generate_round_report(title: str, project_outcome: str, step: int = 0) -> str:
     if not _adapter:
         return ""
-    ctx = _collect_report_context(_workspace, title, project_outcome)
+    ctx = _collect_report_context(_workspace, title, project_outcome, step=step)
     prompt = _build_round_report_prompt(title, ctx)
     try:
         reply = (_adapter.chat(prompt, purpose="report") or "").strip()
@@ -1714,7 +2168,362 @@ def _generate_round_report(title: str, project_outcome: str) -> str:
         return ""
     if reply.startswith("{") and "partner_heartbeat" in reply:
         return ""
+    if ctx.get("startup_transition"):
+        reply = reply.rstrip()
     return reply
+
+
+def _format_stage_report_notification(title: str, published: dict) -> str:
+    return ""
+
+
+def _push_stage_report_files(published: dict) -> bool:
+    """Best-effort QQ file push for generated stage reports.
+
+    User-facing reports are sent as PDF only. Markdown/PPTX stay in workspace
+    unless the user explicitly asks for those formats in a direct deliverable.
+    """
+    if _file_push_callback is None:
+        return False
+    sent = False
+    path = published.get("pdf")
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        ok = _file_push_callback(data, os.path.basename(path), os.path.basename(path))
+        sent = bool(ok) or sent
+    except Exception as exc:
+        logger.warning(f"[REPORT] stage report file push failed for {path}: {exc}")
+    return sent
+
+
+_ONE_SHOT_FILE_EXTS = {
+    ".xlsx", ".xls", ".csv", ".tsv", ".docx", ".pptx", ".pdf",
+    ".png", ".jpg", ".jpeg", ".webp", ".txt",
+}
+
+
+def _safe_report_name(name: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", name or "report").strip("_") or "report"
+
+
+def _write_user_pdf_report(title: str, source_name: str, body: str) -> str:
+    """Render a simple text artifact to a user-facing PDF report."""
+    text = (body or "").strip()
+    if not text:
+        return ""
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+    except Exception as exc:
+        logger.debug(f"[REPORT] reportlab unavailable for PDF report: {exc}")
+        return ""
+
+    font_name = "STSong-Light"
+    try:
+        for candidate in (
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+        ):
+            if os.path.exists(candidate):
+                pdfmetrics.registerFont(TTFont("PartnerCJK", candidate))
+                font_name = "PartnerCJK"
+                break
+        else:
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+    except Exception:
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+            font_name = "STSong-Light"
+        except Exception:
+            font_name = "Helvetica"
+
+    report_dir = os.path.join(_workspace, "user", "reports", _safe_report_name(title))
+    os.makedirs(report_dir, exist_ok=True)
+    base = os.path.splitext(_safe_report_name(source_name))[0] or "report"
+    path = os.path.join(report_dir, f"{base}.pdf")
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "PartnerTitle",
+        parent=styles["Title"],
+        fontName=font_name,
+        fontSize=18,
+        leading=24,
+        spaceAfter=14,
+    )
+    body_style = ParagraphStyle(
+        "PartnerBody",
+        parent=styles["BodyText"],
+        fontName=font_name,
+        fontSize=10.5,
+        leading=16,
+        spaceAfter=8,
+    )
+    heading_style = ParagraphStyle(
+        "PartnerHeading",
+        parent=styles["Heading2"],
+        fontName=font_name,
+        fontSize=13,
+        leading=18,
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    story = [Paragraph(_escape_pdf_text(title), title_style)]
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            story.append(Spacer(1, 0.18 * cm))
+            continue
+        if line.startswith("#"):
+            line = re.sub(r"^#+\s*", "", line).strip()
+            story.append(Paragraph(_escape_pdf_text(line), heading_style))
+        else:
+            story.append(Paragraph(_escape_pdf_text(line), body_style))
+    try:
+        doc = SimpleDocTemplate(
+            path,
+            pagesize=A4,
+            rightMargin=1.6 * cm,
+            leftMargin=1.6 * cm,
+            topMargin=1.6 * cm,
+            bottomMargin=1.6 * cm,
+        )
+        doc.build(story)
+        if os.path.exists(path) and os.path.getsize(path) > 1200:
+            return path
+    except Exception as exc:
+        logger.debug(f"[REPORT] failed to render PDF report: {exc}")
+    return ""
+
+
+def _escape_pdf_text(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _action_event_should_publish_pdf(event_type: EventType) -> bool:
+    return event_type == EventType.PDF_REPORT
+
+
+def _required_output_exts(user_request: str, event_type: str = "", event_kind: str = "") -> set[str]:
+    text = " ".join([user_request or "", event_type or "", event_kind or ""])
+    required: set[str] = set()
+    if re.search(r"(excel|xlsx|xls|工作簿)", text, re.I):
+        required.update({".xlsx", ".xls"})
+    if re.search(r"\bcsv\b|逗号分隔", text, re.I):
+        required.add(".csv")
+    if re.search(r"\bpptx?\b|幻灯片|PPT", text, re.I):
+        required.add(".pptx")
+    if re.search(r"\bpdf\b", text, re.I):
+        required.add(".pdf")
+    if event_type == EventType.PDF_REPORT.value:
+        required.add(".pdf")
+    if re.search(r"(图片|截图|图像|png|jpg|jpeg|webp)", text, re.I):
+        required.update({".png", ".jpg", ".jpeg", ".webp"})
+    if re.search(r"(word|docx)", text, re.I):
+        required.add(".docx")
+    return required
+
+
+def _resolve_one_shot_output_files(project_dir: str, parsed: dict | None,
+                                   artifact_path: str = "",
+                                   since_ts: float | None = None,
+                                   required_exts: set[str] | None = None) -> list[str]:
+    """Resolve user-facing files created by a one-shot event.
+
+    The primary source is structured FILES. As a fallback, scan recent files in
+    the project directory so agents that generated an artifact but forgot to
+    list it can still deliver it.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    required_exts = {x.lower() for x in (required_exts or set()) if x}
+
+    def add_path(raw: str) -> None:
+        raw = str(raw or "").strip().strip("`'\"，,；;。")
+        if not raw or raw.upper() == "EMPTY":
+            return
+        if re.match(r"^[a-zA-Z]+://", raw):
+            return
+        path = raw if os.path.isabs(raw) else os.path.join(project_dir, raw)
+        path = os.path.abspath(path)
+        workspace_root = os.path.abspath(_workspace or project_dir)
+        user_root = os.path.abspath(os.path.join(_workspace or project_dir, "user"))
+        allowed = False
+        try:
+            common = os.path.commonpath([os.path.abspath(project_dir), path])
+            allowed = common == os.path.abspath(project_dir)
+        except ValueError:
+            allowed = False
+        if not allowed:
+            try:
+                common_user = os.path.commonpath([user_root, path])
+                allowed = common_user == user_root
+            except ValueError:
+                allowed = False
+        if not allowed:
+            try:
+                parent = os.path.dirname(path)
+                allowed = os.path.commonpath([workspace_root, path]) == workspace_root and parent == workspace_root
+            except ValueError:
+                allowed = False
+        if not allowed:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in _ONE_SHOT_FILE_EXTS:
+            return
+        if required_exts and ext not in required_exts:
+            return
+        if os.path.exists(path) and os.path.isfile(path) and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    files_text = str((parsed or {}).get("files") or "")
+    for part in re.split(r"[;\n，,]+", files_text):
+        add_path(part)
+    if artifact_path:
+        add_path(artifact_path)
+
+    if paths:
+        return paths[:6]
+
+    cutoff = float(since_ts or 0)
+    recent: list[str] = []
+    skip_parts = {".git", "__pycache__", "10_logs", "state", "logs"}
+    for cur, dirs, files in os.walk(project_dir):
+        dirs[:] = [d for d in dirs if d not in skip_parts and not d.startswith(".")]
+        for name in files:
+            path = os.path.join(cur, name)
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in _ONE_SHOT_FILE_EXTS:
+                continue
+            if required_exts and ext not in required_exts:
+                continue
+            if name in {"state.md", "trace_detail.md", "exploration_log.md", "project_brief.md"}:
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if cutoff and mtime < cutoff - 5:
+                continue
+            recent.append(path)
+    recent.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for path in recent:
+        add_path(path)
+    return paths[:6]
+
+
+def _push_one_shot_output_files(project_dir: str, parsed: dict | None,
+                                artifact_path: str = "",
+                                since_ts: float | None = None,
+                                required_exts: set[str] | None = None) -> tuple[bool, list[str]]:
+    """Best-effort QQ file push for direct one-shot deliverables."""
+    files = _resolve_one_shot_output_files(project_dir, parsed, artifact_path, since_ts, required_exts=required_exts)
+    if _file_push_callback is None or not files:
+        return False, files
+    sent = False
+    for path in files:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            label = os.path.basename(path)
+            ok = _file_push_callback(data, os.path.basename(path), label)
+            sent = bool(ok) or sent
+        except Exception as exc:
+            logger.warning(f"[REPORT] one-shot file push failed for {path}: {exc}")
+    return sent, files
+
+
+def _latest_stage_report_outputs(title: str) -> dict:
+    """Find the latest user-facing stage report outputs for a project."""
+    safe_title = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", title).strip("_") or "project"
+    report_dir = os.path.join(_workspace, "user", "reports", safe_title)
+    outputs: dict[str, str] = {}
+    if not os.path.isdir(report_dir):
+        return outputs
+    latest_md = os.path.join(report_dir, "latest_stage_report.md")
+    if os.path.exists(latest_md):
+        outputs["markdown"] = latest_md
+    try:
+        names = sorted(
+            os.listdir(report_dir),
+            key=lambda name: os.path.getmtime(os.path.join(report_dir, name)),
+            reverse=True,
+        )
+    except OSError:
+        return outputs
+    for name in names:
+        path = os.path.join(report_dir, name)
+        if name.lower().endswith(".pdf") and "pdf" not in outputs:
+            outputs["pdf"] = path
+        elif name.lower().endswith(".pptx") and "pptx" not in outputs:
+            outputs["pptx"] = path
+        if "pdf" in outputs and "pptx" in outputs:
+            break
+    show_dir = os.path.join(_workspace, "user", "showcase", safe_title)
+    if os.path.exists(os.path.join(show_dir, "README.md")):
+        outputs["showcase"] = show_dir
+    return outputs
+
+
+def _stage_report_text_summary(title: str, pause_reason: str, outputs: dict) -> str:
+    """Natural QQ text for a finished basic task / stage report."""
+    md = outputs.get("markdown") or ""
+    body = _read_text(md, 5000) if md else ""
+    bullets: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip().lstrip("-*#0123456789.、 ").strip()
+        if not line or len(line) < 8:
+            continue
+        if re.search(r"(阶段汇报|目录|下一步|文件|workspace|showcase)", line, re.I):
+            continue
+        bullets.append(line)
+        if len(bullets) >= 3:
+            break
+    return "；".join(bullets[:2]) if bullets else ""
+
+
+def _event_completion_receipt(title: str, event_type: EventType | str, parsed: dict | None,
+                              *, next_event: str = "", next_reason: str = "",
+                              files: list[str] | None = None) -> str:
+    parsed = parsed or {}
+    parts: list[str] = []
+    done = _clip(str(parsed.get("step_done") or "本轮 event 已执行完成。"), 220)
+    parts.append(f"本轮完成：{done}")
+    findings = parsed.get("findings") or []
+    if isinstance(findings, list):
+        clean_findings = [_clip(str(x), 120) for x in findings if str(x).strip() and str(x).strip().upper() != "EMPTY"]
+    else:
+        clean_findings = [_clip(str(findings), 180)] if str(findings).strip() and str(findings).strip().upper() != "EMPTY" else []
+    if clean_findings:
+        parts.append("关键结果：" + "；".join(clean_findings[:2]))
+    user_files = [os.path.basename(p) for p in (files or []) if p]
+    if user_files:
+        parts.append("已发送文件：" + "、".join(user_files[:4]))
+    if next_event:
+        label = prefix_event_notice("x", next_event).splitlines()[0].strip("【】").replace("事件：", "")
+        if next_event == EventType.STOP_PROJECT.value:
+            parts.append(f"下一步：调用【事件：{label}】。")
+        else:
+            reason = _clip(next_reason, 140)
+            parts.append(f"下一步：调用【事件：{label}】继续处理" + (f"，因为{reason}" if reason else "。"))
+    else:
+        parts.append("下一步：暂未选择新的 event，等待下一轮 selector 判断。")
+    return "\n".join(parts)
 
 
 # ── 公开接口 ────────────────────────────────────────────────────────
@@ -1729,6 +2538,13 @@ def set_push_callback(callback):
     global _push_callback
     _push_callback = callback
     logger.info(f"[MIND] Push callback registered: {callback}")
+
+
+def set_file_push_callback(callback):
+    """设置文件推送回调。callback(file_bytes, filename, caption) -> bool"""
+    global _file_push_callback
+    _file_push_callback = callback
+    logger.info(f"[MIND] File push callback registered: {callback}")
 
 
 def init(workspace: str, adapter=None, **kwargs):
@@ -1788,6 +2604,16 @@ def _get_handler(event_type: EventType):
     """获取事件类型的处理函数（仅保留 4 种）。"""
     return {
         EventType.PROJECT: _handle_project,
+        EventType.DIRECT_TASK: _handle_action_event,
+        EventType.LITERATURE_REVIEW: _handle_action_event,
+        EventType.DATA_ANALYSIS: _handle_action_event,
+        EventType.EVIDENCE_AUDIT: _handle_action_event,
+        EventType.ARTIFACT_BUILD: _handle_action_event,
+        EventType.PDF_REPORT: _handle_action_event,
+        EventType.PROJECT_THINK: _handle_action_event,
+        EventType.CURIOSITY_EXPLORE: _handle_action_event,
+        EventType.HABIT_UPDATE: _handle_action_event,
+        EventType.STOP_PROJECT: _handle_stop_project,
         EventType.CRON_TICK: _handle_cron_tick,
         EventType.REPORT: _handle_report,
         EventType.WAKE_UP: _handle_wake_up,
@@ -1797,6 +2623,485 @@ def _get_handler(event_type: EventType):
         EventType.CONTENT_DIGEST: _handle_content_digest,
         EventType.CONTENT_PATROL: _handle_content_patrol,
     }.get(event_type)
+
+
+# ── ACTION EVENTS ───────────────────────────────────────────────────
+
+
+_ACTION_EVENT_SPECS = {
+    EventType.DIRECT_TASK: {
+        "name": "直接交付",
+        "artifact": "direct_task_result.md",
+        "rules": [
+            "只完成用户点名的最小交付，不要扩展成长期项目。",
+            "如果用户要 Excel/CSV/文档/图片，必须生成真实文件并在 FILES 写路径。",
+            "不要生成阶段报告、PPT/PDF 或项目路线图，除非用户明确要求。",
+        ],
+    },
+    EventType.LITERATURE_REVIEW: {
+        "name": "资料/文献整理",
+        "artifact": "literature_review.md",
+        "rules": [
+            "围绕用户原始问题查资料、读摘要/元数据/可得正文，并形成可读简报。",
+            "禁止自动进入实验、建模、调参或生成模拟数据。",
+            "输出应包含代表性文献/资料、方法路线、证据强弱和可参考边界。",
+        ],
+    },
+    EventType.DATA_ANALYSIS: {
+        "name": "数据分析",
+        "artifact": "data_analysis_result.md",
+        "rules": [
+            "只做一个最小可验证分析动作：读数据、统计、作图、跑一个脚本或检查数据质量。",
+            "必须说明输入数据来源和输出文件；没有真实数据时不要编造结果。",
+            "不要自动写阶段 PPT/PDF，除非用户明确要求。",
+        ],
+    },
+    EventType.EVIDENCE_AUDIT: {
+        "name": "证据审计",
+        "artifact": "evidence_audit.md",
+        "rules": [
+            "先检查证据真实性、数据泄露、过拟合、引用可靠性或结论边界。",
+            "审计未通过前禁止继续调参、宣称最佳结果或包装成果。",
+            "必须区分 verified / inferred / hypothesis。",
+        ],
+    },
+    EventType.ARTIFACT_BUILD: {
+        "name": "产物构建",
+        "artifact": "artifact_build_result.md",
+        "rules": [
+            "构建用户可看的交付物：代码、图表、表格、PPT 或整理文件。",
+            "必须生成真实文件并在 FILES 写路径。",
+            "如果需要 PDF 报告，应在 NEXT 中建议调用 pdf_report，不要在本 event 内顺手生成 PDF。",
+            "内容质量优先于文件名和路径，不要用占位产物糊弄。",
+        ],
+    },
+    EventType.PDF_REPORT: {
+        "name": "PDF报告",
+        "artifact": "pdf_report_source.md",
+        "rules": [
+            "把已有 event 结果、摘要、图表说明或用户要求整理成 PDF 报告。",
+            "必须生成真实 .pdf 文件并在 FILES 写路径。",
+            "不要重新执行研究/实验/建模；只做报告整理、排版和交付。",
+        ],
+    },
+    EventType.PROJECT_THINK: {
+        "name": "项目思考",
+        "artifact": "project_think.md",
+        "rules": [
+            "只做项目起步、目标拆解、关键难点、最小路线或下一步选择。",
+            "不要机械进入文献、实验、PPT 全流程；下一步只提出一个最小动作。",
+            "应把用户要求、假设、风险和验收标准区分清楚。",
+        ],
+    },
+    EventType.CURIOSITY_EXPLORE: {
+        "name": "好奇探索",
+        "artifact": "curiosity_explore.md",
+        "rules": [
+            "从上一轮 NEXT 中选择一个最小、可验证、能产生新信息的动作。",
+            "探索动作可以是资料、推理、实验、建模、验证、原型、对比或其它能产生新信息的方式；不要只复述上一轮内容。",
+            "必须说明探索问题、方法、得到的新证据/观察，以及下一步是否仍值得继续。",
+            "如果缺少必要数据/环境/权限，先做无阻塞替代：搭建最小公式、伪代码、公开例子或验证计划。",
+        ],
+    },
+    EventType.HABIT_UPDATE: {
+        "name": "习惯/成长更新",
+        "artifact": "habit_update.md",
+        "rules": [
+            "把用户经验、失败教训或新行为边界抽象成可复用习惯。",
+            "不要把具体项目案例长期塞进 prompt；保留抽象行为改变。",
+            "必须写明触发、学到什么、以后怎么改变。",
+        ],
+    },
+}
+
+
+def _action_event_spec(event_type: EventType) -> dict:
+    return _ACTION_EVENT_SPECS.get(event_type, _ACTION_EVENT_SPECS[EventType.DIRECT_TASK])
+
+
+def _curiosity_depth(payload: dict | None) -> int:
+    try:
+        return max(0, int((payload or {}).get("curiosity_depth") or 0))
+    except Exception:
+        return 0
+
+
+def _followup_event_decision_with_llm(event: MindEvent, title: str, parsed: dict, payload: dict) -> dict:
+    """Ask the model selector whether a completed event should enqueue another event."""
+    user_request = str(payload.get("user_request") or title).strip()
+    event_kind = str(payload.get("event_kind") or event.type.value).strip()
+    next_action = str(parsed.get("next_action") or "").strip()
+    depth = _curiosity_depth(payload)
+    max_depth = max(0, int(os.getenv("PARTNER_FOLLOWUP_MAX_DEPTH", os.getenv("PARTNER_CURIOSITY_MAX_DEPTH", "2")) or "2"))
+    if depth >= max_depth:
+        return {"continue": False, "reason": "max_depth"}
+    if not _adapter:
+        return {"continue": False, "reason": "no_llm"}
+    prompt = f"""你是 Partner 的 mind follow-up selector。判断一个已完成 event 是否应继续入队另一个 event。
+
+可选 event：
+- none: 当前目标已经达到，或需要等用户新指令/缺失输入。
+- direct_task: 下一步是一次性直接交付。
+- literature_review: 下一步是资料/文献/方法依据整理。
+- data_analysis: 下一步是读取数据、统计、作图或最小分析。
+- evidence_audit: 下一步是证据真实性、泄露、过拟合或可靠性审计。
+- artifact_build: 下一步是生成用户可看的代码、PPT、图表、表格等交付物。
+- pdf_report: 下一步是把已有结果整理成 PDF 报告并交付。
+- project_think: 下一步是目标拆解、路线选择、风险识别。
+- curiosity_explore: 下一步来自 Partner 的好奇心，要产生新问题、新假设、新探索动作或新的验证线索。
+- habit_update: 下一步是沉淀抽象习惯/经验。
+- stop_project: 停止当前 project 执行链，保存为 waiting；只有明确判断当前目标已完成、或应等待用户/资源/缺失输入时才选择。
+
+选择原则：
+- 不要用关键词或任务类别硬编码判断，基于用户目标、本轮结果和 NEXT 判断。
+- 如果用户目标已经达到，或应该等待用户/资源/缺失输入，选择 stop_project。
+- none 只用于 selector 无法判断或不应改变队列；不要用 none 来停止一个正在执行的 project。
+- 如果 NEXT 只是泛泛“继续/等待/看用户是否需要”，选择 stop_project。
+- 如果用户目标、FILES 或 NEXT 需要 PDF 报告，且已有可整理内容，选择 pdf_report；不要让 artifact_build 或其它 event 附带生成 PDF。
+- 如果继续能更好地完成用户原始目标，或本轮自然产生了值得探索的新问题，选择一个最合适 event。
+- curiosity_explore 不是特殊通道，只有当它比 data_analysis/literature_review/evidence_audit/project_think 等更贴合时才选它。
+
+当前 event：{event.type.value}/{event_kind}
+当前 follow-up 深度：{depth}
+用户原始请求：
+{user_request[:1200]}
+
+本轮结构化结果：
+DONE: {str(parsed.get('step_done') or '')[:600]}
+FINDINGS: {json.dumps(parsed.get('findings') or [], ensure_ascii=False)[:900]}
+EVIDENCE: {str(parsed.get('evidence') or '')[:600]}
+NEXT: {next_action[:700]}
+
+只输出 JSON：
+{{
+  "event_type": "none|direct_task|literature_review|data_analysis|evidence_audit|artifact_build|pdf_report|project_think|curiosity_explore|habit_update|stop_project",
+  "event_kind": "自由短标签",
+  "objective": "如果 event_type 不是 none，写一个具体、可执行、最小的下一步目标",
+  "question": "这一步想弄清楚/验证/交付什么",
+  "reason": "为什么选择这个 event；如果 none，说明为什么停止"
+}}
+"""
+    try:
+        raw = (_adapter.chat(prompt, purpose="classify") or "").strip()
+    except Exception as exc:
+        logger.debug(f"[FOLLOWUP] LLM selector failed: {exc}")
+        return {"continue": False, "reason": "llm_failed"}
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.DOTALL).strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end <= start:
+        return {"continue": False, "reason": "bad_json"}
+    try:
+        data = json.loads(raw[start:end + 1])
+    except Exception:
+        return {"continue": False, "reason": "bad_json"}
+    if not isinstance(data, dict):
+        return {"continue": False, "reason": "bad_json"}
+    selected = str(data.get("event_type") or "none").strip().lower()
+    if selected in {"", "none"}:
+        return {"continue": False, "reason": str(data.get("reason") or "selector_none")}
+    if selected == EventType.STOP_PROJECT.value:
+        return {
+            "continue": True,
+            "event_type": selected,
+            "event_kind": re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or "stop_project")).strip("_")[:80] or "stop_project",
+            "objective": str(data.get("objective") or "停止当前执行链并等待用户继续").strip()[:1800] or "停止当前执行链并等待用户继续",
+            "question": str(data.get("question") or "").strip()[:600],
+            "reason": str(data.get("reason") or "").strip()[:600],
+        }
+    allowed = {
+        EventType.DIRECT_TASK.value,
+        EventType.LITERATURE_REVIEW.value,
+        EventType.DATA_ANALYSIS.value,
+        EventType.EVIDENCE_AUDIT.value,
+        EventType.ARTIFACT_BUILD.value,
+        EventType.PDF_REPORT.value,
+        EventType.PROJECT_THINK.value,
+        EventType.CURIOSITY_EXPLORE.value,
+        EventType.HABIT_UPDATE.value,
+        EventType.STOP_PROJECT.value,
+    }
+    if selected not in allowed:
+        return {"continue": False, "reason": f"unsupported_event:{selected}"}
+    objective = str(data.get("objective") or "").strip()
+    if not objective:
+        return {"continue": False, "reason": "empty_objective"}
+    return {
+        "continue": True,
+        "event_type": selected,
+        "event_kind": re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or selected)).strip("_")[:80] or selected,
+        "objective": objective[:1800],
+        "question": str(data.get("question") or "").strip()[:600],
+        "reason": str(data.get("reason") or "").strip()[:600],
+    }
+
+
+async def _maybe_enqueue_followup_event(event: MindEvent, title: str, parsed: dict, payload: dict) -> dict:
+    decision = _followup_event_decision_with_llm(event, title, parsed, payload)
+    if not decision.get("continue"):
+        logger.info(f"[FOLLOWUP] no follow-up for {title}: {decision.get('reason')}")
+        return {
+            "queued": False,
+            "event_type": "",
+            "event_kind": "",
+            "reason": str(decision.get("reason") or ""),
+        }
+    pool = await ensure_pool()
+    depth = _curiosity_depth(payload) + 1
+    selected_type = EventType(decision["event_type"])
+    await pool.put(MindEvent(
+        type=selected_type,
+        priority=max(2, min(8, int(payload.get("priority") or 4) + 1)),
+        payload={
+            "title": title,
+            "step": int(payload.get("step") or 0) + 1,
+            "delivery_mode": "research_project",
+            "user_request": decision["objective"],
+            "event_type": selected_type.value,
+            "event_kind": decision["event_kind"],
+            "stop_after_completion": True,
+            "curiosity_depth": depth,
+            "parent_user_request": str(payload.get("user_request") or "")[:1600],
+            "followup_question": decision.get("question", ""),
+            "followup_reason": decision.get("reason", ""),
+            "previous_next_action": str(parsed.get("next_action") or "")[:900],
+        },
+        source=f"{event.type.value}:selector_followup",
+        parent_id=event.id,
+    ))
+    if selected_type != EventType.STOP_PROJECT:
+        try:
+            from ..project_state import set_project_status
+            set_project_status(_workspace, title, "active", f"selector follow-up：{selected_type.value}/{decision['event_kind']}")
+        except Exception as exc:
+            logger.debug(f"[FOLLOWUP] failed to mark active: {exc}")
+    logger.info(f"[FOLLOWUP] queued {selected_type.value} for {title}: {decision['event_kind']} depth={depth}")
+    return {
+        "queued": True,
+        "event_type": selected_type.value,
+        "event_kind": decision["event_kind"],
+        "reason": decision.get("reason", ""),
+    }
+
+
+async def _enqueue_stop_project_event(event: MindEvent, title: str, reason: str, payload: dict | None = None) -> bool:
+    pool = await ensure_pool()
+    payload = payload or {}
+    await pool.put(MindEvent(
+        type=EventType.STOP_PROJECT,
+        priority=max(2, min(8, int(payload.get("priority") or 4) + 1)),
+        payload={
+            "title": title,
+            "step": int(payload.get("step") or 0) + 1,
+            "event_kind": "selector_stop_project",
+            "reason": reason or "selector chose to stop",
+            "user_request": str(payload.get("user_request") or "")[:1600],
+            "previous_event_type": event.type.value,
+            "previous_event_kind": str(payload.get("event_kind") or "")[:120],
+        },
+        source=f"{event.type.value}:selector_stop_project",
+        parent_id=event.id,
+    ))
+    logger.info(f"[STOP_PROJECT] queued explicit stop for {title}: {reason}")
+    return True
+
+
+def _build_action_event_prompt(event: MindEvent, title: str, state_md: str, artifact_path: str) -> str:
+    spec = _action_event_spec(event.type)
+    payload = event.payload or {}
+    user_request = _clip(str(payload.get("user_request") or title), 1400)
+    event_kind = str(payload.get("event_kind") or event.type.value).strip()
+    curiosity_block = ""
+    if event.type == EventType.CURIOSITY_EXPLORE:
+        curiosity_block = (
+            "\n好奇探索上下文："
+            f"\n- 想弄清楚的问题：{_clip(str(payload.get('followup_question') or payload.get('curiosity_question') or ''), 600)}"
+            f"\n- 为什么值得继续：{_clip(str(payload.get('followup_reason') or payload.get('curiosity_reason') or ''), 600)}"
+            f"\n- 上一轮 NEXT：{_clip(str(payload.get('previous_next_action') or ''), 700)}"
+            f"\n- 原始用户问题：{_clip(str(payload.get('parent_user_request') or ''), 900)}\n"
+        )
+    habits = ensure_habits(_workspace)
+    habit_lines = [str(x) for x in (habits.get("habits") or [])[:6]]
+    habit_block = "\n".join(f"- {line}" for line in habit_lines) if habit_lines else "- 先证据，后结论；先最小动作，后扩展。"
+    growth_rows = get_recent_growth_events(_workspace, project=title, limit=4)
+    if len(growth_rows) < 4:
+        seen = {
+            (
+                str(row.get("time") or ""),
+                str(row.get("project") or ""),
+                str(row.get("behavior_change") or row.get("learned") or ""),
+            )
+            for row in growth_rows
+        }
+        for row in get_recent_growth_events(_workspace, project="", limit=4):
+            key = (
+                str(row.get("time") or ""),
+                str(row.get("project") or ""),
+                str(row.get("behavior_change") or row.get("learned") or ""),
+            )
+            if key in seen:
+                continue
+            growth_rows.append(row)
+            seen.add(key)
+            if len(growth_rows) >= 4:
+                break
+    growth_lines = []
+    for row in growth_rows[:4]:
+        changed = str(row.get("behavior_change") or row.get("learned") or "").strip()
+        trigger = str(row.get("trigger") or "").strip()
+        if changed:
+            if trigger:
+                growth_lines.append(f"- 因为“{_clip(trigger, 70)}”，以后要：{_clip(changed, 130)}")
+            else:
+                growth_lines.append(f"- {_clip(changed, 150)}")
+    growth_block = "\n".join(growth_lines) if growth_lines else "- 暂无近期成长事件；按共享习惯和当前证据执行。"
+    rules = "\n".join(f"- {line}" for line in spec.get("rules", []))
+    return (
+        "你是 Partner 的动作级执行器。本轮只执行一个小 event，不进入固定项目流水线。\n"
+        f"event_type：{event.type.value}\n"
+        f"event_name：{spec.get('name')}\n"
+        f"event_kind：{event_kind}\n"
+        f"任务/项目名：{title}\n"
+        f"用户原始请求：{user_request}\n"
+        f"{curiosity_block}"
+        f"当前状态摘要：\n{_compact_state_snapshot(state_md)}\n\n"
+        f"本事件边界：\n{rules}\n\n"
+        f"Partner 共享习惯（抽象习惯，不是固定流程）：\n{habit_block}\n\n"
+        f"近期成长事件（会影响本轮判断，但不能覆盖用户明确要求）：\n{growth_block}\n\n"
+        "通用交付约束：如果用户要求具体格式文件，最终必须有该格式真实文件；"
+        "如果缺少地点、文件路径、数据范围等关键参数，不要擅自补全，先说明缺失并停止。\n\n"
+        "必须按以下结构输出，不要 markdown 包裹：\n"
+        "ACTION: <动作类型>\n"
+        "DONE: <一句话说明实际完成了什么>\n"
+        "FINDINGS: <1-3 条关键结果；没有写 EMPTY>\n"
+        "EVIDENCE: <证据来源/文件/链接；没有写 hypothesis>\n"
+        "NEXT: <一个最小下一步；若本次直接交付已完成，写 已完成，等待用户查看/继续>\n"
+        "STATE_DELTA: <需要写入状态的简短增量>\n"
+        "FILES: <真实生成/修改文件路径；没有写 EMPTY>\n"
+        f"ARTIFACT_CONTENT:\n<写入 {os.path.basename(artifact_path)} 的内容；可以是简报、审计、总结或交付说明>\n"
+    )
+
+
+async def _handle_action_event(event: MindEvent):
+    """Handle small action events without entering the heavy PROJECT pipeline."""
+    payload = event.payload or {}
+    title = str(payload.get("title") or payload.get("project") or payload.get("event_kind") or event.type.value).strip()
+    if not title:
+        title = event.type.value
+    logger.info(f"[ACTION] Executing {event.type.value}: '{title[:60]}'")
+
+    from ..project_state import get_project_dir, read_state_md, write_state_md
+
+    project_dir = get_project_dir(_workspace, title)
+    os.makedirs(project_dir, exist_ok=True)
+    state_md = read_state_md(_workspace, title)
+    spec = _action_event_spec(event.type)
+    artifact_path = os.path.join(project_dir, str(spec.get("artifact") or f"{event.type.value}_result.md"))
+    started_at = _time.time()
+    response = ""
+    try:
+        if _adapter:
+            prompt = _build_action_event_prompt(event, title, state_md, artifact_path)
+            response = (_adapter.chat(prompt, purpose="project") or "").strip()
+    except Exception as exc:
+        logger.warning(f"[ACTION] backend failed for {event.type.value}: {exc}")
+        response = ""
+
+    raw_had_tool_noise = bool(re.search(r"<\s*tool_call\b|<function=|<parameter=", response, re.I))
+    parse_response = _strip_tool_call_noise(response) if raw_had_tool_noise else response
+    parsed = _parse_structured_project_response(parse_response)
+    if not parsed:
+        record_risk_event(_workspace, title, f"{event.type.value} returned no structured result", response[:260], severity="medium")
+        logger.info(f"[MIND] DONE event_type={event.type.value}, id={event.id[:8]}")
+        return
+
+    artifact_written = False
+    artifact_text = _normalize_artifact_content(parsed.get("artifact_content", ""))
+    if artifact_text:
+        artifact_written = _write_artifact_file(artifact_path, artifact_text)
+        if artifact_written and not parsed.get("files"):
+            parsed["files"] = artifact_path
+        if artifact_written and event.type == EventType.PDF_REPORT:
+            pdf_path = _write_user_pdf_report(title, os.path.basename(artifact_path), artifact_text)
+            if pdf_path:
+                parsed["files"] = pdf_path
+    new_state = _merge_state_delta(
+        existing_state=state_md,
+        title=title,
+        delta=parsed.get("state_delta", ""),
+        step_done=parsed.get("step_done", ""),
+        next_action=parsed.get("next_action", ""),
+    )
+    if new_state:
+        write_state_md(_workspace, title, new_state)
+    try:
+        record_round_result(_workspace, title, parsed, response)
+    except Exception as exc:
+        logger.debug(f"[ACTION] memory update failed: {exc}")
+    if event.type == EventType.HABIT_UPDATE:
+        _record_growth_event_visible(
+            _workspace,
+            title,
+            trigger=payload.get("user_request") or parsed.get("step_done", ""),
+            learned="用户经验需要转化为抽象习惯，而不是某个实例的硬编码规则。",
+            behavior_change=parsed.get("next_action") or "以后在相似场景先应用该习惯，再决定是否扩展。",
+            evidence=os.path.basename(artifact_path) if artifact_written else parsed.get("evidence", ""),
+            category="habit_update",
+        )
+
+    required_exts = _required_output_exts(
+        str(payload.get("user_request") or ""),
+        event.type.value,
+        str(payload.get("event_kind") or ""),
+    )
+    pushed, files = _push_one_shot_output_files(
+        project_dir,
+        parsed,
+        artifact_path=artifact_path if artifact_written else "",
+        since_ts=started_at,
+        required_exts=required_exts,
+    )
+    if required_exts and not files:
+        record_risk_event(
+            _workspace,
+            title,
+            f"{event.type.value} missing required output file",
+            str(payload.get("user_request") or "")[:260],
+            severity="high",
+        )
+        parsed["step_done"] = "没有生成用户要求的目标格式文件"
+        parsed["findings"] = [
+            f"用户要求的文件格式是 {', '.join(sorted(required_exts))}，但本轮未发现对应真实文件",
+            "不能把摘要 Markdown 当作目标交付文件发送",
+        ]
+        parsed["next_action"] = "补齐必要参数或重新执行文件生成，直到产生目标格式文件。"
+    followup = {"queued": False, "event_type": "", "event_kind": "", "reason": ""}
+    try:
+        followup = await _maybe_enqueue_followup_event(event, title, parsed, payload)
+    except Exception as exc:
+        logger.debug(f"[FOLLOWUP] enqueue check failed: {exc}")
+    await _enqueue_visible_report(
+        _event_completion_receipt(
+            title,
+            event.type,
+            parsed,
+            next_event=str(followup.get("event_type") or ""),
+            next_reason=str(followup.get("reason") or ""),
+            files=files,
+        ),
+        event.type,
+        event_kind=str(payload.get("event_kind") or event.type.value),
+        priority=2,
+        source=f"{event.type.value}:completion_receipt",
+        parent_id=event.id,
+        bypass_rate_limit=True,
+    )
+    if followup.get("queued"):
+        logger.info(f"[ACTION] selector queued next event {followup.get('event_type')} for {title}")
+    else:
+        logger.info(f"[ACTION] selector did not queue a next event; project remains active for later selection: {title}")
+    logger.info(f"[MIND] DONE event_type={event.type.value}, id={event.id[:8]}")
 
 
 # ── PROJECT ─────────────────────────────────────────────────────────
@@ -1894,6 +3199,7 @@ async def _handle_project(event: MindEvent):
         audit_project_context,
         audit_project_round,
         consolidate_project_files,
+        get_project_dir,
         get_project_status,
         is_project_done_signal,
         read_state_md,
@@ -1904,8 +3210,11 @@ async def _handle_project(event: MindEvent):
     )
     title = resolve_project_name(_workspace, title) or title
     set_active(_workspace, title)
+    project_dir = get_project_dir(_workspace, title)
     ensure_mind_files(_workspace, title)
     ensure_baseline_and_metric_contracts(_workspace, title)
+    one_shot_event = _stop_after_completion(event.payload)
+    event_started_at = _time.time()
 
     # 1. 读取项目状态
     state_md = read_state_md(_workspace, title)
@@ -1916,6 +3225,7 @@ async def _handle_project(event: MindEvent):
         hot_text = state_md
 
     open_idea = get_open_idea(_workspace, title)
+    selected_open_idea_text = str((open_idea or {}).get("content") or (open_idea or {}).get("idea") or "").strip()
     project_status = get_project_status(_workspace, title)
     risk_scan_text = _known_done_risk_text(_workspace, title, state_md, hot_text)
     context_audit_issues = audit_project_context(_workspace, title, risk_scan_text)
@@ -1928,13 +3238,25 @@ async def _handle_project(event: MindEvent):
     elif project_status == "done":
         set_project_status(_workspace, title, "active", "阶段完成后继续寻找下一步突破口")
         project_status = "active"
-    if project_status in {"cooling_down", "waiting"} and open_idea:
+    event_source = str(getattr(event, "source", "") or "")
+    material_wakeup = (
+        str(event.payload.get("reason") or "") == "user_shared_project_material"
+        or event_source.startswith("interaction:add_task")
+        or event_source.startswith("interaction:switch_project")
+        or event_source.startswith("interaction:correct_direction")
+    )
+    if project_status in {"cooling_down", "waiting"} and (open_idea or material_wakeup):
         set_project_status(_workspace, title, "active", "检测到未消化用户/老师信号，重新激活项目")
         project_status = "active"
-    elif project_status in {"cooling_down", "waiting"} and not _cooling_down_enabled():
+    elif project_status == "waiting":
+        logger.info(f"[PROJECT] Project is waiting for user evaluation/resource; skip execution: {title}")
+        logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                    f"title='{title[:40]}'")
+        return
+    elif project_status == "cooling_down" and not _cooling_down_enabled():
         set_project_status(_workspace, title, "active", "默认连续推进：不进入冷却等待")
         project_status = "active"
-    elif project_status in {"cooling_down", "waiting"}:
+    elif project_status == "cooling_down":
         pool = await ensure_pool()
         if not _has_reflection_event(pool, title):
             await pool.put(MindEvent(
@@ -1967,6 +3289,7 @@ async def _handle_project(event: MindEvent):
                 title=title,
                 state_md=state_md,
                 step=event.payload.get("step", 0),
+                event_payload=event.payload,
             )
             try:
                 response = _adapter.chat(prompt, purpose="project")
@@ -1976,9 +3299,21 @@ async def _handle_project(event: MindEvent):
 
         # 3. 处理 Hermes 回复
         hermes_response = (response or "").strip()
-        parsed = _parse_structured_project_response(hermes_response)
+        raw_had_tool_noise = bool(re.search(r"<\s*tool_call\b|<function=|<parameter=", hermes_response, re.I))
+        parse_response = _strip_tool_call_noise(hermes_response) if raw_had_tool_noise else hermes_response
+        parsed = _parse_structured_project_response(parse_response)
         repaired_stalled_result = False
-        if parsed and _looks_like_stalled_project_result(parsed):
+        try:
+            from ..project_state import load_project_guardrail
+
+            guardrail_for_pause = load_project_guardrail(_workspace, title)
+            allow_contract_pause = bool(guardrail_for_pause.get("completion_criteria"))
+        except Exception:
+            allow_contract_pause = False
+        if parsed and _looks_like_stalled_project_result(
+            parsed,
+            allow_contract_pause=allow_contract_pause,
+        ):
             repaired_stalled_result = True
             record_risk_event(
                 _workspace,
@@ -1996,7 +3331,7 @@ async def _handle_project(event: MindEvent):
                 next_action=next_breakthrough,
                 source_result=parsed,
             )
-            record_growth_event(
+            _record_growth_event_visible(
                 _workspace,
                 title,
                 trigger="项目输出完成/等待/无下一步",
@@ -2008,7 +3343,7 @@ async def _handle_project(event: MindEvent):
             parsed = _repair_stalled_project_result(title, parsed)
         elif parsed:
             _stalled_repair_counter[title] = 0
-        audit_issues = audit_project_round(_workspace, title, parsed) if parsed else []
+        audit_issues = [] if one_shot_event else (audit_project_round(_workspace, title, parsed) if parsed else [])
         if audit_issues:
             parsed["findings"] = (parsed.get("findings") or [])[:1] + audit_issues[:2]
             parsed["next_action"] = "先补齐真实证据文件或回到真实项目源目录，不能用无证据/合成数据结论收尾。"
@@ -2020,7 +3355,7 @@ async def _handle_project(event: MindEvent):
                 next_action=parsed["next_action"],
                 source_result=parsed,
             )
-            record_growth_event(
+            _record_growth_event_visible(
                 _workspace,
                 title,
                 trigger="证据审计未通过",
@@ -2111,8 +3446,8 @@ async def _handle_project(event: MindEvent):
             parsed["evidence"] = "source_lookup_attempt.md"
             parsed["files"] = "source_lookup_attempt.md"
             parsed["artifact_content"] = forced_artifact_text
-        guardrail_result = {"issues": [], "report_type": "low_value", "progress_score": 0}
-        if parsed and not hermes_response.strip() == USER_FRIENDLY_PROGRESS_REPLY:
+        guardrail_result = {"issues": [], "report_type": "meaningful_progress" if one_shot_event else "low_value", "progress_score": 70 if one_shot_event else 0}
+        if parsed and not one_shot_event and not hermes_response.strip() == USER_FRIENDLY_PROGRESS_REPLY:
             guardrail_result = apply_round_guardrails(
                 _workspace,
                 title,
@@ -2144,6 +3479,8 @@ async def _handle_project(event: MindEvent):
             or hermes_response.strip() == USER_FRIENDLY_PROGRESS_REPLY
         )
         invalid_structured_reply = bool(hermes_response and not timed_out_or_stalled and not parsed)
+        if raw_had_tool_noise and not parsed:
+            record_risk_event(_workspace, title, "raw tool-call leaked in backend output", hermes_response[:260], severity="high")
 
         # 规划循环检测：追踪连续纯规划轮次
         if parsed and not timed_out_or_stalled:
@@ -2159,7 +3496,7 @@ async def _handle_project(event: MindEvent):
                         next_action="停止继续写方案，选择一个已有方案中的最小可执行动作并运行或验证，产出证据文件。",
                         source_result=parsed,
                     )
-                    record_growth_event(
+                    _record_growth_event_visible(
                         _workspace,
                         title,
                         trigger="连续多轮只写计划/方案",
@@ -2179,13 +3516,27 @@ async def _handle_project(event: MindEvent):
                 artifact_text = _normalize_artifact_content(
                     _fallback_artifact_content(hermes_response, artifact_path)
                 )
+            if os.path.basename(artifact_path).startswith("stage_report_") and artifact_path.endswith(".md"):
+                try:
+                    from ..stage_report import _is_placeholder_report, _resolve_full_markdown_path, _read_text
+
+                    if _is_placeholder_report(artifact_text):
+                        resolved = _resolve_full_markdown_path(_workspace, title, artifact_path)
+                        artifact_text = _read_text(resolved)
+                except Exception as exc:
+                    logger.warning(f"[PROJECT] 阶段汇报正文无效，拒绝写入占位报告: {exc}")
+                    artifact_text = ""
             if _artifact_needs_structured_fallback(artifact_path, artifact_text):
                 artifact_text = _structured_audit_artifact(artifact_path, parsed, hermes_response)
-            artifact_written = _write_artifact_file(artifact_path, artifact_text)
+            if artifact_text:
+                artifact_written = _write_artifact_file(artifact_path, artifact_text)
 
         if new_state and not timed_out_or_stalled:
             write_state_md(_workspace, title, new_state)
             logger.info(f"[PROJECT] 状态已更新（{len(new_state)} 字符）")
+        stage_report_published_this_round = False
+        one_shot_files_pushed = False
+        one_shot_output_files: list[str] = []
         if artifact_written:
             logger.info(f"[PROJECT] 产物已写入: {os.path.basename(artifact_path)}")
             artifact_name = os.path.basename(artifact_path)
@@ -2195,12 +3546,9 @@ async def _handle_project(event: MindEvent):
 
                     published = publish_stage_report(_workspace, title, artifact_path)
                     if published:
-                        parsed.setdefault("findings", [])
-                        parsed["findings"] = list(parsed.get("findings") or [])[:2] + [
-                            "阶段汇报 PPT/PDF 已生成，可在用户目录 reports 中查看。"
-                        ]
+                        files_pushed = _push_stage_report_files(published)
                         parsed["next_action"] = parsed.get("next_action") or "继续执行阶段汇报中的下一步最小计划。"
-                        record_growth_event(
+                        _record_growth_event_visible(
                             _workspace,
                             title,
                             trigger="项目积累到阶段性汇报节点",
@@ -2209,11 +3557,28 @@ async def _handle_project(event: MindEvent):
                             evidence=os.path.basename(published.get("pdf") or artifact_name),
                             category="communication_habit",
                         )
+                        try:
+                            pool = await ensure_pool()
+                            message = _stage_report_text_summary(title, "", published)
+                            await pool.put(MindEvent(
+                                type=EventType.REPORT,
+                                priority=2,
+                                payload={
+                                    "content": message,
+                                    "force_send": True,
+                                    "bypass_rate_limit": True,
+                                },
+                                source="project:stage_report_published",
+                                parent_id=event.id,
+                            ))
+                        except Exception as exc:
+                            logger.debug(f"[REPORT] enqueue stage report notification failed: {exc}")
                         logger.info(f"[PROJECT] 阶段汇报已发布: {published}")
+                        stage_report_published_this_round = True
                 except Exception as exc:
                     logger.warning(f"[PROJECT] 阶段汇报发布失败: {exc}")
             if artifact_name == "data_leakage_audit.md":
-                record_growth_event(
+                _record_growth_event_visible(
                     _workspace,
                     title,
                     trigger="用户/审计指出结果异常好或可能泄露",
@@ -2223,7 +3588,7 @@ async def _handle_project(event: MindEvent):
                     category="quality_guardrail",
                 )
             elif artifact_name == "progress_quality_audit.md":
-                record_growth_event(
+                _record_growth_event_visible(
                     _workspace,
                     title,
                     trigger="检测到机械递增、重复堆数量或文件复用",
@@ -2232,6 +3597,26 @@ async def _handle_project(event: MindEvent):
                     evidence=artifact_name,
                     category="progress_quality",
                 )
+
+        if one_shot_event and parsed and not timed_out_or_stalled and not invalid_structured_reply:
+            one_shot_files_pushed, one_shot_output_files = _push_one_shot_output_files(
+                project_dir,
+                parsed,
+                artifact_path=artifact_path if artifact_written else "",
+                since_ts=event_started_at,
+                required_exts=_required_output_exts(
+                    str(event.payload.get("user_request") or ""),
+                    str(event.payload.get("event_type") or "project"),
+                    str(event.payload.get("event_kind") or ""),
+                ),
+            )
+            if one_shot_output_files:
+                logger.info(
+                    "[PROJECT] one-shot output files: %s (pushed=%s)",
+                    [os.path.basename(p) for p in one_shot_output_files],
+                    one_shot_files_pushed,
+                )
+                parsed["files"] = "; ".join(one_shot_output_files)
 
         # 3b. 追加日志：trace_detail.md 记录完整回复，exploration_log.md/log.md 只记录摘要
         if hermes_response and not timed_out_or_stalled and parsed:
@@ -2256,10 +3641,8 @@ async def _handle_project(event: MindEvent):
             except Exception as exc:
                 logger.debug(f"[PROJECT] memory consolidation failed: {exc}")
             try:
-                current_open_idea = get_open_idea(_workspace, title)
-                if current_open_idea and artifact_written:
-                    idea_text = str(current_open_idea.get("content") or current_open_idea.get("idea") or "")
-                    mark_idea_processed(_workspace, title, idea_text, status="absorbed")
+                if selected_open_idea_text and artifact_written:
+                    mark_idea_processed(_workspace, title, selected_open_idea_text, status="absorbed")
             except Exception as exc:
                 logger.debug(f"[PROJECT] idea status update failed: {exc}")
         elif invalid_structured_reply:
@@ -2273,56 +3656,40 @@ async def _handle_project(event: MindEvent):
         elif timed_out_or_stalled:
             record_risk_event(_workspace, title, "agent backend stalled or unavailable", hermes_response[:260], severity="high")
 
-        # 4. 推送至 QQ
+        # 4. Event completion receipt. REPORT is now only the transport for
+        # event-level receipts, not a proactive progress policy.
         pool = await ensure_pool()
-        report_type = str(guardrail_result.get("report_type") or "low_value")
-        round_outcome = push_text
-        if parsed and (
-            not round_outcome
-            or _is_low_value_user_visible_text(round_outcome)
-            or _is_file_operation_report(round_outcome)
-        ):
-            round_outcome = _extract_content_report_from_parsed(parsed)
-        round_outcome = improve_user_report(round_outcome, report_type)
-        if repaired_stalled_result:
-            logger.info("[PROJECT] Skip user-facing report: internal stalled-result repair")
-            round_outcome = ""
-        elif not round_outcome:
-            if invalid_structured_reply:
-                logger.info("[PROJECT] Skip user-facing report: invalid structured reply")
-                round_outcome = ""
-            elif timed_out_or_stalled:
-                logger.info("[PROJECT] Skip user-facing report: model stalled or backend unavailable")
-                round_outcome = ""
-        allow_artifact_report = bool(
-            parsed
-            and artifact_written
-            and not timed_out_or_stalled
-            and not repaired_stalled_result
-            and round_outcome
-            and report_type == "low_value"
-        )
-        if parsed and not should_send_user_report(report_type) and not allow_artifact_report:
-            logger.info(f"[REPORT] Skip proactive report by priority gate: {report_type}")
-            round_outcome = ""
-        elif allow_artifact_report:
-            logger.info("[REPORT] Allow artifact-backed startup report despite low_value gate")
-        report_text = _generate_round_report(title, round_outcome) if round_outcome else ""
-        if (timed_out_or_stalled or repaired_stalled_result) and not round_outcome:
-            report_text = ""
-        used_fallback_report = False
-        if not report_text:
-            report_text = _build_round_report_fallback(title, round_outcome) if round_outcome else ""
-            used_fallback_report = bool(report_text)
-        report_text = improve_user_report(report_text, report_type)
-        if report_text:
-            await pool.put(MindEvent(
-                type=EventType.REPORT,
-                priority=4,
-                payload={"content": report_text, "force_send": True},
-                source="project:round_report_fallback" if used_fallback_report else "project:round_report",
+
+        mode = _delivery_mode(event.payload)
+        if _stop_after_completion(event.payload) and parsed and not timed_out_or_stalled and not invalid_structured_reply:
+            followup = {"queued": False, "event_type": "", "event_kind": "", "reason": ""}
+            try:
+                followup = await _maybe_enqueue_followup_event(event, title, parsed, event.payload or {})
+            except Exception as exc:
+                logger.debug(f"[FOLLOWUP] enqueue check failed: {exc}")
+            await _enqueue_visible_report(
+                _event_completion_receipt(
+                    title,
+                    event.type,
+                    parsed,
+                    next_event=str(followup.get("event_type") or ""),
+                    next_reason=str(followup.get("reason") or ""),
+                    files=one_shot_output_files,
+                ),
+                event.type,
+                event_kind=str(event.payload.get("event_kind") or event.type.value),
+                priority=2,
+                source="project:completion_receipt",
                 parent_id=event.id,
-            ))
+                bypass_rate_limit=True,
+            )
+            if followup.get("queued"):
+                logger.info(f"[PROJECT] selector queued next event {followup.get('event_type')} for {title}")
+            else:
+                logger.info(f"[PROJECT] selector did not choose continue/stop; project remains active for later selection: {title}, mode={mode}, event_kind={event.payload.get('event_kind')}")
+            logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                        f"title='{title[:40]}'")
+            return
 
         # 5. 将自身放回等待室。CRON_TICK 是恢复/健康检查；项目生命线按状态推进。
         next_step = event.payload.get("step", 0) + 1
@@ -2332,6 +3699,57 @@ async def _handle_project(event: MindEvent):
             logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
                         f"title='{title[:40]}'")
             return
+        try:
+            paused_lit, lit_reason = maybe_pause_after_literature_report(
+                _workspace,
+                title,
+                published_report=stage_report_published_this_round,
+            )
+            if paused_lit:
+                logger.info(f"[PROJECT] Literature/reference task paused after report: {title}: {lit_reason}")
+                logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                            f"title='{title[:40]}'")
+                return
+        except Exception as exc:
+            logger.debug(f"[PROJECT] literature task pause check failed: {exc}")
+        paused_by_quality_gate = False
+        try:
+            paused_by_quality_gate, pause_reason = maybe_pause_project_for_quality_gate(
+                _workspace,
+                title,
+                next_step=next_step,
+                report_type=str(guardrail_result.get("report_type") or "low_value"),
+                progress_score=int(guardrail_result.get("progress_score") or 0),
+            )
+            if paused_by_quality_gate:
+                logger.info(f"[PROJECT] Quality gate paused project '{title}': {pause_reason}")
+                if stage_report_published_this_round:
+                    logger.info("[PROJECT] Skip extra quality-gate notice because stage report was just sent")
+                    logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                                f"title='{title[:40]}'")
+                    return
+                try:
+                    report_outputs = _latest_stage_report_outputs(title)
+                    files_pushed = _push_stage_report_files(report_outputs) if report_outputs else False
+                    message = _stage_report_text_summary(title, pause_reason, report_outputs)
+                    await pool.put(MindEvent(
+                        type=EventType.REPORT,
+                        priority=2,
+                        payload={
+                            "content": message,
+                            "force_send": True,
+                            "bypass_rate_limit": True,
+                        },
+                        source="project:quality_gate_pause_notice",
+                        parent_id=event.id,
+                    ))
+                except Exception as exc:
+                    logger.debug(f"[REPORT] failed to enqueue quality-gate pause notice: {exc}")
+                logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
+                            f"title='{title[:40]}'")
+                return
+        except Exception as exc:
+            logger.debug(f"[PROJECT] quality gate check failed: {exc}")
         if (
             parsed
             and not audit_issues
@@ -2367,6 +3785,22 @@ async def _handle_project(event: MindEvent):
                 logger.info(f"[PROJECT] Re-queued for step {next_step} (wake in {int(wake_after - _time.time())}s)")
             else:
                 logger.info(f"[PROJECT] Re-queued for step {next_step} immediately")
+            if parsed and not timed_out_or_stalled and not invalid_structured_reply:
+                await _enqueue_visible_report(
+                    _event_completion_receipt(
+                        title,
+                        event.type,
+                        parsed,
+                        next_event=EventType.PROJECT.value,
+                        next_reason=f"项目仍在 active，下一轮继续 step {next_step}",
+                    ),
+                    event.type,
+                    event_kind=str(event.payload.get("event_kind") or "project_recur"),
+                    priority=3,
+                    source="project:completion_receipt",
+                    parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
 
         logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
                     f"title='{title[:40]}'")
@@ -2377,11 +3811,59 @@ async def _handle_project(event: MindEvent):
 # ── REPORT ──────────────────────────────────────────────────────────
 
 
+async def _handle_stop_project(event: MindEvent):
+    payload = event.payload or {}
+    title = str(payload.get("title") or "").strip()
+    reason = str(payload.get("reason") or "selector chose to stop project execution").strip()
+    if not title:
+        try:
+            from ..project_state import get_active
+            title = get_active(_workspace) or ""
+        except Exception:
+            title = ""
+    if not title:
+        logger.info(f"[STOP_PROJECT] No project title; nothing to stop for {event.id[:8]}")
+        logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
+        return
+    try:
+        from ..project_state import append_log, clear_active, set_project_status
+
+        set_project_status(_workspace, title, "waiting", reason)
+        append_log(_workspace, title, f"STOP_PROJECT: {reason}")
+        clear_active(_workspace, title)
+        logger.info(f"[STOP_PROJECT] Project waiting and active cleared: {title} reason={reason[:160]}")
+        await _enqueue_visible_report(
+            f"已停止「{title}」的当前执行链，原因：{_clip(reason, 160)}",
+            EventType.STOP_PROJECT,
+            event_kind=str(payload.get("event_kind") or ""),
+            priority=2,
+            source="stop_project:notice",
+            parent_id=event.id,
+            bypass_rate_limit=True,
+        )
+    except Exception as exc:
+        logger.warning(f"[STOP_PROJECT] failed to stop project {title}: {exc}")
+    logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
+
+
 async def _handle_report(event: MindEvent):
     """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接），含去重。
     移除旧版 JSON 降级写入逻辑，仅保留 push_callback。
     """
     content = event.payload.get("content", "")
+    visible_type = str(event.payload.get("visible_event_type") or "").strip()
+    visible_kind = str(event.payload.get("visible_event_kind") or "").strip()
+    if not visible_type:
+        source = str(getattr(event, "source", "") or "")
+        if "stop_project" in source:
+            visible_type = EventType.STOP_PROJECT.value
+        elif "habit" in source or "growth" in source:
+            visible_type = EventType.HABIT_UPDATE.value
+        elif ":" in source:
+            visible_type = source.split(":", 1)[0]
+        else:
+            visible_type = EventType.REPORT.value
+    content = prefix_event_notice(content, visible_type, event_kind=visible_kind)
     content = _sanitize_user_report_text(content)
     content = improve_user_report(content, "meaningful_progress")
     if not content:
@@ -2408,10 +3890,11 @@ async def _handle_report(event: MindEvent):
     stale = [k for k, v in _report_dedup_cache.items() if now_ts - v > 600]
     for k in stale:
         del _report_dedup_cache[k]
-    if not event.payload.get("force_send") and h in _report_dedup_cache:
+    force_send = bool(event.payload.get("force_send"))
+    if not force_send and h in _report_dedup_cache:
         logger.debug(f"[REPORT] 去重跳过重复推送: {content_stripped[:60]}...")
         return
-    if _recent_report_seen(semantic_sig):
+    if not force_send and _recent_report_seen(semantic_sig):
         logger.info(f"[REPORT] Skip semantically duplicate report: {content_stripped[:80]}...")
         return
     _report_dedup_cache[h] = now_ts
@@ -2450,12 +3933,24 @@ async def _enqueue_open_content_digests(pool: MindPool, *, source: str, active_p
         if not items and active_project:
             items = get_open_content_items(_workspace, limit=3)
         for item in items:
+            project = item.get("project") or active_project or ""
+            if project and not _should_wake_waiting_literature_project(project, item):
+                logger.info(
+                    f"[CONTENT] Skip stale pre-pause material for waiting literature task: {project} {item.get('id','')}"
+                )
+                mark_content_processed(
+                    _workspace,
+                    item.get("id", ""),
+                    digest="已生成文献阶段汇报后遗留的旧素材，不再唤醒项目。",
+                    status="archived_after_report",
+                )
+                continue
             await pool.put(MindEvent(
                 type=EventType.CONTENT_DIGEST,
                 priority=1,
                 payload={
                     "content_id": item.get("id", ""),
-                    "project": item.get("project") or active_project or "",
+                    "project": project,
                 },
                 source=source,
             ))
@@ -2463,6 +3958,92 @@ async def _enqueue_open_content_digests(pool: MindPool, *, source: str, active_p
     except Exception as exc:
         logger.debug(f"[CONTENT] open content enqueue failed: {exc}")
     return count
+
+
+def _safe_project_name(name: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff-]+", "_", name or "project").strip("_") or "project"
+
+
+def _literature_pause_cutoff_ts(project: str) -> float:
+    """Return timestamp after which user material should wake a paused lit task."""
+    safe = _safe_project_name(project)
+    candidates = [
+        os.path.join(_workspace, "user", "projects", safe, "literature_task_pause.md"),
+        os.path.join(_workspace, "user", "reports", safe, "latest_stage_report.md"),
+    ]
+    times = []
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                times.append(os.path.getmtime(path))
+        except OSError:
+            pass
+    return max(times) if times else 0.0
+
+
+def _content_item_time_ts(item: dict) -> float:
+    raw = str(item.get("time") or item.get("created_at") or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def _idea_time_ts(idea: dict | None) -> float:
+    if not idea:
+        return 0.0
+    raw = str(idea.get("time") or idea.get("ts") or idea.get("created_at") or "").strip()
+    if raw:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def _is_new_idea_for_waiting_literature_project(project: str, idea: dict | None) -> bool:
+    if not idea:
+        return False
+    try:
+        from ..project_state import get_project_status
+
+        status = get_project_status(_workspace, project)
+    except Exception:
+        status = ""
+    if status not in {"waiting", "done"}:
+        return True
+    if not is_literature_reference_task(_workspace, project):
+        return True
+    cutoff = _literature_pause_cutoff_ts(project)
+    if cutoff <= 0:
+        return True
+    idea_ts = _idea_time_ts(idea)
+    return bool(idea_ts and idea_ts > cutoff + 1)
+
+
+def _should_wake_waiting_literature_project(project: str, item: dict | None = None) -> bool:
+    """Only post-pause user material should wake a completed literature task."""
+    if not project:
+        return True
+    try:
+        from ..project_state import get_project_status
+
+        status = get_project_status(_workspace, project)
+    except Exception:
+        status = ""
+    if status not in {"waiting", "done"}:
+        return True
+    if not is_literature_reference_task(_workspace, project):
+        return True
+    cutoff = _literature_pause_cutoff_ts(project)
+    if cutoff <= 0:
+        return True
+    if not item:
+        return False
+    item_ts = _content_item_time_ts(item)
+    return bool(item_ts and item_ts > cutoff + 1)
 
 
 async def _handle_cron_tick(event: MindEvent):
@@ -2529,8 +4110,32 @@ async def _handle_cron_tick(event: MindEvent):
         logger.info(f"[CRON] queued {digests} open content digest event(s)")
     if active_name:
         try:
-            from ..project_state import get_project_status
-            if get_project_status(_workspace, active_name) in {"cooling_down", "waiting"}:
+            from ..project_state import get_project_status, set_project_status
+            from ..project_registry import maybe_release_inactive_active_project
+            status = get_project_status(_workspace, active_name)
+            inactive_hours = int(os.getenv("PARTNER_PUBLIC_RELEASE_AFTER_HOURS", "24") or "24")
+            if maybe_release_inactive_active_project(_workspace, active_name, inactive_hours=inactive_hours):
+                logger.info(f"[WAKE_UP] inactive project released to public pool: {active_name}")
+                status = "waiting"
+            open_idea = get_open_idea(_workspace, active_name)
+            if status in {"waiting", "done"}:
+                if open_idea and _is_new_idea_for_waiting_literature_project(active_name, open_idea):
+                    set_project_status(
+                        _workspace,
+                        active_name,
+                        "active",
+                        "检测到未消化用户/老师信号，定时脉冲重新激活项目",
+                    )
+                    logger.info(f"[CRON] 活跃项目处于 {status}，但存在未消化用户信号，重新激活: {active_name}")
+                elif open_idea:
+                    logger.info(f"[CRON] 活跃项目处于 {status}，但 open_idea 早于阶段汇报暂停，跳过自动恢复: {active_name}")
+                    logger.info(f"[MIND] DONE event_type=cron_tick, id={event.id[:8]}")
+                    return
+                else:
+                    logger.info(f"[CRON] 活跃项目处于 {status}，跳过自动恢复: {active_name}")
+                    logger.info(f"[MIND] DONE event_type=cron_tick, id={event.id[:8]}")
+                    return
+            if status in {"cooling_down"}:
                 _cap_project_waiting_delay(pool, active_name, _cooling_down_delay_sec())
         except Exception as exc:
             logger.debug(f"[CRON] cooling-down delay cap failed: {exc}")
@@ -2590,7 +4195,8 @@ async def _handle_reflection(event: MindEvent):
         logger.warning(f"[REFLECTION] LLM failed: {exc}")
     content = _sanitize_user_report_text(content)
     if not content:
-        content = "本轮反思未形成可靠输出；已保留现有长期记忆，等待下一次周期反思。"
+        logger.info(f"[REFLECTION] skipped empty LLM output for event {event.id[:8]}")
+        return
     path = write_reflection_artifacts(_workspace, content, kind="daily_reflection")
     append_strategy_memory(_workspace, content)
     logger.info(f"[REFLECTION] wrote {path}")
@@ -2598,19 +4204,18 @@ async def _handle_reflection(event: MindEvent):
     reason = str(event.payload.get("reason") or "").strip()
     if project and reason == "project_cooling_down":
         summary = _reflection_summary_for_report(content)
-        if not summary:
-            summary = "阶段完成后的反思已更新，我会继续低频检查是否有新突破口。"
-        pool = await ensure_pool()
-        await pool.put(MindEvent(
-            type=EventType.REPORT,
-            priority=5,
-            payload={
-                "content": f"「{project}」现在处于阶段完成后的反思观察。我刚做了一轮复盘：{summary}",
-                "force_send": True,
-            },
-            source="reflection:cooling_down_report",
-            parent_id=event.id,
-        ))
+        if summary:
+            pool = await ensure_pool()
+            await pool.put(MindEvent(
+                type=EventType.REPORT,
+                priority=5,
+                payload={
+                    "content": summary,
+                    "force_send": True,
+                },
+                source="reflection:cooling_down_report",
+                parent_id=event.id,
+            ))
     logger.info(f"[MIND] DONE event_type=reflection, id={event.id[:8]}")
 
 
@@ -2635,7 +4240,8 @@ async def _handle_cross_project(event: MindEvent):
         logger.warning(f"[CROSS_PROJECT] LLM failed: {exc}")
     content = _sanitize_user_report_text(content)
     if not content:
-        content = "本轮跨项目思考未形成可靠输出；现有经验库中暂无足够迁移证据。"
+        logger.info(f"[CROSS_PROJECT] skipped empty LLM output for event {event.id[:8]}")
+        return
     path = write_reflection_artifacts(_workspace, content, kind="cross_project_thinking")
     append_strategy_memory(_workspace, content)
     logger.info(f"[CROSS_PROJECT] wrote {path}")
@@ -2648,7 +4254,7 @@ async def _handle_content_digest(event: MindEvent):
     content_id = str(event.payload.get("content_id") or "").strip()
     items = get_open_content_items(_workspace, project=project, limit=5)
     if content_id:
-        items = [item for item in items if item.get("id") == content_id] or items[:1]
+        items = [item for item in items if item.get("id") == content_id]
     else:
         items = items[:1]
     if not items:
@@ -2683,36 +4289,128 @@ async def _handle_content_digest(event: MindEvent):
         f"链接：{urls or '无'}\n"
         f"原始附件提示：{item.get('raw_hint', '') or '无'}\n"
     )
-    content = ""
+    media_paths: list[str] = []
     try:
-        if _adapter:
-            content = (_adapter.chat(prompt, purpose="report") or "").strip()
-    except Exception as exc:
-        logger.warning(f"[CONTENT] digest LLM failed: {exc}")
-    content = _sanitize_user_report_text(content)
-    if re.search(r"<\s*tool_call\b|<\s*function=", content or "", re.I):
-        logger.warning("[CONTENT] digest returned tool-call text; using safe fallback")
+        for row in item.get("media_files") or []:
+            if isinstance(row, dict):
+                path = str(row.get("text_preview") or "")
+                if path and os.path.exists(path):
+                    media_paths.append(path)
+        acq = item.get("acquisition") if isinstance(item.get("acquisition"), dict) else {}
+        for row in acq.get("media_files") or []:
+            if isinstance(row, dict):
+                path = str(row.get("text_preview") or "")
+                if path and os.path.exists(path) and path not in media_paths:
+                    media_paths.append(path)
+    except Exception:
+        media_paths = []
+
+    if media_paths:
+        vision_paths = list(media_paths)
+        try:
+            from ..content_tools import split_image_for_vision
+
+            segment_dir = os.path.join(_workspace, "system", "media", "vision_segments")
+            segmented: list[str] = []
+            for path in media_paths[:4]:
+                parts = split_image_for_vision(path, segment_dir)
+                segmented.extend(parts or [path])
+            if segmented:
+                vision_paths = segmented[:8]
+                if len(vision_paths) != len(media_paths):
+                    logger.info(
+                        f"[CONTENT] split {len(media_paths)} image(s) into {len(vision_paths)} vision segment(s)"
+                    )
+        except Exception as exc:
+            logger.debug(f"[CONTENT] image split skipped: {exc}")
+        vision_prompt = (
+            "请读取用户分享的截图/图片内容，输出中文，严格包含：\n"
+            "1. 图片可见正文：尽量完整转写图片中的文字；不确定处标 [看不清]\n"
+            "2. 核心健康主张：逐条列出\n"
+            "3. 初步分类：事实/推测/营销话术/需要验证的假设/非健康建议\n"
+            "4. 证据风险：哪些只是图片说法，哪些需要查权威来源\n"
+            "如果收到的是长截图切片，请按切片顺序合并理解，不要把每个切片当成独立文章。\n"
+            "不要编造图片外的信息。\n\n"
+            f"当前项目：{project_label}\n"
+            f"原始文本提示：{item.get('text','')}\n"
+        )
         content = ""
-    if not content:
-        if access_status in {"access_limited", "link_only", "metadata_only"}:
-            content = (
-                "1. 内容要点：当前只能看到链接或少量元数据，不能确认正文观点。\n"
-                "2. 学习定位：先作为访问受限材料记录，不改动项目主线。\n"
-                "3. 风险与不确定性：正文不可读，不能把标题或平台卡片当证据。\n"
-                "4. 下一步最小动作：把限制写入学习日志，并从公开可访问来源寻找相近主题补充。"
-            )
+        try:
+            if _adapter and hasattr(_adapter, "chat_with_images"):
+                content = (_adapter.chat_with_images(vision_prompt, vision_paths, purpose="vision") or "").strip()
+        except Exception as exc:
+            logger.warning(f"[CONTENT] vision backend failed: {exc}")
+            content = ""
+        if not content or _is_internal_fallback_text(content):
+            try:
+                from ..content_tools import ocr_image_path
+
+                parts = []
+                for path in vision_paths[:8]:
+                    result = ocr_image_path(path)
+                    if result.status == "text_available" and result.text_preview:
+                        parts.append(f"## {os.path.basename(path)}\n{result.text_preview}")
+                if parts:
+                    content = (
+                        "1. 图片可见正文：\n"
+                        + "\n\n".join(parts)
+                        + "\n2. 学习定位：这是用户直接提供的截图内容，已作为可读外部材料记录。\n"
+                        + "3. 风险与不确定性：OCR 可能有错字，后续健康主张仍需权威来源核验。\n"
+                        + "4. 下一步最小动作：提取核心健康主张并纳入项目验证队列。"
+                    )
+            except Exception as exc:
+                logger.debug(f"[CONTENT] OCR fallback failed: {exc}")
+        if content and not _is_internal_fallback_text(content):
+            access_status = "text_available"
+            intent = "project_reference" if project else intent
+            scope = "project" if project else scope
         else:
             content = (
-                "1. 内容要点：内容已记录，但本轮没有形成可靠摘要。\n"
-                "2. 学习定位：先作为普通学习材料保留，不改动项目主线。\n"
-                "3. 风险与不确定性：缺少足够证据，不能作为事实结论。\n"
-                "4. 下一步最小动作：后续只在明确相关时再转成项目 hypothesis。"
+                "1. 内容要点：已检测到图片/附件，但当前后端没有成功读取图片文字。\n"
+                "2. 学习定位：先作为图片材料记录，不改动项目主线。\n"
+                "3. 风险与不确定性：不能把图片提示当作正文；需要可读 OCR、复制正文或支持视觉的模型。\n"
+                "4. 下一步最小动作：记录图片读取失败原因，并等待用户提供正文或配置可用视觉后端。"
             )
+    elif access_status in {"access_limited", "link_only", "metadata_only"}:
+        content = (
+            "1. 内容要点：当前只能看到链接、卡片、附件提示或少量元数据，不能确认正文观点。\n"
+            "2. 学习定位：先作为访问受限材料记录，不改动项目主线。\n"
+            "3. 风险与不确定性：正文不可读，不能把标题、附件提示或平台卡片当证据，也不能用模型常识补成原文。\n"
+            "4. 下一步最小动作：把限制写入学习日志，并等待用户补正文/截图/公开链接；同时只用公开替代来源做背景核验。"
+        )
+    else:
+        visible_text = str(item.get("visible_body") or item.get("text") or "").strip()
+        compact = re.sub(r"\s+", " ", visible_text)
+        excerpt = compact[:420] + ("..." if len(compact) > 420 else "")
+        keywords = []
+        for pattern in (
+            r"TMEM41B", r"CLCC1", r"APOB", r"VLDL", r"MASH", r"脂肪肝",
+            r"内质网", r"磷脂翻转", r"健康建议", r"证据", r"机制",
+        ):
+            if re.search(pattern, compact, re.I):
+                keywords.append(pattern.strip("\\r"))
+        key_line = "、".join(list(dict.fromkeys(keywords))[:8]) or "未提取到稳定关键词"
+        positioning = "项目参考材料" if intent in {"project_instruction", "project_reference"} else "普通学习材料"
+        content = (
+            f"1. 内容要点：已收到可读正文，初步关键词为：{key_line}。正文片段：{excerpt}\n"
+            f"2. 学习定位：先标记为{positioning}；这一步只做收纳和初判，不把内容直接当事实结论。\n"
+            "3. 风险与不确定性：用户转发正文可能是科普改写或二次传播，仍需查原始论文/权威来源核验；不能只凭推文语气判断可靠性。\n"
+            "4. 下一步最小动作：把它转入项目验证队列，后续提取核心主张、证据类型、可核验来源和可能夸大点。"
+        )
     try:
         from ..research_memory import record_user_signal, record_episode
         signal_kind = "user_idea" if intent in {"project_instruction", "project_reference"} else "external_learning"
         signal_project = project if signal_kind == "user_idea" else ""
-        record_user_signal(_workspace, signal_project, f"外部内容学习：{item.get('text','')}", kind=signal_kind)
+        signal_text = content
+        if signal_kind == "user_idea":
+            signal_text = (
+                f"用户新分享材料已消化，需纳入项目「{signal_project}」继续处理。\n"
+                f"来源线索：{item.get('platform', 'unknown')} / {urls or item.get('source', '')}\n"
+                f"消化结果：{content[:1800]}"
+            )
+        else:
+            signal_text = f"外部内容学习：{item.get('text','')}\n\n消化结果：{content[:1200]}"
+        record_user_signal(_workspace, signal_project, signal_text, kind=signal_kind)
         record_episode(
             _workspace,
             signal_project,
@@ -2737,15 +4435,52 @@ async def _handle_content_digest(event: MindEvent):
         with open(learning_path, "a", encoding="utf-8") as f:
             f.write(f"## {datetime.now().isoformat(timespec='seconds')} [{item.get('platform','unknown')}] {intent}/{access_status}\n")
             f.write(content.strip() + "\n\n")
+    if access_status in {"access_limited", "link_only", "metadata_only"}:
+        logger.info(f"[CONTENT] access-limited content recorded without direct user notice: {item.get('id', '')}")
     if project and bool(item.get("should_nudge_project", False)):
         pool = await ensure_pool()
-        await pool.put(MindEvent(
-            type=EventType.PROJECT,
-            priority=4,
-            payload={"title": project, "step": 0},
-            source="content_digest:nudge_project",
-            parent_id=event.id,
-        ))
+        should_wake_project = _should_wake_waiting_literature_project(project, item)
+        try:
+            from ..project_state import get_project_status, set_project_status
+
+            current_status = get_project_status(_workspace, project)
+            if current_status in {"waiting", "done", "cooling_down"} and should_wake_project:
+                set_project_status(
+                    _workspace,
+                    project,
+                    "active",
+                    "用户新分享项目相关材料已消化，临时唤醒项目做材料吸收和汇报",
+                )
+                logger.info(
+                    f"[CONTENT] reactivated project from {current_status} after user-shared content: {project}"
+                )
+        except Exception as exc:
+            logger.debug(f"[CONTENT] failed to reactivate project after content digest: {exc}")
+        try:
+            compact_summary = content.strip()
+            if len(compact_summary) > 900:
+                compact_summary = compact_summary[:900].rstrip() + "..."
+            await pool.put(MindEvent(
+                type=EventType.REPORT,
+                priority=2,
+                payload={
+                    "content": compact_summary,
+                    "force_send": True,
+                    "bypass_rate_limit": True,
+                },
+                source="content_digest:project_material_absorbed",
+                parent_id=event.id,
+            ))
+        except Exception as exc:
+            logger.debug(f"[CONTENT] failed to enqueue project material report: {exc}")
+        if should_wake_project:
+            await pool.put(MindEvent(
+                type=EventType.PROJECT,
+                priority=2,
+                payload={"title": project, "step": 0, "reason": "user_shared_project_material"},
+                source="content_digest:nudge_project",
+                parent_id=event.id,
+            ))
     logger.info(f"[CONTENT] digested {item.get('id')} for project={project_label}")
     logger.info(f"[MIND] DONE event_type=content_digest, id={event.id[:8]}")
 
@@ -2871,8 +4606,27 @@ async def _handle_wake_up(event: MindEvent):
         logger.info(f"[WAKE_UP] queued {digests} open content digest event(s)")
     if active_name:
         try:
-            from ..project_state import get_project_status
-            if get_project_status(_workspace, active_name) in {"cooling_down", "waiting"}:
+            from ..project_state import get_project_status, set_project_status
+            status = get_project_status(_workspace, active_name)
+            open_idea = get_open_idea(_workspace, active_name)
+            if status in {"waiting", "done"}:
+                if open_idea and _is_new_idea_for_waiting_literature_project(active_name, open_idea):
+                    set_project_status(
+                        _workspace,
+                        active_name,
+                        "active",
+                        "检测到未消化用户/老师信号，唤醒脉冲重新激活项目",
+                    )
+                    logger.info(f"[WAKE_UP] 活跃项目处于 {status}，但存在未消化用户信号，重新激活: {active_name}")
+                elif open_idea:
+                    logger.info(f"[WAKE_UP] 活跃项目处于 {status}，但 open_idea 早于阶段汇报暂停，跳过自动恢复: {active_name}")
+                    logger.info(f"[MIND] DONE event_type=wake_up, id={event.id[:8]}")
+                    return
+                else:
+                    logger.info(f"[WAKE_UP] 活跃项目处于 {status}，跳过自动恢复: {active_name}")
+                    logger.info(f"[MIND] DONE event_type=wake_up, id={event.id[:8]}")
+                    return
+            if status in {"cooling_down"}:
                 _cap_project_waiting_delay(pool, active_name, _cooling_down_delay_sec())
         except Exception as exc:
             logger.debug(f"[WAKE_UP] cooling-down delay cap failed: {exc}")

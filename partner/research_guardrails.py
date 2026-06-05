@@ -188,6 +188,7 @@ def ensure_global_mind_files(workspace: str) -> None:
         os.path.join(user, "cross_project_habits.md"): "# Cross-project Habits\n\n",
         os.path.join(user, "partner_reflection_log.md"): "# Partner Reflection Log\n\n",
         os.path.join(user, "partner_mind_status.md"): "# Partner Mind Status\n\n",
+        os.path.join(user, "partner_evolution.md"): "# Partner Evolution\n\n",
         os.path.join(user, "transferable_lessons.md"): "# Transferable Lessons\n\n",
     }
     for path, content in defaults.items():
@@ -213,6 +214,7 @@ def ensure_shared_mind_files(workspace: str) -> None:
         os.path.join(user, "shared_partner_mind_status.md"): "# Shared Partner Mind Status\n\n",
         os.path.join(user, "shared_cross_instance_habits.md"): "# Shared Cross-instance Habits\n\n",
         os.path.join(user, "shared_growth_journal.md"): "# Shared Partner Growth Journal\n\n",
+        os.path.join(user, "shared_partner_evolution.md"): "# Shared Partner Evolution\n\n",
     }
     for path, content in defaults.items():
         if not os.path.exists(path):
@@ -364,45 +366,103 @@ def _first_matching_line(text: str, pattern: str) -> str:
     return ""
 
 
+def _is_abstract_habit(item: dict[str, Any]) -> bool:
+    """Keep transferable habits, not concrete cross-project case details."""
+    text = " ".join(str(item.get(k) or "") for k in ("cue", "routine", "check", "source"))
+    if not text.strip():
+        return False
+    concrete_noise = (
+        "omega-3", "维生素", "脂肪肝", "NHANES", "鲍曼", "agent 前沿",
+        "小红书", "公众号", "DeepSeek", "Task", "v1", "v2", "v3", "v4",
+        "MAE=", "R2=", "R²=", "BUN", "Ferritin", "OmpA", "bla-", "ISAba",
+    )
+    return not any(token.lower() in text.lower() for token in concrete_noise)
+
+
+def _ensure_core_shared_habits(workspace: str) -> None:
+    """Ensure generic shared habits exist without logging growth every round."""
+    ensure_shared_mind_files(workspace)
+    path = os.path.join(_shared_mind_dir(workspace), "habits.json")
+    data = _load_json(path, {"habits": []})
+    habits = data.get("habits") if isinstance(data, dict) else []
+    if not isinstance(habits, list):
+        habits = []
+    cores = [
+        {
+            "cue": "准备汇报最佳结果/突破/完成结论",
+            "routine": "先检查证据文件、运行日志和最小复现是否存在；证据不足只能标为待复核，不继续包装或调参",
+            "check": "用户汇报前必须能指向真实证据路径",
+        },
+        {
+            "cue": "新项目或资料依赖任务起步",
+            "routine": "由 LLM 判断是否需要先查文献/资料/公开数据路线；需要时先做起步卡，不需要时直接做最小可验证动作",
+            "check": "不机械搜索，也不跳过必要背景核验",
+        },
+        {
+            "cue": "容易获取的材料与用户原始意图不一致",
+            "routine": "回到用户问题本身；易获取材料只能作旁证，不能替代用户要求",
+            "check": "输出 verified / inferred / hypothesis 分层",
+        },
+    ]
+    existing = {
+        (str(item.get("cue") or ""), str(item.get("routine") or ""))
+        for item in habits
+        if isinstance(item, dict)
+    }
+    changed = False
+    for core in cores:
+        key = (core["cue"], core["routine"])
+        if key in existing:
+            continue
+        habits.append({
+            "created_at": _now(),
+            "last_seen_at": _now(),
+            "cue": core["cue"],
+            "routine": core["routine"],
+            "check": core["check"],
+            "source": "core_policy",
+            "projects": [],
+            "instances": [],
+        })
+        changed = True
+    if changed:
+        _write_json(path, {"habits": habits[-120:]})
+
+
 def build_mind_context(workspace: str, project: str) -> str:
     """Small prompt context: only the most relevant contracts and habits."""
     ensure_baseline_and_metric_contracts(workspace, project)
     ensure_global_mind_files(workspace)
+    _ensure_core_shared_habits(workspace)
     baseline = load_baseline_contract(workspace, project)
     metric = load_metric_contract(workspace, project)
     habits = _load_json(os.path.join(_project_mind_dir(workspace, project), "habits.json"), {"habits": []})
     global_habits = _load_json(os.path.join(_global_mind_dir(workspace), "habits.json"), {"habits": []})
     shared_habits = _load_json(os.path.join(_shared_mind_dir(workspace), "habits.json"), {"habits": []})
-    shared_growth = _load_recent_jsonl(os.path.join(_shared_mind_dir(workspace), "growth_events.jsonl"), limit=4)
     habit_items = habits.get("habits") if isinstance(habits, dict) else []
     global_habit_items = global_habits.get("habits") if isinstance(global_habits, dict) else []
     shared_habit_items = shared_habits.get("habits") if isinstance(shared_habits, dict) else []
     habit_lines = []
-    for item in (habit_items or [])[-5:]:
+    for item in (habit_items or [])[-3:]:
         if isinstance(item, dict):
             habit_lines.append(
                 f"- cue={_clip(str(item.get('cue') or ''), 70)}; routine={_clip(str(item.get('routine') or ''), 110)}"
             )
     global_habit_lines = []
-    for item in (global_habit_items or [])[-3:]:
+    for item in (global_habit_items or [])[-4:]:
         if isinstance(item, dict):
             global_habit_lines.append(
                 f"- cue={_clip(str(item.get('cue') or ''), 70)}; routine={_clip(str(item.get('routine') or ''), 110)}"
             )
     shared_habit_lines = []
-    for item in (shared_habit_items or [])[-5:]:
-        if isinstance(item, dict):
+    for item in reversed(shared_habit_items or []):
+        if isinstance(item, dict) and _is_abstract_habit(item):
             shared_habit_lines.append(
                 f"- cue={_clip(str(item.get('cue') or ''), 70)}; routine={_clip(str(item.get('routine') or ''), 120)}"
             )
-    shared_growth_lines = []
-    for item in shared_growth[-4:]:
-        changed = item.get("behavior_change") or item.get("learned") or ""
-        trigger = item.get("trigger") or ""
-        if changed:
-            shared_growth_lines.append(
-                f"- trigger={_clip(str(trigger), 70)}; change={_clip(str(changed), 120)}"
-            )
+        if len(shared_habit_lines) >= 6:
+            break
+    shared_habit_lines = list(reversed(shared_habit_lines))
     metric_lines = []
     for item in (metric.get("metrics") or [])[:6]:
         metric_lines.append(
@@ -417,8 +477,6 @@ def build_mind_context(workspace: str, project: str) -> str:
         parts.append("指标契约：\n" + "\n".join(metric_lines))
     if shared_habit_lines:
         parts.append("Partner 共享习惯（所有实例复用）：\n" + "\n".join(shared_habit_lines))
-    if shared_growth_lines:
-        parts.append("Partner 共享成长事件（所有实例可迁移）：\n" + "\n".join(shared_growth_lines))
     if global_habit_lines:
         parts.append("Partner 跨项目习惯：\n" + "\n".join(global_habit_lines))
     if habit_lines:
@@ -539,16 +597,90 @@ def _add_shared_habit(workspace: str, cue: str, routine: str, check: str, source
 
 
 def _record_habit_application(workspace: str, project: str, cue: str, original: str, actual: str, result: str) -> None:
+    ensure_mind_files(workspace, project)
+    now = _now()
+    key_src = f"{cue}|{actual}|{result}"
+    key = re.sub(r"\s+", " ", key_src.strip().lower())[:260]
+    mind_path = os.path.join(_project_mind_dir(workspace, project), "habit_applications.json")
+    data = _load_json(mind_path, {"items": []})
+    items = data.get("items") if isinstance(data, dict) else []
+    if not isinstance(items, list):
+        items = []
+    found = None
+    for item in items:
+        if isinstance(item, dict) and item.get("key") == key:
+            found = item
+            break
+    if found:
+        found["count"] = int(found.get("count") or 1) + 1
+        found["last_seen_at"] = now
+        found["last_result"] = _clip(result, 260)
+    else:
+        items.append({
+            "key": key,
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "count": 1,
+            "cue": _clip(cue, 180),
+            "original": _clip(original, 220),
+            "actual": _clip(actual, 260),
+            "last_result": _clip(result, 260),
+        })
+    _write_json(mind_path, {"items": items[-80:]})
     path = os.path.join(_project_user_dir(workspace, project), "habit_applications.md")
-    _append_text(
-        path,
-        f"\n## {_now()} | {cue}\n\n- 原本可能动作：{original}\n- 实际动作：{actual}\n- 结果：{result}\n",
-    )
-    _append_text(
-        os.path.join(_global_user_dir(workspace), "partner_reflection_log.md"),
-        f"\n## {_now()} | {project} / {cue}\n\n- 原本可能动作：{original}\n- 实际动作：{actual}\n- 结果：{result}\n",
-    )
+    lines = [
+        f"# {project} Habit Applications",
+        "",
+        "同一习惯的重复触发会聚合计数，不再刷屏写多段重复内容。",
+        "",
+        "| 次数 | 最近触发 | 触发 | 以前可能会 | 现在改为 | 最近结果 |",
+        "|---:|---|---|---|---|---|",
+    ]
+    for item in sorted(items, key=lambda x: str(x.get("last_seen_at", "")), reverse=True)[:30]:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"| {int(item.get('count') or 1)} | {item.get('last_seen_at','')} | "
+            f"{str(item.get('cue','')).replace('|','/')} | "
+            f"{str(item.get('original','')).replace('|','/')} | "
+            f"{str(item.get('actual','')).replace('|','/')} | "
+            f"{str(item.get('last_result','')).replace('|','/')} |"
+        )
+    _write_text(path, "\n".join(lines))
+    if not found or int(found.get("count") or 0) in {2, 5, 10, 20, 50}:
+        _append_text(
+            os.path.join(_global_user_dir(workspace), "partner_reflection_log.md"),
+            f"\n## {now} | {project} / {cue}\n\n- 原本可能动作：{original}\n- 实际动作：{actual}\n- 结果：{result}\n",
+        )
+    should_record_evolution = (not found) or int(found.get("count") or 0) in {2, 5, 10, 20, 50}
+    if should_record_evolution:
+        _append_partner_evolution(
+            workspace,
+            project=project,
+            trigger=cue,
+            before=original,
+            after=actual,
+            evidence=result,
+        )
     _publish_global_mind_status(workspace)
+
+
+def _append_partner_evolution(workspace: str, *, project: str, trigger: str, before: str, after: str, evidence: str) -> None:
+    """Write a user-readable evolution card at project/global/shared levels."""
+    instance_id = os.path.basename(os.path.normpath(workspace))
+    block = (
+        f"\n## {_now()} | Evolution Card\n\n"
+        f"- 实例：{instance_id or 'unknown'}\n"
+        f"- 项目：{project or 'unknown'}\n"
+        f"- 触发：{trigger}\n"
+        f"- 以前可能会：{before}\n"
+        f"- 现在改为：{after}\n"
+        f"- 证据/结果：{evidence}\n"
+        "- 后续验证：观察这个习惯是否在其他项目或下一轮中被复用。\n"
+    )
+    _append_text(os.path.join(_project_user_dir(workspace, project), "growth_journal.md"), block)
+    _append_text(os.path.join(_global_user_dir(workspace), "partner_evolution.md"), block)
+    _append_text(os.path.join(_shared_user_dir(workspace), "shared_partner_evolution.md"), block)
 
 
 def _append_user_growth(workspace: str, project: str, block: str) -> None:
@@ -776,6 +908,49 @@ def _detect_comparability_issues(workspace: str, project: str, parsed: dict[str,
     return issues
 
 
+def _evidence_paths_exist(workspace: str, project: str, evidence: str, files: str = "") -> tuple[bool, list[str]]:
+    """Check whether cited local evidence files actually exist."""
+    project_dir = _project_dir(workspace, project)
+    legacy_project_dir = os.path.join(workspace, "projects", _safe_name(project))
+    candidates: list[str] = []
+    for field in (evidence or "", files or ""):
+        for item in re.split(r"[；;,\n]+", field):
+            item = item.strip()
+            if not item or item.lower() in {"hypothesis", "empty"} or item.startswith("system:"):
+                continue
+            if re.search(r"^https?://", item):
+                continue
+            # Strip natural-language explanations after paths, e.g.
+            # "/path/a.md（精读笔记）" or "methods.md (updated)".
+            match = re.search(
+                r"(?P<path>(?:/[^；;,\n（）()]+|(?:20_records/)?projects/[^；;,\n（）()]+|[^；;,\n（）()]+)"
+                r"\.(?:md|csv|json|txt|py|pkl|joblib|parquet|xpt))",
+                item,
+                re.I,
+            )
+            if match:
+                candidates.append(match.group("path").strip())
+    if not candidates:
+        return False, []
+    missing: list[str] = []
+    for item in candidates:
+        path = item
+        possible: list[str] = []
+        if not os.path.isabs(path):
+            cleaned = re.sub(r"^20_records/projects/[^/]+/", "", path)
+            cleaned = re.sub(r"^projects/[^/]+/", "", cleaned)
+            possible.extend([
+                os.path.join(project_dir, cleaned),
+                os.path.join(legacy_project_dir, cleaned),
+                os.path.join(workspace, path),
+            ])
+        else:
+            possible.append(path)
+        if not any(os.path.exists(p) for p in possible):
+            missing.append(item)
+    return len(missing) == 0, missing[:5]
+
+
 def apply_round_guardrails(
     workspace: str,
     project: str,
@@ -790,6 +965,28 @@ def apply_round_guardrails(
     parsed = dict(parsed or {})
     text = _round_text(parsed) + "\n" + (hermes_response or "")[:2000]
     issues = _detect_comparability_issues(workspace, project, parsed)
+    evidence_ok, missing_evidence = _evidence_paths_exist(
+        workspace,
+        project,
+        str(parsed.get("evidence") or ""),
+        str(parsed.get("files") or ""),
+    )
+    metric_or_best_claim = bool(
+        re.search(r"(MAE|R²|R2|AUC|准确率|当前最佳|最佳模型|新最佳|达成.*目标|score|得分)", text, re.I)
+    )
+    if metric_or_best_claim and not evidence_ok:
+        issues.append(
+            "关键指标/最佳结果的证据文件未完整落盘或不可复查，必须先做证据审计后再向用户确认。"
+        )
+        if missing_evidence:
+            parsed["next_action"] = (
+                "先补齐或重跑证据文件："
+                + "；".join(missing_evidence[:3])
+                + "，再判断当前指标是否可信。"
+            )
+        else:
+            parsed["next_action"] = "先把本轮指标落成可复查结果文件，并执行一次复跑/泄露审计，再判断是否可信。"
+        parsed["state_delta"] = (parsed.get("state_delta") or "") + "\n证据审计：关键指标尚未通过证据文件存在性检查，当前只按待复核结果处理。"
     blocker = _detect_blocker(text)
     shortcut = _detect_shortcut(project, text)
     inflated = bool(INFLATED_COMPLETION_RE.search(text))
@@ -911,8 +1108,14 @@ def classify_report_type(workspace: str, project: str, parsed: dict[str, Any], i
     return "low_value"
 
 
-def should_send_user_report(report_type: str) -> bool:
-    return report_type in {"breakthrough", "meaningful_progress", "blocker_question"}
+def should_send_user_report(report_type: str, progress_score: int | None = None) -> bool:
+    if report_type in {"breakthrough", "blocker_question"}:
+        return True
+    if report_type != "meaningful_progress":
+        return False
+    # Small improvements, routine cleanups, and weak analyses still go to the
+    # user workspace, but should not interrupt the user on QQ.
+    return int(progress_score or 0) >= 5
 
 
 def improve_user_report(content: str, report_type: str) -> str:
@@ -923,6 +1126,10 @@ def improve_user_report(content: str, report_type: str) -> str:
     text = re.sub(r"/(?:mnt|home|tmp)/[^\s，,；;]+", "", text)
     text = re.sub(r"(写入|更新|创建|产出)了?[^。；\n]*(文件|目录|路径)[。；]?", "", text)
     text = re.sub(r"\d+\s*字节|关键目录[:：][^\n]+", "", text)
+    if re.search(r"(MAE|R²|R2|当前最佳|最佳模型|达成.*目标|新最佳)", text, re.I):
+        text = re.sub(r"状态正常[，,。；;]?\s*无失败异常[，,。；;]?\s*", "", text)
+        text = re.sub(r"本轮无阻塞风险[，,。；;]?\s*", "", text)
+        text = re.sub(r"无阻塞风险[，,。；;]?\s*", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     if report_type == "low_value":
         return ""
@@ -990,6 +1197,18 @@ def _write_working_memory(workspace: str, project: str, done: str, findings: str
 
 
 def _publish_mind_status(workspace: str, project: str, done: str, findings: str, next_action: str, issues: list[str], report_type: str, score: int) -> None:
+    runtime_line = ""
+    try:
+        from .runtime_monitor import publish_runtime_cost_summary
+
+        runtime = publish_runtime_cost_summary(workspace)
+        if runtime.get("calls"):
+            runtime_line = (
+                f"- 最近调用：{runtime.get('calls')} 次，估算 token {runtime.get('total_tokens_est')}，"
+                f"失败 {runtime.get('failed')} 次\n"
+            )
+    except Exception:
+        runtime_line = ""
     habits = _load_json(os.path.join(_project_mind_dir(workspace, project), "habits.json"), {"habits": []})
     habit_lines = []
     for item in (habits.get("habits") if isinstance(habits, dict) else [] or [])[-3:]:
@@ -1023,10 +1242,14 @@ def _publish_mind_status(workspace: str, project: str, done: str, findings: str,
         f"{'；'.join(issues[:5]) if issues else '暂无明确阻塞。'}\n\n"
         f"## 下一步\n"
         f"{next_action or '继续做一个最小可验证推进动作。'}\n\n"
+        f"## 运行消耗\n"
+        f"{runtime_line or '- 暂无调用统计。'}"
+        f"\n"
         f"## 用户可读记录\n"
         f"- `../projects/{_safe_name(project)}/research_journey.md`\n"
         f"- `../projects/{_safe_name(project)}/growth_journal.md`\n"
         f"- `../projects/{_safe_name(project)}/mind_status.md`\n"
+        f"- `../runtime_cost.md`\n"
     )
     _write_text(os.path.join(current_dir, "summary.md"), summary)
     journey = _read_text(os.path.join(_project_user_dir(workspace, project), "research_journey.md"), 5000)
@@ -1143,6 +1366,211 @@ def maybe_force_stage_report(workspace: str, project: str, step: int, report_typ
         "不要列文件清单；不要把 simulation/proxy/synthetic 写成真实结论。"
     )
     return objective, path
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(float(raw))
+        return value if value >= 0 else default
+    except Exception:
+        return default
+
+
+def _count_project_files(workspace: str, project: str) -> int:
+    roots = [
+        _project_dir(workspace, project),
+        os.path.join(_project_user_dir(workspace, project)),
+    ]
+    seen: set[str] = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for cur, _, files in os.walk(root):
+            for name in files:
+                seen.add(os.path.realpath(os.path.join(cur, name)))
+    return len(seen)
+
+
+def _recent_runtime_tokens(workspace: str, limit: int = 120) -> int:
+    rows = _load_recent_jsonl(os.path.join(workspace, "logs", "agent_runs.jsonl"), limit=limit)
+    total = 0
+    for row in rows:
+        try:
+            total += int(row.get("total_tokens_est") or 0)
+        except Exception:
+            pass
+    return total
+
+
+def _has_user_stage_report(workspace: str, project: str) -> bool:
+    report_dir = os.path.join(workspace, "user", "reports", _safe_name(project))
+    if not os.path.isdir(report_dir):
+        return False
+    try:
+        names = os.listdir(report_dir)
+    except OSError:
+        return False
+    return any(name.endswith((".pdf", ".pptx")) for name in names) and "latest_stage_report.md" in names
+
+
+def _has_showcase(workspace: str, project: str) -> bool:
+    show_dir = os.path.join(workspace, "user", "showcase", _safe_name(project))
+    return os.path.exists(os.path.join(show_dir, "README.md"))
+
+
+def is_literature_reference_task(workspace: str, project: str) -> bool:
+    """Return true for tasks whose user-facing deliverable is literature/method review.
+
+    This is intentionally generic: if the active goal/brief/recent task says
+    "find papers / literature / references / common methods", Partner should
+    produce a solid report and pause for user evaluation instead of drifting
+    into scripts, simulations, or data analysis unless the user asks for that.
+    """
+    parts: list[str] = []
+    for rel in ("state/active_plan.json", "state/task_queue.json"):
+        data = _load_json(os.path.join(workspace, rel), {})
+        if isinstance(data, dict):
+            if data.get("title") == project:
+                parts.extend(str(data.get(k) or "") for k in ("goal", "heartbeat_summary", "title"))
+        elif isinstance(data, list):
+            for item in data[-10:]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("status") in {"obsolete", "done", "completed"}:
+                    continue
+                if project and item.get("title") and item.get("title") != project:
+                    continue
+                parts.extend(str(item.get(k) or "") for k in ("title", "description", "result_summary"))
+    brief = _read_text(os.path.join(_project_dir(workspace, project), "project_brief.md"), 5000)
+    parts.append(brief)
+    text = "\n".join(parts)
+    wants_literature = bool(re.search(r"(找|查|搜|整理|调研|精读|参考).{0,12}(文献|论文|资料|方法|路线|综述|reference|paper|literature)", text, re.I))
+    wants_analysis = bool(re.search(r"(运行|训练|建模|分析脚本|原始数据|数据分析|pipeline|建模型|预测|调参|simulation|模拟数据)", text, re.I))
+    # If both appear, treat it as literature-only only when the current brief
+    # still says the deliverable is reference/method route rather than actual
+    # analysis.
+    reference_positioning = bool(re.search(r"(文献参考|方法学路线|Methods 参考|参考整理|代码参数案例|证据审计)", brief, re.I))
+    return wants_literature and (not wants_analysis or reference_positioning)
+
+
+def maybe_pause_after_literature_report(
+    workspace: str,
+    project: str,
+    *,
+    published_report: bool = False,
+    reason: str = "",
+) -> tuple[bool, str]:
+    contract_reason = ""
+    literature_task = is_literature_reference_task(workspace, project)
+    try:
+        from .project_state import load_project_guardrail
+
+        guardrail = load_project_guardrail(workspace, project)
+        criteria = [str(x).strip() for x in (guardrail.get("completion_criteria") or []) if str(x).strip()]
+        if criteria and published_report:
+            contract_reason = "任务合同内交付物已形成阶段汇报，等待用户评估是否进入下一阶段"
+    except Exception:
+        contract_reason = ""
+    if not contract_reason and not literature_task:
+        return False, ""
+    if literature_task and not published_report and not _has_user_stage_report(workspace, project):
+        return False, ""
+    if contract_reason and not published_report:
+        return False, ""
+    pause_reason = reason or contract_reason or "文献/方法参考任务已形成阶段汇报，等待用户评估是否进入数据分析或代码实现"
+    try:
+        from .project_state import set_project_status
+
+        set_project_status(workspace, project, "waiting", pause_reason)
+    except Exception:
+        pass
+    _write_text(
+        os.path.join(_project_user_dir(workspace, project), "literature_task_pause.md"),
+        (
+            "# Literature Task Pause\n\n"
+            f"时间：{_now()}\n\n"
+            f"原因：{pause_reason}\n\n"
+            "Partner 已完成当前任务合同内的阶段汇报后应暂停，"
+            "不要自动扩展到用户没有要求的新阶段、新实验或新交付物。\n\n"
+            "如果用户继续明确要求下一阶段，再按新的任务合同推进。\n"
+        ),
+    )
+    return True, pause_reason
+
+
+def maybe_pause_project_for_quality_gate(
+    workspace: str,
+    project: str,
+    *,
+    next_step: int,
+    report_type: str,
+    progress_score: int,
+) -> tuple[bool, str]:
+    """Pause runaway projects after enough user-visible evidence exists.
+
+    This is generic. It is not a hardcoded demo patch: every long-running
+    project gets a quality/cost gate so Partner does not keep spending tokens on
+    low-value wrapping after it has a report/showcase or has exceeded budget.
+    """
+    max_steps = _env_int("PARTNER_MAX_PROJECT_STEPS", 120)
+    max_files = _env_int("PARTNER_MAX_PROJECT_FILES", 220)
+    max_recent_tokens = _env_int("PARTNER_MAX_RECENT_TOKEN_EST", 250_000)
+    stop_after_showcase = os.getenv("PARTNER_STOP_AFTER_SHOWCASE", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+    reasons: list[str] = []
+    file_count = _count_project_files(workspace, project)
+    recent_tokens = _recent_runtime_tokens(workspace)
+    has_report = _has_user_stage_report(workspace, project)
+    has_showcase = _has_showcase(workspace, project)
+
+    if max_steps and next_step >= max_steps:
+        reasons.append(f"项目轮次达到上限 {next_step}/{max_steps}")
+    if max_files and file_count >= max_files:
+        reasons.append(f"项目文件数达到上限 {file_count}/{max_files}")
+    if max_recent_tokens and recent_tokens >= max_recent_tokens:
+        reasons.append(f"近期估算 token 达到上限 {recent_tokens}/{max_recent_tokens}")
+    if stop_after_showcase and has_report and has_showcase and report_type in {"breakthrough", "meaningful_progress", "blocker_question"}:
+        reasons.append("已生成阶段汇报和 showcase，适合暂停给用户评估")
+
+    if not reasons:
+        return False, ""
+
+    reason = "；".join(reasons[:4])
+    try:
+        from .project_state import set_project_status
+
+        set_project_status(workspace, project, "waiting", reason)
+    except Exception:
+        pass
+    _write_text(
+        os.path.join(_project_user_dir(workspace, project), "quality_gate_pause.md"),
+        (
+            "# Quality Gate Pause\n\n"
+            f"时间：{_now()}\n\n"
+            f"暂停原因：{reason}\n\n"
+            f"- 当前 step：{next_step}\n"
+            f"- 项目文件数：{file_count}\n"
+            f"- 最近估算 token：{recent_tokens}\n"
+            f"- 已有阶段汇报：{'yes' if has_report else 'no'}\n"
+            f"- 已有 showcase：{'yes' if has_showcase else 'no'}\n\n"
+            "当前阶段的基本任务已经完成，已有一版可给用户查看的报告/展示材料。\n"
+            "Partner 会先把报告交给用户评估，不再继续堆重复材料。\n"
+            "用户继续发送新指令、截图、正文、公开链接、真实 API/数据或新的判断后，"
+            "项目会被唤醒，先吸收材料并汇报，再继续推进一轮。\n"
+        ),
+    )
+    _record_habit_application(
+        workspace,
+        project,
+        cue="质量/成本门槛触发",
+        original="继续生成更多文件、总结和包装材料",
+        actual="阶段性暂停自动扩展；收到新材料或新指令时临时唤醒并做一次材料吸收/项目推进",
+        result=reason,
+    )
+    return True, reason
 
 
 def record_user_signal_to_mind(workspace: str, project: str, text: str, kind: str = "user_signal") -> None:

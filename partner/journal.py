@@ -28,7 +28,7 @@ class Journal:
     def _load(self):
         self.entries = []
         try:
-            with open(self.path) as f:
+            with open(self.path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if line:
@@ -49,7 +49,7 @@ class Journal:
     
     def log(self, entry: JournalEntry):
         self.entries.append(entry)
-        with open(self.path, 'a') as f:
+        with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(asdict(entry), ensure_ascii=False) + '\n')
     
     def get_recent(self, n: int = 10) -> List[JournalEntry]:

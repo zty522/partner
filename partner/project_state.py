@@ -505,6 +505,18 @@ def write_project_contract(workspace: str, project_name: str, contract: dict):
     contract["updated_at"] = datetime.now().isoformat(timespec="seconds")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(contract, f, ensure_ascii=False, indent=2)
+    try:
+        from .project_registry import register_project
+
+        register_project(
+            workspace,
+            contract.get("project_name") or project_name,
+            status=str(contract.get("project_status") or "active"),
+            reason=str(contract.get("status_reason") or ""),
+            make_public=False,
+        )
+    except Exception:
+        pass
 
 
 def get_project_status(workspace: str, project_name: str) -> str:
@@ -532,11 +544,27 @@ def set_project_status(workspace: str, project_name: str, status: str, reason: s
     write_project_contract(workspace, project_name, contract)
     plan = _read_active_plan(workspace)
     plan["project_status"] = status
-    plan["status"] = status if status != "active" else plan.get("status", "planning")
+    if status == "active":
+        # Do not preserve stale lifecycle labels such as "waiting" after a
+        # user-shared material wakes the project.  Several status surfaces read
+        # active_plan.status directly, so keeping the old value makes a running
+        # project look stuck.
+        plan["status"] = "active"
+    else:
+        plan["status"] = status
     plan["last_heartbeat"] = now
     if reason:
         plan["heartbeat_summary"] = reason[:240]
     _write_active_plan(workspace, plan)
+    try:
+        from .project_registry import claim_project, register_project
+
+        if status == "active":
+            claim_project(workspace, project_name, reason=reason)
+        else:
+            register_project(workspace, project_name, status=status, reason=reason, make_public=False)
+    except Exception:
+        pass
 
 
 def is_project_done_signal(parsed: dict) -> bool:
@@ -843,6 +871,30 @@ def set_active(workspace: str, project_name: str):
     with open(path, "w", encoding="utf-8") as f:
         f.write(project_name.strip() + "\n")
     logger.info(f"[State] 活跃项目已设置: {project_name}")
+    try:
+        from .project_registry import claim_project
+
+        claim_project(workspace, project_name, reason="set_active")
+    except Exception:
+        pass
+
+
+def clear_active(workspace: str, project_name: str = "") -> bool:
+    """Clear active_project.txt when it points to a completed one-shot task."""
+    path = get_active_path(workspace)
+    if not os.path.exists(path):
+        return False
+    try:
+        current = ""
+        with open(path, "r", encoding="utf-8") as f:
+            current = f.readline().strip()
+        if project_name and current and current != project_name:
+            return False
+        os.remove(path)
+        logger.info(f"[State] 活跃项目已清除: {current or project_name}")
+        return True
+    except OSError:
+        return False
 
 
 def get_active(workspace: str) -> Optional[str]:
@@ -853,6 +905,8 @@ def get_active(workspace: str) -> Optional[str]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             name = f.readline().strip()
+        if not name:
+            return None
         return resolve_project_name(workspace, name) or (name if name else None)
     except Exception:
         return None
@@ -873,9 +927,11 @@ def recover_active_from_plan(workspace: str) -> Optional[str]:
             return current
         return None
     status = str(plan.get("status") or "").strip().lower()
-    if status in {"", "idle", "done", "completed", "closed"}:
+    if status in {"", "idle", "waiting", "done", "completed", "closed"}:
         if current and not is_generic_project_name(current):
-            return current
+            current_status = get_project_status(workspace, current)
+            if current_status not in {"waiting", "done"}:
+                return current
         return None
 
     candidates = [

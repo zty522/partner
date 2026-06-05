@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.0] - 2026-06-05 (Event-driven Partner runtime)
+
+### Added
+
+- Event-first selector runtime for direct replies, direct tasks, literature review, data analysis, evidence audit, artifact build, PDF report, project thinking, curiosity exploration, habit update, and explicit project stop.
+- Dedicated `pdf_report` event for real PDF delivery instead of treating PDF output as an incidental artifact.
+- Event-boundary user updates that can report the event that ran, what changed, created files, and the intended next event.
+- Conversation continuity for ordinary dialogue and pending missing-parameter answers, separated from project memory.
+- Growth-aware action prompts that inject recent growth events and shared habits into execution.
+- Optional multi-endpoint Ollama pool with local, server, tunnel, and custom endpoint metadata.
+- `partner server` CLI for registering multiple remote servers and printing local-Ollama reverse tunnel commands.
+- `partner ollama` CLI for setup, add, list, test, mode, and disable operations.
+- OpenClaw setup support and updated desktop/GUI assets.
+
+### Changed
+
+- Reduced hard-coded QQ/user-message behavior; duplicate detection, missing-parameter handling, and continuation routing are selector decisions.
+- Active projects stop through explicit `stop_project` or an intentional waiting state instead of silent termination.
+- Setup now records server and Ollama configuration and can sync Ollama pool settings across configured instances.
+- README rewritten for the v0.7 event-driven Partner model.
+- Package, installer, runtime, GUI schema, and Hermes skill metadata updated to `0.7.0`.
+
 ## [0.6.0] - 2026-06-02 (Long-term research partner)
 
 ### Added

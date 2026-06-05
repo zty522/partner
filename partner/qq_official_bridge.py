@@ -1,8 +1,8 @@
-"""QQ Official Bot Bridge - connects QQ Official Bot to Partner's conversation engine.
+"""QQ Official Bot Bridge - connects QQ Official Bot to Partner's event runtime.
 
 This module is the high-level integration layer that:
   1. Starts the QQ Official Bot adapter
-  2. Routes text messages to ConversationEngine
+  2. Routes text messages to InteractionOrchestrator
   3. Sends text replies back through QQ
   4. Maintains per-user conversation context
 
@@ -14,9 +14,9 @@ Usage:
     bridge.start()  # Blocks, listening for messages
 
 Architecture:
-    QQ User → QQ Bot Platform → WebSocket → QQQfficialBot → QQQfficialBridge → ConversationEngine
+    QQ User → QQ Bot Platform → WebSocket → QQQfficialBot → QQQfficialBridge → InteractionOrchestrator
                                                                                          ↓
-    QQ User ← QQ Bot Platform ← REST API ← QQQfficialBot ← QQQfficialBridge ← ConversationEngine
+    QQ User ← QQ Bot Platform ← REST API ← QQQfficialBot ← QQQfficialBridge ← InteractionOrchestrator
 """
 
 import os
@@ -27,23 +27,27 @@ import logging
 import threading
 import subprocess
 import re
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional, Dict, List
 
 from .qq_official_bot import QQQfficialBot, QQMessage, QQMessageType, QQBotInfo
-from .conversation import ConversationEngine
 from .task_queue import TaskQueue
 from .knowledge import KnowledgeBase
 from .journal import Journal, JournalEntry
 from .state import StateManager
+from .outbound_policy import THINKING_NOTICE, UNAVAILABLE_NOTICE, prefix_event_notice
 from .config import (
     apply_runtime_agent_defaults,
     load_partner_config_data,
     save_partner_config_data,
 )
 from .interaction_orchestrator import InteractionOrchestrator
+from .user_text_safety import has_internal_diff, strip_internal_diff
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,8 @@ class QQQfficialBridgeConfig:
     # Message settings
     max_reply_length: int = 2000
     group_at_only: bool = True  # In groups, only respond when @mentioned
-    send_thinking_hint: bool = True
+    send_thinking_hint: bool = False
+    thinking_hint_text: str = ""
 
     # Workspace
     workspace: str = ""
@@ -71,7 +76,7 @@ class QQQfficialBridgeConfig:
 class QQQfficialBridge:
     """High-level bridge between QQ Official Bot and Partner.
 
-    Integrates QQQfficialBot (transport) + ConversationEngine (intelligence).
+    Integrates QQQfficialBot (transport) + InteractionOrchestrator (event selector).
     """
 
     def __init__(self, workspace: str, config: QQQfficialBridgeConfig = None):
@@ -88,10 +93,6 @@ class QQQfficialBridge:
         self.knowledge = KnowledgeBase(os.path.join(state_dir, "knowledge.json"))
         self.journal = Journal(os.path.join(state_dir, "journal.jsonl"))
         self.state_manager = StateManager(state_dir)
-        self.conversation = ConversationEngine(
-            self.journal, self.knowledge, self.task_queue, self.state_manager,
-            workspace=workspace,
-        )
 
         # Agent adapter for LLM-powered conversation
         self._adapter = None
@@ -119,6 +120,7 @@ class QQQfficialBridge:
         self._singleton_lock_fd = None
         self._singleton_lock_path = os.path.join(state_dir, "qq_bridge.lock")
         self._recent_message_file = os.path.join(state_dir, "qq_recent_messages.json")
+        self._qq_chat_history_file = os.path.join(state_dir, "qq_chat_history.jsonl")
         self._recent_reply_keys: Dict[str, float] = {}
         self._interaction_orchestrator: Optional[InteractionOrchestrator] = None
 
@@ -155,6 +157,7 @@ class QQQfficialBridge:
             self.config.is_sandbox = data.get("is_sandbox", self.config.is_sandbox)
             self.config.auto_reconnect = data.get("auto_reconnect", self.config.auto_reconnect)
             self.config.send_thinking_hint = data.get("send_thinking_hint", self.config.send_thinking_hint)
+            self.config.thinking_hint_text = str(data.get("thinking_hint_text", self.config.thinking_hint_text) or "")
             logger.info(f"QQ config loaded from: {config_path}")
             return True
         except Exception as e:
@@ -340,14 +343,26 @@ class QQQfficialBridge:
                 return
 
             logger.info(f"[QQ {msg.sender_name}({msg.sender_id})] {user_text[:100]}\n")
+            self._append_qq_chat_history(
+                {
+                    "role": "user",
+                    "content": user_text,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "qq",
+                    "channel": msg.message_type.value,
+                    "sender_id": msg.sender_id,
+                    "sender_name": msg.sender_name or msg.sender_id,
+                    "msg_id": msg.msg_id,
+                    "group_id": msg.group_id,
+                }
+            )
 
-            shared_content = self._record_shared_content_signal(msg, user_text)
-
-            if self.config.send_thinking_hint:
-                self._send_reply(msg, "思考中......")
+            self._send_reply(msg, THINKING_NOTICE)
 
             # Step 0: Special commands (handled directly, no LLM needed)
             special_reply = self._handle_special_command(user_text, msg)
+            if special_reply == "__PARTNER_NO_USER_REPLY__":
+                return
             if special_reply:  # Has a real reply
                 self._send_reply_once(msg, special_reply)
                 return
@@ -358,16 +373,48 @@ class QQQfficialBridge:
 
             self._force_run_triggered = False
 
+            # Fast path for rapid external-content sharing: record and queue
+            # content before any slow interaction LLM call, but do not send a
+            # hard-coded content reply. The interaction orchestrator still owns
+            # the user-facing response.
+            if self._looks_like_external_content_share(user_text) and self._infer_focus_project():
+                focus_project = self._infer_focus_project() or ""
+                shared_content = self._record_shared_content_signal(
+                    msg,
+                    user_text,
+                    project_override=focus_project,
+                )
+                if shared_content:
+                    self._nudge_content_digest(shared_content)
+
             decision = self._get_interaction_orchestrator().handle_message(
                 sender_id=msg.sender_id,
                 sender_name=msg.sender_name or "QQ用户",
                 text=user_text,
             )
-            if shared_content:
-                self._nudge_content_digest(shared_content)
+            if self._looks_like_external_content_share(user_text):
+                content_project = (
+                    decision.target_project
+                    if decision.need_lifeline_update and decision.target_project
+                    else self._infer_focus_project()
+                ) or ""
+                shared_content = self._record_shared_content_signal(
+                    msg,
+                    user_text,
+                    project_override=content_project,
+                )
+                if shared_content:
+                    self._nudge_content_digest(shared_content)
             reply = self._simplify_response(decision.reply_to_user)
+            reply = prefix_event_notice(reply, decision.event_type, event_kind=decision.event_kind)
             if not (reply or "").strip():
-                reply = "agent 这轮还没返回可用结果，我会继续等它完成。"
+                backend_error = self._recent_backend_failure_notice()
+                if backend_error:
+                    logger.info("QQ message has no agent reply because backend failed; sending configuration notice.")
+                    self._send_reply_once(msg, backend_error)
+                    return
+                logger.info("QQ message produced no user-facing reply; keeping it in history only.")
+                return
             self._mark_proactive_quiet("user_interaction", seconds=300)
             self._add_user_context(msg.sender_id, "user", user_text)
             self._add_user_context(msg.sender_id, "partner", reply)
@@ -395,7 +442,7 @@ class QQQfficialBridge:
             self._stats["errors"] += 1
             # Try to send error notification
             try:
-                error_text = "抱歉，处理消息时出了点问题。请稍后再试。"
+                error_text = self._unavailable_notice()
                 asyncio.run_coroutine_threadsafe(
                     self._bot.send_message(
                         msg.sender_id if msg.message_type == QQMessageType.PRIVATE else msg.group_id,
@@ -406,6 +453,21 @@ class QQQfficialBridge:
                 )
             except Exception:
                 pass
+
+    @staticmethod
+    def _looks_like_external_content_share(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        if re.search(r"https?://|www\.|mp\.weixin\.qq\.com|xiaohongshu\.com|bilibili\.com|zhihu\.com|jump_url|卡片消息|图文H5|附件素材", raw, re.I):
+            return True
+        return False
+
+    @staticmethod
+    def _quick_content_share_reply(item: Optional[dict]) -> str:
+        # Deprecated: user-facing content replies must be generated by the LLM
+        # orchestrator. Keep this stub only for old call sites.
+        return ""
 
     def _build_status_snapshot(self) -> Optional[Dict[str, str]]:
         focus_project = self._infer_focus_project()
@@ -593,7 +655,7 @@ class QQQfficialBridge:
         parts = [part for part in (phase_name, current_step, heartbeat) if part]
         if not parts:
             return ""
-        return "当前推进到：" + "；".join(parts[:2]).strip("；。") + "。"
+        return "；".join(parts[:2]).strip("；。")
 
     def _summarize_stats(self) -> str:
         try:
@@ -604,7 +666,7 @@ class QQQfficialBridge:
         total_tasks = stats.get("total_tasks_completed", 0)
         if not total_cycles and not total_tasks:
             return ""
-        return f"累计跑了 {total_cycles} 轮研究周期，完成了 {total_tasks} 个任务。"
+        return ""
 
     def _resolve_agent_config(self) -> Dict:
         """Load agent config with backward-compatible fallbacks."""
@@ -664,10 +726,28 @@ class QQQfficialBridge:
         if not reply:
             return reply
 
-        agent_pending_reply = "agent 这轮还没返回可用结果，我会继续等它完成。"
+        stripped_reply = reply.strip()
+        stripped_reply = re.sub(
+            r"(?im)^\s*⚠️?\s*Reached maximum iterations.*(?:\n|$)",
+            "",
+            stripped_reply,
+        ).strip()
+        if stripped_reply != reply.strip():
+            reply = stripped_reply
+        if not stripped_reply:
+            return ""
 
-        if reply.strip() == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
-            return agent_pending_reply
+        if has_internal_diff(stripped_reply) or re.search(r"(?im)^\s*(┊\s*)?review diff\b", stripped_reply) or re.search(
+            r"(?m)^@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@|^diff --git |^--- a/|^\+\+\+ b/",
+            stripped_reply,
+        ):
+            stripped_reply = strip_internal_diff(stripped_reply)
+            if not stripped_reply or has_internal_diff(stripped_reply):
+                return ""
+            reply = stripped_reply
+
+        if stripped_reply == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
+            return ""
 
         for bad in (
             "处理时出了点问题",
@@ -678,16 +758,25 @@ class QQQfficialBridge:
             "我先继续在后台处理，晚点给你汇报进展",
             "目前正在看你的项目信息，还没有确定具体方向。你这边有什么想做的，可以直接跟我说，我来安排推进。",
         ):
-            if reply.strip() == bad:
-                return agent_pending_reply
+            if stripped_reply == bad:
+                return ""
         if re.search(r"(还没有确定具体方向|没有确定具体方向|你这边有什么想做|有什么想做的|可以直接跟我说|我来安排推进|我这轮还在继续推进)", reply):
-            return agent_pending_reply
+            return ""
 
         import re
         lines = [line.strip() for line in reply.splitlines() if line.strip()]
         filtered_lines = []
         removed_question = False
         for line in lines:
+            trimmed_line = re.sub(
+                r"[，,。；;]?\s*(?:需要的话|如果需要|如需)?\s*随时(?:说|告诉我|跟我说).*",
+                "",
+                line,
+            ).strip("，,。；; ")
+            if trimmed_line and trimmed_line != line:
+                removed_question = True
+                filtered_lines.append(trimmed_line)
+                continue
             if re.search(r"(要不要|想不想|你看|还是我|直接说就行|现在可以直接说|你有想.*吗|你想怎么处理|你想先搞哪个|有啥想继续搞|随时说|随时告诉我|你想让我|你要我|请选择|给我方向|你这边有什么想做|有什么想做的|直接跟我说|我来安排推进)", line):
                 removed_question = True
                 continue
@@ -714,11 +803,11 @@ class QQQfficialBridge:
         ]
         for pat in _traceback_patterns:
             if re.search(pat, reply, re.MULTILINE):
-                return "程序这轮没有连上 agent，稍后会自动重试。"
+                return ""
 
         # DANGEROUS COMMAND / heredoc warnings
         if re.search(r'DANGEROUS COMMAND|script execution via heredoc|PYEOF', reply):
-            return "程序这轮没有连上 agent，稍后会自动重试。"
+            return ""
 
         # Expose "Hermes" as internal architecture name
         reply = re.sub(r'Hermes\s*(正在|正在处理|在处理|正在处理中)', r'我\1', reply)
@@ -739,7 +828,7 @@ class QQQfficialBridge:
 
         # "Hermes 正在处理中，下一轮再汇报进展。" — generic catch
         if re.match(r'^.*正在处理中.*汇报进展.*$', reply.strip()):
-            return "agent 这轮还没返回可用结果，我会继续等它完成。"
+            return ""
 
         # ── Markdown formatting ──
 
@@ -865,7 +954,7 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        return "好的，队列清干净了"
+        return "__PARTNER_NO_USER_REPLY__"
 
     def _force_run(self, msg: QQMessage) -> str:
         """Trigger immediate research cycle run."""
@@ -945,6 +1034,7 @@ class QQQfficialBridge:
                  "--skills", "partner-research"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except Exception as e:
             logger.debug(f"Force run Hermes exec failed: {e}")
@@ -964,7 +1054,7 @@ class QQQfficialBridge:
             logger.info(f"Heartbeat interval changed to {minutes}min via QQ")
         except Exception as e:
             logger.error(f"Failed to change interval: {e}")
-            return "没改成功，待会儿再试试？"
+            return self._unavailable_notice()
 
         # Try to update the cron job schedule
         try:
@@ -975,6 +1065,7 @@ class QQQfficialBridge:
                 subprocess.run(
                     ["hermes", "cron", "edit", target, "--schedule", f"every {minutes}m"],
                     capture_output=True, timeout=30,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
         except Exception as e:
             logger.debug(f"Cron schedule update failed: {e}")
@@ -990,13 +1081,18 @@ class QQQfficialBridge:
         except Exception:
             pass
 
-        return f"改好了，以后每 {minutes} 分钟找你一次"
+        return "__PARTNER_NO_USER_REPLY__"
 
-    def _record_shared_content_signal(self, msg: QQMessage, user_text: str) -> Optional[dict]:
+    def _record_shared_content_signal(
+        self,
+        msg: QQMessage,
+        user_text: str,
+        project_override: str = "",
+    ) -> Optional[dict]:
         """Record links/social/video/article shares into the content feed."""
         try:
             from .content_feed import record_shared_content
-            project = self._infer_focus_project() or ""
+            project = project_override or self._infer_focus_project() or ""
             return record_shared_content(
                 self.workspace,
                 text=user_text,
@@ -1037,19 +1133,82 @@ class QQQfficialBridge:
         except Exception:
             return 30
 
+    def _recent_backend_failure_notice(self) -> str:
+        """Return a concise notice when the latest agent call failed."""
+        log_names = ("hermes_chat.jsonl", "openclaw_chat.jsonl", "codex_chat.jsonl", "agent_runs.jsonl")
+        latest = None
+        latest_ts = ""
+        for name in log_names:
+            path = os.path.join(self.workspace, "logs", name)
+            try:
+                if not os.path.exists(path):
+                    continue
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = [line.strip() for line in f if line.strip()]
+                for line in lines[-6:]:
+                    row = json.loads(line)
+                    ts = str(row.get("ts") or "")
+                    if ts >= latest_ts:
+                        latest_ts = ts
+                        latest = row
+            except Exception:
+                continue
+        if not isinstance(latest, dict):
+            return ""
+        status = str(latest.get("status") or "").lower()
+        returncode = latest.get("returncode")
+        error_text = "\n".join(
+            str(latest.get(k) or "")
+            for k in ("error", "stderr_preview", "stdout_preview")
+            if latest.get(k)
+        ).strip()
+        if status not in {"failed", "timeout", "exception", "backend_not_available"} and returncode in (0, None):
+            return ""
+        if not error_text and status not in {"timeout", "backend_not_available"}:
+            return ""
+        return self._unavailable_notice()
+
+    @staticmethod
+    def _unavailable_notice() -> str:
+        return UNAVAILABLE_NOTICE
+
     def _send_reply(self, original_msg: QQMessage, reply: str):
         """Send reply back to the user."""
         if not self._bot:
             logger.error("Bot not initialized")
             return
+        sanitized = self._sanitize_outbound_text(reply)
+        if sanitized and sanitized.strip() not in {THINKING_NOTICE, "思考中......", "思考中……", "Thinking..."}:
+            self._append_qq_chat_history(
+                {
+                    "role": "assistant",
+                    "content": sanitized,
+                    "timestamp": datetime.now().isoformat(),
+                    "source": "qq",
+                    "channel": original_msg.message_type.value,
+                    "sender_id": "partner",
+                    "sender_name": "Partner",
+                    "reply_to": original_msg.msg_id,
+                    "target_id": original_msg.sender_id,
+                    "group_id": original_msg.group_id,
+                }
+            )
 
         # Schedule async send
         if self._bot.get_event_loop() and self._bot.get_event_loop().is_running():
             asyncio.run_coroutine_threadsafe(
-                self._bot.reply_message(original_msg, self._sanitize_outbound_text(reply)),
+                self._bot.reply_message(original_msg, sanitized),
                 self._bot.get_event_loop(),
             )
             self._stats["messages_sent"] += 1
+
+    def _append_qq_chat_history(self, row: Dict):
+        try:
+            os.makedirs(os.path.dirname(self._qq_chat_history_file), exist_ok=True)
+            with open(self._qq_chat_history_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.debug(f"Failed to append QQ chat history: {exc}")
 
     def _send_reply_once(self, original_msg: QQMessage, reply: str):
         key = original_msg.msg_id or f"{original_msg.sender_id}:{original_msg.content.strip()}"
@@ -1067,7 +1226,66 @@ class QQQfficialBridge:
     # ── User Context Management ───────────────────────────────────
 
     def _get_user_context(self, sender: str) -> List[Dict]:
-        return self._user_contexts.get(sender, [])
+        memory_context = list(self._user_contexts.get(sender, []))
+        if len(memory_context) >= self._max_context_per_user:
+            return memory_context[-self._max_context_per_user:]
+        file_context = self._load_recent_chat_context(sender, limit=self._max_context_per_user)
+        if not file_context:
+            return memory_context[-self._max_context_per_user:]
+        merged = file_context + memory_context
+        deduped = []
+        seen = set()
+        for item in merged:
+            key = (
+                item.get("role"),
+                item.get("text"),
+                int(float(item.get("timestamp") or 0)) if item.get("timestamp") else 0,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped[-self._max_context_per_user:]
+
+    def _load_recent_chat_context(self, sender: str, limit: int = 10) -> List[Dict]:
+        path = self._qq_chat_history_file
+        if not os.path.exists(path):
+            return []
+        rows = []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    role = row.get("role")
+                    if role == "user" and str(row.get("sender_id") or "") != str(sender or ""):
+                        continue
+                    if role == "assistant" and str(row.get("target_id") or "") != str(sender or ""):
+                        continue
+                    content = str(row.get("content") or "").strip()
+                    if not content:
+                        continue
+                    ts_text = str(row.get("timestamp") or "")
+                    ts_value = 0.0
+                    if ts_text:
+                        try:
+                            ts_value = datetime.fromisoformat(ts_text).timestamp()
+                        except Exception:
+                            ts_value = 0.0
+                    rows.append({
+                        "role": "user" if role == "user" else "partner",
+                        "text": content,
+                        "timestamp": ts_value,
+                    })
+        except Exception as exc:
+            logger.debug(f"Failed to load QQ chat context: {exc}")
+            return []
+        return rows[-limit:]
 
     def _add_user_context(self, sender: str, role: str, text: str):
         if sender not in self._user_contexts:
@@ -1108,9 +1326,24 @@ class QQQfficialBridge:
     def _acquire_singleton_lock(self) -> bool:
         try:
             lock_fd = open(self._singleton_lock_path, "a+", encoding="utf-8")
-            try:
-                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    existing_pid = None
+                    try:
+                        lock_fd.seek(0)
+                        existing_pid = int((lock_fd.read() or "0").strip() or "0")
+                    except (ValueError, OSError):
+                        existing_pid = None
+                    if existing_pid:
+                        try:
+                            os.kill(existing_pid, 0)
+                            lock_fd.close()
+                            return False
+                        except OSError:
+                            pass
+            else:
                 existing_pid = None
                 try:
                     lock_fd.seek(0)
@@ -1124,9 +1357,6 @@ class QQQfficialBridge:
                         return False
                     except OSError:
                         pass
-                if self._workspace_process_exists():
-                    lock_fd.close()
-                    return False
             lock_fd.seek(0)
             lock_fd.truncate()
             lock_fd.write(str(os.getpid()))
@@ -1136,33 +1366,14 @@ class QQQfficialBridge:
         except OSError:
             return False
 
-    def _workspace_process_exists(self) -> bool:
-        """Fallback duplicate detection for filesystems without flock support."""
-        try:
-            out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True)
-        except Exception:
-            return False
-        current_pid = os.getpid()
-        for line in out.splitlines():
-            if self.workspace not in line:
-                continue
-            if "-m partner" not in line:
-                continue
-            try:
-                pid = int(line.strip().split(None, 1)[0])
-            except (IndexError, ValueError):
-                continue
-            if pid != current_pid:
-                return True
-        return False
-
     def _release_singleton_lock(self):
         if self._singleton_lock_fd is None:
             return
-        try:
-            fcntl.flock(self._singleton_lock_fd.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
+        if fcntl is not None:
+            try:
+                fcntl.flock(self._singleton_lock_fd.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
         try:
             self._singleton_lock_fd.close()
         except OSError:
@@ -1191,9 +1402,10 @@ class QQQfficialBridge:
             "max_reply_length": self.config.max_reply_length,
         }
 
-    def send_proactive(self, to_user: str, content: str, msg_type: QQMessageType = QQMessageType.PRIVATE) -> bool:
+    def send_proactive(self, to_user: str, content: str, msg_type: QQMessageType = QQMessageType.PRIVATE,
+                       bypass_quiet: bool = False) -> bool:
         """Send a proactive message to a QQ user (not in reply to a message)."""
-        if self._should_suppress_proactive():
+        if not bypass_quiet and self._should_suppress_proactive():
             logger.info(
                 f"Suppressing proactive QQ push during quiet window: {self._proactive_quiet_reason}"
             )
@@ -1211,12 +1423,20 @@ class QQQfficialBridge:
         text = (content or "").strip()
         if not text:
             return text
+        text = strip_internal_diff(text)
+        if not text or has_internal_diff(text):
+            return ""
         if text == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
             return ""
         if "我先继续在后台处理，晚点给你汇报进展" in text:
             text = text.replace("我先继续在后台处理，晚点给你汇报进展", "")
         if "处理超时了，稍后再试吧" in text:
             text = text.replace("处理超时了，稍后再试吧", "")
+        text = re.sub(
+            r"[，,。；;]?\s*(?:需要的话|如果需要|如需)?\s*随时(?:说|告诉我|跟我说).*",
+            "",
+            text,
+        ).strip("，,。；; ")
         text = re.sub(
             r"(有啥想继续搞|随时说|随时告诉我|你想让我|你要我|要不要|请选择|给我方向).*",
             "",
@@ -1229,7 +1449,8 @@ class QQQfficialBridge:
     def send_file_proactive(self, to_user: str, file_data: bytes,
                              file_type: int = 4,
                              msg_type: QQMessageType = QQMessageType.PRIVATE,
-                             text_content: str = "") -> bool:
+                             text_content: str = "",
+                             file_name: str = "") -> bool:
         """Send a file to a QQ user proactively (not in reply to a message).
 
         Two-step upload+sends via passive quota-friendly method.
@@ -1239,7 +1460,11 @@ class QQQfficialBridge:
             return False
         import asyncio
         future = asyncio.run_coroutine_threadsafe(
-            self._bot.send_file(to_user, file_data, file_type, msg_type, text_content=text_content),
+            self._bot.send_file(
+                to_user, file_data, file_type, msg_type,
+                text_content=text_content,
+                file_name=file_name,
+            ),
             self._bot.get_event_loop(),
         )
         try:
@@ -1249,7 +1474,8 @@ class QQQfficialBridge:
             return False
 
     def reply_with_file(self, msg: QQMessage, file_data: bytes,
-                         file_type: int = 4, text_content: str = "") -> bool:
+                         file_type: int = 4, text_content: str = "",
+                         file_name: str = "") -> bool:
         """Reply to a QQ message with a file attachment.
 
         Uses msg_id + msg_type=7 for passive-reply file sending.
@@ -1259,7 +1485,7 @@ class QQQfficialBridge:
             return False
         import asyncio
         future = asyncio.run_coroutine_threadsafe(
-            self._bot.reply_with_file(msg, file_data, file_type, text_content),
+            self._bot.reply_with_file(msg, file_data, file_type, text_content, file_name=file_name),
             self._bot.get_event_loop(),
         )
         try:

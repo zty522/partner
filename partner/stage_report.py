@@ -12,12 +12,51 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from typing import Any
+from zipfile import ZipFile
 
 
-DEFAULT_EVERY_ROUNDS = 24
-DEFAULT_MIN_INTERVAL_HOURS = 12
+DEFAULT_EVERY_ROUNDS = 8
+DEFAULT_MIN_INTERVAL_HOURS = 2
+REQUIRED_SECTIONS = [
+    "一句话结论",
+    "背景与原始目标",
+    "本阶段真正完成了什么",
+    "关键证据与执行记录",
+    "重要发现或判断变化",
+    "失败、风险与不能声称的内容",
+    "形成的新习惯/成长",
+    "对用户有价值的产物",
+    "下一步最小可验证动作",
+]
+
+
+@dataclass
+class StageReport:
+    project: str
+    title: str
+    created_at: str
+    sections: list[dict[str, Any]]
+    evidence_files: list[str]
+    evidence_levels: list[str]
+    source_markdown: str = ""
+    validation: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ReportValidation:
+    ok: bool
+    errors: list[str]
+    warnings: list[str]
+    stats: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def _now() -> datetime:
@@ -91,11 +130,45 @@ def maybe_stage_report_objective(workspace: str, project: str, step: int) -> tup
 
     ts = _now().strftime("%Y%m%d_%H%M")
     path = os.path.join(_project_report_dir(workspace, project), f"stage_report_{ts}.md")
+    try:
+        from .project_state import load_project_guardrail
+
+        guardrail = load_project_guardrail(workspace, project)
+    except Exception:
+        guardrail = {}
+    contract_clause = ""
+    if guardrail:
+        allowed = "；".join(
+            [str(guardrail.get("current_mainline") or "").strip()]
+            + [str(x).strip() for x in (guardrail.get("allowed_scope") or []) if str(x).strip()]
+        ).strip("；")
+        forbidden = "；".join(str(x).strip() for x in (guardrail.get("forbidden_scope") or []) if str(x).strip())
+        criteria = "；".join(str(x).strip() for x in (guardrail.get("completion_criteria") or []) if str(x).strip())
+        contract_clause = (
+            "汇报必须对照用户原始任务合同。"
+            f"允许/主线：{allowed or '按用户原始要求'}。"
+            f"禁止/越界：{forbidden or '用户没有要求的新方向'}。"
+            f"完成标准：{criteria or '直接满足用户点名交付物'}。"
+            "本阶段真正完成了什么只能写合同内成果；越界内容只能放在风险或下一阶段建议里，不能写成本任务成果。"
+        )
     objective = (
-        "做一次阶段汇报，不要继续扩展实验或大范围检索。基于 project_brief、state、exploration_log、"
-        "长期记忆和最近产物，写一份面向用户/老师的 Markdown 阶段汇报。"
-        "风格参考科研组会汇报：先给诚实结论，再给证据、风险审计、失败边界和下一步。"
-        "必须包含这些二级标题：核心结论、已验证进展、关键证据、风险与审计、失败经验与方法边界、下一步计划。"
+        "做一次高质量阶段汇报，不要继续扩展实验或大范围检索。基于 project_brief、state、exploration_log、"
+        "长期记忆、growth_journal、habit_applications、runtime_cost 和最近产物，写一份面向用户/老师的 Markdown 组会式汇报。"
+        f"{contract_clause}"
+        "汇报必须具体、完整、诚实，不能只写几句摘要。建议 1600-2600 字。"
+        "必须包含这些二级标题，并按顺序写："
+        "1. 一句话结论；"
+        "2. 背景与原始目标；"
+        "3. 本阶段真正完成了什么；"
+        "4. 关键证据与执行记录；"
+        "5. 重要发现或判断变化；"
+        "6. 失败、风险与不能声称的内容；"
+        "7. 形成的新习惯/成长；"
+        "8. 对用户有价值的产物；"
+        "9. 下一步最小可验证动作。"
+        "每个结论都要标注证据等级：REAL / LOCAL_EXECUTION / SIMULATION / INFERRED / BLOCKED。"
+        "如果有代码执行，必须说明执行了什么、输出是什么、能证明什么、不能证明什么。"
+        "如果生成了 PPT/PDF/showcase，要说明用户应该先看哪里。"
         "不要堆文件名、目录结构、字节数；不要问用户选方向；如果结果可能有泄露、幻觉或不可复现，要明确写出。"
     )
     return objective, path
@@ -106,8 +179,10 @@ def mark_stage_report_generated(workspace: str, project: str, markdown_path: str
     state[project] = {
         "last_generated_at": _now().isoformat(timespec="seconds"),
         "markdown": markdown_path,
+        "json": outputs.get("json", ""),
         "pptx": outputs.get("pptx", ""),
         "pdf": outputs.get("pdf", ""),
+        "pipeline": "structured_report_v1",
     }
     _save_state(workspace, state)
 
@@ -118,6 +193,210 @@ def _read_text(path: str) -> str:
             return f.read()
     except Exception:
         return ""
+
+
+def _is_placeholder_report(text: str) -> bool:
+    raw = re.sub(r"\s+", " ", text or "").strip()
+    if not raw:
+        return True
+    bad_patterns = [
+        r"此处不重复全文",
+        r"建议用户直接打开",
+        r"请直接打开",
+        r"报告已写入.*不重复",
+        r"详见.*stage_report",
+        r"见.*文件",
+        r"不再重复",
+    ]
+    if len(raw) < 800:
+        return True
+    if len(raw) < 1600 and any(re.search(pattern, raw, re.I) for pattern in bad_patterns):
+        return True
+    # Long reports can legitimately mention generated files; do not reject
+    # them unless the whole body is essentially a pointer.
+    pointer_ratio = sum(1 for pattern in bad_patterns if re.search(pattern, raw, re.I))
+    return len(raw) < 2400 and pointer_ratio >= 2
+
+
+def _section_count(text: str) -> int:
+    return len(re.findall(r"(?m)^##\s+", text or ""))
+
+
+def _canonical_section(title: str) -> str:
+    title = re.sub(r"^\s*\d+[.、]\s*", "", title or "").strip()
+    title = re.sub(r"\s+", "", title)
+    for required in REQUIRED_SECTIONS:
+        key = re.sub(r"\s+", "", required)
+        if key in title or title in key:
+            return required
+    return title or "摘要"
+
+
+def _extract_evidence_files(text: str) -> list[str]:
+    files = []
+    for match in re.findall(r"[\w\u4e00-\u9fff./-]+\.(?:json|csv|md|py|txt|pdf|pptx|xlsx|docx)", text or ""):
+        item = match.strip("`，,。；;()（）[]【】")
+        if item and item not in files:
+            files.append(item)
+    return files[:60]
+
+
+def _extract_evidence_levels(text: str) -> list[str]:
+    levels = []
+    for level in ("REAL", "LOCAL_EXECUTION", "SIMULATION", "INFERRED", "BLOCKED"):
+        if re.search(rf"\b{level}\b", text or "") and level not in levels:
+            levels.append(level)
+    return levels
+
+
+def stage_report_from_markdown(workspace: str, project: str, markdown_path: str) -> StageReport:
+    markdown_path = _resolve_full_markdown_path(workspace, project, markdown_path)
+    md = _read_text(markdown_path)
+    title, parsed_sections = _parse_markdown(md)
+    sections = []
+    for raw_title, lines in parsed_sections:
+        body = "\n".join(line for line in lines if line.strip()).strip()
+        if not body:
+            continue
+        sections.append({
+            "title": _canonical_section(raw_title),
+            "body": body,
+            "bullets": [line for line in lines if line.strip()],
+        })
+    report = StageReport(
+        project=project,
+        title=title or f"{project} 阶段汇报",
+        created_at=_now().isoformat(timespec="seconds"),
+        sections=sections,
+        evidence_files=_extract_evidence_files(md),
+        evidence_levels=_extract_evidence_levels(md),
+        source_markdown=markdown_path,
+    )
+    validation = validate_stage_report(report)
+    report.validation = validation.to_dict()
+    if not validation.ok:
+        raise RuntimeError(
+            "stage report validation failed: "
+            + "; ".join(validation.errors)
+            + f" source={markdown_path}"
+        )
+    return report
+
+
+def validate_stage_report(report: StageReport) -> ReportValidation:
+    errors: list[str] = []
+    warnings: list[str] = []
+    section_titles = [_canonical_section(str(sec.get("title") or "")) for sec in report.sections]
+    body = "\n\n".join(str(sec.get("title", "")) + "\n" + str(sec.get("body", "")) for sec in report.sections)
+    plain_len = len(re.sub(r"\s+", "", body))
+    if plain_len < 2200:
+        errors.append(f"report body too short: {plain_len} chars")
+    if _is_placeholder_report(body):
+        errors.append("report body looks like a placeholder/pointer")
+    missing = [sec for sec in REQUIRED_SECTIONS if sec not in section_titles]
+    if missing:
+        errors.append("missing required sections: " + ", ".join(missing[:5]))
+    if len(report.evidence_levels) < 1:
+        errors.append("missing evidence level markers")
+    if len(report.evidence_files) < 2:
+        warnings.append("few evidence files referenced")
+    if not re.search(r"(风险|不能声称|失败|泄露|不可复现|BLOCKED|INFERRED)", body, re.I):
+        errors.append("missing risk/limitation boundary")
+    if not re.search(r"(下一步|最小|验证|动作|实验|审计|复现)", body):
+        errors.append("missing executable next-step language")
+    if re.search(r"(此处不重复全文|建议用户直接打开|报告已写入.*不重复)", body):
+        errors.append("contains placeholder wording")
+    stats = {
+        "body_chars": plain_len,
+        "sections": len(report.sections),
+        "required_sections_present": len(REQUIRED_SECTIONS) - len(missing),
+        "evidence_files": len(report.evidence_files),
+        "evidence_levels": report.evidence_levels,
+    }
+    return ReportValidation(ok=not errors, errors=errors, warnings=warnings, stats=stats)
+
+
+def render_stage_report_markdown(report: StageReport) -> str:
+    lines = [
+        f"# {report.title}",
+        "",
+        f"**项目：** {report.project}",
+        f"**生成时间：** {report.created_at}",
+        "",
+    ]
+    for section in report.sections:
+        title = str(section.get("title") or "摘要").strip()
+        body = str(section.get("body") or "").strip()
+        lines.extend([f"## {title}", "", body, ""])
+    if report.evidence_files:
+        lines.extend(["## 证据索引", ""])
+        for item in report.evidence_files[:30]:
+            lines.append(f"- `{item}`")
+        lines.append("")
+    if report.validation:
+        lines.extend(["## 报告质量检查", ""])
+        stats = report.validation.get("stats", {}) if isinstance(report.validation, dict) else {}
+        lines.append(f"- 正文字符数：{stats.get('body_chars', '')}")
+        lines.append(f"- 必需章节覆盖：{stats.get('required_sections_present', '')}/{len(REQUIRED_SECTIONS)}")
+        lines.append(f"- 证据等级：{', '.join(report.evidence_levels) if report.evidence_levels else 'EMPTY'}")
+        warnings = report.validation.get("warnings", []) if isinstance(report.validation, dict) else []
+        if warnings:
+            lines.append(f"- 警告：{'；'.join(warnings)}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _resolve_full_markdown_path(workspace: str, project: str, markdown_path: str) -> str:
+    """Return a real report body, not a short pointer/placeholder.
+
+    Agents sometimes write ARTIFACT_CONTENT as "the report is in X, not repeated".
+    PPT/PDF must never be generated from that placeholder.  This resolver
+    prefers the provided file only if it contains enough report body; otherwise
+    it searches the project directory for a fuller stage_report markdown.
+    """
+    current = _read_text(markdown_path)
+    if current and not _is_placeholder_report(current) and _section_count(current) >= 5:
+        return markdown_path
+
+    from .project_state import get_project_dir
+
+    candidates: list[tuple[int, str]] = []
+    project_dir = get_project_dir(workspace, project)
+    basename = os.path.basename(markdown_path or "")
+    for root, _, files in os.walk(project_dir):
+        for name in files:
+            if not (name.startswith("stage_report_") and name.endswith(".md")):
+                continue
+            path = os.path.join(root, name)
+            if os.path.abspath(path) == os.path.abspath(markdown_path):
+                continue
+            # Prefer same timestamp/name outside reports/, then largest body.
+            score = 0
+            if name == basename:
+                score += 100_000
+            if f"{os.sep}reports{os.sep}" not in path:
+                score += 50_000
+            text = _read_text(path)
+            if _is_placeholder_report(text) or _section_count(text) < 5:
+                continue
+            score += len(text)
+            candidates.append((score, path))
+    if candidates:
+        candidates.sort(reverse=True)
+        resolved = candidates[0][1]
+        # Replace the placeholder file with the full body so user/latest copies
+        # and future publishes all point to a useful Markdown report.
+        try:
+            if os.path.abspath(resolved) != os.path.abspath(markdown_path):
+                shutil.copy2(resolved, markdown_path)
+        except Exception:
+            pass
+        return resolved
+    if current:
+        raise RuntimeError(
+            f"stage report markdown is a placeholder or too short; refusing to publish: {markdown_path}"
+        )
+    raise RuntimeError(f"stage report markdown is empty or unreadable: {markdown_path}")
 
 
 def _plain(text: str) -> str:
@@ -139,7 +418,7 @@ def _parse_markdown(md: str) -> tuple[str, list[tuple[str, list[str]]]]:
         nonlocal current_title, current_lines
         if current_title or current_lines:
             cleaned = [_plain(x) for x in current_lines if _plain(x)]
-            sections.append((current_title or "摘要", cleaned[:8]))
+            sections.append((current_title or "摘要", cleaned[:14]))
         current_title = ""
         current_lines = []
 
@@ -162,10 +441,10 @@ def _parse_markdown(md: str) -> tuple[str, list[tuple[str, list[str]]]]:
     flush()
     if not sections:
         sections = [("摘要", [_plain(x) for x in lines if _plain(x)][:8])]
-    return title, sections[:8]
+    return title, sections[:12]
 
 
-def _chunks(items: list[str], size: int = 5) -> list[list[str]]:
+def _chunks(items: list[str], size: int = 4) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)] or [[]]
 
 
@@ -188,12 +467,41 @@ def _add_textbox(slide, left, top, width, height, text, font_size=20, bold=False
     return box
 
 
-def _generate_pptx(markdown_path: str, project: str, output_path: str) -> None:
+def _pptx_text_char_count(path: str) -> int:
+    try:
+        total = 0
+        with ZipFile(path) as zf:
+            for name in zf.namelist():
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml"):
+                    xml = zf.read(name).decode("utf-8", errors="ignore")
+                    total += sum(len(x) for x in re.findall(r"<a:t>(.*?)</a:t>", xml))
+        return total
+    except Exception:
+        return 0
+
+
+def _assert_nonempty_artifact(path: str, kind: str, min_size: int, min_text_chars: int = 0) -> None:
+    if not path or not os.path.exists(path):
+        raise RuntimeError(f"{kind} artifact was not created: {path}")
+    size = os.path.getsize(path)
+    if size < min_size:
+        raise RuntimeError(f"{kind} artifact is too small ({size} bytes): {path}")
+    if kind.lower() == "pptx":
+        text_chars = _pptx_text_char_count(path)
+        if text_chars < min_text_chars:
+            raise RuntimeError(f"PPTX appears blank ({text_chars} text chars): {path}")
+
+
+def _generate_pptx_from_report(report: StageReport, output_path: str) -> None:
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.util import Inches, Pt
 
-    title, sections = _parse_markdown(_read_text(markdown_path))
+    title = report.title
+    sections = [
+        (str(section.get("title") or "摘要"), [str(x) for x in (section.get("bullets") or []) if str(x).strip()])
+        for section in report.sections
+    ]
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -207,13 +515,13 @@ def _generate_pptx(markdown_path: str, project: str, output_path: str) -> None:
     fill = slide.background.fill
     fill.solid()
     fill.fore_color.rgb = RGBColor(248, 246, 240)
-    _add_textbox(slide, Inches(0.7), Inches(0.7), Inches(11.8), Inches(0.8), project, 20, False, amber)
+    _add_textbox(slide, Inches(0.7), Inches(0.7), Inches(11.8), Inches(0.8), report.project, 20, False, amber)
     _add_textbox(slide, Inches(0.7), Inches(1.55), Inches(11.8), Inches(1.2), title, 34, True, navy)
-    _add_textbox(slide, Inches(0.75), Inches(3.05), Inches(11.2), Inches(0.7), "阶段性科研汇报：结论、证据、风险审计与下一步", 22, False, gray)
+    _add_textbox(slide, Inches(0.75), Inches(3.05), Inches(11.2), Inches(0.7), "阶段性科研汇报：结论、证据等级、执行记录、风险边界与成长习惯", 22, False, gray)
     _add_textbox(slide, Inches(0.75), Inches(5.9), Inches(11), Inches(0.4), datetime.now().strftime("%Y-%m-%d %H:%M"), 14, False, gray)
 
     for idx, (section_title, lines) in enumerate(sections, start=1):
-        for part_idx, group in enumerate(_chunks(lines, 5), start=1):
+        for part_idx, group in enumerate(_chunks(lines, 4), start=1):
             slide = prs.slides.add_slide(blank)
             fill = slide.background.fill
             fill.solid()
@@ -232,43 +540,84 @@ def _generate_pptx(markdown_path: str, project: str, output_path: str) -> None:
                 tf = shape.text_frame
                 tf.word_wrap = True
                 p = tf.paragraphs[0]
-                p.text = item[:220]
+                p.text = item[:300]
                 p.level = 0
                 p.font.name = "Microsoft YaHei"
                 p.font.size = Pt(19)
                 p.font.color.rgb = RGBColor(36, 42, 50)
-                top += 0.88
+                top += 1.08
             _add_textbox(slide, Inches(0.65), Inches(6.95), Inches(11.8), Inches(0.25), "Partner 自动阶段汇报", 10, False, gray)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prs.save(output_path)
+    _assert_nonempty_artifact(output_path, "pptx", min_size=10000, min_text_chars=1200)
 
 
-def _generate_pdf_from_markdown(markdown_path: str, project: str, output_path: str) -> None:
+def _generate_pptx(markdown_path: str, project: str, output_path: str) -> None:
+    report = StageReport(
+        project=project,
+        title=_parse_markdown(_read_text(markdown_path))[0],
+        created_at=_now().isoformat(timespec="seconds"),
+        sections=[
+            {"title": title, "body": "\n".join(lines), "bullets": lines}
+            for title, lines in _parse_markdown(_read_text(markdown_path))[1]
+        ],
+        evidence_files=_extract_evidence_files(_read_text(markdown_path)),
+        evidence_levels=_extract_evidence_levels(_read_text(markdown_path)),
+        source_markdown=markdown_path,
+    )
+    _generate_pptx_from_report(report, output_path)
+
+
+def _generate_pdf_from_report(report: StageReport, output_path: str) -> None:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import cm
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
-    try:
-        pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
-        font_name = "STSong-Light"
-    except Exception:
-        font_name = "Helvetica"
+    def pick_cjk_font() -> str:
+        candidates = [
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/mnt/c/Windows/Fonts/msyh.ttc",
+            "/mnt/c/Windows/Fonts/simsun.ttc",
+        ]
+        for candidate in candidates:
+            if not os.path.exists(candidate):
+                continue
+            try:
+                pdfmetrics.registerFont(TTFont("PartnerCJK", candidate))
+                return "PartnerCJK"
+            except Exception:
+                continue
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+            return "STSong-Light"
+        except Exception:
+            return "Helvetica"
 
-    title, sections = _parse_markdown(_read_text(markdown_path))
+    font_name = pick_cjk_font()
+
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name="CNTitle", fontName=font_name, fontSize=22, leading=28, textColor=colors.HexColor("#14263a"), spaceAfter=16))
     styles.add(ParagraphStyle(name="CNHeading", fontName=font_name, fontSize=15, leading=20, textColor=colors.HexColor("#ac302d"), spaceBefore=14, spaceAfter=8))
     styles.add(ParagraphStyle(name="CNBody", fontName=font_name, fontSize=10.5, leading=16, textColor=colors.HexColor("#242a32"), leftIndent=8))
     styles.add(ParagraphStyle(name="CNMeta", fontName=font_name, fontSize=9, leading=13, textColor=colors.HexColor("#666666"), spaceAfter=10))
     story = [
-        Paragraph(project, styles["CNMeta"]),
-        Paragraph(title, styles["CNTitle"]),
+        Paragraph(report.project, styles["CNMeta"]),
+        Paragraph(report.title, styles["CNTitle"]),
         Paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["CNMeta"]),
+    ]
+    sections = [
+        (str(section.get("title") or "摘要"), [str(x) for x in (section.get("bullets") or []) if str(x).strip()])
+        for section in report.sections
     ]
     for idx, (section_title, lines) in enumerate(sections, start=1):
         story.append(Paragraph(f"{idx:02d}. {section_title}", styles["CNHeading"]))
@@ -279,6 +628,25 @@ def _generate_pdf_from_markdown(markdown_path: str, project: str, output_path: s
             story.append(PageBreak())
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     SimpleDocTemplate(output_path, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm, topMargin=1.3 * cm, bottomMargin=1.3 * cm).build(story)
+    _assert_nonempty_artifact(output_path, "pdf", min_size=8000)
+
+
+def _generate_pdf_from_markdown(markdown_path: str, project: str, output_path: str) -> None:
+    md = _read_text(markdown_path)
+    title, sections = _parse_markdown(md)
+    report = StageReport(
+        project=project,
+        title=title,
+        created_at=_now().isoformat(timespec="seconds"),
+        sections=[
+            {"title": section_title, "body": "\n".join(lines), "bullets": lines}
+            for section_title, lines in sections
+        ],
+        evidence_files=_extract_evidence_files(md),
+        evidence_levels=_extract_evidence_levels(md),
+        source_markdown=markdown_path,
+    )
+    _generate_pdf_from_report(report, output_path)
 
 
 def _try_convert_pptx_to_pdf(pptx_path: str, pdf_path: str) -> bool:
@@ -308,21 +676,33 @@ def publish_stage_report(workspace: str, project: str, markdown_path: str) -> di
     """Create PPTX/PDF copies for a Markdown stage report and expose them to user/."""
     if not markdown_path or not os.path.exists(markdown_path):
         return {}
+    report = stage_report_from_markdown(workspace, project, markdown_path)
     report_dir = _project_report_dir(workspace, project)
     ts = _now().strftime("%Y%m%d_%H%M")
     base = f"{_safe_name(project)}_stage_report_{ts}"
+    canonical_md_path = os.path.join(report_dir, base + ".md")
+    report_json_path = os.path.join(report_dir, base + ".json")
     pptx_path = os.path.join(report_dir, base + ".pptx")
     pdf_path = os.path.join(report_dir, base + ".pdf")
 
-    _generate_pptx(markdown_path, project, pptx_path)
-    if not _try_convert_pptx_to_pdf(pptx_path, pdf_path):
-        _generate_pdf_from_markdown(markdown_path, project, pdf_path)
+    os.makedirs(report_dir, exist_ok=True)
+    with open(canonical_md_path, "w", encoding="utf-8") as f:
+        f.write(render_stage_report_markdown(report))
+    with open(report_json_path, "w", encoding="utf-8") as f:
+        json.dump(report.to_dict(), f, ensure_ascii=False, indent=2)
+
+    _generate_pptx_from_report(report, pptx_path)
+    # Generate PDF directly from Markdown. LibreOffice conversion can produce
+    # visually blank PDFs on minimal Linux images when CJK fonts are missing.
+    _generate_pdf_from_report(report, pdf_path)
 
     user_dir = _user_report_dir(workspace, project)
     user_md = os.path.join(user_dir, "latest_stage_report.md")
+    user_json = os.path.join(user_dir, "latest_stage_report.json")
     user_pptx = os.path.join(user_dir, os.path.basename(pptx_path))
     user_pdf = os.path.join(user_dir, os.path.basename(pdf_path))
-    shutil.copy2(markdown_path, user_md)
+    shutil.copy2(canonical_md_path, user_md)
+    shutil.copy2(report_json_path, user_json)
     shutil.copy2(pptx_path, user_pptx)
     shutil.copy2(pdf_path, user_pdf)
     readme_path = os.path.join(user_dir, "README.md")
@@ -330,9 +710,17 @@ def publish_stage_report(workspace: str, project: str, markdown_path: str) -> di
         f.write(
             f"# {project} 阶段汇报\n\n"
             "- `latest_stage_report.md`：最新文字版汇报\n"
+            "- `latest_stage_report.json`：结构化汇报对象和质量检查\n"
             f"- `{os.path.basename(user_pptx)}`：最新 PPT 汇报\n"
             f"- `{os.path.basename(user_pdf)}`：最新 PDF 汇报\n"
         )
-    outputs = {"markdown": user_md, "pptx": user_pptx, "pdf": user_pdf}
-    mark_stage_report_generated(workspace, project, markdown_path, outputs)
+    outputs = {"markdown": user_md, "json": user_json, "pptx": user_pptx, "pdf": user_pdf}
+    mark_stage_report_generated(workspace, project, canonical_md_path, outputs)
+    try:
+        from .showcase import build_showcase
+
+        showcase_dir = build_showcase(workspace, project)
+        outputs["showcase"] = str(showcase_dir)
+    except Exception:
+        pass
     return outputs

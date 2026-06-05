@@ -1,13 +1,13 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-research"
-version = "0.6.0"
-description = "Partner - Your AI Research Companion. An autonomous research entity that works independently and talks to you when you ask: 'What have you been doing?'"
+version = "0.7.0"
+description = "Partner - an event-driven AI companion for staged execution, memory, growth, and long-running work."
 readme = "README.md"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 requires-python = ">=3.9"
 authors = [
     {name = "Partner Team"},
@@ -16,7 +16,6 @@ keywords = ["ai", "research", "autonomous", "agent", "science", "literature", "c
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -66,3 +65,6 @@ Issues = "https://github.com/zty522/partner/issues"
 
 [tool.setuptools.packages.find]
 include = ["partner*"]
+
+[tool.setuptools.package-data]
+partner = ["assets/*", "assets/icons/*"]

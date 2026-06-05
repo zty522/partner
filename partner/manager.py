@@ -555,9 +555,22 @@ def stop_instance(instance_id: str) -> bool:
 
     print(f"Stopping instance '{instance_id}' (PID {pid})...")
 
+    def _signal_instance(sig: int):
+        if os.name == "nt":
+            os.kill(pid, sig)
+            return
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except ProcessLookupError:
+            raise
+        except Exception:
+            os.kill(pid, sig)
+
     try:
-        # Send SIGTERM (15) first
-        os.kill(pid, signal.SIGTERM)
+        # Send SIGTERM (15) to the whole process group first. Instances are
+        # started with start_new_session=True, so this also stops active agent
+        # subprocesses such as `hermes chat` instead of leaving stale writers.
+        _signal_instance(signal.SIGTERM)
 
         # Wait for graceful shutdown (up to 5 seconds)
         for _ in range(25):
@@ -569,7 +582,7 @@ def stop_instance(instance_id: str) -> bool:
         else:
             # Process still alive after timeout — use SIGKILL
             try:
-                os.kill(pid, signal.SIGKILL)
+                _signal_instance(signal.SIGKILL)
                 print(f"  {C_YELLOW}Force killed (SIGKILL) after timeout.{C_RESET}")
             except ProcessLookupError:
                 pass

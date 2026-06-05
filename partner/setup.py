@@ -97,6 +97,17 @@ def _txt(zh: str, en: str) -> str:
     return zh if _is_zh() else en
 
 
+def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    try:
+        answer = input(f"  {C.BOLD}{prompt}{C.RESET} [{suffix}]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    if not answer:
+        return default
+    return answer in {"y", "yes", "1", "true", "是", "好", "安装", "确认"}
+
+
 def _choose_language():
     current = i18n.lang()
     print()
@@ -387,46 +398,113 @@ def detect_hermes() -> AgentInfo:
     )
 
 
-def detect_claude_code() -> AgentInfo:
-    """Detect Claude Code installation."""
-    candidates = [
-        Path.home() / ".local" / "bin" / "claude",
-        Path("/usr/local/bin/claude"),
-        Path("/usr/bin/claude"),
-    ]
-    
-    claude_bin = None
-    for c in candidates:
-        if c.exists():
-            claude_bin = str(c)
-            break
-    
-    if not claude_bin:
-        try:
-            result = subprocess.run(["which", "claude"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
-            if result.returncode == 0:
-                claude_bin = result.stdout.strip()
-        except:
-            pass
-    
-    return AgentInfo(
-        name="claude_code",
-        display_name="Claude Code",
-        emoji="🧠",
-        available=claude_bin is not None,
-        path=claude_bin,
-    )
-
-
-def detect_codex() -> AgentInfo:
-    """Detect OpenAI Codex installation."""
+def detect_openclaw() -> AgentInfo:
+    """Detect OpenClaw installation."""
     try:
-        result = subprocess.run(["which", "codex"], capture_output=True, text=True, timeout=3, encoding="utf-8", errors="replace", creationflags=_NTFLAGS)
-        if result.returncode == 0:
-            return AgentInfo("codex", "OpenAI Codex", "⚡", True, path=result.stdout.strip())
-    except:
+        from .openclaw_adapter import OpenClawAdapter
+
+        info = OpenClawAdapter.detect_installation()
+        return AgentInfo(
+            "openclaw",
+            "OpenClaw",
+            "🦞",
+            bool(info.get("available")),
+            path=info.get("executable") or info.get("path"),
+            version=info.get("version"),
+            config_path=info.get("config_path"),
+        )
+    except Exception:
         pass
-    return AgentInfo("codex", "OpenAI Codex", "⚡", False)
+    return AgentInfo("openclaw", "OpenClaw", "🦞", False)
+
+
+SUPPORTED_SETUP_AGENTS = ("hermes", "openclaw")
+
+
+def _install_command_for_agent(agent_name: str) -> list[str] | None:
+    if agent_name == "hermes":
+        return [sys.executable, "-m", "pip", "install", "-U", "hermes-agent"]
+    if agent_name == "openclaw":
+        npm = shutil.which("npm")
+        if not npm:
+            return None
+        return [npm, "install", "-g", "openclaw"]
+    return None
+
+
+def _detect_supported_setup_agents() -> list[AgentInfo]:
+    return [detect_hermes(), detect_openclaw()]
+
+
+def _detect_supported_setup_agent(agent_name: str) -> AgentInfo:
+    if agent_name == "hermes":
+        return detect_hermes()
+    if agent_name == "openclaw":
+        return detect_openclaw()
+    return AgentInfo(agent_name, agent_name, "?", False)
+
+
+def _offer_install_supported_agents(agents: list[AgentInfo], quick: bool = False) -> list[AgentInfo]:
+    """Offer installation only for the currently supported setup backends."""
+    if quick:
+        return agents
+
+    updated = []
+    for agent in agents:
+        if agent.available:
+            updated.append(agent)
+            continue
+
+        should_install = _prompt_yes_no(
+            _txt(
+                f"未检测到 {agent.display_name}，是否现在尝试安装？",
+                f"{agent.display_name} was not detected. Install it now?",
+            ),
+            default=False,
+        )
+        if not should_install:
+            updated.append(agent)
+            continue
+
+        cmd = _install_command_for_agent(agent.name)
+        if not cmd:
+            status_warn(
+                _txt(
+                    f"无法自动安装 {agent.display_name}：未找到必要的安装工具",
+                    f"Cannot auto-install {agent.display_name}: required installer was not found",
+                )
+            )
+            updated.append(agent)
+            continue
+
+        status_info(_txt(f"正在安装 {agent.display_name}...", f"Installing {agent.display_name}..."))
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=_NTFLAGS,
+            )
+            if result.returncode == 0:
+                refreshed = _detect_supported_setup_agent(agent.name)
+                if refreshed.available:
+                    status_ok(_txt(f"{agent.display_name} 安装并检测成功", f"{agent.display_name} installed and detected"))
+                    updated.append(refreshed)
+                else:
+                    status_warn(_txt(f"{agent.display_name} 安装命令已完成，但仍未在 PATH 中检测到", f"{agent.display_name} install finished, but it was still not detected in PATH"))
+                    updated.append(agent)
+            else:
+                stderr = (result.stderr or result.stdout or "").strip().splitlines()
+                detail = stderr[-1] if stderr else _txt("安装命令失败", "Install command failed")
+                status_warn(f"{agent.display_name}: {detail}")
+                updated.append(agent)
+        except Exception as exc:
+            status_warn(f"{agent.display_name}: {exc}")
+            updated.append(agent)
+    return updated
 
 
 # ── QQ Official Bot Configuration ─────────────────────────────
@@ -632,7 +710,7 @@ def register_hermes_skill(workspace: str) -> str:
     skill_content = f'''---
 name: partner
 description: "Partner 🤝 - 自主研究伙伴。用户提到 partner 时激活。Partner 在后台自主运行，Hermes 只负责传递指令（用 execute_code 写 task_queue.json），绝不替 Partner 做研究（禁止 delegate_task/web_search/read_file）。"
-version: 0.6.0
+version: 0.7.0
 author: Partner Team
 tags: [partner, autonomous, research, companion]
 ---
@@ -660,12 +738,12 @@ print("✅ 已禁用 web/browser/delegation 工具集")
 
 当用户让 Partner 做某事时，你**只需要把任务加入队列**，然后回复"已加入队列"。
 
-**你不需要考虑 Partner 能不能做、怎么做。** 那是 Partner cron job 的事。cron job 是一个**独立的 Hermes 会话**，每 30 分钟自动运行一次，它会：
-1. 读取 task_queue.json
-2. 用 web_search/read_file 执行研究
-3. 记录结果到 knowledge.json
+**你不需要考虑 Partner 能不能做、怎么做。** 那是 Partner 运行时的事。Partner 有一个持续运行的 mind loop，会连续消费用户事件和项目队列；自脉冲/cron 只负责恢复检查、心跳和必要的通信补偿，不代表“每隔固定时间才研究一次”。它会：
+1. 读取 mind_pool / task_queue
+2. 判断消息属于项目指令、参考材料、纠偏、暂停还是普通学习
+3. 把需要推进的内容交给执行引擎，并把结果记录到 workspace
 
-**你和 cron job 是两个不同的会话。你只管传话，cron job 只管执行。**
+**你和 Partner 执行引擎是两个不同的会话。你只管传话，执行引擎只管推进。**
 
 **你绝对不能：**
 - ❌ 分析任务是否适合 Partner
@@ -802,8 +880,8 @@ def setup_cron_hermes(workspace: str):
     except:
         pass
     
-    # Create cron job
-    # Read interval from config (default 15)
+    # Create heartbeat job.
+    # This interval is only a health/recovery pulse, not research cadence.
     _interval = 15
     try:
         if workspace_has_partner_config(workspace):
@@ -1154,6 +1232,173 @@ def _build_agent_config_for_setup(selected_agent: AgentInfo, existing_agent: dic
     }
 
 
+def _split_csv(value: str, default: str = "") -> list[str]:
+    text = value if value is not None else default
+    return [x.strip() for x in str(text or "").split(",") if x.strip()]
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _prompt_server_config(existing_servers: dict | None = None) -> dict:
+    """Optional global server registry used by CLI/GUI and Ollama hints."""
+    existing_servers = existing_servers if isinstance(existing_servers, dict) else {}
+    if not _prompt_yes_no(
+        _txt(
+            "是否配置服务器连接？可记录多台腾讯云/实验室服务器，供 GUI、运维和 Ollama 隧道提示使用。",
+            "Configure server connections? This stores multiple cloud/lab servers for GUI, ops, and Ollama tunnel hints.",
+        ),
+        default=False,
+    ):
+        return existing_servers
+
+    servers = dict(existing_servers)
+    while True:
+        name = prompt_input(_txt("服务器名称", "Server name"), f"server{len(servers)+1}")
+        host = prompt_input(_txt("SSH Host / IP", "SSH Host / IP"), "")
+        if not name or not host:
+            status_warn(_txt("名称和 Host 不能为空，跳过本条", "Name and host are required; skipped"))
+        else:
+            old = servers.get(name) if isinstance(servers.get(name), dict) else {}
+            user = prompt_input(_txt("SSH 用户", "SSH user"), old.get("user", "ubuntu"))
+            port = prompt_input(_txt("SSH 端口", "SSH port"), str(old.get("port", 22)))
+            key_path = prompt_input(_txt("密钥路径（可空）", "Key path (optional)"), old.get("key_path", ""))
+            remote_workspace = prompt_input(
+                _txt("远端 Partner workspace（可空）", "Remote Partner workspace (optional)"),
+                old.get("workspace", ""),
+            )
+            servers[name] = {
+                "name": name,
+                "host": host,
+                "user": user or "ubuntu",
+                "port": _safe_int(port or 22, 22),
+                "key_path": key_path,
+                "workspace": remote_workspace,
+                "enabled": True,
+            }
+            status_ok(_txt(f"服务器已保存: {name}", f"Server saved: {name}"))
+
+        if not _prompt_yes_no(_txt("继续添加服务器？", "Add another server?"), default=False):
+            break
+    return servers
+
+
+def _print_ollama_tunnel_hint(server: dict, remote_port: int = 11434, local_port: int = 11434):
+    host = server.get("host") or "<server>"
+    user = server.get("user") or "ubuntu"
+    port = _safe_int(server.get("port") or 22, 22)
+    key = server.get("key_path") or ""
+    key_part = f" -i {key}" if key else ""
+    port_part = f" -p {port}" if port != 22 else ""
+    print()
+    status_info(_txt(
+        "如果想把本地电脑的 Ollama 提供给服务器使用，在本地电脑运行：",
+        "To expose your local Ollama to the server, run this on your local computer:",
+    ))
+    print(f"    ssh -N -R {remote_port}:127.0.0.1:{local_port}{key_part}{port_part} {user}@{host}")
+    status_info(_txt(
+        f"然后在服务器实例里把 Ollama endpoint 配成: http://127.0.0.1:{remote_port}",
+        f"Then configure the server instance Ollama endpoint as: http://127.0.0.1:{remote_port}",
+    ))
+
+
+def _configure_ollama_pool_for_workspace(workspace: str, existing_agent: dict | None = None,
+                                         servers: dict | None = None, quick: bool = False) -> dict:
+    """Interactive Ollama pool config for one workspace/instance."""
+    existing_agent = existing_agent if isinstance(existing_agent, dict) else {}
+    pool = existing_agent.get("ollama_pool") if isinstance(existing_agent.get("ollama_pool"), dict) else {}
+    if quick:
+        return pool
+
+    section(_txt("Ollama 连接池", "Ollama Pool"), "🧠")
+    status_info(_txt(
+        "可以配置多个 Ollama endpoint：本机、服务器、SSH 隧道或自定义地址。不可用时会自动回退主后端。",
+        "You can configure multiple Ollama endpoints: local, server, SSH tunnel, or custom. Partner falls back automatically.",
+    ))
+    if not _prompt_yes_no(_txt("是否现在配置 Ollama？", "Configure Ollama now?"), default=bool(pool.get("enabled"))):
+        return pool
+
+    mode = prompt_input(_txt("使用范围 off/lite/project/all", "Scope off/lite/project/all"), str(pool.get("mode") or "lite")).strip().lower()
+    if mode not in {"off", "lite", "project", "all"}:
+        mode = "lite"
+    pool["enabled"] = mode != "off"
+    pool["mode"] = mode
+    pool.setdefault("probe_timeout_sec", 2)
+    pool.setdefault("chat_timeout_sec", 90)
+    pool.setdefault("max_input_chars", 4000)
+    endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
+    location_keys = ["local", "server", "tunnel", "custom"]
+
+    while mode != "off":
+        location = prompt_choice(
+            _txt("Ollama 位置：", "Ollama location:"),
+            [
+                _txt("本机电脑 Ollama", "Local computer Ollama"),
+                _txt("服务器 Ollama", "Server Ollama"),
+                _txt("本机电脑通过 SSH 反向隧道给服务器用", "Local Ollama exposed to server via SSH reverse tunnel"),
+                _txt("自定义地址", "Custom URL"),
+                _txt("结束添加", "Finish"),
+            ],
+            default=0,
+        )
+        if location == 4:
+            break
+        default_url = "http://127.0.0.1:11434"
+        default_name = f"ollama{len(endpoints)+1}"
+        location_key = location_keys[location]
+        server_name = ""
+        if location == 1:
+            server_names = list((servers or {}).keys())
+            if server_names:
+                print("  " + _txt("已配置服务器：", "Configured servers:") + ", ".join(server_names))
+                server_name = prompt_input(_txt("关联服务器名称", "Linked server name"), server_names[0]).strip()
+            default_name = "server_ollama"
+            default_url = "http://127.0.0.1:11434"
+        elif location == 2:
+            server_items = [v for v in (servers or {}).values() if isinstance(v, dict)]
+            if server_items:
+                _print_ollama_tunnel_hint(server_items[0])
+            server_names = list((servers or {}).keys())
+            if server_names:
+                server_name = prompt_input(_txt("隧道目标服务器名称", "Tunnel target server name"), server_names[0]).strip()
+            default_name = "local_tunnel"
+            default_url = "http://127.0.0.1:11434"
+        elif location == 3:
+            default_name = "custom"
+            default_url = ""
+
+        name = prompt_input(_txt("连接名称", "Connection name"), default_name)
+        base_url = prompt_input(_txt("Ollama 地址", "Ollama URL"), default_url).rstrip("/")
+        models = prompt_input(
+            _txt("模型优先级，逗号分隔", "Model priority, comma-separated"),
+            "qwen2.5:7b",
+        )
+        if not base_url:
+            status_warn(_txt("Ollama 地址为空，跳过", "Ollama URL is empty; skipped"))
+        else:
+            endpoints = [e for e in endpoints if not (isinstance(e, dict) and e.get("name") == name)]
+            endpoint = {
+                "name": name or f"ollama{len(endpoints)+1}",
+                "base_url": base_url,
+                "models": _split_csv(models, "qwen2.5:7b"),
+                "enabled": True,
+                "location": location_key,
+            }
+            if server_name:
+                endpoint["server"] = server_name
+            endpoints.append(endpoint)
+            status_ok(_txt(f"Ollama endpoint 已添加: {base_url}", f"Ollama endpoint added: {base_url}"))
+        if not _prompt_yes_no(_txt("继续添加 Ollama endpoint？", "Add another Ollama endpoint?"), default=False):
+            break
+
+    pool["endpoints"] = endpoints
+    return pool
+
+
 def _sync_multi_instance_defaults(
     partner_root: str,
     selected_agent: AgentInfo,
@@ -1375,7 +1620,7 @@ def _pick_agent_for_quick_setup(available: list, old_backend: str):
         for agent in available:
             if agent.name == old_backend:
                 return agent
-    preferred = ["hermes", "codex", "claude_code"]
+    preferred = ["hermes", "openclaw"]
     for name in preferred:
         for agent in available:
             if agent.name == name:
@@ -1476,11 +1721,8 @@ def interactive_setup(quick: bool = False):
     # ── Step 1: Detect Agents ──
     section(_txt("检测已安装的 Agent", "Detect Installed Agents"), "🔍")
     
-    agents = [
-        detect_hermes(),
-        detect_claude_code(),
-        detect_codex(),
-    ]
+    agents = _detect_supported_setup_agents()
+    agents = _offer_install_supported_agents(agents, quick=quick)
     
     available = [a for a in agents if a.available]
     unavailable = [a for a in agents if not a.available]
@@ -1495,9 +1737,9 @@ def interactive_setup(quick: bool = False):
     if not available:
         print()
         status_warn(_txt("没有检测到已安装的 Agent", "No supported agent was detected"))
-        status_info(_txt("请先安装其中一个：", "Please install one of these first:"))
+        status_info(_txt("当前安装向导仅支持 Hermes 和 OpenClaw，请先安装其中一个：", "The setup wizard currently supports only Hermes and OpenClaw. Please install one of them first:"))
         print(f"      • Hermes Agent: {C.UNDER}https://hermes-agent.nousresearch.com{C.RESET}")
-        print(f"      • Claude Code:  {C.UNDER}https://claude.ai/code{C.RESET}")
+        print(f"      • OpenClaw:     {C.UNDER}https://docs.openclaw.ai/cli{C.RESET}")
         print()
         return
     
@@ -1533,10 +1775,7 @@ def interactive_setup(quick: bool = False):
         if selected.version:
             status_info(_txt(f"默认模型: {selected.version}", f"Default model: {selected.version}"))
     else:
-        if selected.name == "codex":
-            status_info(_txt("Codex 使用当前 CLI 登录态，无需单独配置文件", "Codex uses the current CLI login session; no extra config file is needed"))
-        else:
-            status_warn(_txt("未找到配置文件", "Config file not found"))
+        status_warn(_txt("未找到配置文件", "Config file not found"))
     
     # ── Step 4: Workspace ──
     section("创建工作区", "📂")
@@ -1594,8 +1833,8 @@ def interactive_setup(quick: bool = False):
     if selected.name == "hermes":
         skill_path = register_hermes_skill(workspace)
         status_ok(f"技能已注册: {skill_path}")
-    elif selected.name == "codex":
-        status_ok("CodexAdapter 已启用，可在配置中作为 agent backend 使用")
+    elif selected.name == "openclaw":
+        status_ok("OpenClawAdapter 已启用，可在配置中作为 agent backend 使用")
     else:
         status_info(f"{selected.display_name} 集成即将推出")
     
@@ -1664,32 +1903,19 @@ def interactive_setup(quick: bool = False):
         status_info(f"平台: {plat}")
 
 
-    # ── Step 6: Research Interval ──
-    section("研究频率", "⏰")
-    
-    interval_options = [
-        "每 15 分钟（高频，API 消耗大）",
-        "每 30 分钟（推荐）",
-        "每 1 小时",
-        "每 2 小时",
-        "每 4 小时（低频，省 API）",
-    ]
-    interval_values = [15, 30, 60, 120, 240]
-    old_interval = old_config.get("scheduler", {}).get("interval_minutes", 15)
-    interval_default = 0  # default: 15 min
-    for i, v in enumerate(interval_values):
-        if v == old_interval:
-            interval_default = i
-            break
-    if quick:
-        interval_minutes = old_interval if old_interval in interval_values else 30
-        status_info(f"快速模式默认研究频率: 每 {interval_minutes} 分钟")
-    else:
-        interval_idx = prompt_choice("Partner 多久做一次研究？", interval_options, default=interval_default)
-        interval_minutes = interval_values[interval_idx]
-    status_info(f"研究频率: 每 {interval_minutes} 分钟")
+    # ── Internal pulse interval ──
+    # This is not the project execution cadence. Partner keeps processing its
+    # mind pool continuously; the interval only controls self-pulse/health
+    # recovery checks, so setup should not ask ordinary users to tune it.
+    old_interval = old_config.get("scheduler", {}).get("interval_minutes", 30)
+    try:
+        interval_minutes = int(old_interval)
+    except Exception:
+        interval_minutes = 30
+    if interval_minutes <= 0:
+        interval_minutes = 30
 
-    # ── Step 6a: QQ 官方机器人 ──
+    # ── Step 6: QQ 官方机器人 ──
     messaging_config = {}
 
     has_qq = bool(old_qq_cfg.get("app_id"))
@@ -1746,15 +1972,48 @@ def interactive_setup(quick: bool = False):
 
     # ── Step 6c: 微信（已移除）──
 
+    # ── Step 6d: Servers and Ollama ──
+    try:
+        from . import manager as _manager
+        global_cfg_for_servers = _manager.load_global_config()
+    except Exception:
+        global_cfg_for_servers = {}
+    servers_cfg = global_cfg_for_servers.get("servers") if isinstance(global_cfg_for_servers.get("servers"), dict) else {}
+    if not quick:
+        section(_txt("服务器与本地模型", "Servers and Local Models"), "🖥️")
+        servers_cfg = _prompt_server_config(servers_cfg)
+        if servers_cfg:
+            global_cfg_for_servers["servers"] = servers_cfg
+            try:
+                from . import manager as _manager
+                _manager.save_global_config(global_cfg_for_servers)
+                status_ok(_txt("服务器配置已保存到 global_config.json", "Server config saved to global_config.json"))
+            except Exception as exc:
+                status_warn(_txt(f"服务器配置保存失败: {exc}", f"Failed to save server config: {exc}"))
+
+    old_agent_config = old_config.get("agent", {}) if isinstance(old_config.get("agent"), dict) else {}
+    ollama_pool_cfg = _configure_ollama_pool_for_workspace(
+        workspace,
+        existing_agent=old_agent_config,
+        servers=servers_cfg,
+        quick=quick,
+    )
 
     # ── Step 7: Save Config ──
+    agent_config = _build_agent_config_for_setup(selected, old_agent_config)
+    if ollama_pool_cfg:
+        agent_config["ollama_pool"] = ollama_pool_cfg
+        agent_config["dynamic_ollama"] = {
+            **(agent_config.get("dynamic_ollama") if isinstance(agent_config.get("dynamic_ollama"), dict) else {}),
+            "enabled": bool(ollama_pool_cfg.get("enabled")) and str(ollama_pool_cfg.get("mode") or "") in {"project", "all"},
+        }
     config = {
         "name": "Partner",
         "workspace": {
             "path": workspace,
             "readonly_dirs": readonly_dirs,
         },
-        "agent": _build_agent_config_for_setup(selected, old_config.get("agent", {})),
+        "agent": agent_config,
         "scheduler": {
             "interval_minutes": interval_minutes,
             "max_tasks_per_cycle": 1,
@@ -1778,6 +2037,29 @@ def interactive_setup(quick: bool = False):
     )
     if synced_instances:
         status_ok(f"多实例默认设置已同步到 {synced_instances} 个实例")
+
+    if ollama_pool_cfg:
+        try:
+            from . import manager as _manager
+            global_cfg = _manager.load_global_config()
+            instances = global_cfg.get("instances", {}) if isinstance(global_cfg.get("instances"), dict) else {}
+            for instance_id in instances:
+                inst_ws = str(resolve_instance_workspace(str(instance_id)))
+                inst_cfg = _load_json_if_exists(resolve_partner_config_path(inst_ws))
+                if not inst_cfg:
+                    continue
+                inst_agent = inst_cfg.get("agent") if isinstance(inst_cfg.get("agent"), dict) else {}
+                inst_agent["ollama_pool"] = ollama_pool_cfg
+                inst_agent["dynamic_ollama"] = {
+                    **(inst_agent.get("dynamic_ollama") if isinstance(inst_agent.get("dynamic_ollama"), dict) else {}),
+                    "enabled": bool(ollama_pool_cfg.get("enabled")) and str(ollama_pool_cfg.get("mode") or "") in {"project", "all"},
+                }
+                inst_cfg["agent"] = inst_agent
+                save_partner_config_data(inst_ws, inst_cfg)
+            if instances:
+                status_ok(_txt("Ollama 配置已同步到所有实例", "Ollama config synced to all instances"))
+        except Exception as exc:
+            status_warn(_txt(f"Ollama 实例同步失败: {exc}", f"Failed to sync Ollama config to instances: {exc}"))
 
     # ── 保存 QQ 机器人独立配置 ──
     qq_cfg = messaging_config.get("qq", {})
@@ -1913,6 +2195,66 @@ def show_status(workspace=None):
     cfg = manager.load_global_config()
     instances = cfg.get("instances", {}) if isinstance(cfg.get("instances"), dict) else {}
     if not instances:
+        if workspace and workspace_has_partner_config(workspace):
+            instance_id = "02" if str(workspace).replace("\\", "/").rstrip("/").endswith("/partner_workspace") else Path(workspace).name
+            state_dir = os.path.join(workspace, "state")
+            pid_paths = [
+                os.path.join(state_dir, "qq_bot.pid"),
+                os.path.join(workspace, "instance.pid"),
+            ]
+            qq_paths = [
+                os.path.join(workspace, "00_config", "qq_config.json"),
+                os.path.join(workspace, "qq_config.json"),
+            ]
+            qq_configured = any(os.path.exists(path) for path in qq_paths)
+            running = False
+            pid_text = ""
+            for pid_path in pid_paths:
+                if not os.path.exists(pid_path):
+                    continue
+                try:
+                    pid_text = Path(pid_path).read_text(encoding="utf-8").strip()
+                    pid = int(pid_text or "0")
+                except Exception:
+                    pid = 0
+                if not pid:
+                    continue
+                if os.name == "nt":
+                    try:
+                        result = subprocess.run(
+                            ["tasklist.exe", "/FI", f"PID eq {pid}"],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=5,
+                            creationflags=_NTFLAGS,
+                        )
+                        running = str(pid) in (result.stdout or "")
+                    except Exception:
+                        running = False
+                else:
+                    try:
+                        os.kill(pid, 0)
+                        running = True
+                    except OSError:
+                        running = False
+                if running:
+                    break
+
+            section(_txt("实例状态", "Instance Status"), "🧭")
+            print(f"  {C.BOLD}{_txt('实例', 'Instance')} {instance_id}{C.RESET}")
+            print(f"    {_txt('运行状态', 'Runtime')}: {_txt('在运行', 'Running') if running else _txt('未运行', 'Not running')}{f' (PID {pid_text})' if running and pid_text else ''}")
+            print(f"    QQ: {_txt('已配置', 'Configured') if qq_configured else _txt('未配置', 'Not configured')}")
+            print(f"    {_txt('工作区', 'Workspace')}: {workspace}")
+            print()
+            line("─", 48, C.DIM)
+            print(f"  {C.BOLD}Commands:{C.RESET}")
+            print(f"    {C.DIM}partner status --workspace \"{workspace}\"{C.RESET}")
+            print(f"    {C.DIM}partner bot start qq --workspace \"{workspace}\"{C.RESET}")
+            print(f"    {C.DIM}partner bot stop qq --workspace \"{workspace}\"{C.RESET}")
+            print()
+            return
         status_warn(_txt("还没有配置任何实例", "No instances are configured yet"))
         status_info(_txt("运行 partner setup 来创建和管理实例", "Run partner setup to create and manage instances"))
         return

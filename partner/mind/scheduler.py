@@ -53,6 +53,50 @@ def _write_json(path: str, data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+def _compact_event_payload(event: MindEvent) -> dict:
+    payload = dict(getattr(event, "payload", {}) or {})
+    if "user_request" in payload:
+        payload["user_request"] = str(payload.get("user_request") or "")[:800]
+    if "content" in payload:
+        payload["content"] = str(payload.get("content") or "")[:500]
+    return payload
+
+
+def _append_event_invocation_log(
+    workspace: str,
+    save_path: str,
+    event: MindEvent,
+    status: str,
+    ok: bool = True,
+    pool_stats: dict | None = None,
+) -> None:
+    state_dir = _state_dir(workspace, save_path)
+    if not state_dir:
+        return
+    row = {
+        "ts": datetime.now().isoformat(),
+        "status": status,
+        "ok": bool(ok),
+        "event_id": event.id,
+        "event_type": event.type.value if hasattr(event.type, "value") else str(event.type),
+        "priority": event.priority,
+        "source": event.source,
+        "parent_id": event.parent_id,
+        "wake_after": event.wake_after,
+        "payload": _compact_event_payload(event),
+        "selection_rule": "MindPool uses PriorityQueue: lower priority number runs first; delayed events wait until wake_after; duplicate project events are deduped by title+step.",
+    }
+    if pool_stats:
+        row["pool_stats"] = pool_stats
+    path = os.path.join(state_dir, "event_invocations.jsonl")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug(f"failed to append event invocation log: {exc}")
+
+
 def _record_runtime_event(workspace: str, save_path: str, event: MindEvent, status: str, ok: bool = True) -> None:
     """Keep old status/stats files meaningful for the new mind-loop runtime."""
     state_dir = _state_dir(workspace, save_path)
@@ -86,6 +130,7 @@ def _record_runtime_event(workspace: str, save_path: str, event: MindEvent, stat
         "last_event_ok": bool(ok),
         "last_heartbeat": now,
     })
+    _append_event_invocation_log(workspace, save_path, event, status, ok=ok)
 
 
 async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str = "",
@@ -195,6 +240,19 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 await asyncio.sleep(0.1)
                 continue
 
+            try:
+                _append_event_invocation_log(
+                    workspace,
+                    save_path,
+                    event,
+                    "selected",
+                    ok=True,
+                    pool_stats=pool.stats() if hasattr(pool, "stats") else None,
+                )
+            except Exception:
+                pass
+            pool.mark_inflight(event)
+
             # 创建异步 Task 执行
             _record_runtime_event(workspace, save_path, event, "working", ok=True)
             task = asyncio.create_task(
@@ -202,7 +260,23 @@ async def mind_loop(pool: MindPool = None, save_path: str = "", workspace: str =
                 name=f"mind_{event.id[:8]}",
             )
             pending_tasks.add(task)
-            task.add_done_callback(pending_tasks.discard)
+
+            def _done_callback(done_task: asyncio.Task, ev_id: str = event.id):
+                pending_tasks.discard(done_task)
+                try:
+                    pool.unmark_inflight(ev_id)
+                    if getattr(pool, "_inflight", None):
+                        # Multiple mind tasks can run concurrently.  A quick
+                        # REPORT finishing must not overwrite heartbeat to
+                        # idle while a long PROJECT/Hermes call is still
+                        # active; otherwise status shows "not running" or
+                        # "idle" even though the research worker is busy.
+                        active = next(iter(pool._inflight.values()))
+                        _record_runtime_event(workspace, save_path, active, "working", ok=True)
+                except Exception:
+                    pass
+
+            task.add_done_callback(_done_callback)
 
     except asyncio.CancelledError:
         logger.info("🧠 Mind Loop 被取消")

@@ -2,6 +2,12 @@
 cd /d "%~dp0"
 set PYTHONPATH=%~dp0;%PYTHONPATH%
 set "PARTNER_PYTHONW="
+set "PARTNER_GUI_EXE=%~dp0dist\Partner\Partner.exe"
+
+if exist "%PARTNER_GUI_EXE%" (
+    start "" "%PARTNER_GUI_EXE%"
+    exit /b 0
+)
 
 if exist "C:\Python314\pythonw.exe" set "PARTNER_PYTHONW=C:\Python314\pythonw.exe"
 if not defined PARTNER_PYTHONW if exist "%LocalAppData%\Programs\Python\Python314\pythonw.exe" set "PARTNER_PYTHONW=%LocalAppData%\Programs\Python\Python314\pythonw.exe"

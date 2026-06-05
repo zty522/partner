@@ -12,6 +12,13 @@ objShell.Environment("Process")("PYTHONPATH") = strScriptDir & ";" & objShell.En
 objShell.Environment("Process")("PYTHONIOENCODING") = "utf-8"
 objShell.Environment("Process")("PYTHONUTF8") = "1"
 
+' Prefer bundled desktop launcher when available
+launcherPath = strScriptDir & "\dist\Partner\Partner.exe"
+If objFSO.FileExists(launcherPath) Then
+    objShell.Run """" & launcherPath & """", 0, False
+    WScript.Quit 0
+End If
+
 ' Launch GUI with pythonw (no terminal window)
 pythonwPath = "C:\Python314\pythonw.exe"
 If Not objFSO.FileExists(pythonwPath) Then

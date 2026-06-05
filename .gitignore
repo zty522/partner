@@ -42,6 +42,7 @@ logs/
 ideas/
 design/
 docs/
+temp/
 # Gitignored scripts (only build/deploy artifacts)
 scripts/*.bak
 scripts/__pycache__/
@@ -64,6 +65,7 @@ partner/voice.py
 
 # Build artifacts
 releases/
+installer/output/
 run_cycle.py
 demo.py
 .pytest_cache/

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Partner Release Script
-# Usage: ./release.sh v0.6.0 "Long-term research partner"
+# Usage: ./release.sh v0.7.0 "Event-driven Partner runtime"
 
 set -e
 
@@ -9,7 +9,7 @@ MESSAGE=$2
 
 if [ -z "$VERSION" ] || [ -z "$MESSAGE" ]; then
     echo "Usage: ./release.sh <version> <message>"
-    echo "Example: ./release.sh v0.6.0 'Long-term research partner'"
+    echo "Example: ./release.sh v0.7.0 'Event-driven Partner runtime'"
     exit 1
 fi
 

@@ -149,6 +149,9 @@ class AgentConfig:
     classifier_backend: Optional[str] = None
     classifier_model: Optional[str] = None
     classifier_provider: Optional[str] = None
+    dynamic_ollama: Dict = field(default_factory=dict)
+    ollama_pool: Dict = field(default_factory=dict)
+    project_timeout_sec: Optional[int] = 1200
 
 
 @dataclass
@@ -166,14 +169,14 @@ class PartnerConfig:
     agent: AgentConfig = field(default_factory=AgentConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     name: str = "Partner"
-    
+
     def save(self, path: str):
-        with open(path, 'w') as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(asdict(self), f, indent=2)
-    
+
     @classmethod
     def load(cls, path: str) -> 'PartnerConfig':
-        with open(path) as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return cls(
             workspace=WorkspaceConfig(**data.get('workspace', {})),

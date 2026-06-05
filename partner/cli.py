@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from .config import (
     workspace_has_partner_config,
 )
 from .instance_root import resolve_instance_workspace, resolve_partner_root
+
+
+CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 def get_workspace() -> str:
@@ -131,7 +135,7 @@ def _root_workspace_if_different(runtime_workspace: str | None) -> str | None:
 
 def cmd_setup(args):
     """Run first-time setup."""
-    from .setup import interactive_setup, detect_hermes, detect_claude_code
+    from .setup import interactive_setup
     interactive_setup(quick=bool(getattr(args, "quick", False)))
 
 
@@ -182,6 +186,11 @@ def _print_help_menu():
     print(f"      {_cli_txt('更新 Partner 到最新版本', 'Update Partner to the latest version')}")
     print(f"    {C_DIM}partner instance list{C_RESET}")
     print(f"      {_cli_txt('列出所有 Partner 实例', 'List all Partner instances')}")
+    print(f"    {C_DIM}partner showcase build{C_RESET}")
+    print(f"      {_cli_txt('生成用户可读 demo/showcase 材料', 'Build user-facing demo/showcase materials')}")
+    print(f"    {C_DIM}partner server add/list/tunnel-hint{C_RESET}")
+    print(f"    {C_DIM}partner ollama setup/add/list/test/disable{C_RESET}")
+    print(f"      {_cli_txt('配置可选 Ollama 本地/远程模型池', 'Configure optional local/remote Ollama pool')}")
     print()
 
 
@@ -224,7 +233,13 @@ def cmd_doctor(args):
     config_ok = bool(workspace and workspace_has_partner_config(workspace))
     qq_ok = bool(workspace and os.path.exists(_resolve_qq_config(workspace)))
     hermes_ok = shutil.which("hermes") is not None
-    codex_ok = shutil.which("codex") is not None
+    try:
+        from .setup import detect_openclaw
+
+        openclaw_info = detect_openclaw()
+        openclaw_ok = bool(openclaw_info.available)
+    except Exception:
+        openclaw_ok = shutil.which("openclaw") is not None
 
     _print_kv("Python", f"{sys.version.split()[0]} ({_fmt_bool(python_ok)})")
     _print_kv("Git", _fmt_bool(git_ok))
@@ -232,7 +247,7 @@ def cmd_doctor(args):
     _print_kv("Config", _fmt_bool(config_ok))
     _print_kv("QQ Config", _fmt_optional(qq_ok))
     _print_kv("Hermes", _fmt_bool(hermes_ok))
-    _print_kv("Codex", _fmt_bool(codex_ok))
+    _print_kv("OpenClaw", _fmt_bool(openclaw_ok))
 
     issues = []
     if not python_ok:
@@ -297,6 +312,23 @@ def cmd_instance(args):
         manager.print_instance_list()
         _print_commands()
         return
+
+
+def cmd_showcase(args):
+    workspace = args.workspace or _resolve_runtime_workspace(None)
+    if not workspace:
+        print("❌ Partner 未配置，请先运行: partner setup")
+        return
+    try:
+        from .showcase import build_showcase
+
+        out = build_showcase(workspace, project=args.project, output=args.output)
+    except Exception as exc:
+        print(f"❌ showcase 生成失败: {exc}")
+        return
+    print(f"  ✅ Showcase 已生成: {out}")
+    print(f"     入口: {out / 'README.md'}")
+    _print_commands()
 
 def cmd_default(args):
     """Default action: show intro + all commands."""
@@ -369,11 +401,31 @@ def _bot_stop(workspace, platform, quiet=False):
     pid_path = os.path.join(workspace, "state", f"{platform}_bot.pid")
     label = {"qq": "QQ"}.get(platform, platform)
     stopped_any = False
+    def _terminate_runtime_pid(pid: int):
+        if os.name == "nt":
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise ProcessLookupError(result.stderr or result.stdout or f"PID {pid} not found")
+            return
+        try:
+            os.killpg(os.getpgid(pid), 15)
+        except ProcessLookupError:
+            raise
+        except Exception:
+            os.kill(pid, 15)
+
     try:
         if os.path.exists(pid_path):
             with open(pid_path) as f:
                 pid = int(f.read().strip())
-            os.kill(pid, 15)
+            _terminate_runtime_pid(pid)
             os.remove(pid_path)
             print(f"  ✅ {label} 机器人已停止 (PID: {pid})")
             stopped_any = True
@@ -527,11 +579,14 @@ def _bot_start(workspace, platform, quiet=False):
         ]
         env = os.environ.copy()
         env["PYTHONPATH"] = pp + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         proc = subprocess.Popen(
             cmd,
             stdout=open(log, "w"), stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, start_new_session=True,
             env=env,
+            creationflags=CREATION_FLAGS,
         )
         pidf = os.path.join(workspace, "state", "qq_bot.pid")
         os.makedirs(os.path.dirname(pidf), exist_ok=True)
@@ -555,6 +610,7 @@ def _bot_start(workspace, platform, quiet=False):
                 [sys.executable, watchdog_script, workspace],
                 stdout=open(watchdog_log, "a"), stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
+                creationflags=CREATION_FLAGS,
             )
             print(f"  🛡️  Watchdog 已启动 (自动守护)")
 
@@ -793,15 +849,14 @@ def cmd_update(args):
                 cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
 
 你的核心原则：
-1. 30 分钟是最小心跳间隔，不是执行窗口
-2. **不要停下来** — 计划完成后，立即搜索该领域最新前沿文献，
-   看有没有新的改进方向。如果有 → 创建延续计划继续研究。
-   不要等用户下指令才继续。
+1. 30 分钟是心跳/恢复间隔，不是项目执行窗口
+2. **不要停下来** — 计划完成后，自己判断下一步最小可验证动作。
+   只有新项目、陌生领域、资料依赖任务或用户明确要求调研时，才先查文献/资料/公开数据路线。
+   不要机械搜索，也不要等用户下指令才继续。
 
 每次心跳：
 1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
-2. 计划已完成 → 读取 goal 和结果 → 搜索该领域前沿文献 →
-   有新方向就创建延续计划，没有就检查队列
+2. 计划已完成 → 读取 goal 和结果 → 判断下一步是审计、复盘、实验、资料核验还是调研
 3. 空闲 + 队列有任务 → 自动创建计划
 4. 每次心跳向 QQ 汇报当前状态
 
@@ -906,6 +961,9 @@ def _print_commands():
     print(f"    {C_DIM}partner bot stop qq{C_RESET}")
     print(f"    {C_DIM}partner update{C_RESET}")
     print(f"    {C_DIM}partner instance list{C_RESET}")
+    print(f"    {C_DIM}partner showcase build{C_RESET}")
+    print(f"    {C_DIM}partner server add/list/tunnel-hint{C_RESET}")
+    print(f"    {C_DIM}partner ollama setup/add/list/test/disable{C_RESET}")
     print()
 
 
@@ -987,12 +1045,274 @@ def _cmd_config_set(args):
             cfg["scheduler"]["interval_minutes"] = minutes
             save_partner_config_data(workspace, cfg)
             print(f"  ✅ 心跳间隔已设为 {minutes} 分钟")
-            print(f"  ⚠ 需要重启 cron 后才能生效: hermes cron edit ...")
+            print(f"  ⚠ 这是自脉冲/恢复间隔，不是项目执行频率；重启 Partner 后生效。")
         except ValueError:
             print("❌ value 必须是数字（分钟数）")
             return
 
     _print_commands()
+
+
+def _resolve_config_workspace(args) -> str | None:
+    from .setup import find_workspace
+
+    return getattr(args, "workspace", None) or _resolve_runtime_workspace(None) or find_workspace()
+
+
+def _load_cfg_for_workspace(workspace: str) -> dict:
+    try:
+        return load_partner_config_data(workspace)
+    except Exception:
+        return {"workspace": {"path": workspace}, "agent": {"backend": "hermes"}}
+
+
+def _ensure_agent_cfg(cfg: dict) -> dict:
+    agent = cfg.get("agent")
+    if not isinstance(agent, dict):
+        agent = {}
+        cfg["agent"] = agent
+    return agent
+
+
+def _print_ollama_usage(mode: str):
+    print()
+    print(f"  {C_BOLD}Ollama 使用范围:{C_RESET} {mode}")
+    print("  off     不使用 Ollama，全部走主 API/Agent")
+    print("  lite    只把分类、用户短回复、简短汇报交给 Ollama；项目执行仍走主 API/Agent")
+    print("  project 项目执行优先尝试 Ollama；短回复仍走主 API/Agent")
+    print("  all     分类、短回复、汇报、项目执行都优先尝试 Ollama")
+    print("  任一 endpoint/model 不可用时，Partner 自动回退到主 API/Agent，不给用户报错。")
+
+
+def _load_global_cfg() -> dict:
+    try:
+        from . import manager
+        return manager.load_global_config()
+    except Exception:
+        return {}
+
+
+def _save_global_cfg(cfg: dict):
+    from . import manager
+    manager.save_global_config(cfg)
+
+
+def _server_tunnel_command(server: dict, remote_port: int = 11434, local_port: int = 11434) -> str:
+    user = server.get("user") or "ubuntu"
+    host = server.get("host") or "<server>"
+    port = int(server.get("port") or 22)
+    key = server.get("key_path") or ""
+    parts = ["ssh", "-N", "-R", f"{remote_port}:127.0.0.1:{local_port}"]
+    if key:
+        parts += ["-i", key]
+    if port != 22:
+        parts += ["-p", str(port)]
+    parts.append(f"{user}@{host}")
+    return " ".join(parts)
+
+
+def cmd_server(args):
+    cfg = _load_global_cfg()
+    servers = cfg.get("servers") if isinstance(cfg.get("servers"), dict) else {}
+    action = args.server_action
+
+    if action == "add":
+        name = args.name
+        if not name or not args.host:
+            print("❌ 需要 --name 和 --host")
+            return
+        servers[name] = {
+            "name": name,
+            "host": args.host,
+            "user": args.user or "ubuntu",
+            "port": int(args.port or 22),
+            "key_path": args.key or "",
+            "workspace": args.remote_workspace or "",
+            "enabled": not bool(args.disabled),
+        }
+        cfg["servers"] = servers
+        _save_global_cfg(cfg)
+        print(f"  ✅ 已保存服务器: {name} ({args.user or 'ubuntu'}@{args.host}:{int(args.port or 22)})")
+        if args.print_tunnel:
+            print()
+            print("  本地 Ollama 暴露给该服务器的反向隧道命令：")
+            print(f"    {_server_tunnel_command(servers[name], args.remote_port, args.local_port)}")
+            print(f"  服务器实例 Ollama endpoint 配置为: http://127.0.0.1:{args.remote_port}")
+        return
+
+    if action == "list":
+        print()
+        print(f"  {C_BOLD}Servers{C_RESET}")
+        if not servers:
+            print("  (empty)")
+            return
+        for name, row in servers.items():
+            if not isinstance(row, dict):
+                continue
+            print(
+                f"  {name}: {row.get('user') or 'ubuntu'}@{row.get('host')}:{row.get('port') or 22} "
+                f"workspace={row.get('workspace') or '-'} enabled={row.get('enabled', True)}"
+            )
+        return
+
+    if action == "remove":
+        name = args.name
+        if name in servers:
+            servers.pop(name, None)
+            cfg["servers"] = servers
+            _save_global_cfg(cfg)
+            print(f"  ✅ 已删除服务器: {name}")
+        else:
+            print(f"  ⚠ 未找到服务器: {name}")
+        return
+
+    if action == "tunnel-hint":
+        name = args.name
+        row = servers.get(name) if isinstance(servers.get(name), dict) else None
+        if not row:
+            print(f"❌ 未找到服务器: {name}。先运行 partner server add")
+            return
+        print()
+        print("  在本地电脑运行下面命令，把本地 Ollama 暴露给服务器：")
+        print(f"    {_server_tunnel_command(row, args.remote_port, args.local_port)}")
+        print()
+        print("  然后在服务器实例配置 Ollama endpoint：")
+        print(f"    partner ollama add --name local-tunnel --base-url http://127.0.0.1:{args.remote_port} --models {args.models} --mode {args.mode}")
+        print()
+        print("  Windows PowerShell 也可以直接运行同一条 ssh 命令；确保本机 Ollama 已启动。")
+        return
+
+
+def cmd_ollama(args):
+    workspace = _resolve_config_workspace(args)
+    if not workspace:
+        print("❌ Partner 未配置，先运行 partner setup")
+        return
+
+    cfg = _load_cfg_for_workspace(workspace)
+    agent = _ensure_agent_cfg(cfg)
+    pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
+    action = args.ollama_action
+
+    if action == "setup":
+        mode = args.mode or input("Ollama 使用范围 [lite/off/project/all] (默认 lite): ").strip() or "lite"
+        mode = mode.strip().lower()
+        if mode not in {"off", "lite", "project", "all"}:
+            print("❌ mode 只能是 off/lite/project/all")
+            return
+        pool["enabled"] = mode != "off"
+        pool["mode"] = mode
+        pool.setdefault("probe_timeout_sec", 2)
+        pool.setdefault("chat_timeout_sec", 90)
+        pool.setdefault("max_input_chars", 4000)
+        endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
+        if mode != "off":
+            print()
+            print("配置一个 Ollama endpoint。示例：")
+            print("  本机: http://127.0.0.1:11434")
+            print("  SSH 隧道: http://127.0.0.1:11435")
+            print("  远程服务器: http://server-ip:11434")
+            name = args.name or input("名称 (如 local/lab160/server1): ").strip() or f"ollama{len(endpoints)+1}"
+            base_url = args.base_url or input("Ollama 地址: ").strip()
+            models = args.models or input("模型优先级，逗号分隔 (如 qwen2.5:14b,qwen2.5:7b): ").strip() or "qwen2.5:7b"
+            if not base_url:
+                print("❌ base_url 不能为空")
+                return
+            endpoints = [e for e in endpoints if not (isinstance(e, dict) and e.get("name") == name)]
+            endpoints.append({
+                "name": name,
+                "base_url": base_url.rstrip("/"),
+                "models": [x.strip() for x in models.split(",") if x.strip()],
+                "enabled": True,
+            })
+            pool["endpoints"] = endpoints
+        agent["ollama_pool"] = pool
+        # Keep old switches compatible with the new pool.
+        agent["dynamic_ollama"] = {**(agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}), "enabled": mode in {"project", "all"}}
+        cfg["agent"] = agent
+        save_partner_config_data(workspace, cfg)
+        print(f"  ✅ Ollama pool 已保存到: {workspace}")
+        _print_ollama_usage(mode)
+        print("  测试命令: partner ollama test")
+        return
+
+    if action == "add":
+        endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
+        name = args.name or f"ollama{len(endpoints)+1}"
+        if not args.base_url:
+            print("❌ 需要 --base-url，例如 partner ollama add --name lab --base-url http://127.0.0.1:11435 --models qwen2.5:14b,qwen2.5:7b")
+            return
+        models = [x.strip() for x in (args.models or "qwen2.5:7b").split(",") if x.strip()]
+        endpoints = [e for e in endpoints if not (isinstance(e, dict) and e.get("name") == name)]
+        endpoint = {"name": name, "base_url": args.base_url.rstrip("/"), "models": models, "enabled": True}
+        if getattr(args, "location", None):
+            endpoint["location"] = args.location
+        if getattr(args, "server", None):
+            endpoint["server"] = args.server
+        endpoints.append(endpoint)
+        pool["enabled"] = True
+        pool["mode"] = args.mode or pool.get("mode") or "lite"
+        pool["endpoints"] = endpoints
+        agent["ollama_pool"] = pool
+        agent["dynamic_ollama"] = {**(agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}), "enabled": pool["mode"] in {"project", "all"}}
+        save_partner_config_data(workspace, cfg)
+        print(f"  ✅ 已添加 Ollama endpoint: {name}")
+        return
+
+    if action == "mode":
+        mode = args.mode
+        if mode not in {"off", "lite", "project", "all"}:
+            print("❌ mode 只能是 off/lite/project/all")
+            return
+        pool["enabled"] = mode != "off"
+        pool["mode"] = mode
+        agent["ollama_pool"] = pool
+        agent["dynamic_ollama"] = {**(agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}), "enabled": mode in {"project", "all"}}
+        save_partner_config_data(workspace, cfg)
+        print(f"  ✅ Ollama 使用范围已设为: {mode}")
+        _print_ollama_usage(mode)
+        return
+
+    if action == "disable":
+        pool["enabled"] = False
+        pool["mode"] = "off"
+        agent["ollama_pool"] = pool
+        agent["dynamic_ollama"] = {**(agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}), "enabled": False}
+        save_partner_config_data(workspace, cfg)
+        print("  ✅ 已关闭 Ollama，后续全部回主 API/Agent")
+        return
+
+    if action == "list":
+        print()
+        print(f"  {C_BOLD}Ollama Pool{C_RESET}")
+        print(f"  Workspace: {workspace}")
+        print(f"  Enabled: {pool.get('enabled', False)}")
+        print(f"  Mode: {pool.get('mode', 'off')}")
+        for i, e in enumerate(pool.get("endpoints") or [], start=1):
+            if not isinstance(e, dict):
+                continue
+            print(f"  {i}. {e.get('name') or 'ollama'}  {e.get('base_url')}  models={','.join(str(x) for x in (e.get('models') or []))}  enabled={e.get('enabled', True)}")
+        _print_ollama_usage(str(pool.get("mode") or "off"))
+        return
+
+    if action == "test":
+        from .ollama_pool import test_pool
+
+        result = test_pool(workspace, purpose=args.purpose or "report")
+        selected = result.get("selected")
+        status = result.get("status") or {}
+        print()
+        print(f"  {C_BOLD}Ollama Test{C_RESET}")
+        if selected:
+            print(f"  ✅ selected: {selected.get('name')} {selected.get('model')} {selected.get('base_url')}")
+        else:
+            print("  ⚠ 没有可用 Ollama，将回退到主 API/Agent")
+        print(f"  mode: {status.get('mode') or result.get('configured', {}).get('mode')}")
+        print(f"  purpose: {status.get('purpose') or args.purpose or 'report'}")
+        print(f"  reason: {status.get('reason')}")
+        for row in status.get("probe_results") or []:
+            print(f"  - {row}")
+        return
 
 
 def main():
@@ -1015,6 +1335,7 @@ def main():
     # setup
     p_setup = sub.add_parser('setup', help='配置 Partner（QQ机器人等）')
     p_setup.add_argument('--status', action='store_true', help='查看状态')
+    p_setup.add_argument('--quick', action='store_true', help='快速配置，尽量使用默认值')
     p_setup.set_defaults(func=lambda args: cmd_status(args) if args.status else cmd_setup(args))
 
     p_help = sub.add_parser('help', help='显示完整命令帮助')
@@ -1024,6 +1345,10 @@ def main():
     p_status = sub.add_parser('status', help='查看 Partner 状态')
     p_status.add_argument('--workspace', '-w', help='工作区路径')
     p_status.set_defaults(func=cmd_status)
+
+    p_doctor = sub.add_parser('doctor', help='检查本机 Partner 运行环境')
+    p_doctor.add_argument('--workspace', '-w', help='工作区路径')
+    p_doctor.set_defaults(func=cmd_doctor)
 
     for action, desc in [('start', '启动 QQ 机器人'), ('stop', '停止 QQ 机器人'), ('restart', '重启 QQ 机器人')]:
         p_short = sub.add_parser(action, help=desc)
@@ -1046,6 +1371,79 @@ def main():
     i_sub.required = True
     i_sub.add_parser('list', help='列出所有实例')
     p_instance.set_defaults(func=cmd_instance)
+
+    p_showcase = sub.add_parser('showcase', help='生成用户可读 demo/showcase 材料')
+    s_sub = p_showcase.add_subparsers(dest='showcase_action')
+    s_sub.required = True
+    p_showcase_build = s_sub.add_parser('build', help='Build showcase materials')
+    p_showcase_build.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+    p_showcase_build.add_argument('--project', help='项目名称；默认读取 active project')
+    p_showcase_build.add_argument('--output', help='输出目录；默认 user/showcase/<project>')
+    p_showcase.set_defaults(func=cmd_showcase)
+
+    p_server = sub.add_parser('server', help='配置服务器连接和本机 Ollama 隧道提示')
+    srv_sub = p_server.add_subparsers(dest='server_action')
+    srv_sub.required = True
+
+    p_server_add = srv_sub.add_parser('add', help='添加一台服务器')
+    p_server_add.add_argument('--name', required=True, help='服务器名称，如 tx04/lab/server1')
+    p_server_add.add_argument('--host', required=True, help='服务器 IP 或域名')
+    p_server_add.add_argument('--user', default='ubuntu', help='SSH 用户')
+    p_server_add.add_argument('--port', type=int, default=22, help='SSH 端口')
+    p_server_add.add_argument('--key', help='SSH 私钥路径')
+    p_server_add.add_argument('--remote-workspace', help='远端 Partner workspace')
+    p_server_add.add_argument('--disabled', action='store_true', help='保存但禁用')
+    p_server_add.add_argument('--print-tunnel', action='store_true', help='保存后打印本地 Ollama 反向隧道命令')
+    p_server_add.add_argument('--remote-port', type=int, default=11434, help='服务器侧监听端口')
+    p_server_add.add_argument('--local-port', type=int, default=11434, help='本机 Ollama 端口')
+
+    p_server_list = srv_sub.add_parser('list', help='列出服务器')
+
+    p_server_remove = srv_sub.add_parser('remove', help='删除服务器')
+    p_server_remove.add_argument('name', help='服务器名称')
+
+    p_server_hint = srv_sub.add_parser('tunnel-hint', help='打印本地 Ollama 暴露给服务器的 SSH 反向隧道命令')
+    p_server_hint.add_argument('name', help='服务器名称')
+    p_server_hint.add_argument('--remote-port', type=int, default=11434, help='服务器侧监听端口')
+    p_server_hint.add_argument('--local-port', type=int, default=11434, help='本机 Ollama 端口')
+    p_server_hint.add_argument('--models', default='qwen2.5:7b', help='建议配置的模型列表')
+    p_server_hint.add_argument('--mode', choices=['lite', 'project', 'all'], default='lite', help='建议配置的 Ollama 使用范围')
+    p_server.set_defaults(func=cmd_server)
+
+    p_ollama = sub.add_parser('ollama', help='配置可选 Ollama 本地/远程模型池')
+    o_sub = p_ollama.add_subparsers(dest='ollama_action')
+    o_sub.required = True
+
+    p_ollama_setup = o_sub.add_parser('setup', help='交互式配置 Ollama endpoint 和使用范围')
+    p_ollama_setup.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+    p_ollama_setup.add_argument('--mode', choices=['off', 'lite', 'project', 'all'], help='Ollama 使用范围')
+    p_ollama_setup.add_argument('--name', help='endpoint 名称，如 local/lab160/server1')
+    p_ollama_setup.add_argument('--base-url', help='Ollama 地址，如 http://127.0.0.1:11434')
+    p_ollama_setup.add_argument('--models', help='模型优先级，逗号分隔，如 qwen2.5:14b,qwen2.5:7b')
+
+    p_ollama_add = o_sub.add_parser('add', help='添加一个 Ollama endpoint')
+    p_ollama_add.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+    p_ollama_add.add_argument('--name', help='endpoint 名称')
+    p_ollama_add.add_argument('--base-url', required=True, help='Ollama 地址')
+    p_ollama_add.add_argument('--models', default='qwen2.5:7b', help='模型优先级，逗号分隔')
+    p_ollama_add.add_argument('--mode', choices=['lite', 'project', 'all'], help='添加后设置使用范围')
+    p_ollama_add.add_argument('--location', choices=['local', 'server', 'tunnel', 'custom'], help='endpoint 位置元数据')
+    p_ollama_add.add_argument('--server', help='关联的 server 名称')
+
+    p_ollama_mode = o_sub.add_parser('mode', help='设置 Ollama 使用范围')
+    p_ollama_mode.add_argument('mode', choices=['off', 'lite', 'project', 'all'])
+    p_ollama_mode.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+
+    p_ollama_disable = o_sub.add_parser('disable', help='关闭 Ollama，全部回主 API/Agent')
+    p_ollama_disable.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+
+    p_ollama_list = o_sub.add_parser('list', help='查看 Ollama pool 配置')
+    p_ollama_list.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+
+    p_ollama_test = o_sub.add_parser('test', help='探测当前可用 Ollama endpoint')
+    p_ollama_test.add_argument('--workspace', '-w', default=argparse.SUPPRESS, help='工作区路径')
+    p_ollama_test.add_argument('--purpose', choices=['classify', 'interaction', 'report', 'project', 'chat'], default='report')
+    p_ollama.set_defaults(func=cmd_ollama)
 
     # default
     parser.set_defaults(func=cmd_default)

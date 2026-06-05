@@ -381,7 +381,7 @@ def run_daily_maintenance(workspace: str) -> Dict:
     if os.path.exists(journal_path):
         try:
             today_str = datetime.now().strftime("%Y-%m-%d")
-            with open(journal_path) as f:
+            with open(journal_path, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:

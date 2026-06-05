@@ -243,30 +243,48 @@ def record_user_signal(workspace: str, project: str, text: str, kind: str = "use
         }
         memory.setdefault("lessons", []).append(lesson)
         _append_method_memory(workspace, lesson)
-    if re.search(r"(失败|没提升|不代表|别的项目|迁移|方法边界|走捷径|幻觉)", text):
-        lesson = {
-            "ts": _now(),
-            "project": project or "",
-            "type": "user_method_boundary",
-            "content": _clip(text, 260),
-            "transferable": bool(re.search(r"(不代表|别的项目|迁移)", text)),
-        }
-        memory.setdefault("lessons", []).append(lesson)
-        _append_method_memory(workspace, lesson)
     save_memory(workspace, memory)
 
 
 def get_open_idea(workspace: str, project: str) -> dict[str, Any] | None:
-    """Return the newest unprocessed user/teacher idea for the project."""
+    """Return the highest-priority unprocessed user/teacher idea.
+
+    Ordering matters for rapid multi-message sharing: a short card/link sent
+    after a long pasted article must not steal the next project round from the
+    richer project-specific material.
+    """
     memory = load_memory(workspace)
-    for idea in reversed(memory.get("ideas") or []):
-        if idea.get("kind") == "correction_signal":
+    candidates: list[dict[str, Any]] = []
+    for idx, idea in enumerate(memory.get("ideas") or []):
+        kind = str(idea.get("kind") or "")
+        idea_project = str(idea.get("project") or "").strip()
+        if kind == "correction_signal":
             continue
-        if idea.get("project") and idea.get("project") != project:
+        if idea_project and idea_project != project:
+            continue
+        # Generic external-learning notes without a project anchor are memory
+        # material, not project-driving instructions. Otherwise a metadata-only
+        # card/attachment can keep reactivating an unrelated waiting project.
+        if kind == "external_learning" and not idea_project:
             continue
         if str(idea.get("status", "open")).lower() in OPEN_IDEA_STATUSES:
-            return idea
-    return None
+            row = dict(idea)
+            row["_idx"] = idx
+            candidates.append(row)
+    if not candidates:
+        return None
+
+    def score(idea: dict[str, Any]) -> tuple[int, int, int, int]:
+        text = str(idea.get("content") or idea.get("idea") or "")
+        kind = str(idea.get("kind") or "")
+        has_project = 1 if idea.get("project") == project else 0
+        is_user_signal = 1 if kind in {"user_idea", "teacher_advice", "risk_signal"} else 0
+        rich_text = min(len(text), 2000)
+        return (has_project, is_user_signal, rich_text, int(idea.get("_idx") or 0))
+
+    best = max(candidates, key=score)
+    best.pop("_idx", None)
+    return best
 
 
 def mark_idea_processed(workspace: str, project: str, idea_text: str, status: str = "absorbed"):
@@ -302,17 +320,6 @@ def record_round_result(workspace: str, project: str, parsed: dict, raw_response
         card["latest_result"] = step_done
     if next_action:
         card["next_bets"] = _dedupe_recent([next_action] + card.get("next_bets", []), 8)
-
-    for finding in findings:
-        if _looks_like_bottleneck(finding):
-            card["bottlenecks"] = _dedupe_recent([finding] + card.get("bottlenecks", []), 8)
-        if _looks_like_method_boundary(finding):
-            card["method_boundaries"] = _dedupe_recent([finding] + card.get("method_boundaries", []), 8)
-
-    lesson = _lesson_from_round(project, step_done, findings, next_action, state_delta, raw_response)
-    if lesson:
-        memory.setdefault("lessons", []).append(lesson)
-        _append_method_memory(workspace, lesson)
 
     episode = {
         "ts": _now(),
@@ -507,7 +514,7 @@ def scan_workspace_changes(workspace: str, project: str = "", max_files: int = 8
     return changed
 
 
-def build_research_context(workspace: str, project: str, limit_chars: int = 1100) -> str:
+def build_research_context(workspace: str, project: str, limit_chars: int = 760) -> str:
     """Return a compact, prompt-safe research memory slice."""
     memory = load_memory(workspace)
     card = (memory.get("projects") or {}).get(project, {})
@@ -518,31 +525,36 @@ def build_research_context(workspace: str, project: str, limit_chars: int = 1100
         latest = _clean_memory_text(card.get("latest_result", ""), 120)
         if latest:
             lines.append(f"- 最近有效结果：{latest}")
-        for item in (card.get("bottlenecks") or [])[:2]:
+        for item in (card.get("bottlenecks") or [])[:1]:
             item = _clean_memory_text(item, 120)
             if item:
                 lines.append(f"- 当前瓶颈：{item}")
-        for item in (card.get("method_boundaries") or [])[:2]:
+        for item in (card.get("method_boundaries") or [])[:1]:
             item = _clean_memory_text(item, 120)
             if item:
                 lines.append(f"- 方法边界：{item}")
-        for item in (card.get("next_bets") or [])[:2]:
+        for item in (card.get("next_bets") or [])[:1]:
             item = _clean_memory_text(item, 120)
             if item:
                 lines.append(f"- 候选突破口：{item}")
 
-    related_lessons = _related_items(memory.get("lessons") or [], project, 4)
+    # Project execution prompts should only receive concrete lessons from the
+    # current project. Cross-project concrete cases easily pollute the task
+    # context (for example, a nutrition lesson leaking into an age-prediction
+    # project). Transferable experience is injected separately as abstract
+    # habits by research_guardrails.
+    related_lessons = [x for x in (memory.get("lessons") or []) if isinstance(x, dict) and x.get("project") == project][-3:][::-1]
     if related_lessons:
         if not lines:
             lines.append("长期研究记忆：")
-        for lesson in related_lessons[:3]:
+        for lesson in related_lessons[:2]:
             label = lesson.get("type", "lesson")
             content = _clean_memory_text(lesson.get("content", ""), 130)
             if content:
                 lines.append(f"- {label}：{content}")
 
-    ideas = _related_items(memory.get("ideas") or [], project, 3)
-    for idea in ideas[:2]:
+    ideas = _related_items(memory.get("ideas") or [], project, 2)
+    for idea in ideas[:1]:
         if idea.get("status") == "open":
             if not lines:
                 lines.append("长期研究记忆：")
@@ -575,6 +587,8 @@ def ensure_habits(workspace: str) -> dict[str, Any]:
         "habits": [
             "每轮只做一个最小动作",
             "关键数字必须有 evidence 文件",
+            "任何最佳结果/突破/完成结论先过 evidence check；证据不足只能写待复核，不能继续堆调参或包装汇报",
+            "遇到新项目时由 LLM 判断是否需要先查文献/资料/公开数据路线；不机械搜索，也不跳过必要背景核验",
             "失败要记录条件和适用边界",
             "用户/老师灵感进入 idea_inbox",
             "用户分享内容先分项目指令/项目参考/普通学习/访问受限",
@@ -590,6 +604,13 @@ def ensure_habits(workspace: str) -> dict[str, Any]:
                 data = json.load(f)
             if isinstance(data, dict):
                 merged = {**defaults, **data}
+                existing = [str(x) for x in (data.get("habits") or [])]
+                merged["habits"] = existing[:]
+                for item in defaults["habits"]:
+                    if item not in merged["habits"]:
+                        merged["habits"].append(item)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(merged, f, ensure_ascii=False, indent=2)
                 return merged
         except Exception:
             pass
@@ -683,7 +704,7 @@ def build_cross_project_context(workspace: str, limit_chars: int = 6000) -> str:
     lines = ["# 跨项目迁移上下文"]
     for lesson in _compact_lessons_for_prompt(memory.get("lessons") or [], limit=12):
         content = lesson.get("content", "")
-        if lesson.get("transferable") or re.search(r"(迁移|不代表|边界|可迁移|may work)", content, re.I):
+        if lesson.get("transferable"):
             lines.append(f"- [{lesson.get('project','')}] {lesson.get('type','')}: {_clip(content, 220)}")
     if len(lines) == 1:
         for lesson in _compact_lessons_for_prompt(memory.get("lessons") or [], limit=8):
@@ -790,42 +811,15 @@ def _dedupe_recent(items: list[str], limit: int) -> list[str]:
 
 
 def _looks_like_bottleneck(text: str) -> bool:
-    return bool(re.search(r"(瓶颈|失败|没有提升|差于|不稳定|偏差|超时|卡住|缺失|不可约|噪声)", text or ""))
+    return False
 
 
 def _looks_like_method_boundary(text: str) -> bool:
-    return bool(re.search(r"(不适合|不提供|触及天花板|不能解释|无法|边界|局限|迁移|只在|不代表)", text or ""))
+    return False
 
 
 def _lesson_from_round(project: str, done: str, findings: list[str], next_action: str,
                        state_delta: str, raw_response: str) -> dict[str, Any] | None:
-    text = "；".join([done] + findings + [state_delta])
-    if not text.strip():
-        return None
-    if _looks_like_method_boundary(text):
-        return {
-            "ts": _now(),
-            "project": project,
-            "type": "method_boundary",
-            "content": _clip(text, 260),
-            "transferable": "不代表" in text or "迁移" in text,
-        }
-    if _looks_like_bottleneck(text):
-        return {
-            "ts": _now(),
-            "project": project,
-            "type": "pitfall",
-            "content": _clip(text, 260),
-            "transferable": False,
-        }
-    if next_action and re.search(r"(尝试|探索|验证|对比|迁移|换成|升级)", next_action):
-        return {
-            "ts": _now(),
-            "project": project,
-            "type": "next_bet",
-            "content": _clip(next_action, 220),
-            "transferable": False,
-        }
     return None
 
 
@@ -864,18 +858,10 @@ def _update_cross_project_lessons(workspace: str, row: dict[str, Any]):
 
 
 def _infer_method_name(text: str) -> str:
-    candidates = re.findall(r"[A-Za-z][A-Za-z0-9_+\-]{2,}", text or "")
-    if candidates:
-        return candidates[0][:80]
-    for token in ("ComBat", "XGBoost", "LightGBM", "VAE", "REINVENT", "PLS", "Ridge"):
-        if token.lower() in (text or "").lower():
-            return token
     return "未命名方法"
 
 
 def _lesson_result(kind: str, content: str) -> str:
-    if kind in ("pitfall", "method_boundary", "user_method_boundary"):
-        return "failed" if re.search(r"(失败|没有提升|差于|不稳定|无法)", content or "") else "partial"
     if kind == "next_bet":
         return "unknown"
     return "partial"

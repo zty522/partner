@@ -5,6 +5,9 @@ import logging
 import os
 import re
 import shutil
+import time
+import base64
+import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime
 
@@ -17,6 +20,77 @@ INTERNAL_PROGRESS_SENTINEL = "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
 # Backward-compatible name used by older executor/bridge code. This is an
 # internal sentinel and must never be pushed to users.
 USER_FRIENDLY_PROGRESS_REPLY = INTERNAL_PROGRESS_SENTINEL
+_NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _refresh_runtime_cost_summary(workspace: str) -> None:
+    """Best-effort refresh of user-facing runtime/cost telemetry."""
+    try:
+        from .runtime_monitor import publish_runtime_cost_summary
+
+        publish_runtime_cost_summary(workspace)
+    except Exception as exc:
+        logger.debug(f"failed to refresh runtime cost summary: {exc}")
+
+
+def _load_agent_config(workspace: str) -> dict:
+    """Load the per-instance agent config if it exists."""
+    for rel in ("00_config/partner_config.json", "partner_config.json"):
+        path = os.path.join(workspace, rel)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            agent = data.get("agent") if isinstance(data, dict) else None
+            if isinstance(agent, dict):
+                return agent
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            logger.debug(f"failed to load agent config {path}: {exc}")
+    return {}
+
+
+def _env_or_config(name: str, config: dict, key: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is not None and value != "":
+        return value
+    raw = config.get(key, default)
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(x) for x in raw)
+    return str(raw)
+
+
+def _project_timeout_sec(workspace: str, default: int = 1200) -> Optional[int]:
+    """Soft cap for a single agent project turn.
+
+    Partner should keep working indefinitely across turns, but one stuck
+    subprocess must not block the lifeline forever.  Use 0/none/off to opt out.
+    """
+    config = _load_agent_config(workspace)
+    value = os.getenv("PARTNER_PROJECT_AGENT_TIMEOUT_SEC")
+    if value is None or value == "":
+        value = config.get("project_timeout_sec", default)
+    text = str(value).strip().lower()
+    if text in {"0", "none", "no", "off", "false", "disabled"}:
+        return None
+    try:
+        return max(60, int(float(text)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(float(os.getenv(name, "").strip()))
+    except Exception:
+        return default
 
 
 @dataclass
@@ -60,6 +134,20 @@ class AgentAdapter(ABC):
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         """Have a conversation (used for the check-in interface)."""
         pass
+
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        """Analyze local images when the backend supports vision.
+
+        Default implementation returns the internal sentinel so callers can
+        fall back to OCR or primary agent without exposing backend details.
+        """
+        return USER_FRIENDLY_PROGRESS_REPLY
 
 
 class HermesAdapter(AgentAdapter):
@@ -116,6 +204,7 @@ class HermesAdapter(AgentAdapter):
             }
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            _refresh_runtime_cost_summary(self.workspace)
         except Exception as exc:
             logger.warning(f"failed to write agent run log: {exc}")
 
@@ -180,12 +269,15 @@ class HermesAdapter(AgentAdapter):
 
     def _max_resume_uses(self) -> int:
         try:
-            return max(5, int(os.getenv("PARTNER_HERMES_MAX_RESUME_USES", "80")))
+            return max(2, int(os.getenv("PARTNER_HERMES_MAX_RESUME_USES", "12")))
         except Exception:
-            return 80
+            return 12
 
     def _should_resume_session(self, purpose: str) -> bool:
-        configured = os.getenv("PARTNER_HERMES_RESUME_PURPOSES", "project")
+        # Partner owns long-term memory. Hermes sessions are an optional
+        # short-lived acceleration cache only; leaving them on indefinitely
+        # makes Hermes heavier over multi-day runs.
+        configured = os.getenv("PARTNER_HERMES_RESUME_PURPOSES", "")
         purposes = {p.strip() for p in configured.split(",") if p.strip()}
         return purpose in purposes or "*" in purposes
 
@@ -241,46 +333,169 @@ class HermesAdapter(AgentAdapter):
 
     def _max_resume_context_tokens(self) -> int:
         try:
-            return max(2000, int(os.getenv("PARTNER_HERMES_MAX_RESUME_CONTEXT_TOKENS", "30000")))
+            return max(2000, int(os.getenv("PARTNER_HERMES_MAX_RESUME_CONTEXT_TOKENS", "12000")))
         except Exception:
-            return 30000
+            return 12000
+
+    def _lean_mode_enabled(self) -> bool:
+        return _env_flag("PARTNER_HERMES_LEAN_MODE", True)
+
+    def _prune_hermes_runtime(self, hermes_home: str) -> None:
+        """Keep Hermes as a lean execution engine.
+
+        Partner keeps durable research memory in its own state/user/system
+        files. Hermes' per-instance home is only a runtime sandbox. We prune
+        sessions/checkpoints/caches so repeated background cycles do not make
+        Hermes progressively heavier.
+        """
+        if not self._lean_mode_enabled():
+            return
+        now = time.time()
+        stamp_path = os.path.join(hermes_home, ".partner_lean_prune")
+        interval = max(60, _env_int("PARTNER_HERMES_PRUNE_INTERVAL_SEC", 900))
+        try:
+            last = os.path.getmtime(stamp_path) if os.path.exists(stamp_path) else 0
+            if now - last < interval:
+                return
+        except OSError:
+            pass
+
+        keep_sessions = _env_flag("PARTNER_HERMES_KEEP_SESSIONS", False) or bool(os.getenv("PARTNER_HERMES_RESUME_PURPOSES", "").strip())
+        keep_checkpoints = _env_flag("PARTNER_HERMES_KEEP_CHECKPOINTS", False)
+        removable_dirs = []
+        if not keep_sessions:
+            removable_dirs.append("sessions")
+        if not keep_checkpoints:
+            removable_dirs.extend(["checkpoints", "sandboxes"])
+        removable_dirs.extend(["audio_cache", "image_cache"])
+
+        for rel in removable_dirs:
+            path = os.path.join(hermes_home, rel)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                elif os.path.exists(path):
+                    os.remove(path)
+            except OSError as exc:
+                logger.debug(f"failed to prune Hermes runtime path {path}: {exc}")
+            try:
+                os.makedirs(path, exist_ok=True)
+            except OSError:
+                pass
+
+        # The state DB is allowed to exist, but not to grow without bound.
+        max_db_mb = max(5, _env_int("PARTNER_HERMES_MAX_STATE_DB_MB", 64))
+        if not _env_flag("PARTNER_HERMES_KEEP_STATE_DB", True):
+            max_db_mb = 0
+        for rel in ("state.db", "state.db-wal", "state.db-shm"):
+            path = os.path.join(hermes_home, rel)
+            try:
+                if os.path.exists(path) and (max_db_mb == 0 or os.path.getsize(path) > max_db_mb * 1024 * 1024):
+                    os.remove(path)
+            except OSError as exc:
+                logger.debug(f"failed to prune Hermes db {path}: {exc}")
+
+        # Skills are not injected because we pass --ignore-rules, but Hermes can
+        # still scan the directory. Optionally remove them in strict isolation.
+        if _env_flag("PARTNER_HERMES_STRICT_NO_SKILLS", False):
+            skills_dir = os.path.join(hermes_home, "skills")
+            try:
+                if os.path.isdir(skills_dir):
+                    shutil.rmtree(skills_dir)
+                os.makedirs(skills_dir, exist_ok=True)
+            except OSError as exc:
+                logger.debug(f"failed to prune Hermes skills dir: {exc}")
+
+        try:
+            with open(stamp_path, "w", encoding="utf-8") as f:
+                f.write(datetime.now().isoformat() + "\n")
+        except OSError:
+            pass
 
     def _build_hermes_env(self) -> dict:
         """Give Hermes a writable per-instance home under the workspace."""
         env = os.environ.copy()
+        executable = self._hermes_executable()
         hermes_home = os.path.join(self.workspace, "system", "hermes_home")
         hermes_logs = os.path.join(hermes_home, "logs")
         os.makedirs(hermes_logs, exist_ok=True)
+
+        # A frozen Windows build can inherit Python/PyInstaller variables from
+        # Partner.exe. Hermes owns its own Python venv; leaking Python 3.14
+        # paths into the child process makes provider plugins fail to import.
+        for name in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "PYTHONEXECUTABLE",
+            "__PYVENV_LAUNCHER__",
+            "_PYI_APPLICATION_HOME_DIR",
+            "_PYI_PARENT_PROCESS_LEVEL",
+            "PYINSTALLER_RESET_ENVIRONMENT",
+        ):
+            env.pop(name, None)
+
+        exe_dir = os.path.dirname(executable) if executable and os.path.isabs(executable) else ""
+        venv_root = os.path.dirname(exe_dir) if os.path.basename(exe_dir).lower() in {"scripts", "bin"} else ""
+        path_parts = [p for p in (env.get("PATH") or "").split(os.pathsep) if p]
+        cleaned_path = []
+        for part in path_parts:
+            lowered = part.replace("\\", "/").lower()
+            if "python314" in lowered or "/_internal" in lowered or "pyinstaller" in lowered:
+                continue
+            cleaned_path.append(part)
+        hermes_path_prefix = []
+        if exe_dir:
+            hermes_path_prefix.append(exe_dir)
+        if venv_root:
+            hermes_path_prefix.extend(
+                [
+                    os.path.join(venv_root, "Library", "bin"),
+                    os.path.join(venv_root, "DLLs"),
+                ]
+            )
+        env["PATH"] = os.pathsep.join([p for p in hermes_path_prefix + cleaned_path if p])
         env["HOME"] = hermes_home
         env["HERMES_HOME"] = hermes_home
         env["XDG_STATE_HOME"] = os.path.join(hermes_home, ".local", "state")
         env["XDG_CACHE_HOME"] = os.path.join(hermes_home, ".cache")
         env["XDG_CONFIG_HOME"] = os.path.join(hermes_home, ".config")
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
         os.makedirs(env["XDG_CACHE_HOME"], exist_ok=True)
         os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
         self._sync_hermes_runtime_files(hermes_home)
+        self._prune_hermes_runtime(hermes_home)
         return env
 
     def _sync_hermes_runtime_files(self, hermes_home: str):
         """Mirror the user's Hermes config/auth into the writable instance home."""
-        source_home = os.path.expanduser("~/.hermes")
-        if not os.path.isdir(source_home):
+        source_homes = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "hermes"),
+            os.path.expanduser("~/.hermes"),
+        ]
+        existing_sources = []
+        for source_home in source_homes:
+            if source_home and os.path.isdir(source_home) and os.path.abspath(source_home) != os.path.abspath(hermes_home):
+                existing_sources.append(source_home)
+        if not existing_sources:
             return
         for filename in ("config.yaml", "auth.json", ".env"):
-            source_path = os.path.join(source_home, filename)
-            target_path = os.path.join(hermes_home, filename)
-            if not os.path.exists(source_path):
-                continue
-            try:
-                source_mtime = os.path.getmtime(source_path)
-                target_mtime = os.path.getmtime(target_path) if os.path.exists(target_path) else -1
-                if source_mtime <= target_mtime:
+            for source_home in existing_sources:
+                source_path = os.path.join(source_home, filename)
+                target_path = os.path.join(hermes_home, filename)
+                if not os.path.exists(source_path):
                     continue
-                with open(source_path, "rb") as src, open(target_path, "wb") as dst:
-                    dst.write(src.read())
-            except OSError as exc:
-                logger.warning(f"failed to mirror Hermes runtime file {filename}: {exc}")
+                try:
+                    source_mtime = os.path.getmtime(source_path)
+                    target_mtime = os.path.getmtime(target_path) if os.path.exists(target_path) else -1
+                    if source_mtime <= target_mtime:
+                        break
+                    with open(source_path, "rb") as src, open(target_path, "wb") as dst:
+                        dst.write(src.read())
+                    break
+                except OSError as exc:
+                    logger.warning(f"failed to mirror Hermes runtime file {filename}: {exc}")
 
     @staticmethod
     def _candidate_executables() -> list:
@@ -289,19 +504,19 @@ class HermesAdapter(AgentAdapter):
         home = os.path.expanduser("~")
         candidates = [
             os.getenv("HERMES_BIN", ""),
+            os.path.join(localappdata, "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe"),
+            os.path.join(localappdata, "hermes", "hermes-agent", "venv", "Scripts", "hermes"),
             shutil.which("hermes") or "",
             os.path.join(home, ".local", "bin", "hermes"),
             "/usr/local/bin/hermes",
             "/home/ubuntu/.local/bin/hermes",
             "/home/os/.local/bin/hermes",
             os.path.join(home, ".hermes", "hermes-agent", "venv", "bin", "hermes"),
-            os.path.join(appdata, "Python", "Python314", "Scripts", "hermes.exe"),
-            os.path.join(appdata, "Python", "Python313", "Scripts", "hermes.exe"),
             os.path.join(appdata, "Python", "Python312", "Scripts", "hermes.exe"),
+            os.path.join(appdata, "Python", "Python313", "Scripts", "hermes.exe"),
+            os.path.join(appdata, "Python", "Python314", "Scripts", "hermes.exe"),
             os.path.join(appdata, "npm", "hermes"),
             os.path.join(appdata, "npm", "hermes.cmd"),
-            os.path.join(localappdata, "hermes", "hermes-agent", "venv", "Scripts", "hermes"),
-            os.path.join(localappdata, "hermes", "hermes-agent", "venv", "Scripts", "hermes.exe"),
         ]
         return [path for path in candidates if path]
 
@@ -403,7 +618,7 @@ class HermesAdapter(AgentAdapter):
             timeout_sec = 90
             max_retries = 0
         elif purpose == "project":
-            timeout_sec = None  # 项目执行交给 agent 跑完，不做本地超时降级
+            timeout_sec = _project_timeout_sec(self.workspace)
             max_retries = 0
         elif purpose == "report":
             timeout_sec = 90
@@ -416,8 +631,11 @@ class HermesAdapter(AgentAdapter):
                     "args": cmd,
                     "capture_output": True,
                     "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
                     "cwd": self.workspace,
                     "env": self._build_hermes_env(),
+                    "creationflags": _NTFLAGS,
                 }
                 if timeout_sec is not None:
                     run_kwargs["timeout"] = timeout_sec
@@ -568,6 +786,514 @@ class HermesAdapter(AgentAdapter):
 
         return USER_FRIENDLY_PROGRESS_REPLY
 
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        """Use Hermes CLI multimodal support (`hermes chat --image`)."""
+        import subprocess
+        import time
+
+        valid = [p for p in (image_paths or []) if p and os.path.exists(p)]
+        if not valid:
+            return USER_FRIENDLY_PROGRESS_REPLY
+
+        max_images = 8
+        selected = valid[:max_images]
+        outputs: list[str] = []
+        for idx, image_path in enumerate(selected, start=1):
+            prompt = (
+                f"{message}\n\n"
+                f"这是第 {idx}/{len(selected)} 张图片或长截图切片。请读取图片中的文字和视觉信息，"
+                "不要编造看不见的内容。"
+            )
+            cmd = [self._hermes_executable(), "chat", "-q", prompt, "--image", image_path, "-Q"]
+            if self.model:
+                cmd.extend(["-m", self.model])
+            if self.provider:
+                cmd.extend(["--provider", self.provider])
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            timeout_sec = 120
+            started_at = time.time()
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=self.workspace,
+                    env=self._build_hermes_env(),
+                    timeout=timeout_sec,
+                    creationflags=_NTFLAGS,
+                )
+                out = self._strip_session_noise((result.stdout or "").strip())
+                out = re.sub(r"(?im)^\s*⚠️?\s*Reached maximum iterations.*(?:\n|$)", "", out).strip()
+                err = (result.stderr or "").strip()
+                elapsed_ms = int((time.time() - started_at) * 1000)
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": 1,
+                    "purpose": purpose,
+                    "timeout_sec": timeout_sec,
+                    "elapsed_ms": elapsed_ms,
+                    "returncode": result.returncode,
+                    "status": "ok" if result.returncode == 0 and out else "failed",
+                    "model": self.model,
+                    "provider": self.provider,
+                    "message_chars": len(prompt),
+                    "prompt_tokens_est": self._estimate_tokens(prompt),
+                    "completion_tokens_est": self._estimate_tokens(out),
+                    "total_tokens_est": self._estimate_tokens(prompt) + self._estimate_tokens(out),
+                    "stdout_preview": out[:500],
+                    "stderr_preview": err[:500],
+                    "message_preview": prompt[:500],
+                    "image_path": image_path,
+                })
+                if result.returncode == 0 and out:
+                    outputs.append(f"## 图片{idx}\n{out}")
+            except Exception as exc:
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": 1,
+                    "purpose": purpose,
+                    "timeout_sec": timeout_sec,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                    "returncode": None,
+                    "status": "exception",
+                    "model": self.model,
+                    "provider": self.provider,
+                    "message_chars": len(prompt),
+                    "prompt_tokens_est": self._estimate_tokens(prompt),
+                    "completion_tokens_est": 0,
+                    "total_tokens_est": self._estimate_tokens(prompt),
+                    "error": str(exc),
+                    "message_preview": prompt[:500],
+                    "image_path": image_path,
+                })
+        return "\n\n".join(outputs).strip() or USER_FRIENDLY_PROGRESS_REPLY
+
+
+class CustomEndpointHermesAdapter(HermesAdapter):
+    """Hermes adapter pinned to an OpenAI-compatible endpoint.
+
+    Hermes reads custom provider base_url/api_key from config.yaml.  This
+    adapter patches the per-instance Hermes home before each call so the
+    caller can safely switch a single instance to a local/remote Ollama
+    endpoint without changing the user's global Hermes config.
+    """
+
+    def __init__(
+        self,
+        workspace_path: str,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: str = "ollama",
+    ):
+        super().__init__(workspace_path, model=model, provider=provider or "custom")
+        self.base_url = (base_url or os.getenv("PARTNER_DYNAMIC_OLLAMA_BASE_URL") or "").rstrip("/")
+        self.api_key = api_key or "ollama"
+
+    def _build_hermes_env(self) -> dict:
+        env = super()._build_hermes_env()
+        if self.base_url:
+            self._patch_hermes_config(
+                os.path.join(self.workspace, "system", "hermes_home"),
+                model=self.model or "",
+                provider=self.provider or "custom",
+                base_url=self.base_url,
+                api_key=self.api_key,
+            )
+        return env
+
+    @staticmethod
+    def _patch_hermes_config(
+        hermes_home: str,
+        model: str,
+        provider: str,
+        base_url: str,
+        api_key: str,
+    ) -> None:
+        os.makedirs(hermes_home, exist_ok=True)
+        path = os.path.join(hermes_home, "config.yaml")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read()
+            except OSError:
+                text = ""
+        else:
+            text = ""
+
+        lines = text.splitlines()
+        out = []
+        in_model = False
+        saw_model = saw_default = saw_provider = saw_base = saw_key = False
+        for line in lines:
+            stripped = line.strip()
+            top_level = line and not line.startswith((" ", "\t"))
+            if top_level and stripped == "model:":
+                in_model = True
+                saw_model = True
+                out.append(line)
+                continue
+            if in_model and top_level and stripped != "model:":
+                if not saw_default:
+                    out.append(f"  default: {model}")
+                if not saw_provider:
+                    out.append(f"  provider: {provider}")
+                if not saw_base:
+                    out.append(f"  base_url: {base_url}")
+                if not saw_key:
+                    out.append(f"  api_key: {api_key}")
+                in_model = False
+            if in_model and line.startswith("  "):
+                key = stripped.split(":", 1)[0]
+                if key == "default":
+                    out.append(f"  default: {model}")
+                    saw_default = True
+                    continue
+                if key == "provider":
+                    out.append(f"  provider: {provider}")
+                    saw_provider = True
+                    continue
+                if key == "base_url":
+                    out.append(f"  base_url: {base_url}")
+                    saw_base = True
+                    continue
+                if key == "api_key":
+                    out.append(f"  api_key: {api_key}")
+                    saw_key = True
+                    continue
+            out.append(line)
+
+        if in_model:
+            if not saw_default:
+                out.append(f"  default: {model}")
+            if not saw_provider:
+                out.append(f"  provider: {provider}")
+            if not saw_base:
+                out.append(f"  base_url: {base_url}")
+            if not saw_key:
+                out.append(f"  api_key: {api_key}")
+        if not saw_model:
+            out = [
+                "model:",
+                f"  default: {model}",
+                f"  provider: {provider}",
+                f"  base_url: {base_url}",
+                f"  api_key: {api_key}",
+                *out,
+            ]
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("\n".join(out).rstrip() + "\n")
+        except OSError as exc:
+            logger.warning(f"failed to patch Hermes custom endpoint config: {exc}")
+
+
+class DynamicOllamaProjectAdapter(AgentAdapter):
+    """Use Ollama for project work only when it is actually responsive.
+
+    Selection is intentionally based on a small real completion rather than
+    only static GPU numbers.  If a remote server is busy and Ollama falls back
+    to CPU, the probe times out and the project run falls back to the primary
+    API-backed agent.
+    """
+
+    def __init__(self, primary: AgentAdapter, workspace_path: str):
+        self.primary = primary
+        self.workspace = workspace_path
+        config = _load_agent_config(workspace_path).get("dynamic_ollama", {})
+        if not isinstance(config, dict):
+            config = {}
+        self.base_url = _env_or_config(
+            "PARTNER_DYNAMIC_OLLAMA_BASE_URL",
+            config,
+            "base_url",
+            "",
+        ).rstrip("/")
+        self.candidates = [
+            m.strip()
+            for m in _env_or_config(
+                "PARTNER_DYNAMIC_OLLAMA_MODELS",
+                config,
+                "models",
+                "qwen2.5:14b,qwen2.5:7b",
+            ).split(",")
+            if m.strip()
+        ]
+        self.probe_timeout_sec = float(
+            _env_or_config("PARTNER_DYNAMIC_OLLAMA_PROBE_TIMEOUT_SEC", config, "probe_timeout_sec", "20")
+        )
+        self.unavailable_cooldown_sec = int(
+            _env_or_config("PARTNER_DYNAMIC_OLLAMA_COOLDOWN_SEC", config, "cooldown_sec", "300")
+        )
+        self._unavailable_until = 0.0
+
+    def name(self) -> str:
+        return f"{self.primary.name()}+dynamic_ollama"
+
+    def search_web(self, query: str) -> List[SearchResult]:
+        return self.primary.search_web(query)
+
+    def execute_task(self, prompt: str) -> str:
+        return self.chat(prompt, purpose="project")
+
+    def _status_path(self) -> str:
+        state_dir = os.path.join(self.workspace, "state")
+        os.makedirs(state_dir, exist_ok=True)
+        return os.path.join(state_dir, "dynamic_ollama_status.json")
+
+    def _write_status(self, payload: dict) -> None:
+        try:
+            payload = {"ts": datetime.now().isoformat(), **payload}
+            with open(self._status_path(), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            _refresh_runtime_cost_summary(self.workspace)
+        except Exception as exc:
+            logger.debug(f"failed to write dynamic Ollama status: {exc}")
+
+    @staticmethod
+    def _api_root(base_url: str) -> str:
+        return base_url[:-3] if base_url.endswith("/v1") else base_url
+
+    def _available_models(self) -> set:
+        import urllib.request
+
+        tags_url = self._api_root(self.base_url) + "/api/tags"
+        with urllib.request.urlopen(tags_url, timeout=self.probe_timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return {
+            item.get("name") or item.get("model")
+            for item in data.get("models", [])
+            if item.get("name") or item.get("model")
+        }
+
+    def _probe_model(self, model: str) -> tuple[bool, str]:
+        import time
+        import urllib.error
+        import urllib.request
+
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "只回复 OK"}],
+            "stream": False,
+            "temperature": 0,
+            "max_tokens": 4,
+        }
+        req = urllib.request.Request(
+            self.base_url + "/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer ollama"},
+            method="POST",
+        )
+        started = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=self.probe_timeout_sec) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            elapsed_ms = int((time.time() - started) * 1000)
+            if reply.strip():
+                return True, f"probe_ok:{elapsed_ms}ms"
+            return False, "empty_probe_reply"
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+            return False, f"{type(exc).__name__}: {str(exc)[:160]}"
+
+    def _select_model(self) -> Optional[str]:
+        try:
+            from .ollama_pool import select_ollama
+
+            selected = select_ollama(self.workspace, "project")
+            if selected:
+                self.base_url = selected.api_base_url
+                self._write_status({
+                    "selected": selected.model,
+                    "endpoint": selected.name,
+                    "fallback": "",
+                    "reason": selected.reason,
+                    "base_url": selected.api_base_url,
+                    "mode": selected.mode,
+                })
+                return selected.model
+        except Exception as exc:
+            logger.debug(f"ollama pool project selection failed: {exc}")
+
+        import time
+
+        if not self.base_url or not self.candidates:
+            self._write_status({
+                "selected": "",
+                "fallback": "primary_agent",
+                "reason": "dynamic Ollama not configured",
+                "base_url": self.base_url,
+                "candidates": self.candidates,
+            })
+            return None
+        now = time.time()
+        if now < self._unavailable_until:
+            self._write_status({
+                "selected": "",
+                "fallback": "primary_agent",
+                "reason": "cooldown_after_unavailable",
+                "base_url": self.base_url,
+                "candidates": self.candidates,
+            })
+            return None
+        try:
+            available = self._available_models()
+        except Exception as exc:
+            self._unavailable_until = now + self.unavailable_cooldown_sec
+            self._write_status({
+                "selected": "",
+                "fallback": "primary_agent",
+                "reason": f"model_list_failed: {str(exc)[:160]}",
+                "base_url": self.base_url,
+                "candidates": self.candidates,
+            })
+            return None
+
+        probe_results = []
+        for model in self.candidates:
+            if model not in available:
+                probe_results.append({"model": model, "ok": False, "reason": "model_not_installed"})
+                continue
+            ok, reason = self._probe_model(model)
+            probe_results.append({"model": model, "ok": ok, "reason": reason})
+            if ok:
+                self._write_status({
+                    "selected": model,
+                    "fallback": "",
+                    "reason": reason,
+                    "base_url": self.base_url,
+                    "candidates": self.candidates,
+                    "probe_results": probe_results,
+                })
+                return model
+
+        self._unavailable_until = now + self.unavailable_cooldown_sec
+        self._write_status({
+            "selected": "",
+            "fallback": "primary_agent",
+            "reason": "all_candidates_unresponsive_or_missing",
+            "base_url": self.base_url,
+            "candidates": self.candidates,
+            "probe_results": probe_results,
+        })
+        return None
+
+    def _event_execution_profile(self, message: str) -> dict:
+        text = message or ""
+        event_type = ""
+        match = re.search(r"(?m)^event_type[：:]\s*([A-Za-z0-9_.-]+)\s*$", text)
+        if match:
+            event_type = match.group(1).strip()
+        lower = text.lower()
+        hard_markers = (
+            "真实文件",
+            "生成文件",
+            "修改文件",
+            "excel",
+            ".xlsx",
+            ".xls",
+            ".pdf",
+            "pdf",
+            "ppt",
+            ".pptx",
+            "运行脚本",
+            "执行命令",
+            "代码实现",
+            "可视化",
+            "联网",
+            "下载",
+            "api",
+            "tool",
+            "files:",
+        )
+        heavy_events = {
+            "direct_task",
+            "data_analysis",
+            "artifact_build",
+            "pdf_report",
+            "project",
+            "content_digest",
+        }
+        lite_events = {
+            "project_think",
+            "curiosity_explore",
+            "habit_update",
+            "evidence_audit",
+            "literature_review",
+        }
+        needs_tools_or_files = any(marker in lower for marker in hard_markers)
+        input_chars = len(text)
+        if event_type in heavy_events or needs_tools_or_files or input_chars > 7000:
+            return {
+                "try_ollama": False,
+                "event_type": event_type,
+                "difficulty": "heavy",
+                "reason": "tool_file_or_large_context",
+                "input_chars": input_chars,
+            }
+        if event_type in lite_events or input_chars <= 4500:
+            return {
+                "try_ollama": True,
+                "event_type": event_type,
+                "difficulty": "lite",
+                "reason": "short_reasoning_event",
+                "input_chars": input_chars,
+            }
+        return {
+            "try_ollama": False,
+            "event_type": event_type,
+            "difficulty": "medium",
+            "reason": "uncertain_project_execution",
+            "input_chars": input_chars,
+        }
+
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
+        if purpose != "project":
+            return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
+        profile = self._event_execution_profile(message)
+        if not profile.get("try_ollama"):
+            self._write_status({
+                "selected": "",
+                "fallback": "primary_agent",
+                "reason": f"event_policy:{profile.get('reason')}",
+                "event_type": profile.get("event_type", ""),
+                "difficulty": profile.get("difficulty", ""),
+                "input_chars": profile.get("input_chars", 0),
+            })
+            return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
+        selected = self._select_model()
+        if selected:
+            local = CustomEndpointHermesAdapter(
+                self.workspace,
+                model=selected,
+                provider="custom",
+                base_url=self.base_url,
+                api_key="ollama",
+            )
+            reply = local.chat(message, max_tokens=max_tokens, purpose=purpose)
+            if reply and reply != USER_FRIENDLY_PROGRESS_REPLY:
+                return reply
+        return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
+
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        # Vision support depends on model capabilities.  Use the primary
+        # backend by default; HybridLiteAdapter may try Ollama vision first.
+        return self.primary.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+
 
 class CodexAdapter(AgentAdapter):
     """Adapter for OpenAI Codex CLI."""
@@ -611,6 +1337,7 @@ class CodexAdapter(AgentAdapter):
             }
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            _refresh_runtime_cost_summary(self.workspace)
         except Exception as exc:
             logger.warning(f"failed to write agent run log: {exc}")
 
@@ -656,7 +1383,7 @@ class CodexAdapter(AgentAdapter):
         elif purpose == "interaction":
             timeout_sec = 60
         elif purpose == "project":
-            timeout_sec = None
+            timeout_sec = _project_timeout_sec(self.workspace)
         elif purpose == "report":
             timeout_sec = 90
 
@@ -689,7 +1416,10 @@ class CodexAdapter(AgentAdapter):
                 "args": cmd,
                 "capture_output": True,
                 "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
                 "cwd": self.workspace,
+                "creationflags": _NTFLAGS,
             }
             if timeout_sec is not None:
                 run_kwargs["timeout"] = timeout_sec
@@ -792,6 +1522,437 @@ class CodexAdapter(AgentAdapter):
                 pass
 
 
+class OllamaLiteAdapter(AgentAdapter):
+    """Small local-model adapter for cheap short responses.
+
+    This deliberately does not implement a general tool runner.  It is meant
+    for low-risk classification, interaction, and reporting prompts where a
+    short deterministic answer is useful and API cost matters.
+    """
+
+    def __init__(self, workspace_path: str, model: Optional[str] = None,
+                 provider: Optional[str] = None):
+        self.workspace = workspace_path
+        self.model = model or os.getenv("PARTNER_OLLAMA_MODEL", "qwen2.5:0.5b")
+        self.base_url = (
+            provider if provider and provider.startswith(("http://", "https://"))
+            else os.getenv("PARTNER_OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+        ).rstrip("/")
+        self.timeout_sec = int(os.getenv("PARTNER_OLLAMA_TIMEOUT_SEC", "90"))
+        self.probe_timeout_sec = float(os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", "1.5"))
+        self.unavailable_cooldown_sec = int(os.getenv("PARTNER_OLLAMA_UNAVAILABLE_COOLDOWN_SEC", "300"))
+        self.max_input_chars = int(os.getenv("PARTNER_OLLAMA_MAX_INPUT_CHARS", "4000"))
+        self._unavailable_until = 0.0
+
+    def name(self) -> str:
+        return "ollama_lite"
+
+    def _status_path(self) -> str:
+        state_dir = os.path.join(self.workspace, "state")
+        os.makedirs(state_dir, exist_ok=True)
+        return os.path.join(state_dir, "ollama_lite_status.json")
+
+    def _write_status(self, available: bool, reason: str = "") -> None:
+        try:
+            payload = {
+                "ts": datetime.now().isoformat(),
+                "available": available,
+                "model": self.model,
+                "base_url": self.base_url,
+                "reason": reason,
+                "mode": os.getenv("PARTNER_OLLAMA_LITE", "auto"),
+                "fallback": "primary_agent",
+            }
+            with open(self._status_path(), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            _refresh_runtime_cost_summary(self.workspace)
+        except Exception as exc:
+            logger.debug(f"failed to write ollama lite status: {exc}")
+
+    def _log_chat_attempt(self, payload: dict):
+        try:
+            log_dir = os.path.join(self.workspace, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "ollama_lite_chat.jsonl")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(f"failed to write OllamaLite chat log: {exc}")
+        try:
+            log_dir = os.path.join(self.workspace, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "agent_runs.jsonl")
+            row = {
+                "ts": payload.get("ts") or datetime.now().isoformat(),
+                "backend": "ollama_lite",
+                "purpose": payload.get("purpose", ""),
+                "status": payload.get("status", ""),
+                "elapsed_ms": payload.get("elapsed_ms"),
+                "timeout_sec": payload.get("timeout_sec"),
+                "model": payload.get("model"),
+                "provider": payload.get("provider"),
+                "message_chars": payload.get("message_chars"),
+                "prompt_tokens_est": payload.get("prompt_tokens_est"),
+                "completion_tokens_est": payload.get("completion_tokens_est"),
+                "total_tokens_est": payload.get("total_tokens_est"),
+                "reply_preview": payload.get("reply_preview", ""),
+                "error": payload.get("error", ""),
+            }
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            _refresh_runtime_cost_summary(self.workspace)
+        except Exception as exc:
+            logger.warning(f"failed to write agent run log: {exc}")
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, int(len(text) / 2.2))
+
+    @staticmethod
+    def _ollama_api_root(base_url: str) -> str:
+        return base_url[:-3] if base_url.endswith("/v1") else base_url
+
+    @classmethod
+    def is_available(cls) -> bool:
+        import urllib.request
+
+        base_url = os.getenv("PARTNER_OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
+        version_url = cls._ollama_api_root(base_url) + "/api/version"
+        try:
+            timeout = float(os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", "1.5"))
+            with urllib.request.urlopen(version_url, timeout=timeout) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def _probe_available(self) -> bool:
+        try:
+            from .ollama_pool import select_ollama
+
+            selected = select_ollama(self.workspace, "report")
+            if selected:
+                self.base_url = selected.api_base_url
+                self.model = selected.model
+                self._write_status(True, f"pool:{selected.name}:{selected.reason}")
+                return True
+        except Exception as exc:
+            logger.debug(f"ollama pool lite probe failed: {exc}")
+
+        import time
+        import urllib.request
+
+        now = time.time()
+        if now < self._unavailable_until:
+            return False
+        version_url = self._ollama_api_root(self.base_url) + "/api/version"
+        try:
+            with urllib.request.urlopen(version_url, timeout=self.probe_timeout_sec) as resp:
+                ok = resp.status == 200
+            self._write_status(ok, "" if ok else f"HTTP status {resp.status}")
+            return ok
+        except Exception as exc:
+            self._unavailable_until = now + self.unavailable_cooldown_sec
+            self._write_status(False, str(exc)[:200])
+            return False
+
+    def search_web(self, query: str) -> List[SearchResult]:
+        return [SearchResult(
+            title="Search unavailable",
+            url="",
+            snippet="ollama_lite does not provide web search.",
+        )]
+
+    def execute_task(self, prompt: str) -> str:
+        return self.chat(prompt, purpose="project")
+
+    def _system_prompt(self, purpose: str) -> str:
+        if purpose == "classify":
+            return (
+                "You are a strict local classifier. Return only compact JSON. "
+                "No markdown, no explanation."
+            )
+        if purpose == "interaction":
+            return (
+                "You write concise Chinese user-facing replies. Do not mention "
+                "internal logs, files, queues, tools, backend names, or JSON."
+            )
+        if purpose == "report":
+            return (
+                "You summarize progress in concise Chinese. Focus on concrete "
+                "results, risks, and next action. No markdown unless requested."
+            )
+        return (
+            "You are a small local model. Answer briefly and honestly. Do not "
+            "claim that you executed commands, edited files, or used tools."
+        )
+
+    def _max_tokens(self, purpose: str, requested: Optional[int]) -> int:
+        if requested:
+            return requested
+        if purpose == "classify":
+            return 160
+        if purpose == "interaction":
+            return 220
+        if purpose == "report":
+            return 360
+        return 240
+
+    @staticmethod
+    def _clean_reply(reply: str, purpose: str) -> str:
+        cleaned = (reply or "").strip()
+        if purpose != "classify":
+            return cleaned
+        fenced = re.match(r"(?is)^```(?:json)?\s*(.*?)\s*```$", cleaned)
+        if fenced:
+            cleaned = fenced.group(1).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            cleaned = cleaned[start:end + 1].strip()
+        return cleaned
+
+    @staticmethod
+    def _is_vision_model_name(model: str) -> bool:
+        name = (model or "").lower()
+        needles = (
+            "vision",
+            "vl",
+            "llava",
+            "bakllava",
+            "minicpm-v",
+            "minicpmv",
+            "qwen2-vl",
+            "qwen2.5-vl",
+            "qwen2.5vl",
+            "gemma3",
+        )
+        return any(x in name for x in needles)
+
+    @staticmethod
+    def _looks_like_no_image_reply(reply: str) -> bool:
+        text = (reply or "").lower()
+        if not text:
+            return True
+        cn_needles = (
+            "没有提供实际的图片",
+            "没有提供实际的截图",
+            "没有提供图片",
+            "无法直接读取",
+            "请您上传",
+            "请上传",
+            "没有收到图片",
+            "未提供图片",
+        )
+        en_needles = (
+            "no image",
+            "no actual image",
+            "cannot access the image",
+            "please upload",
+            "image was not provided",
+        )
+        return any(x in text for x in cn_needles + en_needles)
+
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
+        import time
+        import urllib.error
+        import urllib.request
+
+        if purpose == "project":
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "unsupported_project",
+                "timeout_sec": self.timeout_sec,
+                "elapsed_ms": 0,
+                "model": self.model,
+                "provider": self.base_url,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(message),
+                "completion_tokens_est": 0,
+                "total_tokens_est": self._estimate_tokens(message),
+                "error": "ollama_lite intentionally does not run project tasks",
+            })
+            return USER_FRIENDLY_PROGRESS_REPLY
+
+        if not self._probe_available():
+            # Fast fallback path: when the user's laptop/tunnel is offline, do
+            # not block interaction/report calls. HybridLiteAdapter will route
+            # the same prompt to the primary backend.
+            return USER_FRIENDLY_PROGRESS_REPLY
+
+        clipped = message or ""
+        if len(clipped) > self.max_input_chars:
+            clipped = clipped[:self.max_input_chars] + "\n\n[truncated for local model]"
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": self._system_prompt(purpose)},
+                {"role": "user", "content": clipped},
+            ],
+            "stream": False,
+            "temperature": 0.1,
+            "max_tokens": self._max_tokens(purpose, max_tokens),
+        }
+        if purpose == "classify":
+            payload["response_format"] = {"type": "json_object"}
+        started_at = time.time()
+        try:
+            req = urllib.request.Request(
+                self.base_url + "/chat/completions",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            reply = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            reply = self._clean_reply(reply, purpose)
+            elapsed_ms = int((time.time() - started_at) * 1000)
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "ok" if reply else "empty",
+                "timeout_sec": self.timeout_sec,
+                "elapsed_ms": elapsed_ms,
+                "model": self.model,
+                "provider": self.base_url,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(clipped),
+                "completion_tokens_est": self._estimate_tokens(reply),
+                "total_tokens_est": self._estimate_tokens(clipped) + self._estimate_tokens(reply),
+                "reply_preview": reply[:500],
+            })
+            return reply or USER_FRIENDLY_PROGRESS_REPLY
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "failed",
+                "timeout_sec": self.timeout_sec,
+                "elapsed_ms": int((time.time() - started_at) * 1000),
+                "model": self.model,
+                "provider": self.base_url,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(clipped),
+                "completion_tokens_est": 0,
+                "total_tokens_est": self._estimate_tokens(clipped),
+                "error": str(exc),
+            })
+            return USER_FRIENDLY_PROGRESS_REPLY
+
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        """Use Ollama native multimodal chat when the selected model supports it."""
+        import time
+        import urllib.error
+        import urllib.request
+
+        valid = [p for p in (image_paths or []) if p and os.path.exists(p)]
+        if not valid or not self._probe_available():
+            return USER_FRIENDLY_PROGRESS_REPLY
+        if not self._is_vision_model_name(self.model):
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "unsupported_vision_model",
+                "timeout_sec": 0,
+                "elapsed_ms": 0,
+                "model": self.model,
+                "provider": self.base_url,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(message),
+                "completion_tokens_est": 0,
+                "total_tokens_est": self._estimate_tokens(message),
+                "error": "selected Ollama model is not known to support images",
+                "image_count": len(valid),
+            })
+            return USER_FRIENDLY_PROGRESS_REPLY
+        images: list[str] = []
+        for path in valid[:8]:
+            try:
+                with open(path, "rb") as f:
+                    images.append(base64.b64encode(f.read()).decode("ascii"))
+            except OSError:
+                continue
+        if not images:
+            return USER_FRIENDLY_PROGRESS_REPLY
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": message,
+                    "images": images,
+                }
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": self._max_tokens(purpose, max_tokens),
+            },
+        }
+        started_at = time.time()
+        api_root = self._ollama_api_root(self.base_url)
+        try:
+            req = urllib.request.Request(
+                api_root + "/api/chat",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            reply = str((data.get("message") or {}).get("content") or "").strip()
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "no_image_reply" if self._looks_like_no_image_reply(reply) else ("ok" if reply else "empty"),
+                "timeout_sec": self.timeout_sec,
+                "elapsed_ms": int((time.time() - started_at) * 1000),
+                "model": self.model,
+                "provider": api_root,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(message),
+                "completion_tokens_est": self._estimate_tokens(reply),
+                "total_tokens_est": self._estimate_tokens(message) + self._estimate_tokens(reply),
+                "reply_preview": reply[:500],
+                "image_count": len(images),
+            })
+            if self._looks_like_no_image_reply(reply):
+                return USER_FRIENDLY_PROGRESS_REPLY
+            return reply or USER_FRIENDLY_PROGRESS_REPLY
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+            self._log_chat_attempt({
+                "ts": datetime.now().isoformat(),
+                "purpose": purpose,
+                "status": "failed",
+                "timeout_sec": self.timeout_sec,
+                "elapsed_ms": int((time.time() - started_at) * 1000),
+                "model": self.model,
+                "provider": api_root,
+                "message_chars": len(message or ""),
+                "prompt_tokens_est": self._estimate_tokens(message),
+                "completion_tokens_est": 0,
+                "total_tokens_est": self._estimate_tokens(message),
+                "error": str(exc),
+                "image_count": len(images),
+            })
+            return USER_FRIENDLY_PROGRESS_REPLY
+
+
 class DirectAdapter(AgentAdapter):
     """Direct adapter - Partner operates without an external agent.
     
@@ -837,12 +1998,52 @@ class DirectAdapter(AgentAdapter):
         return "Direct mode: I can only work through scheduled tasks."
 
 
+class HybridLiteAdapter(AgentAdapter):
+    """Route small language tasks to Ollama and heavy project work to primary."""
+
+    def __init__(self, primary: AgentAdapter, lite: OllamaLiteAdapter):
+        self.primary = primary
+        self.lite = lite
+        self.workspace = getattr(primary, "workspace", getattr(lite, "workspace", ""))
+
+    def name(self) -> str:
+        return f"{self.primary.name()}+ollama_lite"
+
+    def search_web(self, query: str) -> List[SearchResult]:
+        return self.primary.search_web(query)
+
+    def execute_task(self, prompt: str) -> str:
+        return self.primary.execute_task(prompt)
+
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
+        if purpose in {"classify", "interaction", "report"}:
+            reply = self.lite.chat(message, max_tokens=max_tokens, purpose=purpose)
+            if reply and reply != USER_FRIENDLY_PROGRESS_REPLY:
+                return reply
+        return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
+
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        # Try local/remote Ollama vision first if configured with a vision model;
+        # fall back to primary backend such as Hermes --image.
+        reply = self.lite.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+        if reply and reply != USER_FRIENDLY_PROGRESS_REPLY:
+            return reply
+        return self.primary.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+
+
 def create_adapter(backend: str, workspace_path: str, model: Optional[str] = None,
                    provider: Optional[str] = None) -> AgentAdapter:
     """Factory function to create the appropriate adapter."""
     adapters = {
         "hermes": HermesAdapter,
         "codex": CodexAdapter,
+        "ollama_lite": OllamaLiteAdapter,
         "direct": DirectAdapter,
     }
     
@@ -864,23 +2065,52 @@ def create_adapter(backend: str, workspace_path: str, model: Optional[str] = Non
     
     adapter_class = adapters.get(backend, DirectAdapter)
     try:
-        return adapter_class(workspace_path, model=model, provider=provider)
+        primary = adapter_class(workspace_path, model=model, provider=provider)
     except TypeError:
-        return adapter_class(workspace_path)
+        primary = adapter_class(workspace_path)
+
+    agent_config = _load_agent_config(workspace_path)
+    pool_config = agent_config.get("ollama_pool", {})
+    if not isinstance(pool_config, dict):
+        pool_config = {}
+    pool_enabled = bool(pool_config.get("enabled", False))
+    pool_mode = str(pool_config.get("mode") or "").strip().lower()
+    dynamic_config = agent_config.get("dynamic_ollama", {})
+    if not isinstance(dynamic_config, dict):
+        dynamic_config = {}
+    dynamic_ollama = os.getenv("PARTNER_DYNAMIC_OLLAMA_PROJECT")
+    if dynamic_ollama is None:
+        dynamic_ollama = str(dynamic_config.get("enabled", "0"))
+    dynamic_ollama = dynamic_ollama.strip().lower()
+    pool_project_enabled = pool_enabled and pool_mode in {"project", "all"}
+    if backend != "ollama_lite" and (
+        pool_project_enabled
+        or dynamic_ollama in {"1", "true", "on", "enabled", "yes", "auto"}
+    ):
+        primary = DynamicOllamaProjectAdapter(primary, workspace_path)
+
+    lite_mode = os.getenv("PARTNER_OLLAMA_LITE")
+    if lite_mode is None:
+        lite_mode = "auto" if pool_enabled and pool_mode in {"lite", "all"} else "off"
+    lite_mode = str(lite_mode).strip().lower()
+    if backend != "ollama_lite" and lite_mode not in {"0", "false", "off", "disabled", "no"}:
+        try:
+            if lite_mode == "auto" or lite_mode in {"1", "true", "on", "enabled", "yes"} or OllamaLiteAdapter.is_available():
+                return HybridLiteAdapter(primary, OllamaLiteAdapter(workspace_path))
+        except Exception:
+            pass
+    return primary
 
 
 def list_available_adapters(workspace_path: str) -> list:
-    """List all available agent adapters."""
+    """List user-selectable agent adapters for setup/diagnostics.
+
+    Runtime keeps legacy adapters for backward compatibility, but new CLI setup
+    intentionally exposes only the supported production backends.
+    """
     all_adapters = [
         ("hermes", "Hermes Agent", "🔮"),
         ("openclaw", "OpenClaw (小龙虾)", "🦞"),
-        ("crewai", "CrewAI", "👥"),
-        ("autogpt", "AutoGPT", "🤖"),
-        ("openhands", "OpenHands", "👐"),
-        ("gptme", "gptme", "💻"),
-        ("codex", "OpenAI Codex", "⚡"),
-        ("claude_code", "Claude Code", "🧠"),
-        ("direct", "Direct (no agent)", "📌"),
     ]
     
     result = []

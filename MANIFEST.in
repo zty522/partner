@@ -1,11 +1,11 @@
 # Include essential files
 include LICENSE
 include README.md
-include CONTRIBUTING.md
+include CHANGELOG.md
+include release_v0.7.0.md
 
 # Include package data (templates, configs, etc.)
-recursive-include partner/templates *.yaml *.yml *.json
-recursive-include partner *.yaml *.yml *.json
+recursive-include partner *.json
 
 # Exclude test files from distribution
 recursive-exclude tests *
@@ -13,7 +13,6 @@ recursive-exclude partner/tests *
 
 # Exclude development/CI files
 exclude .gitignore
-exclude AUDIT_REPORT.md
 exclude demo.py
 exclude run_cycle.py
 

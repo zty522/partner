@@ -33,6 +33,10 @@ class MindPool:
         self._thread_queue: queue.PriorityQueue[MindEvent] = queue.PriorityQueue(maxsize=0)
         # 等待室：{event.id: (wake_after, event)} — 不到时间的暂存这里
         self._waiting_room: dict = {}
+        # 已被 scheduler 取出、但 handler 还没执行完的事件。
+        # 这段窗口内事件已经不在 queue 里，也可能尚未进入 executor 的
+        # _running_projects，因此必须在 pool 层参与去重。
+        self._inflight: dict[str, MindEvent] = {}
         self._total_put: int = 0
         self._total_get: int = 0
         self._save_path: str = save_path
@@ -55,12 +59,15 @@ class MindPool:
             data = []
             for ev in self._queue._queue:
                 data.append(self._event_to_dict(ev))
-            try:
-                while True:
-                    ev = self._thread_queue.get_nowait()
+            for ev in self._inflight.values():
+                data.append(self._event_to_dict(ev))
+            # Important: this is only a persistence snapshot.  Do not drain
+            # _thread_queue here.  QQ/bridge threads use put_threadsafe(); if
+            # save() consumes that queue, the running scheduler will never see
+            # the event until a process restart reloads mind_pool.json.
+            with self._thread_queue.mutex:
+                for ev in list(self._thread_queue.queue):
                     data.append(self._event_to_dict(ev))
-            except queue.Empty:
-                pass
             for eid, (wake_at, ev) in self._waiting_room.items():
                 d = self._event_to_dict(ev)
                 d["wake_after"] = wake_at
@@ -80,12 +87,11 @@ class MindPool:
                 data = []
                 for ev in self._queue._queue:
                     data.append(self._event_to_dict(ev))
-                try:
-                    while True:
-                        ev = self._thread_queue.get_nowait()
+                for ev in self._inflight.values():
+                    data.append(self._event_to_dict(ev))
+                with self._thread_queue.mutex:
+                    for ev in list(self._thread_queue.queue):
                         data.append(self._event_to_dict(ev))
-                except queue.Empty:
-                    pass
                 for eid, (wake_at, ev) in self._waiting_room.items():
                     d = self._event_to_dict(ev)
                     d["wake_after"] = wake_at
@@ -107,6 +113,23 @@ class MindPool:
             data = self._dedupe_event_dicts(data if isinstance(data, list) else [])
             count = 0
             for d in data:
+                event_type = str(d.get("type", "")).lower()
+                if event_type == "report":
+                    try:
+                        from datetime import datetime, timezone
+                        created = str(d.get("created_at") or "")
+                        created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        if created_dt.tzinfo is None:
+                            created_dt = created_dt.replace(tzinfo=timezone.utc)
+                        if (_time.time() - created_dt.timestamp()) > 300:
+                            logger.info(f"[MIND] Drop stale persisted report event: {d.get('id', '')[:8]}")
+                            continue
+                    except Exception:
+                        # A report without a parseable timestamp is unsafe to
+                        # replay because QQ users may receive duplicate stale
+                        # progress messages after restart.
+                        logger.info(f"[MIND] Drop stale persisted report with invalid timestamp: {d.get('id', '')[:8]}")
+                        continue
                 ev = self._dict_to_event(d)
                 if ev.wake_after and ev.wake_after > _time.time():
                     self._waiting_room[ev.id] = (ev.wake_after, ev)
@@ -156,23 +179,52 @@ class MindPool:
             return None
         payload = d.get("payload") or {}
         event_type = str(d.get("type", "")).lower()
-        if event_type == "project":
+        if event_type in {
+            "project",
+            "direct_task",
+            "literature_review",
+            "data_analysis",
+            "evidence_audit",
+            "artifact_build",
+            "pdf_report",
+            "project_think",
+            "curiosity_explore",
+            "habit_update",
+            "stop_project",
+        }:
             title = str(payload.get("title") or "").strip()
             if not title:
                 return None
-            return ("project", title)
+            event_kind = str(payload.get("event_kind") or "").strip()
+            # PROJECT is a lifeline, not a one-shot task.  While step N is
+            # inflight, the executor must be able to enqueue step N+1.  Deduping
+            # only by title incorrectly blocks that continuation and leaves the
+            # instance idle after a successful round.
+            step = payload.get("step")
+            if step is not None and str(step).strip() != "":
+                try:
+                    step_key = int(step)
+                except Exception:
+                    step_key = str(step).strip()
+                return (event_type, title, event_kind, step_key)
+            return (event_type, title, event_kind)
         if event_type == "content_digest":
             content_id = str(payload.get("content_id") or "").strip()
-            project = str(payload.get("project") or "").strip()
             if content_id:
                 return ("content_digest", content_id)
-            if project:
-                return ("content_digest_project", project)
+            # Without a stable content_id we cannot safely dedupe by project:
+            # rapid multi-message shares often belong to the same project but
+            # must be digested independently.
+            return None
         return None
 
     @classmethod
     def _dedupe_event_dicts(cls, rows: list[dict]) -> list[dict]:
-        """Keep one pending PROJECT per project title; keep the earliest wake."""
+        """Keep duplicate work out of persisted queues.
+
+        PROJECT events are deduped by title + step when step is available so a
+        running project can persist a valid next-step continuation.
+        """
         best_by_key = {}
         out = []
         for row in rows or []:
@@ -199,10 +251,28 @@ class MindPool:
         for ev in list(getattr(self._queue, "_queue", [])):
             if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
                 return True
+        with self._thread_queue.mutex:
+            for ev in list(self._thread_queue.queue):
+                if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
+                    return True
+        for ev in self._inflight.values():
+            if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
+                return True
         for _, (_, ev) in self._waiting_room.items():
             if self._dedupe_key_from_dict(self._event_to_dict(ev)) == key:
                 return True
         return False
+
+    def mark_inflight(self, event: MindEvent):
+        self._inflight[event.id] = event
+        if self._auto_save:
+            self.save()
+
+    def unmark_inflight(self, event_id: str):
+        if event_id in self._inflight:
+            self._inflight.pop(event_id, None)
+            if self._auto_save:
+                self.save()
 
     @classmethod
     async def get_instance(cls) -> 'MindPool':
@@ -338,8 +408,6 @@ class MindPool:
             self._total_get += 1
             logger.info(f"[MIND] START event_type={event.type.value}, id={event.id[:8]}, "
                         f"pri={event.priority}, topic={event.payload.get('topic', '')}")
-            if self._auto_save:
-                self.save()
             return event
 
     def qsize(self) -> int:
@@ -351,6 +419,7 @@ class MindPool:
             "async_queue_size": self._queue.qsize(),
             "thread_queue_size": self._thread_queue.qsize(),
             "waiting_room_size": len(self._waiting_room),
+            "inflight_size": len(self._inflight),
             "total_put": self._total_put,
             "total_get": self._total_get,
         }

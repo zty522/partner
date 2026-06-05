@@ -16,11 +16,11 @@ from .event_types import (
 )
 from .pool import MindPool
 from .scheduler import mind_loop
-from .executor import init as init_executor, execute_event, set_push_callback
+from .executor import init as init_executor, execute_event, set_file_push_callback, set_push_callback
 
 __all__ = [
     "MindEvent", "EventType",
     "report", "cron_tick", "wake_up",
     "MindPool", "mind_loop", "init_executor", "execute_event",
-    "set_push_callback",
+    "set_push_callback", "set_file_push_callback",
 ]

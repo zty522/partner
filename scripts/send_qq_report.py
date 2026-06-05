@@ -294,11 +294,25 @@ def render_report_text(state_data: dict) -> str:
             current = phase
             break
 
+    if not summary and not completed:
+        return ""
+
+    low_value_patterns = (
+        "我先继续在后台处理",
+        "继续盯着",
+        "继续往下推",
+        "有结果了再跟你说",
+        "文件已更新",
+        "目录",
+    )
+    if summary and any(p in summary for p in low_value_patterns):
+        return ""
+
     lines = []
     if title:
-        lines.append(f"我刚推进了一下「{title}」。")
+        lines.append(f"「{title}」有阶段性更新。")
     else:
-        lines.append("我刚推进了一下当前项目。")
+        lines.append("当前项目有阶段性更新。")
 
     if summary:
         lines.append(summary.rstrip("。") + "。")
@@ -309,10 +323,8 @@ def render_report_text(state_data: dict) -> str:
         lines.append(f"这轮已经完成了 {len(completed)} 个阶段。")
 
     pending = int(queue.get("pending", 0) or 0)
-    if pending > 0:
-        lines.append("我会顺着这条线继续往下推，有结果了再跟你说。")
-    else:
-        lines.append("我会继续盯着这条线，有新进展再跟你说。")
+    if pending > 0 and current and current.get("current_step"):
+        lines.append(f"后台还有 {pending} 个待处理动作。")
 
     text = "\n".join(lines).strip()
     if len(text) > 500:
@@ -392,6 +404,12 @@ def main():
     try:
         token = get_access_token()
         message_text = render_report_text(state_data)
+        if not message_text:
+            log("No meaningful heartbeat report — skipping push")
+            state_data["pushed"] = False
+            state_data["push_reason"] = "low_value"
+            print(json.dumps(state_data, ensure_ascii=False))
+            return
         success = send_qq_message(ctx["openid"], message_text, token)
         if success:
             log("✅ Natural-language report sent to QQ!")

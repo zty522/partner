@@ -3,15 +3,18 @@
 ; Build with: ISCC.exe installer.iss
 
 #define MyAppName "Partner"
-#define MyAppVersion "0.6.0"
+#define MyAppVersion "0.7.0"
+#define MyAppVerName "Partner v0.7.0"
 #define MyAppPublisher "Partner Team"
 #define MyAppURL "https://github.com/zty522/partner"
 #define MyAppExeName "Partner.bat"
+#define MyAppId "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 
 [Setup]
-AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppVerName}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
@@ -20,13 +23,16 @@ DefaultDirName={userpf}\Partner
 DefaultGroupName=Partner
 AllowNoIcons=yes
 OutputDir=.\output
-OutputBaseFilename=Partner-{#MyAppVersion}-Setup
+OutputBaseFilename=Partner-v{#MyAppVersion}-Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\partner\assets\partner_app_v2.ico
+UninstallDisplayIcon={app}\partner\assets\partner_app_v2.ico
 PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
-CloseApplications=no
+DisableDirPage=no
+CloseApplications=yes
 AppMutex=PartnerMutex
 UsePreviousAppDir=yes
 UsePreviousGroup=yes
@@ -39,8 +45,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-Source: "..\partner\*"; DestDir: "{app}\partner"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\partner\*"; DestDir: "{app}\partner"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc,*.pyo"
+Source: "..\dist\Partner\*"; DestDir: "{app}\Partner"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*,*.pyc,*.pyo"
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -49,14 +56,26 @@ Source: "..\Partner.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\config.json"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{userprograms}\Partner"; Filename: "wscript.exe"; Parameters: "{app}\Partner.vbs"; WorkingDir: "{app}"
-Name: "{userdesktop}\Partner"; Filename: "wscript.exe"; Parameters: "{app}\Partner.vbs"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userprograms}\Partner"; Filename: "{app}\Partner\Partner.exe"; WorkingDir: "{app}\Partner"; IconFilename: "{app}\partner\assets\partner_app_v2.ico"
+Name: "{userdesktop}\Partner"; Filename: "{app}\Partner\Partner.exe"; WorkingDir: "{app}\Partner"; Tasks: desktopicon; IconFilename: "{app}\partner\assets\partner_app_v2.ico"
 Name: "{userprograms}\Uninstall Partner"; Filename: "{uninstallexe}"
 
 [Code]
 var
   PythonInstalled: Boolean;
   AppDir: String;
+
+procedure UpdateExistingInstallLabel(Sender: TObject);
+var
+  ExistingPath: String;
+begin
+  ExistingPath := WizardDirValue;
+  if FileExists(AddBackslash(ExistingPath) + 'Partner.vbs') or
+     FileExists(AddBackslash(ExistingPath) + 'Partner\Partner.exe') then
+    WizardForm.DiskSpaceLabel.Caption := 'Detected an existing Partner installation in: ' + ExistingPath
+  else
+    WizardForm.DiskSpaceLabel.Caption := 'No previous installation detected in the selected location.';
+end;
 
 { ── Detect Python ── }
 function CheckPython(): Boolean;
@@ -116,6 +135,22 @@ end;
 procedure InitializeWizard;
 begin
   PythonInstalled := CheckPython();
+  WizardForm.WelcomeLabel2.Caption :=
+    'Install Partner v{#MyAppVersion} on this computer.' + #13#10 +
+    'You can choose the install location on the next step.';
+  WizardForm.DirEdit.OnChange := @UpdateExistingInstallLabel;
+  UpdateExistingInstallLabel(WizardForm.DirEdit);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  WizardForm.StatusLabel.Caption := 'Closing running Partner processes...';
+  Exec('taskkill.exe', '/IM Partner.exe /T /F',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(800);
 end;
 
 { ── Run install steps ── }
@@ -136,9 +171,6 @@ begin
     RunPostInstall();
 
     WizardForm.StatusLabel.Caption := 'Setup complete!';
-    SuppressibleMsgBox('Partner has been installed successfully!' + #13#10 +
-      'Double-click the Partner shortcut on your desktop to launch.',
-      mbInformation, MB_OK, IDOK);
   end;
 end;
 
