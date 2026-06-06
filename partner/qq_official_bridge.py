@@ -406,7 +406,12 @@ class QQQfficialBridge:
                 if shared_content:
                     self._nudge_content_digest(shared_content)
             reply = self._simplify_response(decision.reply_to_user)
-            reply = prefix_event_notice(reply, decision.event_type, event_kind=decision.event_kind)
+            reply = prefix_event_notice(
+                reply,
+                decision.event_type,
+                event_kind=decision.event_kind,
+                workspace=self.workspace,
+            )
             if not (reply or "").strip():
                 backend_error = self._recent_backend_failure_notice()
                 if backend_error:
@@ -501,7 +506,9 @@ class QQQfficialBridge:
         }
 
     def _is_recent_duplicate_message(self, msg: QQMessage) -> bool:
-        key = msg.msg_id or f"{msg.sender_id}:{msg.message_type.value}:{msg.content.strip()}"
+        if not msg.msg_id:
+            return False
+        key = msg.msg_id
         now = time.time()
         cutoff = now - self._message_dedup_ttl
         try:
@@ -618,8 +625,6 @@ class QQQfficialBridge:
             if len(line) < 10:
                 continue
             if re.match(r"^\d{4}-\d{2}-\d{2}", line):
-                continue
-            if "我先继续在后台处理，晚点给你汇报进展" in line:
                 continue
             if "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__" in line:
                 continue
@@ -748,45 +753,6 @@ class QQQfficialBridge:
 
         if stripped_reply == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
             return ""
-
-        for bad in (
-            "处理时出了点问题",
-            "处理时出了点问题，稍后再试",
-            "处理超时了，稍后再试吧",
-            "请求超时，请稍后再试",
-            "我这边API有点忙，晚点再聊",
-            "我先继续在后台处理，晚点给你汇报进展",
-            "目前正在看你的项目信息，还没有确定具体方向。你这边有什么想做的，可以直接跟我说，我来安排推进。",
-        ):
-            if stripped_reply == bad:
-                return ""
-        if re.search(r"(还没有确定具体方向|没有确定具体方向|你这边有什么想做|有什么想做的|可以直接跟我说|我来安排推进|我这轮还在继续推进)", reply):
-            return ""
-
-        import re
-        lines = [line.strip() for line in reply.splitlines() if line.strip()]
-        filtered_lines = []
-        removed_question = False
-        for line in lines:
-            trimmed_line = re.sub(
-                r"[，,。；;]?\s*(?:需要的话|如果需要|如需)?\s*随时(?:说|告诉我|跟我说).*",
-                "",
-                line,
-            ).strip("，,。；; ")
-            if trimmed_line and trimmed_line != line:
-                removed_question = True
-                filtered_lines.append(trimmed_line)
-                continue
-            if re.search(r"(要不要|想不想|你看|还是我|直接说就行|现在可以直接说|你有想.*吗|你想怎么处理|你想先搞哪个|有啥想继续搞|随时说|随时告诉我|你想让我|你要我|请选择|给我方向|你这边有什么想做|有什么想做的|直接跟我说|我来安排推进)", line):
-                removed_question = True
-                continue
-            if "?" in line or "？" in line:
-                if re.search(r"(什么|吗|要不要|还是|想不想|直接说)", line):
-                    removed_question = True
-                    continue
-            filtered_lines.append(line)
-        if removed_question:
-            reply = "\n".join(filtered_lines)
 
         # ── Safety filter: catch internal leaks before any formatting ──
         # Traceback / error dumps → replace with friendly message
@@ -1211,7 +1177,10 @@ class QQQfficialBridge:
             logger.debug(f"Failed to append QQ chat history: {exc}")
 
     def _send_reply_once(self, original_msg: QQMessage, reply: str):
-        key = original_msg.msg_id or f"{original_msg.sender_id}:{original_msg.content.strip()}"
+        if not original_msg.msg_id:
+            self._send_reply(original_msg, reply)
+            return
+        key = original_msg.msg_id
         now = time.time()
         cutoff = now - self._message_dedup_ttl
         stale = [k for k, ts in self._recent_reply_keys.items() if ts < cutoff]
@@ -1413,7 +1382,7 @@ class QQQfficialBridge:
         if self._bot:
             sanitized = self._sanitize_outbound_text(content)
             if not sanitized:
-                logger.info("Suppressing empty/low-value proactive QQ push")
+                logger.info("Suppressing empty proactive QQ push")
                 return False
             return self._bot.send_proactive(to_user, sanitized, msg_type)
         return False
@@ -1428,20 +1397,6 @@ class QQQfficialBridge:
             return ""
         if text == "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
             return ""
-        if "我先继续在后台处理，晚点给你汇报进展" in text:
-            text = text.replace("我先继续在后台处理，晚点给你汇报进展", "")
-        if "处理超时了，稍后再试吧" in text:
-            text = text.replace("处理超时了，稍后再试吧", "")
-        text = re.sub(
-            r"[，,。；;]?\s*(?:需要的话|如果需要|如需)?\s*随时(?:说|告诉我|跟我说).*",
-            "",
-            text,
-        ).strip("，,。；; ")
-        text = re.sub(
-            r"(有啥想继续搞|随时说|随时告诉我|你想让我|你要我|要不要|请选择|给我方向).*",
-            "",
-            text,
-        ).strip()
         if text.startswith("{") and '"type": "partner_heartbeat"' in text:
             return ""
         return text

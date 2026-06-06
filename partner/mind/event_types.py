@@ -13,8 +13,9 @@
 保留的事件类型：PROJECT, REPORT, CRON_TICK, WAKE_UP, REFLECTION,
 CROSS_PROJECT, MEMORY_CONSOLIDATE, CONTENT_DIGEST, CONTENT_PATROL。
 
-动作级事件：DIRECT_TASK, LITERATURE_REVIEW, DATA_ANALYSIS, EVIDENCE_AUDIT,
-ARTIFACT_BUILD, PDF_REPORT, PROJECT_THINK, CURIOSITY_EXPLORE, HABIT_UPDATE。项目只是容器，具体动作由这些
+动作级事件：DIRECT_TASK, LITERATURE_REVIEW, DATA_FETCH, DATA_ANALYSIS, VISUALIZATION,
+EVIDENCE_AUDIT, ARTIFACT_BUILD, PDF_REPORT, EMAIL_DELIVERY, WEB_SEARCH, WEB_CAPTURE, PROJECT_THINK,
+OBJECTIVE_REVIEW, CURIOSITY_EXPLORE, HABIT_UPDATE。项目只是容器，具体动作由这些
 小事件承载，避免所有用户请求都进入重型 PROJECT 管道。
 """
 
@@ -28,13 +29,19 @@ from enum import Enum
 class EventType(str, Enum):
     """所有念头类型（精简版）。"""
     PROJECT = "project"                # 长期项目：多步推进的研究意图
-    DIRECT_TASK = "direct_task"        # 一次性直接交付：改表、查天气、生成文件等
+    DIRECT_TASK = "direct_task"        # 一次性直接交付：改文件、生成文件等
     LITERATURE_REVIEW = "literature_review"  # 查资料/找文献/整理方法，不自动进入实验
-    DATA_ANALYSIS = "data_analysis"    # 数据读取、统计、作图、最小分析
+    DATA_FETCH = "data_fetch"          # 数据获取：只获取/下载/保存一个真实数据源
+    DATA_ANALYSIS = "data_analysis"    # 数据读取、统计、质量检查或最小分析
+    VISUALIZATION = "visualization"    # 可视化：只基于已有数据/结果绘制图表
     EVIDENCE_AUDIT = "evidence_audit"  # 证据审计、泄露/过拟合/可靠性检查
     ARTIFACT_BUILD = "artifact_build"  # 图表、表格、代码、PPT 等用户可见产物构建
     PDF_REPORT = "pdf_report"          # PDF 报告生成：把已有结果/摘要整理成 PDF 并交付
+    EMAIL_DELIVERY = "email_delivery"  # 邮件交付：把已有/本轮生成文件通过 SMTP 发送
+    WEB_SEARCH = "web_search"          # 公开网页/平台搜索：网页、小红书、B站等
+    WEB_CAPTURE = "web_capture"        # 网页/图片捕获：下载公开图片或对公开网页截图
     PROJECT_THINK = "project_think"    # 项目拆解、难点识别、下一步选择
+    OBJECTIVE_REVIEW = "objective_review"  # 目标/交付物对齐：回看根目标、已完成、缺口和下一 event
     CURIOSITY_EXPLORE = "curiosity_explore"  # 好奇探索：从可执行下一步中选择最小探索动作
     HABIT_UPDATE = "habit_update"      # 经验/习惯/成长记录和抽象化
     STOP_PROJECT = "stop_project"      # 显式停止当前执行链：由 LLM selector 选择后才等待/清 active

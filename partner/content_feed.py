@@ -145,18 +145,14 @@ def infer_access_status(text: str, platform: str = "", urls: list[str] | None = 
 
 
 def _project_relevance(project: str, text: str) -> bool:
-    project_raw = project or ""
+    project_raw = (project or "").lower()
     raw = (text or "").lower()
-    checks = [
-        (("agent", "智能体", "前沿", "评测"), ("agent", "deepseek", "benchmark", "工具", "多智能体", "swe-bench", "评测", "openclaw")),
-        (("分子", "药物", "生成"), ("smiles", "selfies", "vae", "vq-vae", "reinvent", "autodock", "docking", "分子", "药物", "生成")),
-        (("bio", "ai", "交叉", "生物"), ("bio", "biology", "protein", "蛋白", "单细胞", "分子", "基因", "agent", "ai")),
-        (("年龄", "预测", "衰老"), ("age", "aging", "年龄", "衰老", "biomarker", "甲基化", "表观")),
-    ]
-    for project_needles, text_needles in checks:
-        if any(x in project_raw.lower() for x in project_needles):
-            return any(x in raw for x in text_needles)
-    return False
+    if not project_raw or not raw:
+        return False
+    tokens = set(re.findall(r"[A-Za-z][A-Za-z0-9_+-]{2,}|[\u4e00-\u9fff]{2,}", project_raw))
+    if not tokens:
+        return False
+    return any(token in raw for token in list(tokens)[:12])
 
 
 def infer_content_intent(
@@ -454,19 +450,15 @@ def ensure_content_sources(workspace: str) -> dict[str, Any]:
     defaults = {
         "enabled": False,
         "interval_hours": 6,
-        "topic": "AI Agent 发展、长期自主 agent、agent 评测、工具使用、多智能体",
+        "topic": "",
         "rules": [
             "只访问公开页面、公开搜索结果或用户提供链接",
             "不绕过登录、不破解反爬、不批量抓取",
-            "小红书/B站/知乎若需要登录，则只记录不可访问和原因",
+            "平台需要登录、权限或验证码时，只记录不可访问和原因",
             "每轮最多提炼 3 条内容信号",
             "内容只作为 hypothesis，不作为事实证据",
         ],
-        "sources": [
-            {"platform": "zhihu", "url": "https://www.zhihu.com/search?q=AI%20Agent", "enabled": False},
-            {"platform": "bilibili", "url": "https://search.bilibili.com/all?keyword=AI%20Agent", "enabled": False},
-            {"platform": "xiaohongshu", "url": "https://www.xiaohongshu.com/search_result?keyword=AI%20Agent", "enabled": False},
-        ],
+        "sources": [],
     }
     if os.path.exists(path):
         try:

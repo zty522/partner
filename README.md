@@ -344,6 +344,43 @@ The QQ bridge should:
 
 ---
 
+## External Content Acquisition
+
+Partner includes a bounded content acquisition layer for `web_search` and `content_digest` events. It is designed to read real accessible content, save evidence files, and report access limits instead of pretending a blocked page was read.
+
+```bash
+python -m partner.content_tools status
+python -m partner.content_tools acquire "https://www.bilibili.com/video/BV..." --dest ./deliverables/content --json
+```
+
+Supported paths:
+
+- Public web/blog/article pages: direct HTTP reader and optional Jina Reader.
+- Bilibili: public video metadata, owner profile, cover image, top public comments, and media files exposed by public APIs.
+- WeChat official accounts, Zhihu, Xiaohongshu, and dynamic social pages: use public readers when possible; for full text behind login/app rendering, configure a login browser profile or a platform-specific external CLI/MCP.
+- Images: downloadable media URLs are saved as real files; screenshots can be OCRed or passed to a vision-capable backend.
+- Videos: public links can be downloaded with `yt-dlp` when explicitly enabled, then keyframes can be extracted with `ffmpeg`.
+- Literature and databases: use public APIs/download pages or register a dedicated CLI/MCP wrapper for sources that need credentials.
+
+Useful environment variables:
+
+```bash
+PARTNER_CONTENT_TOOL_COMMANDS='[
+  {"name":"xhs-reader","platforms":["xiaohongshu"],"cmd":"xhs-reader read {url}"},
+  {"name":"wechat-reader","platforms":["wechat"],"cmd":"wechat-reader read {url}"},
+  {"name":"zhihu-reader","platforms":["zhihu"],"cmd":"zhihu-reader read {url}"}
+]'
+PARTNER_ENABLE_BROWSER_LOGIN=1
+PARTNER_BROWSER_PROFILE=/path/to/chrome-profile
+PARTNER_ENABLE_VIDEO_DOWNLOAD=1
+PARTNER_YTDLP_COOKIES=/path/to/cookies.txt
+PARTNER_ENABLE_OCR=1
+```
+
+Partner does not bypass login, captchas, paywalls, app-only restrictions, or platform permissions. If full text, images, comments, or videos are not accessible with the configured tools, the event records the exact limitation and asks for forwarded text, screenshots, cookies, or an authorized connector.
+
+---
+
 ## Design Principles
 
 - Event first: always decide the next event before execution.

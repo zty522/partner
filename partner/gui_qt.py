@@ -28,8 +28,8 @@ import time
 import tempfile
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QSize, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QSize, QUrl, QEvent
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -68,7 +68,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PARTNER_DIR = os.path.dirname(APP_DIR)
 ICON_DIR = os.path.join(APP_DIR, "assets", "icons")
 CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-AUTO_REFRESH_INTERVAL_MS = 15000
+AUTO_REFRESH_INTERVAL_MS = 60000
+AUTO_REFRESH_IDLE_GRACE_MS = 12000
+AUTO_REFRESH_MIN_DASHBOARD_RENDER_MS = 180000
+REMOTE_BUNDLE_CACHE_TTL_SEC = 60
 CHAT_HISTORY_LIMIT = 30
 APP_ICON_PATH = os.path.join(APP_DIR, "assets", "partner_app_v2.ico")
 PARTNER_CONFIG_SCHEMA_VERSION = "0.7.0-config-v1"
@@ -134,6 +137,19 @@ def icon_url(key: str) -> str:
 
 def load_svg_icon(key: str) -> QIcon:
     return QIcon(icon_path(key))
+
+
+def load_tinted_svg_icon(key: str, color: str) -> QIcon:
+    base = QIcon(icon_path(key))
+    pixmap = base.pixmap(22, 22)
+    if pixmap.isNull():
+        return base
+    tinted = pixmap.copy()
+    painter = QPainter(tinted)
+    painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), QColor(color))
+    painter.end()
+    return QIcon(tinted)
 
 
 def set_windows_app_id():
@@ -337,6 +353,94 @@ def ask_partner_confirm(parent, title: str, message: str) -> bool:
     return dialog.exec() == QDialog.Accepted
 
 
+def show_partner_text_dialog(parent, title: str, message: str, width: int = 720, height: int = 620, rich: bool = False) -> None:
+    dialog = DraggableDialog(parent)
+    dialog.setWindowTitle(title or "Partner")
+    dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+    dialog.setAttribute(Qt.WA_TranslucentBackground, True)
+    dialog.setModal(True)
+    dialog.setStyleSheet(dialog_stylesheet())
+
+    root = QVBoxLayout(dialog)
+    root.setContentsMargins(18, 18, 18, 18)
+    shell = QFrame()
+    shell.setObjectName("Card")
+    root.addWidget(shell)
+
+    layout = QVBoxLayout(shell)
+    layout.setContentsMargins(24, 22, 24, 20)
+    layout.setSpacing(14)
+    head = QHBoxLayout()
+    icon = QLabel()
+    icon.setPixmap(load_svg_icon("configured").pixmap(20, 20))
+    title_label = QLabel(title or "Partner")
+    title_label.setStyleSheet("font-size: 18px; font-weight: 780;")
+    close = QPushButton("×")
+    close.setObjectName("TitleControlClose")
+    close.setFixedSize(42, 34)
+    close.clicked.connect(dialog.accept)
+    head.addWidget(icon)
+    head.addWidget(title_label)
+    head.addStretch(1)
+    head.addWidget(close)
+    layout.addLayout(head)
+
+    view = QTextBrowser()
+    view.setOpenExternalLinks(True)
+    view.setStyleSheet(
+        f"""
+        QTextBrowser {{
+            background: #f7fafc;
+            border: 1px solid {COLORS['border']};
+            border-radius: 16px;
+            padding: 14px;
+            color: {COLORS['text']};
+            selection-background-color: {COLORS['accent']};
+        }}
+        """
+    )
+    if rich:
+        view.setHtml(str(message or ""))
+    else:
+        view.setPlainText(str(message or ""))
+    view.setMinimumHeight(360)
+    layout.addWidget(view, 1)
+    footer = QHBoxLayout()
+    ok_btn = QPushButton("知道了")
+    ok_btn.setObjectName("PrimaryAction")
+    ok_btn.clicked.connect(dialog.accept)
+    footer.addStretch(1)
+    footer.addWidget(ok_btn)
+    layout.addLayout(footer)
+
+    dialog.resize(width, height)
+    dialog.exec()
+
+
+class DraggableDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.drag_origin: Optional[QPoint] = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and event.position().y() <= 76:
+            self.drag_origin = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drag_origin is not None and event.buttons() & Qt.LeftButton:
+            self.move(event.globalPosition().toPoint() - self.drag_origin)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.drag_origin = None
+        super().mouseReleaseEvent(event)
+
+
 def prompt_partner_text(parent, title: str, label: str, text: str = "") -> tuple[str, bool]:
     dialog = QDialog(parent)
     dialog.setWindowTitle(title or "Partner")
@@ -418,6 +522,8 @@ I18N = {
         "tab_dashboard": "仪表盘",
         "tab_chat": "对话",
         "tab_qq": "实例 / QQ 机器人",
+        "tab_agent_api": "Agent / API",
+        "tab_linux": "WSL / Linux",
         "tab_logs": "探索记录",
         "tab_ollama": "Ollama",
         "tab_settings": "配置服务器",
@@ -430,12 +536,18 @@ I18N = {
         "opening_page": "正在打开 {page}…",
         "config_footer": "连接配置：{path}",
         "config_footer_empty": "连接配置：未读取",
-        "mode_local": "Windows 本地工作区",
-        "mode_wsl": "Linux / WSL 已连接",
-        "mode_ssh": "SSH 服务器已连接",
+        "mode_local": "当前连接为 Windows 本地",
+        "mode_wsl": "当前连接为 WSL / Linux",
+        "mode_ssh": "当前连接为 SSH 服务器",
+        "switch_to_local": "切回本地电脑",
+        "switch_to_linux": "切到 WSL",
+        "switch_to_ssh": "切到 SSH",
+        "switched_to_local": "已切回 Windows 本地。",
+        "switched_to_linux": "已切到 WSL / Linux。",
+        "switched_to_ssh": "已切到 SSH 服务器。",
         "setup_title": "连接 Partner",
-        "setup_sub": "选择本机工作区、Linux / WSL，或通过 SSH 连接服务器上已经在运行的 Partner。",
-        "chat_remote_readonly": "当前连接的是 Linux / WSL 工作区。Windows 桌面端当前只负责查看，不直接接管对话与运行。",
+        "setup_sub": "先配置 Windows 本地工作区和本机 Agent。WSL / Linux、SSH 等放在高级配置里。",
+        "chat_remote_readonly": "当前连接的是 WSL / Linux 工作区。Windows 桌面端当前只负责查看，不直接接管对话与运行。",
         "chat_target": "发送目标",
         "chat_no_instance": "未选择实例",
         "chat_current_target": "当前发送给实例 {id}",
@@ -459,12 +571,15 @@ I18N = {
         "qq_auto_hint": "实例启动时会自动启动对应 QQ 机器人；关闭实例会一起停止。",
         "add": "新增",
         "delete": "删除",
+        "rename": "改名",
         "configure": "配置",
         "start_instance": "开启实例",
         "stop_instance": "关闭实例",
         "instance_already_running": "实例已经在运行。",
         "instance_started": "实例已启动。",
         "instance_start_failed": "实例启动失败。",
+        "instance_auto_start_failed": "自动启动失败：{items}",
+        "first_instance_notice": "已默认创建第一个实例 01。实例就是一套独立的研究工作区，用来分别保存目标、对话、日志、QQ 机器人和运行状态。",
         "instance_stopped": "实例已停止。",
         "instance_stop_failed": "实例停止失败。",
         "instance_no_pid": "实例没有运行中的 PID。",
@@ -481,7 +596,11 @@ I18N = {
         "qq_bot": "QQ 机器人",
         "control_backend": "控制后端",
         "instance_label": "实例 {id}",
-        "instance_label_02": "实例02",
+        "agent_api": "Agent API",
+        "configure_agent_api": "配置 API",
+        "beginner_guide": "新手指引",
+        "api_config_file": "API 本地配置文件",
+        "qq_config_file": "QQ 机器人本地配置文件",
         "logs_dir": "记录目录",
         "logs_summary": "按实例浏览 user 文件夹",
         "logs_preview": "内容预览",
@@ -518,12 +637,13 @@ I18N = {
         "settings_workspace": "工作区",
         "settings_mode_help": "把本地、WSL 和 SSH 放到同一页管理，不再弹出旧式设置窗口。",
         "settings_local_radio": "Windows 本地工作区",
-        "settings_wsl_radio": "连接 Linux / WSL",
+        "settings_wsl_radio": "连接 WSL / Linux",
         "settings_ssh_radio": "连接 SSH 服务器",
         "settings_local_placeholder": "选择本地 Partner workspace",
         "settings_browse_workspace": "浏览工作区",
         "settings_wsl_distro": "WSL 发行版",
         "settings_linux_path": "Linux 路径",
+        "settings_detect_linux_path": "自动检测 Linux 路径",
         "settings_detect_agents": "重新检测 Agent",
         "settings_save": "保存高级设置",
         "settings_agent_title": "本机 Agent",
@@ -546,6 +666,8 @@ I18N = {
         "tab_dashboard": "Dashboard",
         "tab_chat": "Chat",
         "tab_qq": "Instances / QQ Bots",
+        "tab_agent_api": "Agent / API",
+        "tab_linux": "WSL / Linux",
         "tab_logs": "Records",
         "tab_ollama": "Ollama",
         "tab_settings": "Server Config",
@@ -558,12 +680,18 @@ I18N = {
         "opening_page": "Opening {page}…",
         "config_footer": "Connection config: {path}",
         "config_footer_empty": "Connection config: not loaded",
-        "mode_local": "Windows Local Workspace",
-        "mode_wsl": "Linux / WSL Connected",
-        "mode_ssh": "SSH Server Connected",
+        "mode_local": "Current connection: Windows local",
+        "mode_wsl": "Current connection: WSL / Linux",
+        "mode_ssh": "Current connection: SSH server",
+        "switch_to_local": "Switch to Local",
+        "switch_to_linux": "Switch to WSL",
+        "switch_to_ssh": "Switch to SSH",
+        "switched_to_local": "Switched to Windows local.",
+        "switched_to_linux": "Switched to WSL / Linux.",
+        "switched_to_ssh": "Switched to SSH server.",
         "setup_title": "Connect Partner",
-        "setup_sub": "Choose a local workspace, Linux / WSL, or connect to an already running server-side Partner over SSH.",
-        "chat_remote_readonly": "This window is attached to a Linux / WSL workspace. The Windows desktop app is view-only for now.",
+        "setup_sub": "Configure the Windows local workspace and local agents first. WSL / Linux and SSH are in advanced settings.",
+        "chat_remote_readonly": "This window is attached to a WSL / Linux workspace. The Windows desktop app is view-only for now.",
         "chat_target": "Target",
         "chat_no_instance": "No instance selected",
         "chat_current_target": "Sending to instance {id}",
@@ -587,12 +715,15 @@ I18N = {
         "qq_auto_hint": "Starting an instance also starts its QQ bot; stopping the instance stops both.",
         "add": "Add",
         "delete": "Delete",
+        "rename": "Rename",
         "configure": "Configure",
         "start_instance": "Start Instance",
         "stop_instance": "Stop Instance",
         "instance_already_running": "The instance is already running.",
         "instance_started": "Instance started.",
         "instance_start_failed": "Instance failed to start.",
+        "instance_auto_start_failed": "Auto-start failed: {items}",
+        "first_instance_notice": "The first instance 01 has been created by default. An instance is an independent research workspace that keeps its own goals, chat, logs, QQ bot, and runtime state.",
         "instance_stopped": "Instance stopped.",
         "instance_stop_failed": "Instance failed to stop.",
         "instance_no_pid": "No running PID was found for this instance.",
@@ -609,7 +740,11 @@ I18N = {
         "qq_bot": "QQ bot",
         "control_backend": "Control backend",
         "instance_label": "Instance {id}",
-        "instance_label_02": "Instance 02",
+        "agent_api": "Agent API",
+        "configure_agent_api": "Configure API",
+        "beginner_guide": "Beginner Guide",
+        "api_config_file": "API Local Config",
+        "qq_config_file": "QQ Bot Local Config",
         "logs_dir": "Record Folders",
         "logs_summary": "Browse the user folder by instance",
         "logs_preview": "Preview",
@@ -646,12 +781,13 @@ I18N = {
         "settings_workspace": "Workspace",
         "settings_mode_help": "Manage local, WSL, and SSH connections from this page.",
         "settings_local_radio": "Windows Local Workspace",
-        "settings_wsl_radio": "Connect Linux / WSL",
+        "settings_wsl_radio": "Connect WSL / Linux",
         "settings_ssh_radio": "Connect SSH Server",
         "settings_local_placeholder": "Choose a local Partner workspace",
         "settings_browse_workspace": "Browse Workspace",
         "settings_wsl_distro": "WSL Distro",
         "settings_linux_path": "Linux Path",
+        "settings_detect_linux_path": "Detect Linux Path",
         "settings_detect_agents": "Detect Agents",
         "settings_save": "Save Advanced Settings",
         "settings_agent_title": "Local Agents",
@@ -703,6 +839,31 @@ def count_jsonl_lines(path: str) -> int:
             return sum(1 for _ in f)
     except Exception:
         return 0
+
+
+def count_research_memory_entries(memory: dict) -> int:
+    if not isinstance(memory, dict):
+        return 0
+    total = 0
+    for key in ("projects",):
+        value = memory.get(key)
+        if isinstance(value, dict):
+            total += len([item for item in value.values() if item])
+        elif isinstance(value, list):
+            total += len([item for item in value if item])
+    for key in ("lessons", "ideas", "episodes", "growth_events"):
+        value = memory.get(key)
+        if isinstance(value, list):
+            total += len([item for item in value if item])
+        elif isinstance(value, dict):
+            total += len([item for item in value.values() if item])
+    return total
+
+
+def count_research_habits(habits: dict) -> int:
+    if not isinstance(habits, dict):
+        return 0
+    return sum(1 for value in habits.values() if value)
 
 
 def parse_iso(value: str):
@@ -943,9 +1104,44 @@ def is_wsl_unc_path(path: str) -> bool:
     return bool(path) and str(path).replace("/", "\\").startswith("\\\\wsl$\\")
 
 
+def unc_to_wsl_path(path: str) -> str:
+    if not is_wsl_unc_path(path):
+        return path
+    text = str(path).replace("/", "\\")
+    parts = [part for part in text.split("\\") if part]
+    if len(parts) < 3:
+        return path
+    return "/" + "/".join(parts[2:])
+
+
+def readable_filesystem_path(path: str, workspace_mode: str = "", distro: str | None = None) -> str:
+    if not path:
+        return ""
+    text = str(path).strip()
+    if os.name != "nt":
+        if is_wsl_unc_path(text):
+            return unc_to_wsl_path(text)
+        if len(text) >= 2 and text[1] == ":":
+            return windows_to_wsl_path(text)
+        return text
+    if is_wsl_unc_path(text):
+        wsl_text = unc_to_wsl_path(text)
+        if wsl_text.replace("\\", "/").startswith("/mnt/"):
+            return wsl_to_windows_path(wsl_text)
+        return text
+    if workspace_mode == "wsl":
+        distro_name = str(distro or "").strip()
+        if text.replace("\\", "/").startswith("/mnt/"):
+            return wsl_to_windows_path(text)
+        if len(text) >= 2 and text[1] == ":" and distro_name:
+            return linux_path_to_unc(windows_to_wsl_path(text), distro_name)
+    return text
+
+
 def detect_wsl_distros() -> list[str]:
     if os.name != "nt":
-        return []
+        current = os.environ.get("WSL_DISTRO_NAME", "").strip()
+        return [current] if current else []
     try:
         result = subprocess.run(
             ["wsl.exe", "-l", "-q"],
@@ -964,6 +1160,149 @@ def detect_wsl_distros() -> list[str]:
         return [line.strip() for line in cleaned.splitlines() if line.strip()]
     except Exception:
         return []
+
+
+def detect_default_wsl_distro() -> str:
+    env_name = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if env_name:
+        return env_name
+    if os.name != "nt":
+        return ""
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-l", "-v"],
+            capture_output=True,
+            timeout=5,
+            creationflags=CREATION_FLAGS,
+        )
+        if result.returncode != 0:
+            return ""
+        raw = result.stdout or b""
+        try:
+            decoded = raw.decode("utf-16le")
+        except Exception:
+            decoded = raw.decode("mbcs" if os.name == "nt" else "utf-8", errors="replace")
+        for line in decoded.replace("\x00", "").splitlines():
+            text = line.strip()
+            if not text.startswith("*"):
+                continue
+            parts = text.lstrip("*").strip().split()
+            return parts[0] if parts else ""
+    except Exception:
+        return ""
+    return ""
+
+
+def preferred_wsl_distro(saved: str | None = None, distros: list[str] | None = None) -> str:
+    choices = distros if distros is not None else detect_wsl_distros()
+    saved_text = str(saved or "").strip()
+    default = detect_default_wsl_distro()
+    if default and (not choices or default in choices):
+        return default
+    if saved_text and (not choices or saved_text in choices):
+        return saved_text
+    if len(choices) == 1:
+        return choices[0]
+    return ""
+
+
+def wsl_path_exists_in_distro(path: str, distro: str | None = None) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/")
+    if not normalized:
+        return False
+    if os.name != "nt":
+        return os.path.isdir(normalized)
+    cmd = ["wsl.exe"]
+    distro_name = str(distro or "").strip()
+    if distro_name:
+        cmd.extend(["-d", distro_name])
+    cmd.extend(["--", "sh", "-lc", f"test -d {shlex.quote(normalized)}"])
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=8,
+            creationflags=CREATION_FLAGS,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def linux_workspace_candidates(local_workspace: str | None = None) -> list[str]:
+    candidates: list[str] = []
+
+    def add_workspace(path: str | None) -> None:
+        raw = str(path or "").strip()
+        if not raw:
+            return
+        if is_wsl_unc_path(raw):
+            return
+        normalized = raw.replace("\\", "/")
+        if normalized.startswith("/mnt/"):
+            candidates.append(normalized)
+            return
+        win_path = wsl_to_windows_path(raw) if normalized.startswith("/mnt/") else raw
+        expanded = os.path.expandvars(win_path)
+        candidates.append(windows_to_wsl_path(expanded))
+        if os.path.basename(expanded.rstrip("\\/")).lower() == "partner":
+            candidates.append(windows_to_wsl_path(str(Path(expanded).parent / "partner_workspace")))
+
+    try:
+        settings = load_gui_bridge_settings()
+    except Exception:
+        settings = {}
+    add_workspace(str(settings.get("local_workspace") or ""))
+    configured_linux = str(settings.get("linux_workspace") or "").strip()
+    if configured_linux and not configured_linux.startswith("/mnt/c/Users/"):
+        add_workspace(configured_linux)
+
+    partner_root = Path(PARTNER_DIR)
+    add_workspace(str(partner_root.parent / "partner_workspace"))
+    add_workspace(str(Path.cwd().parent / "partner_workspace"))
+
+    if os.name == "nt":
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            add_workspace(f"{letter}:\\work\\partner_workspace")
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            add_workspace(f"{letter}:\\partner_workspace")
+    else:
+        for mount in (sorted(Path("/mnt").glob("*")) if Path("/mnt").exists() else []):
+            add_workspace(str(mount / "work" / "partner_workspace"))
+        for mount in (sorted(Path("/mnt").glob("*")) if Path("/mnt").exists() else []):
+            add_workspace(str(mount / "partner_workspace"))
+
+    add_workspace(str(Path.cwd() / "partner_workspace"))
+    add_workspace(local_workspace)
+    current_ws = ""
+    try:
+        current_ws = find_workspace() or ""
+    except Exception:
+        current_ws = ""
+    add_workspace(current_ws)
+    if configured_linux:
+        add_workspace(configured_linux)
+    if os.name == "nt":
+        add_workspace(str(Path.home() / "partner_workspace"))
+    else:
+        add_workspace(str(Path.home() / "partner_workspace"))
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        text = str(candidate or "").strip().replace("\\", "/")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        if text.startswith("/mnt/"):
+            ordered.append(text)
+    return ordered
+
+
+def detect_linux_workspace_path(local_workspace: str | None = None, distro: str | None = None) -> str:
+    for text in linux_workspace_candidates(local_workspace):
+        if wsl_path_exists_in_distro(text, distro):
+            return text
+    return ""
 
 
 def detect_local_agents() -> list[dict]:
@@ -1026,7 +1365,6 @@ def detect_local_agents() -> list[dict]:
                 "/usr/bin/openclaw",
             ]
         )
-        or wsl_which("openclaw")
     )
     claude = shutil.which("claude") or first_existing([os.path.join(home, ".local", "bin", "claude"), "/usr/local/bin/claude", "/usr/bin/claude"])
     return [
@@ -1042,6 +1380,11 @@ def linux_path_to_unc(linux_path: str, distro_name: str) -> str:
         return ""
     clean = linux_path.strip().replace("/", "\\").lstrip("\\")
     return f"\\\\wsl$\\{distro_name}\\{clean}"
+
+
+def instance_sort_key(value: str) -> tuple[int, str]:
+    text = str(value or "")
+    return (0, f"{int(text):08d}") if text.isdigit() else (1, text.lower())
 
 
 def find_workspace() -> Optional[str]:
@@ -1075,6 +1418,50 @@ def load_dialog_history(workspace: str, n: int = 50) -> list[dict]:
         pass
     turns.sort(key=lambda item: str(item.get("timestamp") or item.get("created_at") or ""))
     return turns[-n:]
+
+
+def ensure_first_local_instance(workspace: str) -> tuple[bool, str]:
+    if not workspace:
+        return False, ""
+    cfg_path = os.path.join(workspace, "global_config.json")
+    cfg = load_json_file(cfg_path)
+    instances = cfg.get("instances") if isinstance(cfg, dict) else None
+    if isinstance(instances, dict) and instances:
+        return False, next(iter(sorted(instances.keys(), key=instance_sort_key)))
+    instance_id = "01"
+    inst_dir = os.path.join(workspace, "instances", instance_id)
+    for sub in ["00_config", "10_logs", "20_records", "logs", "state", "system", "user", "99_temp"]:
+        os.makedirs(os.path.join(inst_dir, sub), exist_ok=True)
+    cfg = cfg if isinstance(cfg, dict) else {}
+    cfg.setdefault("python_cmd", sys.executable)
+    cfg.setdefault("partner_dir", PARTNER_DIR)
+    cfg["instances"] = {
+        instance_id: {
+            "enabled": True,
+            "working_dir": inst_dir,
+            "qq_config": "00_config/qq_config.json",
+            "agent_backend": "hermes",
+            "interval_minutes": 30,
+        }
+    }
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    try:
+        from partner.config import save_partner_config_data
+
+        save_partner_config_data(
+            inst_dir,
+            {
+                "workspace": {"path": inst_dir, "readonly_dirs": []},
+                "agent": {"backend": "hermes"},
+                "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
+                "name": "Partner",
+            },
+        )
+    except Exception:
+        pass
+    return True, instance_id
 
 
 def append_synced_chat_history(workspace: str, row: dict):
@@ -1219,6 +1606,7 @@ class InstanceSnapshot:
     progress_text: str
     progress_pct: int
     knowledge_entries: int
+    habit_count: int
     journal_count: int
     growth: str
     token_total: int
@@ -1286,6 +1674,8 @@ class RefreshWorker(QObject):
         result = {
             "page_index": self.page_index,
             "force": self.force,
+            "silent": bool(getattr(self, "silent", False)),
+            "auto": bool(getattr(self, "auto", False)),
             "finished_at": datetime.now().strftime("%H:%M:%S"),
             "error": "",
         }
@@ -1295,7 +1685,7 @@ class RefreshWorker(QObject):
                 self.owner._remote_user_file_list_cache.clear()
             if self.owner.workspace_mode == "ssh":
                 self.owner.fetch_remote_bundle(force=self.force)
-                if self.page_index == 1:
+                if self.page_index == 0:
                     _, inst_dir = self.chat_instance
                     if inst_dir:
                         self.owner.remote_dialog_history(inst_dir, n=CHAT_HISTORY_LIMIT)
@@ -1304,6 +1694,97 @@ class RefreshWorker(QObject):
         except Exception as exc:
             result["error"] = str(exc)
         self.finished.emit(result)
+
+
+class LinuxPathWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, distro: str, local_workspace: str, seq: int):
+        super().__init__()
+        self.distro = distro
+        self.local_workspace = local_workspace
+        self.seq = seq
+
+    def run(self):
+        result = {
+            "seq": self.seq,
+            "distro": self.distro,
+            "path": "",
+            "candidates": [],
+            "checked": [],
+            "error": "",
+        }
+        try:
+            candidates = linux_workspace_candidates(self.local_workspace)
+            result["candidates"] = candidates[:12]
+            for path in candidates:
+                exists = wsl_path_exists_in_distro(path, self.distro)
+                result["checked"].append({"path": path, "exists": exists})
+                if exists:
+                    result["path"] = path
+                    break
+        except Exception as exc:
+            result["error"] = str(exc)
+        self.finished.emit(result)
+
+
+class RuntimeActionWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, owner: "PartnerQtWindow", action: str, instance_id: str, instance_dir: str, payload: dict | None = None):
+        super().__init__()
+        self.owner = owner
+        self.action = action
+        self.instance_id = instance_id
+        self.instance_dir = instance_dir
+        self.payload = payload or {}
+
+    def run(self):
+        ok = False
+        msg = ""
+        try:
+            if self.action == "start_instance":
+                ok, msg = self.owner.start_instance_runtime(self.instance_id, self.instance_dir)
+            elif self.action == "stop_instance":
+                ok, msg = self.owner.stop_instance_runtime(self.instance_id, self.instance_dir)
+            elif self.action == "start_bot":
+                ok, msg = self.owner.start_bot_runtime(self.instance_dir, self.payload.get("bot"))
+            elif self.action == "stop_bot":
+                ok, msg = self.owner.stop_bot_runtime(self.instance_dir)
+            else:
+                msg = f"未知操作：{self.action}"
+        except Exception as exc:
+            ok = False
+            msg = str(exc)
+        self.finished.emit(
+            {
+                "ok": ok,
+                "message": msg,
+                "action": self.action,
+                "instance_id": self.instance_id,
+                "instance_dir": self.instance_dir,
+                "finished_at": datetime.now().strftime("%H:%M:%S"),
+            }
+        )
+
+
+class BackgroundTaskWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, name: str, fn: Callable[[], tuple[bool, str]]):
+        super().__init__()
+        self.name = name
+        self.fn = fn
+
+    def run(self):
+        ok = False
+        msg = ""
+        try:
+            ok, msg = self.fn()
+        except Exception as exc:
+            ok = False
+            msg = str(exc)
+        self.finished.emit({"ok": ok, "message": msg, "name": self.name, "finished_at": datetime.now().strftime("%H:%M:%S")})
 
 
 class MetricCard(QFrame):
@@ -1482,7 +1963,7 @@ class SetupDialog(QDialog):
         mode_layout = QVBoxLayout(mode_box)
         self.mode_group = QButtonGroup(self)
         self.local_radio = QRadioButton("Windows 本地工作区")
-        self.wsl_radio = QRadioButton("连接 Linux / WSL 中的 Partner")
+        self.wsl_radio = QRadioButton("连接 WSL / Linux 中的 Partner")
         self.ssh_radio = QRadioButton("连接 SSH 服务器中的 Partner")
         self.mode_group.addButton(self.local_radio)
         self.mode_group.addButton(self.wsl_radio)
@@ -1504,18 +1985,21 @@ class SetupDialog(QDialog):
         local_layout.addWidget(browse_btn)
         shell_layout.addWidget(local_box)
 
-        wsl_box = QGroupBox("Linux / WSL 工作区")
+        wsl_box = QGroupBox("WSL / Linux 工作区")
         wsl_layout = QGridLayout(wsl_box)
         distros = detect_wsl_distros()
-        distro_default = (bridge_settings.get("wsl_distro") or (distros[0] if distros else ""))
+        distro_default = preferred_wsl_distro(bridge_settings.get("wsl_distro"), distros)
         self.distro_input = StableComboBox()
         self.distro_input.setObjectName("ModernCombo")
         self.distro_input.setEditable(True)
         self.distro_input.addItems(distros)
         if distro_default:
             self.distro_input.setCurrentText(distro_default)
-        self.linux_path_input = QLineEdit(bridge_settings.get("linux_workspace") or "/mnt/e/work/partner_workspace")
-        hint = QLabel("例如 `/mnt/e/work/partner_workspace`，会转换成 `\\\\wsl$` 路径连接。")
+        configured_linux_path = str(bridge_settings.get("linux_workspace") or "")
+        detected_linux_path = detect_linux_workspace_path(workspace, distro_default)
+        self.linux_path_input = QLineEdit(detected_linux_path or configured_linux_path)
+        self.linux_path_input.setPlaceholderText("例如 /mnt/e/work/partner_workspace")
+        hint = QLabel("Linux 路径是同一个 Windows workspace 在 WSL 里的路径，例如 E:\\work\\partner_workspace 对应 /mnt/e/work/partner_workspace。")
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {COLORS['subtext']};")
         wsl_layout.addWidget(QLabel("WSL 发行版"), 0, 0)
@@ -1530,7 +2014,7 @@ class SetupDialog(QDialog):
         self.ssh_host_input = QLineEdit(bridge_settings.get("ssh_host") or "")
         self.ssh_port_input = QLineEdit(str(bridge_settings.get("ssh_port") or 22))
         self.ssh_user_input = QLineEdit(bridge_settings.get("ssh_user") or "ubuntu")
-        self.ssh_key_input = QLineEdit(bridge_settings.get("ssh_key") or "/mnt/e/work/temp/zty.pem")
+        self.ssh_key_input = QLineEdit(bridge_settings.get("ssh_key") or "")
         self.ssh_workspace_input = QLineEdit(bridge_settings.get("ssh_workspace") or "/home/ubuntu/partner_workspace")
         self.ssh_partner_dir_input = QLineEdit(bridge_settings.get("ssh_partner_dir") or "/home/ubuntu/partner")
         ssh_hint = QLabel("支持 host / port / user / key / remote workspace，仪表盘和实例控制会通过 SSH 读取与执行。")
@@ -1587,11 +2071,20 @@ class SetupDialog(QDialog):
             }
             save_partner_config_data(ws, config)
             save_workspace_pointer(ws)
+            ensure_first_local_instance(ws)
             self.result_workspace = ws
             self.result_mode = "local"
         elif self.wsl_radio.isChecked():
             distro = self.distro_input.currentText().strip()
             linux_path = self.linux_path_input.text().strip()
+            detected_path = detect_linux_workspace_path(workspace, distro)
+            if detected_path and (
+                not linux_path
+                or linux_path.startswith("/mnt/c/")
+                or not wsl_path_exists_in_distro(linux_path, distro)
+            ):
+                linux_path = detected_path
+                self.linux_path_input.setText(linux_path)
             if not distro or not linux_path:
                 show_partner_notice(self, "Partner", "请填写 WSL 发行版和 Linux 路径")
                 return
@@ -1647,8 +2140,8 @@ class OnboardingDialog(QDialog):
         self.setWindowTitle("Partner 配置")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setMinimumSize(980, 720)
-        self.resize(1080, 760)
+        self.setMinimumSize(1180, 620)
+        self.resize(1280, 650)
         self.setStyleSheet(dialog_stylesheet() + self.onboarding_stylesheet())
 
         self.bridge_settings = dict(parent.bridge_settings or {})
@@ -1692,46 +2185,62 @@ class OnboardingDialog(QDialog):
         layout.addLayout(titlebar)
 
         content = QHBoxLayout()
-        content.setContentsMargins(28, 10, 28, 24)
-        content.setSpacing(24)
+        content.setContentsMargins(30, 8, 30, 22)
+        content.setSpacing(28)
         layout.addLayout(content, 1)
 
         left = QFrame()
         left.setObjectName("OnboardingHero")
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(26, 26, 26, 26)
-        left_layout.setSpacing(18)
-        headline = QLabel("让 Partner 成为研究伙伴")
+        left_layout.setContentsMargins(28, 26, 28, 24)
+        left_layout.setSpacing(15)
+        badge = QLabel("GETTING STARTED")
+        badge.setObjectName("OnboardingBadge")
+        badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        headline = QLabel("Partner 是你的 Agent 工作台")
         headline.setWordWrap(True)
-        headline.setStyleSheet("font-size: 34px; font-weight: 820; line-height: 1.1;")
+        headline.setStyleSheet("font-size: 32px; font-weight: 820; line-height: 1.12;")
         subtitle = QLabel(
-            "Partner 会把目标、计划、经验和运行状态持续沉淀在 workspace 中，并调用 Openclaw、Hermes 等 agent 推进研究。"
+            "Partner 会管理实例、对话、任务事件、日志和经验沉淀，并调度 Hermes、OpenClaw 等 Agent 去调用模型和工具。初始配置会创建 Windows workspace、默认实例 01，并准备一个默认 API 和一个默认 QQ 机器人。"
         )
         subtitle.setWordWrap(True)
         subtitle.setObjectName("OnboardingSubtle")
+        left_layout.addWidget(badge)
         left_layout.addWidget(headline)
         left_layout.addWidget(subtitle)
-        left_layout.addSpacing(8)
-        for icon_key, text in (
-            ("folder", "配置 workspace，保存实例、项目、日志和经验"),
-            ("active", "检测 WSL / Linux，并帮助打开安装入口"),
-            ("hermes_ok", "检测 Openclaw、Hermes"),
-            ("token", "引导准备 API、QQ 机器人"),
-        ):
-            row = self.feature_row(icon_key, text)
-            left_layout.addWidget(row)
+
+        flow = QFrame()
+        flow.setObjectName("GuidePanel")
+        flow_layout = QVBoxLayout(flow)
+        flow_layout.setContentsMargins(16, 14, 16, 14)
+        flow_layout.setSpacing(10)
+        flow_title = QLabel("初始配置会建立")
+        flow_title.setObjectName("GuidePanelTitle")
+        flow_layout.addWidget(flow_title)
+        flow_row = QHBoxLayout()
+        flow_row.setSpacing(8)
+        for label in ("workspace", "实例 01", "默认 API", "默认 QQ", "自动启动"):
+            flow_row.addWidget(self.flow_chip(label))
+        flow_row.addStretch(1)
+        flow_layout.addLayout(flow_row)
+        flow_note = QLabel("基础配置只做最少必要项；之后可以在主界面为不同 Agent、实例和 QQ 机器人做更细的配置。")
+        flow_note.setObjectName("OnboardingSubtle")
+        flow_note.setWordWrap(True)
+        flow_layout.addWidget(flow_note)
+        left_layout.addWidget(flow)
+
+        guide_btn = QPushButton("打开新手指引")
+        guide_btn.setObjectName("PrimaryAction")
+        guide_btn.clicked.connect(self.parent_window.show_beginner_guide)
+        left_layout.addWidget(guide_btn)
         left_layout.addStretch(1)
-        advanced = QLabel("进阶功能：连接远程服务器、配置 Ollama 池、切换更多 Agent、管理 QQ 机器人和实例运维。")
-        advanced.setWordWrap(True)
-        advanced.setObjectName("OnboardingNote")
-        left_layout.addWidget(advanced)
 
         right = QFrame()
         right.setObjectName("OnboardingPanel")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(24, 24, 24, 20)
         right_layout.setSpacing(14)
-        panel_title = QLabel("配置")
+        panel_title = QLabel("初始配置")
         panel_title.setStyleSheet("font-size: 24px; font-weight: 820;")
         right_layout.addWidget(panel_title)
 
@@ -1745,19 +2254,6 @@ class OnboardingDialog(QDialog):
         ws_row.addWidget(browse)
         right_layout.addWidget(self.field_card("Workspace", "所有实例、项目、日志和配置会保存在这里。", ws_row))
 
-        wsl_card = self.status_card(
-            "WSL / Ubuntu",
-            self.wsl_status_text(),
-            [
-                ("重新检测", self.refresh_wsl_status),
-                ("安装 WSL", self.open_wsl_install),
-                ("安装 Ubuntu", self.open_ubuntu_install),
-                ("打开 Linux", self.open_wsl_terminal),
-            ],
-        )
-        self.wsl_status_label = wsl_card.findChild(QLabel, "StatusText")
-        right_layout.addWidget(wsl_card)
-
         agent_card = self.status_card(
             "Agent",
             self.agent_status_text(),
@@ -1770,26 +2266,48 @@ class OnboardingDialog(QDialog):
         self.agent_status_label = agent_card.findChild(QLabel, "StatusText")
         right_layout.addWidget(agent_card)
 
-        api_row = QHBoxLayout()
+        api_card = QFrame()
+        api_card.setObjectName("SetupStep")
+        api_card_layout = QVBoxLayout(api_card)
+        api_card_layout.setContentsMargins(16, 14, 16, 14)
+        api_card_layout.setSpacing(10)
+        api_title = QLabel("API 与 QQ 机器人")
+        api_title.setStyleSheet("font-size: 15px; font-weight: 760;")
+        api_sub = QLabel("基础配置只保存一个默认 API 和一个默认 QQ 机器人。高级的多 API、多 Agent 绑定可以稍后在主界面配置。")
+        api_sub.setObjectName("StatusText")
+        api_sub.setWordWrap(True)
+        api_card_layout.addWidget(api_title)
+        api_card_layout.addWidget(api_sub)
+        provider_row = QHBoxLayout()
+        provider_row.setSpacing(10)
+        provider_label = QLabel("API 服务商")
+        provider_label.setObjectName("StatusText")
         self.api_provider_combo = StableComboBox()
         self.api_provider_combo.setObjectName("ModernCombo")
         self.api_provider_combo.addItems(["DeepSeek", "OpenAI"])
         if str(self.bridge_settings.get("api_provider") or "").lower() == "openai":
             self.api_provider_combo.setCurrentText("OpenAI")
-        api_row.addWidget(self.api_provider_combo, 1)
+        provider_row.addWidget(provider_label)
+        provider_row.addWidget(self.api_provider_combo, 1)
+        api_card_layout.addLayout(provider_row)
+        api_actions = QGridLayout()
+        api_actions.setHorizontalSpacing(10)
+        api_actions.setVerticalSpacing(10)
         api_buy = QPushButton("打开 API 平台")
         api_buy.setObjectName("TertiaryAction")
         api_buy.clicked.connect(self.open_selected_api_provider)
+        api_file_btn = QPushButton("API 本地配置")
+        api_file_btn.setObjectName("TertiaryAction")
+        api_file_btn.clicked.connect(self.open_basic_api_config)
         qq_btn = QPushButton("QQ 机器人")
         qq_btn.setObjectName("TertiaryAction")
         qq_btn.clicked.connect(lambda: self.open_url("https://q.qq.com/"))
-        api_row.addWidget(api_buy)
-        api_row.addWidget(qq_btn)
-        api_card = self.field_card(
-            "API 与 QQ 机器人",
-            "先选择 API 服务商，再跳转到对应平台购买或创建 key。QQ 机器人需要在腾讯 QQ 机器人平台创建并获取 AppID / Secret。",
-            api_row,
-        )
+        qq_file_btn = QPushButton("QQ 本地配置")
+        qq_file_btn.setObjectName("TertiaryAction")
+        qq_file_btn.clicked.connect(self.open_basic_qq_config)
+        for idx, btn in enumerate((api_buy, api_file_btn, qq_btn, qq_file_btn)):
+            api_actions.addWidget(btn, idx // 2, idx % 2)
+        api_card_layout.addLayout(api_actions)
         right_layout.addWidget(api_card)
 
         right_layout.addStretch(1)
@@ -1835,6 +2353,15 @@ class OnboardingDialog(QDialog):
             font-size: 15px;
             line-height: 1.35;
         }}
+        QLabel#OnboardingBadge {{
+            color: {COLORS['accent']};
+            background: #e8f1ff;
+            border: 1px solid #cfe0ff;
+            border-radius: 12px;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 820;
+        }}
         QLabel#OnboardingNote {{
             color: #31506f;
             background: #e9f2ff;
@@ -1843,13 +2370,38 @@ class OnboardingDialog(QDialog):
             padding: 14px;
             font-weight: 600;
         }}
+        QFrame#GuidePanel {{
+            background: #ffffff;
+            border: 1px solid #d9e6f5;
+            border-radius: 16px;
+        }}
+        QLabel#GuidePanelTitle {{
+            color: {COLORS['text']};
+            font-size: 13px;
+            font-weight: 780;
+        }}
+        QLabel#FlowChip {{
+            color: {COLORS['text']};
+            background: #f1f6fc;
+            border: 1px solid #d8e4f1;
+            border-radius: 12px;
+            padding: 7px 10px;
+            font-size: 12px;
+            font-weight: 760;
+        }}
         QLabel#StatusText {{
             color: {COLORS['subtext']};
             font-size: 13px;
         }}
         """
 
-    def feature_row(self, icon_key: str, text: str) -> QFrame:
+    def flow_chip(self, text: str) -> QLabel:
+        chip = QLabel(text)
+        chip.setObjectName("FlowChip")
+        chip.setAlignment(Qt.AlignCenter)
+        return chip
+
+    def feature_row(self, icon_key: str, title: str, body: str) -> QFrame:
         row = QFrame()
         row.setObjectName("SetupStep")
         layout = QHBoxLayout(row)
@@ -1859,11 +2411,18 @@ class OnboardingDialog(QDialog):
         icon.setFixedSize(26, 26)
         icon.setAlignment(Qt.AlignCenter)
         icon.setPixmap(self.parent_window.qt_icon(icon_key).pixmap(18, 18))
-        label = QLabel(text)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(2)
+        label = QLabel(title)
         label.setWordWrap(True)
-        label.setStyleSheet("font-weight: 650;")
+        label.setStyleSheet("font-weight: 760;")
+        sub = QLabel(body)
+        sub.setWordWrap(True)
+        sub.setObjectName("StatusText")
+        text_box.addWidget(label)
+        text_box.addWidget(sub)
         layout.addWidget(icon)
-        layout.addWidget(label, 1)
+        layout.addLayout(text_box, 1)
         return row
 
     def field_card(self, title: str, subtitle: str, child_layout: QHBoxLayout) -> QFrame:
@@ -1910,6 +2469,25 @@ class OnboardingDialog(QDialog):
         path = QFileDialog.getExistingDirectory(self, "选择 Partner workspace", self.workspace_input.text().strip() or str(Path.home()))
         if path:
             self.workspace_input.setText(path)
+
+    def ensure_setup_instance(self) -> tuple[str, str]:
+        ws = self.workspace_input.text().strip() or default_local_workspace_path()
+        os.makedirs(ws, exist_ok=True)
+        for sub in ["state", "logs", "data", "00_config"]:
+            os.makedirs(os.path.join(ws, sub), exist_ok=True)
+        _, inst_id = ensure_first_local_instance(ws)
+        inst_id = inst_id or "01"
+        return inst_id, os.path.join(ws, "instances", inst_id)
+
+    def open_basic_api_config(self):
+        inst_id, inst_dir = self.ensure_setup_instance()
+        dialog = BasicApiConfigDialog(self.parent_window, inst_dir)
+        dialog.exec()
+
+    def open_basic_qq_config(self):
+        inst_id, inst_dir = self.ensure_setup_instance()
+        dialog = BasicQQConfigDialog(self.parent_window, inst_id, inst_dir)
+        dialog.exec()
 
     def wsl_status_text(self) -> str:
         distros = detect_wsl_distros()
@@ -2046,7 +2624,7 @@ class OnboardingDialog(QDialog):
             if not self.confirm_action("已检测到 Hermes。是否要重新安装 Hermes？"):
                 return
         else:
-            if not self.confirm_action("未检测到 Hermes。是否现在打开安装命令？"):
+            if not self.confirm_action("未检测到 Hermes。安装脚本需要能访问 GitHub；如果网络受限请先配置代理。是否现在打开安装命令？"):
                 return
         if os.name == "nt":
             self.run_installer_command("irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex", "Hermes 安装")
@@ -2058,11 +2636,11 @@ class OnboardingDialog(QDialog):
             if not self.confirm_action("已检测到 OpenClaw。是否要重新安装 OpenClaw？"):
                 return
         else:
-            if not self.confirm_action("未检测到 OpenClaw。是否现在打开安装命令？"):
+            if not self.confirm_action("未检测到 OpenClaw。将通过 Windows 本机 npm 安装；如果网络受限请先配置代理。是否现在打开安装命令？"):
                 return
         if os.name == "nt":
             self.run_installer_command(
-                'wsl.exe bash -lc "set -o pipefail; echo Installing OpenClaw...; curl -fsSL https://openclaw.ai/install-cli.sh | bash"',
+                "npm install -g openclaw",
                 "OpenClaw 安装",
             )
         else:
@@ -2109,6 +2687,7 @@ class OnboardingDialog(QDialog):
         }
         save_partner_config_data(ws, config)
         save_workspace_pointer(ws)
+        created, _ = ensure_first_local_instance(ws)
         settings = dict(self.bridge_settings or {})
         settings.update(
             {
@@ -2125,6 +2704,7 @@ class OnboardingDialog(QDialog):
         save_gui_bridge_settings(settings, workspace_hint=ws)
         self.parent_window.workspace = ws
         self.parent_window.workspace_mode = "local"
+        self.parent_window._first_instance_created_notice = created
         self.parent_window.bridge_settings, self.parent_window.bridge_settings_path = load_gui_bridge_settings_with_path()
 
     def _mark_seen_without_reconfigure(self):
@@ -2149,6 +2729,718 @@ class OnboardingDialog(QDialog):
     def finish(self):
         self._save_onboarding_settings(completed=True)
         self.accept()
+
+
+class AgentApiDialog(DraggableDialog):
+    def __init__(self, parent, existing: dict | None = None, agent_cfg: dict | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("配置 Agent API")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setStyleSheet(dialog_stylesheet())
+        self.result_data: dict = {}
+        data = existing if isinstance(existing, dict) else {}
+        agent = agent_cfg if isinstance(agent_cfg, dict) else {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame()
+        shell.setObjectName("Card")
+        root.addWidget(shell)
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(16)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(load_svg_icon("token").pixmap(20, 20))
+        title = QLabel("配置 Hermes / OpenClaw API")
+        title.setStyleSheet("font-size: 18px; font-weight: 780;")
+        close = QPushButton("×")
+        close.setObjectName("TitleControlClose")
+        close.setFixedSize(42, 34)
+        close.clicked.connect(self.reject)
+        head.addWidget(icon)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(close)
+        layout.addLayout(head)
+
+        hint = QLabel("provider/model 会写入实例 Partner 配置；base URL/API key 会写入实例的 00_config/agent_api_config.json。")
+        hint.setWordWrap(True)
+        hint.setObjectName("Subtle")
+        layout.addWidget(hint)
+
+        self.fields: dict[str, QLineEdit] = {}
+        for backend, label in (("hermes", "Hermes"), ("openclaw", "OpenClaw")):
+            box = QGroupBox(label)
+            grid = QGridLayout(box)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(8)
+            section = data.get(backend) if isinstance(data.get(backend), dict) else {}
+            defaults = {
+                "provider": section.get("provider") or (agent.get("provider") if agent.get("backend") == backend else ""),
+                "model": section.get("model") or (agent.get("model") if agent.get("backend") == backend else ""),
+                "base_url": section.get("base_url") or "",
+                "api_key": section.get("api_key") or "",
+            }
+            for row, (key, title_text) in enumerate((("provider", "Provider"), ("model", "Model"), ("base_url", "Base URL"), ("api_key", "API Key"))):
+                line = QLineEdit(str(defaults.get(key) or ""))
+                if key == "api_key":
+                    line.setEchoMode(QLineEdit.Password)
+                self.fields[f"{backend}.{key}"] = line
+                grid.addWidget(QLabel(title_text), row, 0)
+                grid.addWidget(line, row, 1)
+            layout.addWidget(box)
+
+        footer = QHBoxLayout()
+        cancel = QPushButton("取消")
+        save = QPushButton("保存")
+        save.setObjectName("PrimaryAction")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.accept_with_data)
+        footer.addStretch(1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+        self.resize(620, 620)
+
+    def accept_with_data(self):
+        data: dict[str, dict] = {}
+        for backend in ("hermes", "openclaw"):
+            data[backend] = {
+                key: self.fields[f"{backend}.{key}"].text().strip()
+                for key in ("provider", "model", "base_url", "api_key")
+            }
+        self.result_data = data
+        self.accept()
+
+
+class BasicApiConfigDialog(DraggableDialog):
+    def __init__(self, parent: "PartnerQtWindow", instance_dir: str):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.instance_dir = instance_dir
+        api_cfg = parent.load_agent_api_config(instance_dir)
+        agent_cfg = parent.load_instance_partner_agent_config(instance_dir)
+        backend = str(agent_cfg.get("backend") or "hermes")
+        section = api_cfg.get(backend) if isinstance(api_cfg.get(backend), dict) else {}
+        self.setWindowTitle("基础 API 配置")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setStyleSheet(dialog_stylesheet())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame()
+        shell.setObjectName("Card")
+        root.addWidget(shell)
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(load_svg_icon("token").pixmap(20, 20))
+        title = QLabel("基础 API 配置")
+        title.setStyleSheet("font-size: 18px; font-weight: 780;")
+        close = QPushButton("×")
+        close.setObjectName("TitleControlClose")
+        close.setFixedSize(42, 34)
+        close.clicked.connect(self.reject)
+        head.addWidget(icon)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(close)
+        layout.addLayout(head)
+
+        hint = QLabel("这里配置一个默认 API，保存后会复制给常用 Agent。复杂的多 API、多 Agent 绑定可以在主界面“实例 / QQ 机器人”页下方配置。")
+        hint.setObjectName("Subtle")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        self.provider_input = QLineEdit(str(section.get("provider") or agent_cfg.get("provider") or "deepseek"))
+        self.base_url_input = QLineEdit(str(section.get("base_url") or ""))
+        self.model_input = QLineEdit(str(section.get("model") or agent_cfg.get("model") or ""))
+        self.api_key_input = QLineEdit(str(section.get("api_key") or ""))
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.provider_input.setPlaceholderText("deepseek / openai / custom")
+        self.base_url_input.setPlaceholderText("例如 https://api.deepseek.com/v1")
+        self.model_input.setPlaceholderText("例如 deepseek-chat")
+        self.api_key_input.setPlaceholderText("API key")
+        for row, (label, widget) in enumerate((("Provider", self.provider_input), ("Base URL", self.base_url_input), ("Model", self.model_input), ("API Key", self.api_key_input))):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(widget, row, 1)
+        layout.addLayout(grid)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Subtle")
+        cancel = QPushButton("取消")
+        save = QPushButton("保存默认 API")
+        save.setObjectName("PrimaryAction")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.save_current)
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+        self.resize(620, 430)
+
+    def save_current(self):
+        entry = {
+            "provider": self.provider_input.text().strip(),
+            "base_url": self.base_url_input.text().strip(),
+            "model": self.model_input.text().strip(),
+            "api_key": self.api_key_input.text().strip(),
+        }
+        data = self.parent_window.load_agent_api_config(self.instance_dir)
+        data = data if isinstance(data, dict) else {}
+        for backend in ("hermes", "openclaw", "codex", "claude_code"):
+            data[backend] = dict(entry)
+        agent_cfg = self.parent_window.load_instance_partner_agent_config(self.instance_dir)
+        agent_cfg["backend"] = str(agent_cfg.get("backend") or "hermes")
+        agent_cfg["provider"] = entry["provider"]
+        agent_cfg["model"] = entry["model"]
+        ok, msg = self.parent_window.save_instance_partner_agent_config(self.instance_dir, agent_cfg)
+        if not ok:
+            self.status_label.setText(msg or "保存失败。")
+            return
+        ok, msg = self.parent_window.save_agent_api_config(self.instance_dir, data)
+        self.status_label.setText(msg if ok else (msg or "保存失败。"))
+
+
+class BasicQQConfigDialog(DraggableDialog):
+    def __init__(self, parent: "PartnerQtWindow", instance_id: str, instance_dir: str):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.instance_id = instance_id
+        self.instance_dir = instance_dir
+        bots, _ = parent.load_bot_configs(instance_dir)
+        bot = bots[0] if bots else {}
+        self.setWindowTitle("基础 QQ 机器人配置")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setStyleSheet(dialog_stylesheet())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame()
+        shell.setObjectName("Card")
+        root.addWidget(shell)
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(load_svg_icon("instances").pixmap(20, 20))
+        title = QLabel("基础 QQ 机器人配置")
+        title.setStyleSheet("font-size: 18px; font-weight: 780;")
+        close = QPushButton("×")
+        close.setObjectName("TitleControlClose")
+        close.setFixedSize(42, 34)
+        close.clicked.connect(self.reject)
+        head.addWidget(icon)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(close)
+        layout.addLayout(head)
+
+        hint = QLabel(f"这里配置一个默认 QQ 机器人，保存后绑定到实例 {html.escape(str(instance_id))}。更多机器人和实例绑定可以在主界面继续管理。")
+        hint.setObjectName("Subtle")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        self.name_input = QLineEdit(str(bot.get("name") or "默认 QQ 机器人"))
+        self.app_id_input = QLineEdit(str(bot.get("app_id") or ""))
+        self.secret_input = QLineEdit(str(bot.get("app_secret") or ""))
+        self.secret_input.setEchoMode(QLineEdit.Password)
+        self.app_id_input.setPlaceholderText("QQ 机器人 AppID")
+        self.secret_input.setPlaceholderText("QQ 机器人 Secret")
+        for row, (label, widget) in enumerate((("名称", self.name_input), ("AppID", self.app_id_input), ("Secret", self.secret_input))):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(widget, row, 1)
+        layout.addLayout(grid)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Subtle")
+        cancel = QPushButton("取消")
+        save = QPushButton("保存默认机器人")
+        save.setObjectName("PrimaryAction")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.save_current)
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+        self.resize(620, 400)
+
+    def save_current(self):
+        bot = {
+            "name": self.name_input.text().strip() or "默认 QQ 机器人",
+            "app_id": self.app_id_input.text().strip(),
+            "app_secret": self.secret_input.text().strip(),
+            "mode": "official",
+            "is_sandbox": True,
+        }
+        self.parent_window.save_bot_configs(self.instance_dir, [bot])
+        self.status_label.setText(f"已保存到实例 {self.instance_id}。")
+
+
+class ApiConfigEditorDialog(DraggableDialog):
+    def __init__(self, parent: "PartnerQtWindow"):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.instances = parent.available_instances()
+        self.current_instance_dir = ""
+        self.current_api_config: dict = {}
+        self.current_agent_config: dict = {}
+        self.setWindowTitle("API 本地配置")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setStyleSheet(dialog_stylesheet())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame()
+        shell.setObjectName("Card")
+        root.addWidget(shell)
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(load_svg_icon("token").pixmap(20, 20))
+        title = QLabel("API 本地配置")
+        title.setStyleSheet("font-size: 18px; font-weight: 780;")
+        close = QPushButton("×")
+        close.setObjectName("TitleControlClose")
+        close.setFixedSize(42, 34)
+        close.clicked.connect(self.reject)
+        head.addWidget(icon)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(close)
+        layout.addLayout(head)
+
+        intro = QLabel("选择实例和当前使用的 Agent，然后填写 provider、base URL、model、API key。保存后实例会按这里的配置调用 LLM。")
+        intro.setObjectName("Subtle")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.instance_combo = StableComboBox()
+        self.instance_combo.setObjectName("ModernCombo")
+        for inst_id, inst_dir in self.instances:
+            self.instance_combo.addItem(parent.display_instance_label(inst_id, inst_dir), (inst_id, inst_dir))
+        self.backend_combo = StableComboBox()
+        self.backend_combo.setObjectName("ModernCombo")
+        self.backend_combo.addItems(["hermes", "openclaw", "codex", "claude_code"])
+        top.addWidget(QLabel("实例"))
+        top.addWidget(self.instance_combo, 1)
+        top.addWidget(QLabel("当前 Agent"))
+        top.addWidget(self.backend_combo, 1)
+        layout.addLayout(top)
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(10)
+        self.profile_combo = StableComboBox()
+        self.profile_combo.setObjectName("ModernCombo")
+        self.profile_name_input = QLineEdit()
+        self.profile_name_input.setPlaceholderText("配置名称，例如 DeepSeek 默认")
+        add_profile = QPushButton("新增配置")
+        delete_profile = QPushButton("删除配置")
+        add_profile.setObjectName("TertiaryAction")
+        delete_profile.setObjectName("TertiaryAction")
+        add_profile.clicked.connect(self.add_profile)
+        delete_profile.clicked.connect(self.delete_profile)
+        profile_row.addWidget(QLabel("API 配置"))
+        profile_row.addWidget(self.profile_combo, 1)
+        profile_row.addWidget(self.profile_name_input, 1)
+        profile_row.addWidget(add_profile)
+        profile_row.addWidget(delete_profile)
+        layout.addLayout(profile_row)
+
+        self.config_path_label = QLabel("")
+        self.config_path_label.setObjectName("Subtle")
+        self.config_path_label.setWordWrap(True)
+        layout.addWidget(self.config_path_label)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        self.provider_input = QLineEdit()
+        self.provider_input.setPlaceholderText("deepseek / openai / custom")
+        self.base_url_input = QLineEdit()
+        self.base_url_input.setPlaceholderText("例如 https://api.openai.com/v1")
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("例如 gpt-4.1 / deepseek-chat")
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("sk-...")
+        for row, (label, widget) in enumerate(
+            (
+                ("Provider", self.provider_input),
+                ("Base URL", self.base_url_input),
+                ("Model", self.model_input),
+                ("API Key", self.api_key_input),
+            )
+        ):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(widget, row, 1)
+        layout.addLayout(grid)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Subtle")
+        cancel = QPushButton("取消")
+        save = QPushButton("保存 API 配置")
+        save.setObjectName("PrimaryAction")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.save_current)
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+
+        self.instance_combo.currentIndexChanged.connect(self.load_current_instance)
+        self.backend_combo.currentTextChanged.connect(self.load_current_backend)
+        self.profile_combo.currentIndexChanged.connect(self.load_current_profile)
+        if self.instances:
+            self.load_current_instance()
+        else:
+            self.status_label.setText("当前没有可配置的实例。")
+        self.resize(720, 520)
+
+    def selected_instance(self) -> tuple[str, str]:
+        data = self.instance_combo.currentData()
+        if isinstance(data, tuple) and len(data) == 2:
+            return str(data[0] or ""), str(data[1] or "")
+        return "", ""
+
+    def load_current_instance(self):
+        inst_id, inst_dir = self.selected_instance()
+        self.current_instance_dir = inst_dir
+        if not inst_dir:
+            return
+        self.current_api_config = self.parent_window.load_agent_api_config(inst_dir)
+        self.current_agent_config = self.parent_window.load_instance_partner_agent_config(inst_dir)
+        backend = str(self.current_agent_config.get("backend") or "hermes")
+        if backend in [self.backend_combo.itemText(i) for i in range(self.backend_combo.count())]:
+            self.backend_combo.blockSignals(True)
+            self.backend_combo.setCurrentText(backend)
+            self.backend_combo.blockSignals(False)
+        self.config_path_label.setText(f"配置文件：{self.parent_window.agent_api_config_path(inst_dir)}")
+        self.load_current_backend()
+
+    def load_current_backend(self):
+        backend = self.backend_combo.currentText().strip() or "hermes"
+        active_backend = str(self.current_agent_config.get("backend") or "hermes")
+        profiles = self.profiles_for_backend(backend)
+        active_name = ((self.current_api_config.get("_active_profile") or {}) if isinstance(self.current_api_config.get("_active_profile"), dict) else {}).get(backend) or ""
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        for profile in profiles:
+            self.profile_combo.addItem(str(profile.get("name") or "默认配置"), profile)
+        target = 0
+        if active_name:
+            for idx, profile in enumerate(profiles):
+                if str(profile.get("name") or "") == str(active_name):
+                    target = idx
+                    break
+        self.profile_combo.setCurrentIndex(target if profiles else -1)
+        self.profile_combo.blockSignals(False)
+        self.status_label.setText(f"当前使用：{active_backend}")
+        self.load_current_profile()
+
+    def profiles_for_backend(self, backend: str) -> list[dict]:
+        profiles_root = self.current_api_config.get("_profiles") if isinstance(self.current_api_config.get("_profiles"), dict) else {}
+        profiles = profiles_root.get(backend) if isinstance(profiles_root.get(backend), list) else []
+        if profiles:
+            return [dict(item) for item in profiles if isinstance(item, dict)]
+        section = self.current_api_config.get(backend) if isinstance(self.current_api_config.get(backend), dict) else {}
+        active_backend = str(self.current_agent_config.get("backend") or "hermes")
+        fallback = {
+            "name": "默认配置",
+            "provider": section.get("provider") or (self.current_agent_config.get("provider") if active_backend == backend else "") or "",
+            "base_url": section.get("base_url") or "",
+            "model": section.get("model") or (self.current_agent_config.get("model") if active_backend == backend else "") or "",
+            "api_key": section.get("api_key") or "",
+        }
+        return [fallback]
+
+    def load_current_profile(self):
+        profile = self.profile_combo.currentData()
+        profile = profile if isinstance(profile, dict) else {}
+        self.profile_name_input.setText(str(profile.get("name") or "默认配置"))
+        self.provider_input.setText(str(profile.get("provider") or ""))
+        self.base_url_input.setText(str(profile.get("base_url") or ""))
+        self.model_input.setText(str(profile.get("model") or ""))
+        self.api_key_input.setText(str(profile.get("api_key") or ""))
+
+    def collect_profile_from_fields(self) -> dict:
+        return {
+            "name": self.profile_name_input.text().strip() or "默认配置",
+            "provider": self.provider_input.text().strip(),
+            "base_url": self.base_url_input.text().strip(),
+            "model": self.model_input.text().strip(),
+            "api_key": self.api_key_input.text().strip(),
+        }
+
+    def update_profiles_for_backend(self, backend: str, profiles: list[dict]):
+        self.current_api_config.setdefault("_profiles", {})
+        if not isinstance(self.current_api_config["_profiles"], dict):
+            self.current_api_config["_profiles"] = {}
+        self.current_api_config["_profiles"][backend] = profiles
+
+    def add_profile(self):
+        backend = self.backend_combo.currentText().strip() or "hermes"
+        profiles = self.profiles_for_backend(backend)
+        profiles.append({"name": f"配置 {len(profiles) + 1}", "provider": "", "base_url": "", "model": "", "api_key": ""})
+        self.update_profiles_for_backend(backend, profiles)
+        self.load_current_backend()
+        self.profile_combo.setCurrentIndex(len(profiles) - 1)
+
+    def delete_profile(self):
+        backend = self.backend_combo.currentText().strip() or "hermes"
+        profiles = self.profiles_for_backend(backend)
+        row = self.profile_combo.currentIndex()
+        if 0 <= row < len(profiles):
+            profiles.pop(row)
+        if not profiles:
+            profiles = [{"name": "默认配置", "provider": "", "base_url": "", "model": "", "api_key": ""}]
+        self.update_profiles_for_backend(backend, profiles)
+        self.load_current_backend()
+
+    def save_current(self):
+        inst_id, inst_dir = self.selected_instance()
+        if not inst_dir:
+            return
+        backend = self.backend_combo.currentText().strip() or "hermes"
+        data = dict(self.current_api_config or {})
+        profiles = self.profiles_for_backend(backend)
+        row = self.profile_combo.currentIndex()
+        profile = self.collect_profile_from_fields()
+        if 0 <= row < len(profiles):
+            profiles[row] = profile
+        else:
+            profiles.append(profile)
+        data.setdefault("_profiles", {})
+        if not isinstance(data["_profiles"], dict):
+            data["_profiles"] = {}
+        data["_profiles"][backend] = profiles
+        data.setdefault("_active_profile", {})
+        if not isinstance(data["_active_profile"], dict):
+            data["_active_profile"] = {}
+        data["_active_profile"][backend] = profile["name"]
+        data[backend] = {
+            "provider": profile["provider"],
+            "base_url": profile["base_url"],
+            "model": profile["model"],
+            "api_key": profile["api_key"],
+        }
+        agent_cfg = self.parent_window.load_instance_partner_agent_config(inst_dir)
+        agent_cfg["backend"] = backend
+        agent_cfg["provider"] = data[backend]["provider"]
+        agent_cfg["model"] = data[backend]["model"]
+        agent_ok, agent_msg = self.parent_window.save_instance_partner_agent_config(inst_dir, agent_cfg)
+        if not agent_ok:
+            self.status_label.setText(agent_msg or "Agent 配置保存失败。")
+            return
+        ok, msg = self.parent_window.save_agent_api_config(inst_dir, data)
+        self.current_api_config = data
+        self.current_agent_config = agent_cfg
+        self.status_label.setText(msg if ok else (msg or "API 配置保存失败。"))
+
+
+class QQConfigEditorDialog(DraggableDialog):
+    def __init__(self, parent: "PartnerQtWindow"):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.instances = parent.available_instances()
+        self.current_instance_dir = ""
+        self.bots: list[dict] = []
+        self.setWindowTitle("QQ 机器人本地配置")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setStyleSheet(dialog_stylesheet())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        shell = QFrame()
+        shell.setObjectName("Card")
+        root.addWidget(shell)
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+
+        head = QHBoxLayout()
+        icon = QLabel()
+        icon.setPixmap(load_svg_icon("instances").pixmap(20, 20))
+        title = QLabel("QQ 机器人本地配置")
+        title.setStyleSheet("font-size: 18px; font-weight: 780;")
+        close = QPushButton("×")
+        close.setObjectName("TitleControlClose")
+        close.setFixedSize(42, 34)
+        close.clicked.connect(self.reject)
+        head.addWidget(icon)
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(close)
+        layout.addLayout(head)
+
+        intro = QLabel("按实例查看和编辑 QQ 机器人。一个机器人绑定一个实例；实例自动启动时会同步启动它对应的 QQ 机器人。")
+        intro.setObjectName("Subtle")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.instance_combo = StableComboBox()
+        self.instance_combo.setObjectName("ModernCombo")
+        for inst_id, inst_dir in self.instances:
+            self.instance_combo.addItem(parent.display_instance_label(inst_id, inst_dir), (inst_id, inst_dir))
+        layout.addWidget(self.instance_combo)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        left = QVBoxLayout()
+        self.config_path_label = QLabel("")
+        self.config_path_label.setObjectName("Subtle")
+        self.config_path_label.setWordWrap(True)
+        self.bot_list = QListWidget()
+        self.bot_list.setMinimumWidth(240)
+        self.bot_list.setMinimumHeight(260)
+        bot_actions = QHBoxLayout()
+        add = QPushButton("新增")
+        delete = QPushButton("删除")
+        add.setObjectName("TertiaryAction")
+        delete.setObjectName("TertiaryAction")
+        add.clicked.connect(self.add_bot)
+        delete.clicked.connect(self.delete_bot)
+        bot_actions.addWidget(add)
+        bot_actions.addWidget(delete)
+        left.addWidget(self.config_path_label)
+        left.addWidget(self.bot_list, 1)
+        left.addLayout(bot_actions)
+        body.addLayout(left, 4)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如 研究助手")
+        self.app_id_input = QLineEdit()
+        self.app_id_input.setPlaceholderText("QQ 机器人 AppID")
+        self.secret_input = QLineEdit()
+        self.secret_input.setEchoMode(QLineEdit.Password)
+        self.secret_input.setPlaceholderText("QQ 机器人 Secret")
+        for row, (label, widget) in enumerate((("名称", self.name_input), ("AppID", self.app_id_input), ("Secret", self.secret_input))):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(widget, row, 1)
+        edit_wrap = QVBoxLayout()
+        edit_wrap.addLayout(grid)
+        edit_wrap.addStretch(1)
+        body.addLayout(edit_wrap, 6)
+        layout.addLayout(body, 1)
+
+        footer = QHBoxLayout()
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Subtle")
+        cancel = QPushButton("取消")
+        save = QPushButton("保存 QQ 配置")
+        save.setObjectName("PrimaryAction")
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.save_current)
+        footer.addWidget(self.status_label, 1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        layout.addLayout(footer)
+
+        self.instance_combo.currentIndexChanged.connect(self.load_current_instance)
+        self.bot_list.currentRowChanged.connect(self.load_selected_bot)
+        if self.instances:
+            self.load_current_instance()
+        else:
+            self.status_label.setText("当前没有可配置的实例。")
+        self.resize(760, 560)
+
+    def selected_instance(self) -> tuple[str, str]:
+        data = self.instance_combo.currentData()
+        if isinstance(data, tuple) and len(data) == 2:
+            return str(data[0] or ""), str(data[1] or "")
+        return "", ""
+
+    def load_current_instance(self):
+        inst_id, inst_dir = self.selected_instance()
+        self.current_instance_dir = inst_dir
+        if not inst_dir:
+            return
+        self.bots, path = self.parent_window.load_bot_configs(inst_dir)
+        self.config_path_label.setText(f"配置文件：{path}")
+        self.refresh_bot_list()
+
+    def refresh_bot_list(self):
+        self.bot_list.blockSignals(True)
+        self.bot_list.clear()
+        for idx, bot in enumerate(self.bots):
+            label = self.parent_window.bot_display_id(bot, idx + 1)
+            item = QListWidgetItem(f"{label}  ·  当前实例")
+            item.setData(Qt.UserRole, idx)
+            self.bot_list.addItem(item)
+        self.bot_list.blockSignals(False)
+        self.bot_list.setCurrentRow(0 if self.bots else -1)
+        self.load_selected_bot()
+
+    def load_selected_bot(self):
+        row = self.bot_list.currentRow()
+        bot = self.bots[row] if 0 <= row < len(self.bots) else {}
+        self.name_input.setText(str(bot.get("name") or ""))
+        self.app_id_input.setText(str(bot.get("app_id") or ""))
+        self.secret_input.setText(str(bot.get("app_secret") or ""))
+
+    def add_bot(self):
+        self.bots.append({"name": f"Bot {len(self.bots) + 1}", "app_id": "", "app_secret": "", "mode": "official", "is_sandbox": True})
+        self.refresh_bot_list()
+        self.bot_list.setCurrentRow(len(self.bots) - 1)
+
+    def delete_bot(self):
+        row = self.bot_list.currentRow()
+        if 0 <= row < len(self.bots):
+            self.bots.pop(row)
+            self.refresh_bot_list()
+
+    def save_current(self):
+        row = self.bot_list.currentRow()
+        if 0 <= row < len(self.bots):
+            self.bots[row].update(
+                {
+                    "name": self.name_input.text().strip() or f"Bot {row + 1}",
+                    "app_id": self.app_id_input.text().strip(),
+                    "app_secret": self.secret_input.text().strip(),
+                    "mode": "official",
+                    "is_sandbox": True,
+                }
+            )
+        inst_id, inst_dir = self.selected_instance()
+        if not inst_dir:
+            return
+        self.parent_window.save_bot_configs(inst_dir, self.bots)
+        self.status_label.setText(f"{self.parent_window.display_instance_label(inst_id, inst_dir)} 的 QQ 配置已保存。")
+        self.refresh_bot_list()
 
 
 class LoadingOverlay(QFrame):
@@ -2224,13 +3516,24 @@ class PartnerQtWindow(QMainWindow):
         self._remote_user_file_list_cache: dict[str, tuple[float, list[str]]] = {}
         self._remote_text_cache: dict[str, tuple[float, str]] = {}
         self._refresh_worker: RefreshWorker | None = None
+        self._linux_path_worker: LinuxPathWorker | None = None
+        self._runtime_action_worker: RuntimeActionWorker | None = None
+        self._background_task_worker: BackgroundTaskWorker | None = None
+        self._linux_path_seq = 0
+        self._linux_path_inflight = False
         self._refresh_inflight = False
+        self._runtime_action_inflight = False
+        self._background_task_inflight = False
         self._last_refresh_at = ""
         self._local_agents_cache: list[dict] = []
         self._loading_generation = 0
         self._loading_started_at = 0.0
         self._auto_start_done = False
         self._onboarding_visible = False
+        self._first_instance_created_notice = False
+        self._last_user_activity_ts = time.time()
+        self._last_auto_refresh_ts = 0.0
+        self._last_dashboard_render_ts = 0.0
 
         self.setWindowTitle(tr("app_title", self.lang))
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
@@ -2244,6 +3547,9 @@ class PartnerQtWindow(QMainWindow):
         self.loading_overlay.setGeometry(self.rect())
         self.show_loading(tr("loading_partner", self.lang), tr("loading_workspace", self.lang))
         self.request_refresh(force=True)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
         QTimer.singleShot(700, self.maybe_show_onboarding)
         QTimer.singleShot(1800, self.auto_start_instances_once)
 
@@ -2518,6 +3824,12 @@ class PartnerQtWindow(QMainWindow):
                 color: #174ea6;
                 border-color: #c8dafc;
             }}
+            QLabel#NavSection {{
+                color: {COLORS['dim']};
+                font-size: 11px;
+                font-weight: 780;
+                padding: 8px 6px 0 6px;
+            }}
             QPushButton#SecondaryAction {{
                 background: #f6f9fc;
                 border: 1px solid #d8e0ea;
@@ -2526,6 +3838,17 @@ class PartnerQtWindow(QMainWindow):
             }}
             QPushButton#SecondaryAction:hover {{
                 background: #eef3f9;
+            }}
+            QPushButton#PrimaryAction {{
+                background: {COLORS['accent']};
+                color: white;
+                border: 1px solid {COLORS['accent_soft']};
+                border-radius: 12px;
+                padding: 12px 18px;
+                font-weight: 760;
+            }}
+            QPushButton#PrimaryAction:hover {{
+                background: #255bd6;
             }}
             QPushButton#TertiaryAction {{
                 background: transparent;
@@ -2578,14 +3901,12 @@ class PartnerQtWindow(QMainWindow):
         sidebar.setObjectName("SideBar")
         sidebar.setFixedWidth(246)
         side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(22, 24, 22, 24)
-        side_layout.setSpacing(16)
+        side_layout.setContentsMargins(22, 22, 22, 24)
+        side_layout.setSpacing(10)
 
-        brand = QLabel("Partner")
-        brand.setStyleSheet("font-size: 24px; font-weight: 760; letter-spacing: 0.5px;")
-        side_layout.addWidget(brand)
         self.mode_label = QLabel()
         self.mode_label.setObjectName("Subtle")
+        self.mode_label.setWordWrap(True)
         side_layout.addWidget(self.mode_label)
 
         self.status_dot = QLabel("●")
@@ -2597,18 +3918,37 @@ class PartnerQtWindow(QMainWindow):
         status_row.addWidget(self.status_text)
         status_row.addStretch(1)
         side_layout.addLayout(status_row)
+        self.switch_local_btn = QPushButton(self.text("switch_to_local"))
+        self.switch_local_btn.setObjectName("TertiaryAction")
+        self.switch_local_btn.setIcon(load_tinted_svg_icon("source_local", COLORS["text"]))
+        self.switch_local_btn.setIconSize(QSize(16, 16))
+        self.switch_local_btn.clicked.connect(self.switch_to_local_workspace)
+        side_layout.addWidget(self.switch_local_btn)
+        self.switch_linux_btn = QPushButton(self.text("switch_to_linux"))
+        self.switch_linux_btn.setObjectName("TertiaryAction")
+        self.switch_linux_btn.setIcon(load_tinted_svg_icon("source_wsl", COLORS["dim"]))
+        self.switch_linux_btn.setIconSize(QSize(16, 16))
+        self.switch_linux_btn.clicked.connect(self.switch_to_linux_workspace)
+        side_layout.addWidget(self.switch_linux_btn)
+        self.switch_ssh_btn = QPushButton(self.text("switch_to_ssh"))
+        self.switch_ssh_btn.setObjectName("TertiaryAction")
+        self.switch_ssh_btn.setIcon(load_tinted_svg_icon("settings", COLORS["dim"]))
+        self.switch_ssh_btn.setIconSize(QSize(16, 16))
+        self.switch_ssh_btn.clicked.connect(self.switch_to_ssh_workspace)
+        side_layout.addWidget(self.switch_ssh_btn)
 
         self.nav_buttons = []
         nav_group = QButtonGroup(self)
-        tabs = [
-            (self.nav_label("tab_chat"), 0, "chat"),
-            (self.nav_label("tab_dashboard"), 1, "dashboard"),
-            (self.nav_label("tab_qq"), 2, "instances"),
-        ]
-        for text, index, icon_key in tabs:
+        def add_section(title: str):
+            label = QLabel(title)
+            label.setObjectName("NavSection")
+            label.setContentsMargins(0, 12, 0, 4)
+            side_layout.addWidget(label)
+
+        def add_nav_button(text: str, index: int, icon_key: str, color: str):
             btn = QPushButton(text)
             btn.setObjectName("NavButton")
-            btn.setIcon(self.qt_icon(icon_key))
+            btn.setIcon(load_tinted_svg_icon(icon_key, color))
             btn.setIconSize(QSize(18, 18))
             btn.setCheckable(True)
             btn.setMinimumHeight(50)
@@ -2616,39 +3956,36 @@ class PartnerQtWindow(QMainWindow):
             nav_group.addButton(btn)
             side_layout.addWidget(btn)
             self.nav_buttons.append(btn)
+
+        add_section("基础设置" if self.lang == "zh" else "BASIC")
+        for text, index, icon_key in [
+            (self.nav_label("tab_chat"), 0, "chat"),
+            (self.nav_label("tab_dashboard"), 1, "dashboard"),
+            (self.nav_label("tab_qq"), 2, "instances"),
+            (self.nav_label("tab_agent_api"), 3, "configured"),
+        ]:
+            add_nav_button(text, index, icon_key, COLORS["accent"])
         self.nav_buttons[0].setChecked(True)
 
+        add_section("进阶设置" if self.lang == "zh" else "ADVANCED")
+
+        add_nav_button(self.nav_label("tab_linux"), 4, "source_wsl", COLORS["dim"])
+        add_nav_button(self.nav_label("tab_ollama"), 5, "ollama", COLORS["dim"])
+        add_nav_button(self.nav_label("tab_settings"), 6, "settings", COLORS["dim"])
+
         side_layout.addStretch(1)
-
-        ollama_btn = QPushButton(self.nav_label("tab_ollama"))
-        ollama_btn.setObjectName("NavButton")
-        ollama_btn.setIcon(self.qt_icon("ollama"))
-        ollama_btn.setIconSize(QSize(18, 18))
-        ollama_btn.setCheckable(True)
-        ollama_btn.setMinimumHeight(50)
-        ollama_btn.clicked.connect(lambda checked=False: self.switch_page(3))
-        nav_group.addButton(ollama_btn)
-        side_layout.addWidget(ollama_btn)
-        self.nav_buttons.append(ollama_btn)
-
-        advanced_btn = QPushButton(self.nav_label("tab_settings"))
-        advanced_btn.setObjectName("NavButton")
-        advanced_btn.setIcon(self.qt_icon("settings"))
-        advanced_btn.setIconSize(QSize(18, 18))
-        advanced_btn.setCheckable(True)
-        advanced_btn.setMinimumHeight(50)
-        advanced_btn.clicked.connect(lambda checked=False: self.switch_page(4))
-        nav_group.addButton(advanced_btn)
-        side_layout.addWidget(advanced_btn)
-        self.nav_buttons.append(advanced_btn)
+        add_section("新手指引" if self.lang == "zh" else "GUIDE")
 
         self.partner_config_btn = QPushButton(self.text("partner_config"))
-        self.partner_config_btn.setObjectName("SecondaryAction")
-        self.partner_config_btn.setIcon(self.qt_icon("configured"))
+        self.partner_config_btn.setObjectName("NavButton")
+        self.partner_config_btn.setIcon(load_tinted_svg_icon("configured", COLORS["text"]))
         self.partner_config_btn.setIconSize(QSize(18, 18))
+        self.partner_config_btn.setCheckable(True)
         self.partner_config_btn.setMinimumHeight(50)
-        self.partner_config_btn.clicked.connect(self.open_partner_config)
+        self.partner_config_btn.clicked.connect(lambda checked=False: self.switch_page(7))
+        nav_group.addButton(self.partner_config_btn)
         side_layout.addWidget(self.partner_config_btn)
+        self.nav_buttons.append(self.partner_config_btn)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -2675,20 +4012,20 @@ class PartnerQtWindow(QMainWindow):
         self.dashboard_page = self.build_dashboard_page()
         self.chat_page = self.build_chat_page()
         self.qq_page = self.build_qq_page()
+        self.agent_api_page = self.build_agent_api_page()
+        self.linux_page = self.build_linux_page()
         self.ollama_page = self.build_ollama_page()
         self.settings_page = self.build_settings_page()
+        self.setup_page = self.build_setup_page()
 
         self.stack.addWidget(self.chat_page)
         self.stack.addWidget(self.dashboard_page)
         self.stack.addWidget(self.qq_page)
+        self.stack.addWidget(self.agent_api_page)
+        self.stack.addWidget(self.linux_page)
         self.stack.addWidget(self.ollama_page)
         self.stack.addWidget(self.settings_page)
-
-        self.footer_config_label = QLabel(self.text("config_footer_empty"))
-        self.footer_config_label.setObjectName("FooterMeta")
-        self.footer_config_label.setWordWrap(False)
-        self.footer_config_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        content_layout.addWidget(self.footer_config_label)
+        self.stack.addWidget(self.setup_page)
 
         body_root.addWidget(sidebar)
         body_root.addWidget(content, 1)
@@ -2713,14 +4050,29 @@ class PartnerQtWindow(QMainWindow):
             tr("tab_chat", self.lang),
             tr("tab_dashboard", self.lang),
             tr("tab_qq", self.lang),
+            tr("tab_agent_api", self.lang),
+            tr("tab_linux", self.lang),
             tr("tab_ollama", self.lang),
             tr("tab_settings", self.lang),
+            self.text("partner_config"),
         ]
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, "loading_overlay"):
             self.loading_overlay.setGeometry(self.rect())
+
+    def eventFilter(self, obj, event):
+        if event.type() in {
+            QEvent.KeyPress,
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.Wheel,
+            QEvent.TouchBegin,
+            QEvent.TouchUpdate,
+        }:
+            self._last_user_activity_ts = time.time()
+        return super().eventFilter(obj, event)
 
     def show_loading(self, title: str = "正在加载 Partner", message: str = "请稍候…"):
         self._loading_generation += 1
@@ -2750,38 +4102,18 @@ class PartnerQtWindow(QMainWindow):
         install_stamp = current_install_stamp()
         install_prompt_seen = bool(install_stamp) and self.bridge_settings.get("install_config_prompt_stamp") == install_stamp
         if bridge_onboarding_done(self.bridge_settings) and install_prompt_seen:
+            if self.workspace_mode == "local" and self.workspace:
+                created, _ = ensure_first_local_instance(self.workspace)
+                if created:
+                    self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+                    QTimer.singleShot(250, self.show_first_instance_notice)
             return
         self.hide_loading(minimum_ms=MIN_PAGE_LOADING_MS)
-        dialog = OnboardingDialog(self)
-        self._onboarding_visible = True
-        accepted = dialog.exec()
-        self._onboarding_visible = False
-        if accepted:
-            self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
-            self.workspace, self.workspace_mode = resolve_initial_workspace(self.bridge_settings)
-            if install_stamp and self.bridge_settings.get("install_config_prompt_stamp") != install_stamp:
-                settings = dict(self.bridge_settings or {})
-                settings["install_config_prompt_stamp"] = install_stamp
-                settings["install_config_prompted_at"] = datetime.now().isoformat()
-                save_gui_bridge_settings(settings, workspace_hint=self.workspace if self.workspace_mode == "local" else None)
-                self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
-            self.request_refresh(force=True)
-            QTimer.singleShot(300, self.auto_start_instances_once)
-            return
-        settings = dict(self.bridge_settings or {})
-        settings.update(
-            {
-                "onboarding_completed": True,
-                "onboarding_schema_version": PARTNER_CONFIG_SCHEMA_VERSION,
-                "onboarding_completed_at": datetime.now().isoformat(),
-                "install_config_prompt_stamp": install_stamp,
-                "install_config_prompted_at": datetime.now().isoformat(),
-                "saved_at": datetime.now().isoformat(),
-            }
-        )
-        save_gui_bridge_settings(settings, workspace_hint=self.workspace if self.workspace_mode == "local" else None)
-        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
-        QTimer.singleShot(300, self.auto_start_instances_once)
+        self.switch_page(7)
+
+    def show_first_instance_notice(self):
+        self._first_instance_created_notice = False
+        show_partner_notice(self, "Partner", self.text("first_instance_notice"), kind="ok")
 
     def build_dashboard_page(self):
         page = QWidget()
@@ -2908,26 +4240,34 @@ class PartnerQtWindow(QMainWindow):
         left_title.setStyleSheet("font-size: 18px; font-weight: 760;")
         left_head.addWidget(left_title)
         left_head.addStretch(1)
+        left_layout.addLayout(left_head)
+        instance_tools = QHBoxLayout()
+        instance_tools.setSpacing(8)
         add_instance_btn = QPushButton(self.text("add"))
+        rename_instance_btn = QPushButton(self.text("rename"))
         del_instance_btn = QPushButton(self.text("delete"))
         add_instance_btn.setObjectName("TertiaryAction")
+        rename_instance_btn.setObjectName("TertiaryAction")
         del_instance_btn.setObjectName("TertiaryAction")
-        add_instance_btn.setMinimumWidth(72)
-        del_instance_btn.setMinimumWidth(82)
         self.add_instance_btn = add_instance_btn
+        self.rename_instance_btn = rename_instance_btn
         self.del_instance_btn = del_instance_btn
         add_instance_btn.clicked.connect(self.add_instance)
+        rename_instance_btn.clicked.connect(self.rename_instance)
         del_instance_btn.clicked.connect(self.delete_instance)
-        left_head.addWidget(add_instance_btn)
-        left_head.addWidget(del_instance_btn)
-        left_layout.addLayout(left_head)
+        instance_tools.addWidget(add_instance_btn)
+        instance_tools.addWidget(rename_instance_btn)
+        instance_tools.addWidget(del_instance_btn)
+        instance_tools.addStretch(1)
+        left_layout.addLayout(instance_tools)
         self.instance_status = QLabel(self.text("qq_instance_status_empty"))
         self.instance_status.setObjectName("Subtle")
         left_layout.addWidget(self.instance_status)
         self.instance_list = QListWidget()
         self.instance_list.setObjectName("ManagedList")
         self.instance_list.setMinimumWidth(260)
-        self.instance_list.setFixedHeight(270)
+        self.instance_list.setFixedHeight(210)
+        self.instance_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.instance_list.currentItemChanged.connect(self.on_instance_selected)
         left_layout.addWidget(self.instance_list)
         left_layout.addSpacing(10)
@@ -2958,35 +4298,36 @@ class PartnerQtWindow(QMainWindow):
         mid_title.setStyleSheet("font-size: 18px; font-weight: 760;")
         mid_head.addWidget(mid_title)
         mid_head.addStretch(1)
+        mid_layout.addLayout(mid_head)
+        bot_tools = QHBoxLayout()
+        bot_tools.setSpacing(8)
         add_bot_btn = QPushButton(self.text("add"))
         config_bot_btn = QPushButton(self.text("configure"))
         del_bot_btn = QPushButton(self.text("delete"))
         add_bot_btn.setObjectName("TertiaryAction")
         config_bot_btn.setObjectName("TertiaryAction")
         del_bot_btn.setObjectName("TertiaryAction")
-        add_bot_btn.setMinimumWidth(72)
-        config_bot_btn.setMinimumWidth(110)
-        del_bot_btn.setMinimumWidth(82)
         self.add_bot_btn = add_bot_btn
         self.config_bot_btn = config_bot_btn
         self.del_bot_btn = del_bot_btn
         add_bot_btn.clicked.connect(self.add_bot)
         config_bot_btn.clicked.connect(self.configure_bot)
         del_bot_btn.clicked.connect(self.delete_bot)
-        mid_head.addWidget(add_bot_btn)
-        mid_head.addWidget(config_bot_btn)
-        mid_head.addWidget(del_bot_btn)
-        mid_layout.addLayout(mid_head)
+        bot_tools.addWidget(add_bot_btn)
+        bot_tools.addWidget(config_bot_btn)
+        bot_tools.addWidget(del_bot_btn)
+        bot_tools.addStretch(1)
+        mid_layout.addLayout(bot_tools)
         self.bot_status = QLabel(self.text("qq_bot_status_empty"))
         self.bot_status.setObjectName("Subtle")
         mid_layout.addWidget(self.bot_status)
         self.bot_list = QListWidget()
         self.bot_list.setObjectName("ManagedList")
         self.bot_list.setMinimumWidth(360)
-        self.bot_list.setFixedHeight(170)
+        self.bot_list.setFixedHeight(105)
+        self.bot_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.bot_list.currentItemChanged.connect(self.on_bot_selected)
         mid_layout.addWidget(self.bot_list)
-        mid_layout.addSpacing(8)
         detail_title = QLabel(self.text("qq_details"))
         detail_title.setStyleSheet("font-size: 16px; font-weight: 760;")
         mid_layout.addWidget(detail_title)
@@ -2996,12 +4337,238 @@ class PartnerQtWindow(QMainWindow):
         mid_layout.addWidget(right_hint)
         self.qq_info = QTextBrowser()
         self.qq_info.setOpenExternalLinks(False)
-        self.qq_info.setFixedHeight(150)
+        self.qq_info.setFixedHeight(115)
         mid_layout.addWidget(self.qq_info, 1)
 
         layout.addWidget(left_box, 1)
         layout.addWidget(mid_box, 1)
         page_layout.addLayout(layout, 1)
+        return page
+
+    def build_agent_api_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(14)
+
+        top = QFrame()
+        top.setObjectName("Card")
+        top_layout = QHBoxLayout(top)
+        top_layout.setContentsMargins(18, 16, 18, 16)
+        top_layout.setSpacing(12)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title = QLabel("Agent / API 配置")
+        title.setStyleSheet("font-size: 20px; font-weight: 780;")
+        subtitle = QLabel("为不同 Agent 保存多套 API，并选择每个 Agent 当前使用哪一套。Setup 页面只显示其中一个基础默认配置。")
+        subtitle.setObjectName("Subtle")
+        subtitle.setWordWrap(True)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        top_layout.addLayout(title_box, 1)
+        self.agent_api_instance_combo = StableComboBox()
+        self.agent_api_instance_combo.setMinimumWidth(240)
+        self.agent_api_instance_combo.currentIndexChanged.connect(lambda _idx=0: self.refresh_agent_api_page())
+        top_layout.addWidget(self.agent_api_instance_combo)
+        self.manage_agent_api_btn = QPushButton("管理 Agent / API")
+        self.manage_agent_api_btn.setObjectName("SecondaryAction")
+        self.manage_agent_api_btn.clicked.connect(self.configure_agent_api)
+        top_layout.addWidget(self.manage_agent_api_btn)
+        layout.addWidget(top)
+
+        summary_box = QFrame()
+        summary_box.setObjectName("Card")
+        summary_layout = QVBoxLayout(summary_box)
+        summary_layout.setContentsMargins(18, 18, 18, 18)
+        summary_layout.setSpacing(12)
+        summary_title = QLabel("当前实例的 Agent API")
+        summary_title.setStyleSheet("font-size: 18px; font-weight: 760;")
+        self.agent_api_summary = QTextBrowser()
+        self.agent_api_summary.setOpenExternalLinks(False)
+        self.agent_api_summary.setMinimumHeight(260)
+        summary_layout.addWidget(summary_title)
+        summary_layout.addWidget(self.agent_api_summary, 1)
+        layout.addWidget(summary_box, 1)
+        return page
+
+    def build_setup_page(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll)
+
+        body = QWidget()
+        scroll.setWidget(body)
+        layout = QHBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        intro = QFrame()
+        intro.setObjectName("Hero")
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(24, 22, 24, 22)
+        intro_layout.setSpacing(14)
+        badge = QLabel("GETTING STARTED")
+        badge.setStyleSheet(
+            f"color:{COLORS['accent']}; background:#e8f1ff; border:1px solid #cfe0ff; "
+            "border-radius:12px; padding:5px 10px; font-size:11px; font-weight:820;"
+        )
+        badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        headline = QLabel("Partner 是你的 Agent 工作台")
+        headline.setWordWrap(True)
+        headline.setStyleSheet("font-size: 28px; font-weight: 820;")
+        body_text = QLabel(
+            "Partner 负责保存目标、实例、事件、对话和运行状态，再调用 Hermes、OpenClaw 等 Agent 通过 API 使用模型和工具。"
+            "初始配置会创建 Windows workspace、默认实例 01，并准备一个默认 API 和一个默认 QQ 机器人。"
+        )
+        body_text.setObjectName("Subtle")
+        body_text.setWordWrap(True)
+        intro_layout.addWidget(badge)
+        intro_layout.addWidget(headline)
+        intro_layout.addWidget(body_text)
+
+        flow = QFrame()
+        flow.setObjectName("Card")
+        flow_layout = QVBoxLayout(flow)
+        flow_layout.setContentsMargins(16, 14, 16, 14)
+        flow_layout.setSpacing(10)
+        flow_title = QLabel("初始配置会做")
+        flow_title.setStyleSheet("font-size: 16px; font-weight: 760;")
+        flow_layout.addWidget(flow_title)
+        for text in (
+            "创建或选择 Windows workspace，用来保存实例、日志和本地配置。",
+            "默认创建第一个实例 01。实例可以理解为一个独立研究分身，互不混用记忆和机器人。",
+            "保存一个基础 API，默认给 Agent 使用；高级页面可以给不同 Agent 切换不同 API。",
+            "保存一个基础 QQ 机器人，默认绑定到实例 01；高级实例页可以继续新增和调整。"
+        ):
+            item = QLabel(text)
+            item.setObjectName("Subtle")
+            item.setWordWrap(True)
+            flow_layout.addWidget(item)
+        intro_layout.addWidget(flow)
+        guide_btn = QPushButton("打开新手指引")
+        guide_btn.setObjectName("SecondaryAction")
+        guide_btn.clicked.connect(self.show_beginner_guide)
+        intro_layout.addWidget(guide_btn)
+        intro_layout.addStretch(1)
+
+        panel = QFrame()
+        panel.setObjectName("Card")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(22, 22, 22, 20)
+        panel_layout.setSpacing(14)
+        panel_title = QLabel("初始配置")
+        panel_title.setStyleSheet("font-size: 22px; font-weight: 820;")
+        panel_layout.addWidget(panel_title)
+
+        ws_card = QFrame()
+        ws_card.setObjectName("MetricCard")
+        ws_layout = QVBoxLayout(ws_card)
+        ws_layout.setContentsMargins(16, 14, 16, 14)
+        ws_layout.setSpacing(8)
+        ws_title = QLabel("Workspace")
+        ws_title.setStyleSheet("font-size: 16px; font-weight: 760;")
+        ws_sub = QLabel("所有实例、项目、日志和配置会保存在这里。")
+        ws_sub.setObjectName("Subtle")
+        ws_sub.setWordWrap(True)
+        self.setup_workspace_input = QLineEdit(self.workspace if self.workspace_mode == "local" and self.workspace else default_local_workspace_path())
+        browse_btn = QPushButton("浏览")
+        browse_btn.setObjectName("TertiaryAction")
+        browse_btn.clicked.connect(self.pick_setup_workspace)
+        ws_row = QHBoxLayout()
+        ws_row.setSpacing(10)
+        ws_row.addWidget(self.setup_workspace_input, 1)
+        ws_row.addWidget(browse_btn)
+        ws_layout.addWidget(ws_title)
+        ws_layout.addWidget(ws_sub)
+        ws_layout.addLayout(ws_row)
+        panel_layout.addWidget(ws_card)
+
+        agent_card = QFrame()
+        agent_card.setObjectName("MetricCard")
+        agent_layout = QVBoxLayout(agent_card)
+        agent_layout.setContentsMargins(16, 14, 16, 14)
+        agent_layout.setSpacing(10)
+        agent_title = QLabel("Agent")
+        agent_title.setStyleSheet("font-size: 16px; font-weight: 760;")
+        self.setup_agent_status_label = QLabel(self.setup_agent_status_text())
+        self.setup_agent_status_label.setObjectName("Subtle")
+        self.setup_agent_status_label.setWordWrap(True)
+        agent_actions = QHBoxLayout()
+        agent_actions.setSpacing(8)
+        detect_btn = QPushButton("重新检测")
+        hermes_btn = QPushButton("安装 Hermes")
+        openclaw_btn = QPushButton("安装 OpenClaw")
+        for btn in (detect_btn, hermes_btn, openclaw_btn):
+            btn.setObjectName("TertiaryAction")
+            agent_actions.addWidget(btn)
+        agent_actions.addStretch(1)
+        detect_btn.clicked.connect(self.refresh_setup_agent_status)
+        hermes_btn.clicked.connect(self.open_setup_hermes_install)
+        openclaw_btn.clicked.connect(self.open_setup_openclaw_install)
+        agent_layout.addWidget(agent_title)
+        agent_layout.addWidget(self.setup_agent_status_label)
+        agent_layout.addLayout(agent_actions)
+        panel_layout.addWidget(agent_card)
+
+        api_card = QFrame()
+        api_card.setObjectName("MetricCard")
+        api_layout = QVBoxLayout(api_card)
+        api_layout.setContentsMargins(16, 14, 16, 14)
+        api_layout.setSpacing(10)
+        api_title = QLabel("基础 API / QQ")
+        api_title.setStyleSheet("font-size: 16px; font-weight: 760;")
+        api_sub = QLabel("这里先配一个默认 API 和一个默认 QQ 机器人。更复杂的多 Agent、多 API、多机器人绑定放在左侧高级页面。")
+        api_sub.setObjectName("Subtle")
+        api_sub.setWordWrap(True)
+        provider_row = QHBoxLayout()
+        provider_row.setSpacing(10)
+        provider_row.addWidget(QLabel("API 服务商"))
+        self.setup_api_provider_combo = StableComboBox()
+        self.setup_api_provider_combo.addItems(["DeepSeek", "OpenAI"])
+        if str(self.bridge_settings.get("api_provider") or "").lower() == "openai":
+            self.setup_api_provider_combo.setCurrentText("OpenAI")
+        provider_row.addWidget(self.setup_api_provider_combo, 1)
+        api_actions = QGridLayout()
+        api_actions.setHorizontalSpacing(10)
+        api_actions.setVerticalSpacing(10)
+        open_api_btn = QPushButton("打开 API 平台")
+        edit_api_btn = QPushButton("API 基础配置")
+        open_qq_btn = QPushButton("QQ 机器人平台")
+        edit_qq_btn = QPushButton("QQ 基础配置")
+        for idx, btn in enumerate((open_api_btn, edit_api_btn, open_qq_btn, edit_qq_btn)):
+            btn.setObjectName("TertiaryAction")
+            api_actions.addWidget(btn, idx // 2, idx % 2)
+        open_api_btn.clicked.connect(self.open_selected_setup_api_provider)
+        edit_api_btn.clicked.connect(self.open_setup_basic_api_config)
+        open_qq_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://q.qq.com/")))
+        edit_qq_btn.clicked.connect(self.open_setup_basic_qq_config)
+        api_layout.addWidget(api_title)
+        api_layout.addWidget(api_sub)
+        api_layout.addLayout(provider_row)
+        api_layout.addLayout(api_actions)
+        panel_layout.addWidget(api_card)
+
+        panel_layout.addStretch(1)
+        footer = QHBoxLayout()
+        skip_btn = QPushButton("稍后配置")
+        save_btn = QPushButton("完成并进入 Partner")
+        skip_btn.setObjectName("SecondaryAction")
+        save_btn.setObjectName("PrimaryAction")
+        skip_btn.clicked.connect(self.defer_setup_page)
+        save_btn.clicked.connect(self.save_setup_page)
+        footer.addWidget(skip_btn)
+        footer.addStretch(1)
+        footer.addWidget(save_btn)
+        panel_layout.addLayout(footer)
+
+        layout.addWidget(intro, 9)
+        layout.addWidget(panel, 10)
         return page
 
     def build_logs_page(self):
@@ -3099,6 +4666,82 @@ class PartnerQtWindow(QMainWindow):
         layout.addWidget(splitter)
         return page
 
+    def build_linux_page(self):
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(14)
+
+        intro = QFrame()
+        intro.setObjectName("Card")
+        intro_layout = QVBoxLayout(intro)
+        intro_layout.setContentsMargins(18, 16, 18, 16)
+        intro_layout.setSpacing(10)
+        title = QLabel("WSL / Linux")
+        title.setStyleSheet("font-size: 22px; font-weight: 780;")
+        hint = QLabel("这里连接的是 Windows 上的 WSL。通常只需要使用一个默认 Ubuntu；如果是真正的远程 Linux 机器，请在“配置服务器”里走 SSH。")
+        hint.setWordWrap(True)
+        hint.setObjectName("Subtle")
+        intro_layout.addWidget(title)
+        intro_layout.addWidget(hint)
+        outer.addWidget(intro)
+
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        self.linux_status_label = QLabel("")
+        self.linux_status_label.setObjectName("Subtle")
+        self.linux_status_label.setWordWrap(True)
+        layout.addWidget(self.linux_status_label)
+
+        distros = detect_wsl_distros()
+        self.linux_distro_combo = StableComboBox()
+        self.linux_distro_combo.setObjectName("ModernCombo")
+        self.linux_distro_combo.setEditable(True)
+        self.linux_distro_combo.addItems(distros)
+        preferred_distro = preferred_wsl_distro(self.bridge_settings.get("wsl_distro"), distros)
+        if preferred_distro:
+            self.linux_distro_combo.setCurrentText(preferred_distro)
+        self.linux_distro_combo.currentTextChanged.connect(lambda _text: self.schedule_linux_path_check(reason="distro"))
+        layout.addWidget(self.field_block("使用的 WSL 发行版（建议保持 Windows 默认项）", self.linux_distro_combo))
+        self.linux_workspace_input = QLineEdit()
+        self.linux_workspace_input.setPlaceholderText("例如 /mnt/e/work/partner_workspace")
+        configured_linux = str(self.bridge_settings.get("linux_workspace") or "")
+        self.linux_workspace_input.setText(configured_linux)
+        layout.addWidget(self.field_block("WSL 中看到的 workspace 路径", self.linux_workspace_input))
+        mode_help = QLabel("这个路径不是某个 Ubuntu 私有目录，而是 Windows 磁盘在 WSL 里的挂载路径。例如 E:\\work\\partner_workspace 在 WSL 中通常就是 /mnt/e/work/partner_workspace。多个 Ubuntu 会看到同一个 /mnt/e/work；建议只保留并使用一个默认 Ubuntu。")
+        mode_help.setObjectName("Subtle")
+        mode_help.setWordWrap(True)
+        layout.addWidget(mode_help)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        self.linux_check_wsl_btn = QPushButton("检查 WSL")
+        self.linux_install_wsl_btn = QPushButton("安装 WSL")
+        self.linux_install_ubuntu_btn = QPushButton("安装 Ubuntu")
+        self.linux_open_btn = QPushButton("打开 Linux")
+        self.linux_save_btn = QPushButton("保存并切到 WSL")
+        self.linux_check_wsl_btn.setObjectName("TertiaryAction")
+        self.linux_install_wsl_btn.setObjectName("TertiaryAction")
+        self.linux_install_ubuntu_btn.setObjectName("TertiaryAction")
+        self.linux_open_btn.setObjectName("TertiaryAction")
+        self.linux_save_btn.setObjectName("PrimaryAction")
+        self.linux_check_wsl_btn.clicked.connect(lambda: self.schedule_linux_path_check(force=True, reason="manual"))
+        self.linux_install_wsl_btn.clicked.connect(self.open_linux_wsl_install)
+        self.linux_install_ubuntu_btn.clicked.connect(self.open_linux_ubuntu_install)
+        self.linux_open_btn.clicked.connect(self.open_linux_terminal)
+        self.linux_save_btn.clicked.connect(self.save_linux_page)
+        for btn in (self.linux_check_wsl_btn, self.linux_install_wsl_btn, self.linux_install_ubuntu_btn, self.linux_open_btn, self.linux_save_btn):
+            actions.addWidget(btn)
+        actions.addStretch(1)
+        layout.addLayout(actions)
+        outer.addWidget(card)
+        outer.addStretch(1)
+        QTimer.singleShot(150, lambda: self.schedule_linux_path_check(force=True, reason="initial"))
+        return page
+
     def build_ollama_page(self):
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -3142,35 +4785,48 @@ class PartnerQtWindow(QMainWindow):
         summary_row.addWidget(self.ollama_usage_card)
         page_layout.addLayout(summary_row)
 
-        content_splitter = QSplitter(Qt.Horizontal)
-        content_splitter.setChildrenCollapsible(False)
-
-        left_box = QFrame()
-        left_box.setObjectName("Card")
-        left_layout = QVBoxLayout(left_box)
-        left_layout.setContentsMargins(16, 16, 16, 16)
-        left_layout.setSpacing(8)
-        left_layout.setAlignment(Qt.AlignTop)
-        left_title = QLabel(self.text("ollama_instances_pool"))
+        main_box = QFrame()
+        main_box.setObjectName("Card")
+        main_layout = QVBoxLayout(main_box)
+        main_layout.setContentsMargins(18, 18, 18, 18)
+        main_layout.setSpacing(12)
+        main_layout.setAlignment(Qt.AlignTop)
+        left_title = QLabel("统一 Ollama 配置")
         left_title.setStyleSheet("font-size: 18px; font-weight: 760;")
-        left_layout.addWidget(left_title)
-        self.ollama_scope_help = QLabel(self.text("ollama_scope_help"))
+        main_layout.addWidget(left_title)
+        self.ollama_scope_help = QLabel("选择安装位置后，Partner 会检查那台机器是否安装 Ollama、推荐是否启用以及适合的 model。连接地址自动处理：同机直连，跨机器使用自动隧道。")
         self.ollama_scope_help.setObjectName("Subtle")
         self.ollama_scope_help.setWordWrap(True)
-        left_layout.addWidget(self.ollama_scope_help)
-        self.ollama_instance_combo = StableComboBox()
-        self.ollama_instance_combo.setObjectName("ModernCombo")
-        self.ollama_instance_combo.currentIndexChanged.connect(self.refresh_ollama_page)
-        left_layout.addWidget(self.ollama_instance_combo)
-        self.ollama_mode_combo = StableComboBox()
-        self.ollama_mode_combo.setObjectName("ModernCombo")
-        self.ollama_mode_combo.addItems(["off", "lite", "project", "all"])
-        left_layout.addWidget(self.ollama_mode_combo)
-        self.ollama_mode_hint = QLabel(self.text("ollama_mode_hint"))
-        self.ollama_mode_hint.setObjectName("Subtle")
-        self.ollama_mode_hint.setWordWrap(True)
-        left_layout.addWidget(self.ollama_mode_hint)
+        main_layout.addWidget(self.ollama_scope_help)
+        install_box = QFrame()
+        install_box.setObjectName("MetricCard")
+        install_layout = QVBoxLayout(install_box)
+        install_layout.setContentsMargins(14, 14, 14, 14)
+        install_layout.setSpacing(8)
+        install_title = QLabel("一键安装 / 配置")
+        install_title.setStyleSheet("font-weight:760;")
+        self.ollama_install_target_combo = StableComboBox()
+        self.ollama_install_target_combo.addItems(["本地电脑", "WSL / Linux", "SSH 服务器"])
+        self.ollama_install_target_combo.currentIndexChanged.connect(lambda _idx=0: self.refresh_ollama_page())
+        self.ollama_install_model_combo = StableComboBox()
+        self.ollama_install_model_combo.addItems(["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b", "deepseek-r1:7b", "llama3.1:8b"])
+        self.ollama_startup_combo = StableComboBox()
+        self.ollama_startup_combo.addItems(["开机自启", "手动启动"])
+        install_btn = QPushButton("检查并安装 Ollama / Model")
+        install_btn.setObjectName("SecondaryAction")
+        install_btn.clicked.connect(self.install_ollama_with_mirror)
+        install_note = QLabel("会先按机器环境推荐模型；如 Ollama 与实例不在同一台机器，Partner 会提示配置自动隧道。")
+        install_note.setObjectName("Subtle")
+        install_note.setWordWrap(True)
+        install_layout.addWidget(install_title)
+        install_layout.addWidget(self.field_block("安装位置", self.ollama_install_target_combo))
+        install_layout.addWidget(self.field_block("模型", self.ollama_install_model_combo))
+        install_layout.addWidget(self.field_block("本地启动方式", self.ollama_startup_combo))
+        install_layout.addWidget(install_btn)
+        install_layout.addWidget(install_note)
+        main_layout.addWidget(install_box)
         self.ollama_endpoint_list = QListWidget()
+        self.ollama_endpoint_list.hide()
         self.ollama_endpoint_list.setObjectName("OllamaEndpointList")
         self.ollama_endpoint_list.setMinimumHeight(118)
         self.ollama_endpoint_list.setMaximumHeight(150)
@@ -3178,7 +4834,7 @@ class PartnerQtWindow(QMainWindow):
         self.ollama_endpoint_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.ollama_endpoint_list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self.ollama_endpoint_list.currentItemChanged.connect(self.on_ollama_endpoint_selected)
-        left_layout.addWidget(self.ollama_endpoint_list)
+        main_layout.addWidget(self.ollama_endpoint_list)
         left_actions = QHBoxLayout()
         left_actions.setSpacing(8)
         self.ollama_add_btn = QPushButton(self.text("ollama_add"))
@@ -3190,10 +4846,14 @@ class PartnerQtWindow(QMainWindow):
         left_actions.addWidget(self.ollama_add_btn)
         left_actions.addWidget(self.ollama_remove_btn)
         left_actions.addStretch(1)
-        left_layout.addLayout(left_actions)
+        left_actions_widget = QWidget()
+        left_actions_widget.setLayout(left_actions)
+        left_actions_widget.hide()
+        main_layout.addWidget(left_actions_widget)
 
         right_box = QFrame()
         right_box.setObjectName("Card")
+        right_box.hide()
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(18, 18, 18, 18)
         right_layout.setSpacing(12)
@@ -3246,19 +4906,14 @@ class PartnerQtWindow(QMainWindow):
         self.ollama_runtime_summary = QLabel(self.text("ollama_runtime_summary"))
         self.ollama_runtime_summary.setObjectName("Subtle")
         self.ollama_runtime_summary.setWordWrap(True)
-        right_layout.addWidget(self.ollama_runtime_summary)
+        self.ollama_runtime_summary.hide()
         self.ollama_status_view = QPlainTextEdit()
         self.ollama_status_view.setReadOnly(True)
         self.ollama_status_view.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.ollama_status_view.setMinimumHeight(120)
-        right_layout.addWidget(self.ollama_status_view, 1)
-
-        content_splitter.addWidget(left_box)
-        content_splitter.addWidget(right_box)
-        content_splitter.setStretchFactor(0, 9)
-        content_splitter.setStretchFactor(1, 15)
-        content_splitter.setSizes([420, 800])
-        page_layout.addWidget(content_splitter, 1)
+        self.ollama_status_view.setMinimumHeight(180)
+        self.ollama_status_view.hide()
+        page_layout.addWidget(main_box, 1)
+        page_layout.addWidget(right_box)
         return page
 
     def build_settings_page(self):
@@ -3276,80 +4931,90 @@ class PartnerQtWindow(QMainWindow):
         scroll.setWidget(body)
         page_layout = QVBoxLayout(body)
         page_layout.setContentsMargins(4, 4, 4, 4)
-        page_layout.setSpacing(12)
-
-        intro = QFrame()
-        intro.setObjectName("Card")
-        intro_layout = QHBoxLayout(intro)
-        intro_layout.setContentsMargins(16, 12, 16, 12)
-        intro_layout.setSpacing(12)
-        intro_icon = QLabel()
-        intro_icon.setPixmap(self.qt_icon("settings").pixmap(16, 16))
-        self.settings_intro_label = QLabel(self.text("settings_intro"))
-        self.settings_intro_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 14px; font-weight: 600;")
-        self.settings_intro_label.setWordWrap(True)
-        intro_layout.addWidget(intro_icon)
-        intro_layout.addWidget(self.settings_intro_label, 1)
-        page_layout.addWidget(intro)
-
-        top = QHBoxLayout()
-        top.setSpacing(12)
-        self.settings_mode_card = MetricCard(self.text("settings_mode_title"), "-", COLORS["accent"], "settings")
-        self.settings_workspace_card = MetricCard(self.text("settings_workspace"), "-", COLORS["text"], "folder")
-        self.settings_agent_card = MetricCard(self.text("settings_agent_title"), "-", COLORS["green"], "active")
-        top.addWidget(self.settings_mode_card)
-        top.addWidget(self.settings_workspace_card)
-        top.addWidget(self.settings_agent_card)
-        page_layout.addLayout(top)
-
-        split = QSplitter(Qt.Horizontal)
-        split.setChildrenCollapsible(False)
-
-        left_box = QFrame()
-        left_box.setObjectName("Card")
-        left_layout = QVBoxLayout(left_box)
-        left_layout.setContentsMargins(18, 18, 18, 18)
-        left_layout.setSpacing(12)
-        left_title = QLabel(self.text("settings_mode_title"))
-        left_title.setStyleSheet("font-size: 18px; font-weight: 760;")
-        left_layout.addWidget(left_title)
-        self.settings_mode_help = QLabel(self.text("settings_mode_help"))
-        self.settings_mode_help.setObjectName("Subtle")
-        self.settings_mode_help.setWordWrap(True)
-        left_layout.addWidget(self.settings_mode_help)
+        page_layout.setSpacing(14)
 
         self.settings_mode_group = QButtonGroup(self)
-        self.settings_local_radio = QRadioButton(self.text("settings_local_radio"))
-        self.settings_wsl_radio = QRadioButton(self.text("settings_wsl_radio"))
-        self.settings_ssh_radio = QRadioButton(self.text("settings_ssh_radio"))
+        self.settings_local_radio = QRadioButton("Windows 本地")
+        self.settings_wsl_radio = QRadioButton("WSL / Linux")
+        self.settings_ssh_radio = QRadioButton("SSH 服务器")
         for btn in (self.settings_local_radio, self.settings_wsl_radio, self.settings_ssh_radio):
             self.settings_mode_group.addButton(btn)
-            left_layout.addWidget(btn)
+            btn.setStyleSheet(
+                "QRadioButton{spacing:10px;font-size:14px;font-weight:650;}"
+                "QRadioButton::indicator{width:18px;height:18px;border-radius:9px;border:2px solid #9aa7b6;background:#ffffff;}"
+                f"QRadioButton::indicator:checked{{border:5px solid {COLORS['accent']};background:#ffffff;}}"
+            )
 
-        self.settings_local_input = QLineEdit()
-        self.settings_local_input.setPlaceholderText(self.text("settings_local_placeholder"))
-        self.settings_local_browse_btn = QPushButton(self.text("settings_browse_workspace"))
-        self.settings_local_browse_btn.setObjectName("TertiaryAction")
-        self.settings_local_browse_btn.clicked.connect(self.pick_settings_local_dir)
-        local_row = QHBoxLayout()
-        local_row.addWidget(self.settings_local_input, 1)
-        local_row.addWidget(self.settings_local_browse_btn)
-        left_layout.addLayout(local_row)
+        linux_box = QFrame()
+        linux_box.setObjectName("Card")
+        linux_layout = QVBoxLayout(linux_box)
+        linux_layout.setContentsMargins(18, 18, 18, 18)
+        linux_layout.setSpacing(12)
+        linux_head = QHBoxLayout()
+        linux_title = QLabel("WSL / Linux")
+        linux_title.setStyleSheet("font-size: 20px; font-weight: 780;")
+        self.settings_linux_status = QLabel("")
+        self.settings_linux_status.setObjectName("Subtle")
+        self.settings_linux_status.setWordWrap(True)
+        linux_head.addWidget(linux_title)
+        linux_head.addStretch(1)
+        linux_head.addWidget(self.settings_local_radio)
+        linux_head.addWidget(self.settings_wsl_radio)
+        linux_layout.addLayout(linux_head)
+        linux_hint = QLabel("Windows 本地是默认模式。这里连接的是 WSL 发行版；真正的远程 Linux 请在配置服务器里用 SSH。")
+        linux_hint.setObjectName("Subtle")
+        linux_hint.setWordWrap(True)
+        linux_layout.addWidget(linux_hint)
 
         self.settings_distro_combo = StableComboBox()
         self.settings_distro_combo.setObjectName("ModernCombo")
         self.settings_distro_combo.setEditable(True)
-        self.settings_linux_path_input = QLineEdit()
-        self.settings_linux_path_input.setPlaceholderText("/mnt/e/work/partner_workspace")
-        left_layout.addWidget(self.field_block(self.text("settings_wsl_distro"), self.settings_distro_combo))
-        left_layout.addWidget(self.field_block(self.text("settings_linux_path"), self.settings_linux_path_input))
+        linux_grid = QGridLayout()
+        linux_grid.setHorizontalSpacing(12)
+        linux_grid.setVerticalSpacing(10)
+        linux_grid.addWidget(QLabel("WSL 发行版"), 0, 0)
+        linux_grid.addWidget(self.settings_distro_combo, 0, 1, 1, 3)
+        self.settings_linux_check_btn = QPushButton("检查 WSL")
+        self.settings_linux_check_btn.setObjectName("TertiaryAction")
+        self.settings_linux_check_btn.clicked.connect(self.refresh_settings_page)
+        self.settings_linux_install_btn = QPushButton("检查并安装 WSL")
+        self.settings_linux_install_btn.setObjectName("SecondaryAction")
+        self.settings_linux_install_btn.clicked.connect(self.install_linux_with_mirror)
+        self.settings_linux_save_btn = QPushButton("保存 Windows / WSL 模式")
+        self.settings_linux_save_btn.setObjectName("PrimaryAction")
+        self.settings_linux_save_btn.clicked.connect(self.save_settings_page)
+        linux_grid.addWidget(self.settings_linux_check_btn, 1, 0)
+        linux_grid.addWidget(self.settings_linux_install_btn, 1, 1)
+        linux_grid.addWidget(self.settings_linux_save_btn, 1, 2, 1, 2)
+        linux_layout.addLayout(linux_grid)
+        linux_layout.addWidget(self.settings_linux_status)
+        linux_box.hide()
+        page_layout.addWidget(linux_box)
 
         self.settings_ssh_host_input = QLineEdit()
         self.settings_ssh_port_input = QLineEdit()
         self.settings_ssh_user_input = QLineEdit()
         self.settings_ssh_key_input = QLineEdit()
+        self.settings_ssh_key_input.setPlaceholderText(r"私钥文件路径，例如 C:\Users\你\.ssh\id_ed25519；不是服务器密码")
         self.settings_ssh_workspace_input = QLineEdit()
         self.settings_ssh_partner_dir_input = QLineEdit()
+
+        ssh_box = QFrame()
+        ssh_box.setObjectName("Card")
+        ssh_layout = QVBoxLayout(ssh_box)
+        ssh_layout.setContentsMargins(18, 18, 18, 18)
+        ssh_layout.setSpacing(12)
+        ssh_head = QHBoxLayout()
+        ssh_title = QLabel("SSH 服务器")
+        ssh_title.setStyleSheet("font-size: 20px; font-weight: 780;")
+        ssh_head.addWidget(ssh_title)
+        ssh_head.addStretch(1)
+        self.settings_ssh_radio.hide()
+        ssh_layout.addLayout(ssh_head)
+        ssh_hint = QLabel("用于把 Partner 切到远程服务器。Key 填 SSH 私钥文件路径，例如 C:\\Users\\你\\.ssh\\id_ed25519；如果没有私钥，需要先在 Windows 里生成 SSH key 并把公钥放到服务器 ~/.ssh/authorized_keys。")
+        ssh_hint.setObjectName("Subtle")
+        ssh_hint.setWordWrap(True)
+        ssh_layout.addWidget(ssh_hint)
         ssh_grid = QGridLayout()
         ssh_grid.setHorizontalSpacing(12)
         ssh_grid.setVerticalSpacing(10)
@@ -3365,51 +5030,27 @@ class PartnerQtWindow(QMainWindow):
         ssh_grid.addWidget(self.settings_ssh_workspace_input, 2, 1, 1, 3)
         ssh_grid.addWidget(QLabel("Partner Dir"), 3, 0)
         ssh_grid.addWidget(self.settings_ssh_partner_dir_input, 3, 1, 1, 3)
-        ssh_wrap = QWidget()
-        ssh_wrap.setLayout(ssh_grid)
-        left_layout.addWidget(ssh_wrap)
-
-        left_actions = QHBoxLayout()
-        self.settings_detect_agents_btn = QPushButton(self.text("settings_detect_agents"))
-        self.settings_detect_agents_btn.setObjectName("TertiaryAction")
-        self.settings_detect_agents_btn.clicked.connect(self.refresh_settings_page)
-        self.settings_save_btn = QPushButton(self.text("settings_save"))
+        ssh_layout.addLayout(ssh_grid)
+        ssh_actions = QHBoxLayout()
+        self.settings_ssh_check_btn = QPushButton("检查 SSH 配置")
+        self.settings_ssh_check_btn.setObjectName("TertiaryAction")
+        self.settings_ssh_check_btn.clicked.connect(self.refresh_settings_page)
+        self.settings_save_btn = QPushButton("保存 SSH 配置")
+        self.settings_save_btn.setObjectName("PrimaryAction")
         self.settings_save_btn.clicked.connect(self.save_settings_page)
-        left_actions.addWidget(self.settings_detect_agents_btn)
-        left_actions.addStretch(1)
-        left_actions.addWidget(self.settings_save_btn)
-        left_layout.addLayout(left_actions)
+        ssh_actions.addWidget(self.settings_ssh_check_btn)
+        ssh_actions.addStretch(1)
+        ssh_actions.addWidget(self.settings_save_btn)
+        ssh_layout.addLayout(ssh_actions)
+        page_layout.addWidget(ssh_box)
 
-        right_box = QFrame()
-        right_box.setObjectName("Card")
-        right_layout = QVBoxLayout(right_box)
-        right_layout.setContentsMargins(18, 18, 18, 18)
-        right_layout.setSpacing(12)
-        right_title = QLabel(self.text("settings_agent_title"))
-        right_title.setStyleSheet("font-size: 18px; font-weight: 760;")
-        right_layout.addWidget(right_title)
-        self.settings_agent_help = QLabel(self.text("settings_agent_help"))
-        self.settings_agent_help.setObjectName("Subtle")
-        self.settings_agent_help.setWordWrap(True)
-        right_layout.addWidget(self.settings_agent_help)
+        self.settings_local_input = QLineEdit()
+        self.settings_linux_path_input = QLineEdit()
         self.settings_agent_list = QListWidget()
-        self.settings_agent_list.setMinimumHeight(180)
-        right_layout.addWidget(self.settings_agent_list)
         self.settings_agent_backend_combo = StableComboBox()
-        self.settings_agent_backend_combo.setObjectName("ModernCombo")
         self.settings_agent_backend_combo.addItems(["hermes", "codex", "openclaw", "claude_code"])
-        right_layout.addWidget(self.field_block(self.text("settings_default_agent"), self.settings_agent_backend_combo))
         self.settings_agent_detail = QPlainTextEdit()
-        self.settings_agent_detail.setReadOnly(True)
-        self.settings_agent_detail.setMinimumHeight(180)
-        right_layout.addWidget(self.settings_agent_detail, 1)
-
-        split.addWidget(left_box)
-        split.addWidget(right_box)
-        split.setStretchFactor(0, 13)
-        split.setStretchFactor(1, 10)
-        split.setSizes([760, 520])
-        page_layout.addWidget(split, 1)
+        page_layout.addStretch(1)
         return page
 
     def toggle_max_restore(self):
@@ -3446,16 +5087,337 @@ class PartnerQtWindow(QMainWindow):
         )
 
     def open_setup(self):
-        self.switch_page(4)
+        self.switch_page(7)
 
     def open_partner_config(self):
-        self.hide_loading(minimum_ms=MIN_PAGE_LOADING_MS)
-        dialog = OnboardingDialog(self)
-        if dialog.exec():
-            self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
-            self.workspace, self.workspace_mode = resolve_initial_workspace(self.bridge_settings)
-            self.refresh_settings_page()
-            self.request_refresh(force=True)
+        self.switch_page(7)
+
+    def setup_agent_status_text(self) -> str:
+        agents = detect_local_agents()
+        self._setup_agents_cache = agents
+        by_name = {str(a.get("name") or ""): a for a in agents}
+        parts = []
+        for name, label in (("hermes", "Hermes"), ("openclaw", "OpenClaw")):
+            item = by_name.get(name) or {}
+            if item.get("available"):
+                path = str(item.get("path") or "").strip()
+                parts.append(f"已检测到 {label}" + (f"：{path}" if path else ""))
+            else:
+                parts.append(f"未安装 {label}")
+        return "；".join(parts) + "。"
+
+    def refresh_setup_page(self):
+        if hasattr(self, "setup_workspace_input") and not self.setup_workspace_input.text().strip():
+            self.setup_workspace_input.setText(self.workspace if self.workspace_mode == "local" and self.workspace else default_local_workspace_path())
+        if hasattr(self, "setup_agent_status_label"):
+            self.setup_agent_status_label.setText(self.setup_agent_status_text())
+
+    def pick_setup_workspace(self):
+        current = self.setup_workspace_input.text().strip() if hasattr(self, "setup_workspace_input") else ""
+        path = QFileDialog.getExistingDirectory(self, "选择 Partner workspace", current or default_local_workspace_path())
+        if path:
+            self.setup_workspace_input.setText(path)
+
+    def ensure_setup_instance(self) -> tuple[str, str]:
+        ws = self.setup_workspace_input.text().strip() if hasattr(self, "setup_workspace_input") else ""
+        ws = ws or default_local_workspace_path()
+        os.makedirs(ws, exist_ok=True)
+        for sub in ["state", "logs", "data", "00_config"]:
+            os.makedirs(os.path.join(ws, sub), exist_ok=True)
+        _, inst_id = ensure_first_local_instance(ws)
+        inst_id = inst_id or "01"
+        return inst_id, os.path.join(ws, "instances", inst_id)
+
+    def refresh_setup_agent_status(self):
+        if hasattr(self, "setup_agent_status_label"):
+            self.setup_agent_status_label.setText("正在检测 Hermes / OpenClaw…")
+            QApplication.processEvents()
+            self.setup_agent_status_label.setText(self.setup_agent_status_text())
+
+    def run_setup_installer_command(self, command: str, title: str):
+        if os.name == "nt":
+            escaped_title = title.replace("'", "''")
+            ps = (
+                f"$host.UI.RawUI.WindowTitle = '{escaped_title}'; "
+                "$ErrorActionPreference='Continue'; "
+                "Write-Host 'Partner 正在执行安装命令…'; "
+                "Write-Host ''; "
+                f"{command}; "
+                "$partnerExitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 0 }; "
+                "Write-Host ''; "
+                "if ($partnerExitCode -eq 0) { Write-Host '安装成功。' -ForegroundColor Green } "
+                "else { Write-Host ('安装失败，退出码：' + $partnerExitCode) -ForegroundColor Red }; "
+                "Read-Host '按 Enter 关闭窗口'"
+            )
+            subprocess.Popen(
+                ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+            return
+        subprocess.Popen(["bash", "-lc", command])
+
+    def open_setup_hermes_install(self):
+        agents = getattr(self, "_setup_agents_cache", None) or detect_local_agents()
+        installed = any(a.get("name") == "hermes" and a.get("available") for a in agents)
+        if installed:
+            if not ask_partner_confirm(self, "Hermes", "已检测到 Hermes。是否要重新安装 Hermes？"):
+                return
+        elif not ask_partner_confirm(self, "Hermes", "未检测到 Hermes。安装脚本需要能访问 GitHub；如果网络受限请先配置代理。是否现在打开安装命令？"):
+            return
+        if os.name == "nt":
+            self.run_setup_installer_command(
+                "$env:PIP_INDEX_URL='https://pypi.tuna.tsinghua.edu.cn/simple'; "
+                "irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex",
+                "Hermes 安装",
+            )
+        else:
+            self.run_setup_installer_command(
+                "export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple; "
+                "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+                "Hermes 安装",
+            )
+
+    def open_setup_openclaw_install(self):
+        agents = getattr(self, "_setup_agents_cache", None) or detect_local_agents()
+        installed = any(a.get("name") == "openclaw" and a.get("available") for a in agents)
+        if installed:
+            if not ask_partner_confirm(self, "OpenClaw", "已检测到 OpenClaw。是否要重新安装 OpenClaw？"):
+                return
+        elif not ask_partner_confirm(self, "OpenClaw", "未检测到 OpenClaw。将通过 Windows 本机 npm 安装；如果网络受限请先配置代理。是否现在打开安装命令？"):
+            return
+        if os.name == "nt":
+            self.run_setup_installer_command("npm config set registry https://registry.npmmirror.com && npm install -g openclaw", "OpenClaw 安装")
+        else:
+            self.run_setup_installer_command(
+                "npm config set registry https://registry.npmmirror.com 2>/dev/null || true; "
+                "curl -fsSL https://openclaw.ai/install-cli.sh | bash",
+                "OpenClaw 安装",
+            )
+
+    def open_selected_setup_api_provider(self):
+        provider = self.setup_api_provider_combo.currentText().strip().lower() if hasattr(self, "setup_api_provider_combo") else "deepseek"
+        if provider == "deepseek":
+            QDesktopServices.openUrl(QUrl("https://platform.deepseek.com/"))
+        else:
+            QDesktopServices.openUrl(QUrl("https://platform.openai.com/"))
+
+    def open_setup_basic_api_config(self):
+        _, inst_dir = self.ensure_setup_instance()
+        dialog = BasicApiConfigDialog(self, inst_dir)
+        dialog.exec()
+        self.refresh_agent_api_page()
+
+    def open_setup_basic_qq_config(self):
+        inst_id, inst_dir = self.ensure_setup_instance()
+        dialog = BasicQQConfigDialog(self, inst_id, inst_dir)
+        dialog.exec()
+        self.refresh_qq_page()
+
+    def defer_setup_page(self):
+        install_stamp = current_install_stamp()
+        settings = dict(self.bridge_settings or {})
+        settings.update(
+            {
+                "onboarding_completed": True,
+                "onboarding_schema_version": PARTNER_CONFIG_SCHEMA_VERSION,
+                "onboarding_completed_at": datetime.now().isoformat(),
+                "install_config_prompt_stamp": install_stamp,
+                "install_config_prompted_at": datetime.now().isoformat(),
+                "saved_at": datetime.now().isoformat(),
+            }
+        )
+        save_gui_bridge_settings(settings, workspace_hint=self.workspace if self.workspace_mode == "local" else None)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        self.switch_page(0)
+        QTimer.singleShot(300, self.auto_start_instances_once)
+
+    def save_setup_page(self):
+        from partner.config import save_partner_config_data
+        from partner.setup import save_workspace_pointer
+
+        ws = self.setup_workspace_input.text().strip() if hasattr(self, "setup_workspace_input") else ""
+        ws = ws or default_local_workspace_path()
+        os.makedirs(ws, exist_ok=True)
+        for sub in ["state", "logs", "data", "00_config"]:
+            os.makedirs(os.path.join(ws, sub), exist_ok=True)
+        config = {
+            "workspace": {"path": ws, "readonly_dirs": []},
+            "agent": {"backend": "hermes"},
+            "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
+            "name": "Partner",
+        }
+        save_partner_config_data(ws, config)
+        save_workspace_pointer(ws)
+        created, _ = ensure_first_local_instance(ws)
+        install_stamp = current_install_stamp()
+        provider = self.setup_api_provider_combo.currentText().strip() if hasattr(self, "setup_api_provider_combo") else "DeepSeek"
+        settings = dict(self.bridge_settings or {})
+        settings.update(
+            {
+                "mode": "local",
+                "local_workspace": ws,
+                "api_provider": provider,
+                "onboarding_completed": True,
+                "onboarding_schema_version": PARTNER_CONFIG_SCHEMA_VERSION,
+                "onboarding_completed_at": datetime.now().isoformat(),
+                "install_config_prompt_stamp": install_stamp,
+                "install_config_prompted_at": datetime.now().isoformat(),
+                "saved_at": datetime.now().isoformat(),
+            }
+        )
+        save_gui_bridge_settings(settings, workspace_hint=ws)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        self.workspace = ws
+        self.workspace_mode = "local"
+        if created:
+            self._first_instance_created_notice = True
+        self.request_refresh(force=True, page_index=0)
+        self.switch_page(0)
+        if getattr(self, "_first_instance_created_notice", False):
+            QTimer.singleShot(250, self.show_first_instance_notice)
+        QTimer.singleShot(300, self.auto_start_instances_once)
+
+    def show_beginner_guide(self):
+        text = f"""
+        <html>
+        <head>
+        <style>
+            body {{
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                color: {COLORS['text']};
+                background: #f7fafc;
+                margin: 0;
+            }}
+            .hero {{
+                background: #ffffff;
+                border: 1px solid #d9e6f5;
+                border-radius: 14px;
+                padding: 18px 20px;
+                margin-bottom: 14px;
+            }}
+            h1 {{ font-size: 24px; margin: 0 0 8px 0; }}
+            h2 {{ font-size: 18px; margin: 16px 0 8px 0; }}
+            h3 {{ font-size: 15px; margin: 0 0 6px 0; }}
+            p {{ color: {COLORS['subtext']}; font-size: 14px; line-height: 1.65; margin: 0; }}
+            .flow {{
+                margin-top: 14px;
+                color: {COLORS['accent']};
+                font-weight: 760;
+                background: #edf5ff;
+                border: 1px solid #d1e3ff;
+                border-radius: 12px;
+                padding: 11px 13px;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: separate;
+                border-spacing: 10px;
+            }}
+            td {{
+                vertical-align: top;
+                width: 50%;
+            }}
+            .section {{
+                background: #ffffff;
+                border: 1px solid #d9e6f5;
+                border-radius: 14px;
+                padding: 14px 16px;
+                margin-bottom: 12px;
+            }}
+            .card {{
+                background: #ffffff;
+                border: 1px solid #dce6f1;
+                border-radius: 14px;
+                padding: 14px 16px;
+                min-height: 92px;
+            }}
+            .tag {{
+                display: inline-block;
+                color: {COLORS['accent']};
+                background: #edf5ff;
+                border-radius: 999px;
+                padding: 3px 9px;
+                font-size: 12px;
+                font-weight: 760;
+                margin-bottom: 8px;
+            }}
+            .note {{
+                margin-top: 14px;
+                background: #fffaf0;
+                border: 1px solid #f0d9a8;
+                border-radius: 14px;
+                padding: 14px 16px;
+            }}
+        </style>
+        </head>
+        <body>
+            <div class="hero">
+                <div class="tag">Partner Beginner Guide</div>
+                <h1>先理解这五件事，再开始配置</h1>
+                <p>Partner 不是单个聊天窗口，而是一套把目标、实例、Agent、API、工具、日志和机器人串起来的本地工作系统。</p>
+                <div class="flow">你发目标 -> Partner 整理成 event -> Agent 执行 -> LLM API 思考 -> 工具/文件落地 -> 经验沉淀</div>
+            </div>
+            <div class="section">
+                <h2>1. 通用 Agent 知识</h2>
+                <table>
+                    <tr>
+                        <td><div class="card"><h3>LLM</h3><p>像一个会读写、总结、推理的大脑。它负责“想”和“写”，但不会自动管理文件、流程和长期任务。</p></div></td>
+                        <td><div class="card"><h3>API</h3><p>像去模型服务的窗口。API key 是门禁卡，base URL 是地址，model 是你要调用的模型。</p></div></td>
+                    </tr>
+                    <tr>
+                        <td><div class="card"><h3>Agent</h3><p>像会用工具的助手。它把目标拆成步骤，调用 LLM、工具和文件系统，再整理结果。</p></div></td>
+                        <td><div class="card"><h3>Prompt / Token</h3><p>Prompt 是任务说明；token 是模型处理文字的基本单位，影响上下文长度和费用。</p></div></td>
+                    </tr>
+                    <tr>
+                        <td><div class="card"><h3>Skill / Tool</h3><p>Skill 像工作说明书，Tool 是实际可调用的工具，例如读文件、搜索、运行命令。</p></div></td>
+                        <td><div class="card"><h3>Harness</h3><p>Harness 是工作台，把 Agent、工具、权限、日志和执行环境放在一起管理。</p></div></td>
+                    </tr>
+                </table>
+            </div>
+            <div class="section">
+                <h2>2. Partner 的创新和功能</h2>
+                <p>Partner 做的是调度和沉淀：把目标拆成 event，把 event 交给 Hermes/OpenClaw 等 Agent，保存对话、日志、文件、经验和运行状态。实例是独立工作区，默认创建 01；你也可以开多个实例，让不同课题互不干扰。</p>
+            </div>
+            <div class="section">
+                <h2>3. 为什么要配置 Linux</h2>
+                <p>WSL / Linux 不是新手必填项。它适合需要更稳定命令行环境、Linux 工具链、长期后台任务或和服务器环境保持一致时使用。普通用户先用 Windows 本地跑通即可。</p>
+            </div>
+            <div class="section">
+                <h2>4. 什么是 Ollama</h2>
+                <p>Ollama 可以在本机或服务器上运行本地模型。它适合做低成本、离线、隐私要求更高的任务，也可以作为 Agent 的备用模型池；缺点是效果和速度取决于你的硬件和模型大小。</p>
+            </div>
+            <div class="section">
+                <h2>5. 远程服务器</h2>
+                <p>远程服务器适合长时间运行、算力更强或多人共享的场景。Partner 桌面端可以连接服务器查看状态、日志和实例运行情况；本地电脑关机后，服务器上的任务也可以继续跑。</p>
+            </div>
+        </body>
+        </html>
+        """
+        show_partner_text_dialog(self, "新手指引", text, width=880, height=740, rich=True)
+
+    def mask_secret(self, value: str) -> str:
+        text = str(value or "")
+        if not text:
+            return "未填写"
+        if len(text) <= 6:
+            return "*" * len(text)
+        return text[:3] + "*" * max(3, len(text) - 6) + text[-3:]
+
+    def show_api_config_file_help(self):
+        if self.workspace_mode == "ssh":
+            show_partner_notice(self, "Partner", "远程服务器模式暂不支持从桌面直接编辑 API 本地配置。")
+            return
+        dialog = ApiConfigEditorDialog(self)
+        dialog.exec()
+        self.request_refresh(force=True)
+
+    def show_qq_config_file_help(self):
+        if self.workspace_mode == "ssh":
+            show_partner_notice(self, "Partner", "远程服务器模式暂不支持从桌面直接编辑 QQ 机器人本地配置。")
+            return
+        dialog = QQConfigEditorDialog(self)
+        dialog.exec()
+        self.request_refresh(force=True)
 
     def ssh_target(self) -> tuple[str, str, str, str]:
         host = (self.bridge_settings.get("ssh_host") or "").strip()
@@ -3531,7 +5493,7 @@ class PartnerQtWindow(QMainWindow):
         return "python3 -c " + shlex.quote(py)
 
     def fetch_remote_bundle(self, force: bool = False) -> dict:
-        if not force and self._remote_bundle_cache and (time.time() - self._remote_bundle_ts) < 15:
+        if not force and self._remote_bundle_cache and (time.time() - self._remote_bundle_ts) < REMOTE_BUNDLE_CACHE_TTL_SEC:
             return self._remote_bundle_cache
         workspace = self.workspace or ""
         script = f"""
@@ -3689,7 +5651,7 @@ bundle["ollama"] = {{
   "runtime": summarize_runs(ws),
 }}
 instances = (bundle["global_config"].get("instances") or {{}})
-for inst_id in sorted(instances.keys()):
+for inst_id in sorted(instances.keys(), key=lambda value: (0, str(int(value)).zfill(8)) if str(value).isdigit() else (1, str(value).lower())):
     inst_dir = os.path.join(ws, "instances", inst_id)
     bot_cfg = os.path.join(inst_dir, "qq_configs.json")
     primary_bot = os.path.join(inst_dir, "00_config", "qq_config.json")
@@ -3747,20 +5709,53 @@ for inst_id in sorted(instances.keys()):
         if "qq_official_bridge" in cmd or "qq_official_bot" in cmd:
             return True
         return "partner" in cmd and inst_dir in cmd and ("qq" in cmd.lower() or "bot" in cmd.lower())
+    def find_process(inst_id, inst_dir, kind):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            cmd = pid_cmdline(name)
+            if not cmd:
+                continue
+            lower = cmd.lower()
+            if kind == "instance":
+                if "python" in lower and "partner" in lower and (f"--instance-id {{inst_id}}" in cmd or inst_dir in cmd):
+                    return name
+            elif kind == "qq":
+                if "qq_official_bridge" in lower or "qq_official_bot" in lower:
+                    if inst_dir in cmd or "--workspace" in cmd:
+                        return name
+                if "partner" in lower and inst_dir in cmd and ("qq" in lower or "bot" in lower):
+                    return name
+        return ""
     token_total, token_today = read_tokens(inst_dir)
+    instance_running = instance_pid_alive(instance_pid, inst_id, inst_dir)
+    if not instance_running:
+        found_instance_pid = find_process(inst_id, inst_dir, "instance")
+        if found_instance_pid:
+            instance_pid = found_instance_pid
+            instance_running = True
+    qq_running = qq_pid_alive(qq_pid, inst_dir)
+    if not qq_running:
+        found_qq_pid = find_process(inst_id, inst_dir, "qq")
+        if found_qq_pid:
+            qq_pid = found_qq_pid
+            qq_running = True
     bundle["instances"][inst_id] = {{
       "dir": inst_dir,
       "plan": load_json(os.path.join(inst_dir, "state", "active_plan.json")),
       "heartbeat": load_json(os.path.join(inst_dir, "state", "heartbeat.json")),
       "active_project": load_json(os.path.join(inst_dir, "20_records", "active_project.json")),
+      "active_project_text": load_text(os.path.join(inst_dir, "20_records", "active_project.txt")),
       "knowledge": load_json(os.path.join(inst_dir, "state", "knowledge.json")),
+      "research_memory": load_json(os.path.join(inst_dir, "state", "research_memory.json")),
+      "research_habits": load_json(os.path.join(inst_dir, "state", "research_habits_state.json")),
       "summary": load_text(os.path.join(inst_dir, "user", "current_project", "summary.md")),
       "journal_count": count_lines(os.path.join(inst_dir, "state", "journal.jsonl")),
       "bots": bots,
       "qq_pid": qq_pid,
       "instance_pid": instance_pid,
-      "instance_running": instance_pid_alive(instance_pid, inst_id, inst_dir),
-      "qq_running": qq_pid_alive(qq_pid, inst_dir),
+      "instance_running": instance_running,
+      "qq_running": qq_running,
       "token_total": token_total,
       "token_today": token_today,
       "ollama": {{
@@ -4071,17 +6066,26 @@ print(json.dumps(bundle, ensure_ascii=False))
 
         instances_cfg = (snapshot["global_config"].get("instances") or {}) if ws else {}
         if instances_cfg:
-            for instance_id, cfg in sorted(instances_cfg.items()):
+            for instance_id, cfg in sorted(instances_cfg.items(), key=lambda item: instance_sort_key(item[0])):
                 if self.workspace_mode == "ssh":
                     instance_dir = ((remote_bundle or {}).get("instances") or {}).get(instance_id, {}).get("dir") or os.path.join(ws, "instances", instance_id)
                 else:
                     instance_dir = cfg.get("working_dir") or os.path.join(ws, "instances", instance_id)
+                    if self.workspace_mode == "local" and str(instance_dir).replace("\\", "/").startswith("/mnt/"):
+                        instance_dir = wsl_to_windows_path(instance_dir)
+                    elif self.workspace_mode == "wsl":
+                        normalized_dir = str(instance_dir).replace("\\", "/")
+                        distro = str(self.bridge_settings.get("wsl_distro") or "").strip()
+                        if normalized_dir.startswith("/mnt/") and distro:
+                            instance_dir = linux_path_to_unc(normalized_dir, distro)
+                        elif len(str(instance_dir)) >= 2 and str(instance_dir)[1] == ":" and distro:
+                            instance_dir = linux_path_to_unc(windows_to_wsl_path(str(instance_dir)), distro)
                 snapshot["instances"].append(self.collect_instance_snapshot(instance_id, instance_dir))
         elif ws:
             snapshot["instances"].append(self.collect_instance_snapshot(workspace_instance_label(ws), ws))
 
         if snapshot["source"] == "wsl":
-            snapshot["alerts"].append(("warn", "当前是 Linux / WSL 工作区连接模式。Windows 端主要用于查看状态、日志和项目进展。"))
+            snapshot["alerts"].append(("warn", "当前是 WSL / Linux 工作区连接模式。Windows 端主要用于查看状态、日志和项目进展。"))
         elif snapshot["source"] == "ssh":
             host = self.bridge_settings.get("ssh_host") or "SSH"
             snapshot["alerts"].append(("warn", f"当前是 SSH 服务器连接模式：{host}。状态、启停与日志预览都通过远端读取。"))
@@ -4093,24 +6097,31 @@ print(json.dumps(bundle, ensure_ascii=False))
             plan = remote_item.get("plan") or {}
             heartbeat = remote_item.get("heartbeat") or {}
             active_project = remote_item.get("active_project") or {}
+            active_project_text = str(remote_item.get("active_project_text") or "").strip()
             knowledge = remote_item.get("knowledge") or {}
+            research_memory = remote_item.get("research_memory") or {}
+            research_habits = remote_item.get("research_habits") or {}
             summary_md = remote_item.get("summary") or ""
             journal_count = int(remote_item.get("journal_count") or 0)
             token_total = int(remote_item.get("token_total") or 0)
             token_today = int(remote_item.get("token_today") or 0)
         else:
-            plan = load_json_file(os.path.join(instance_dir, "state", "active_plan.json"))
-            heartbeat = load_json_file(os.path.join(instance_dir, "state", "heartbeat.json"))
-            active_project = load_json_file(os.path.join(instance_dir, "20_records", "active_project.json"))
-            knowledge = load_json_file(os.path.join(instance_dir, "state", "knowledge.json"))
-            summary_md = read_text_file(os.path.join(instance_dir, "user", "current_project", "summary.md"))
-            journal_count = count_jsonl_lines(os.path.join(instance_dir, "state", "journal.jsonl"))
-            token_total, token_today = read_token_usage(instance_dir)
+            read_dir = self.readable_path(instance_dir)
+            plan = load_json_file(os.path.join(read_dir, "state", "active_plan.json"))
+            heartbeat = load_json_file(os.path.join(read_dir, "state", "heartbeat.json"))
+            active_project = load_json_file(os.path.join(read_dir, "20_records", "active_project.json"))
+            active_project_text = read_text_file(os.path.join(read_dir, "20_records", "active_project.txt"))
+            knowledge = load_json_file(os.path.join(read_dir, "state", "knowledge.json"))
+            research_memory = load_json_file(os.path.join(read_dir, "state", "research_memory.json"))
+            research_habits = load_json_file(os.path.join(read_dir, "state", "research_habits_state.json"))
+            summary_md = read_text_file(os.path.join(read_dir, "user", "current_project", "summary.md"))
+            journal_count = count_jsonl_lines(os.path.join(read_dir, "state", "journal.jsonl"))
+            token_total, token_today = read_token_usage(read_dir)
 
         phases = plan.get("phases") or []
         completed = sum(1 for p in phases if p.get("status") == "completed")
         total_phases = len(phases)
-        focus = active_project.get("project_name") or plan.get("title") or plan.get("goal") or "尚未明确研究方向"
+        focus = active_project.get("project_name") or active_project_text or plan.get("title") or plan.get("goal") or "尚未明确研究方向"
         current_action = (
             plan.get("heartbeat_summary")
             or active_project.get("current_phase")
@@ -4120,20 +6131,24 @@ print(json.dumps(bundle, ensure_ascii=False))
         knowledge_entries = (knowledge.get("meta") or {}).get("total_entries")
         if knowledge_entries is None:
             knowledge_entries = len(knowledge.get("entries") or [])
+        knowledge_entries = int(knowledge_entries or 0) + count_research_memory_entries(research_memory)
+        habit_count = count_research_habits(research_habits)
 
         status = heartbeat.get("status") or plan.get("status") or "idle"
         status_map = {
             "alive": ("在线", COLORS["green"]),
             "working": ("执行中", COLORS["green"]),
+            "running": ("运行中", COLORS["green"]),
             "active": ("推进中", COLORS["green"]),
             "planning": ("规划中", COLORS["yellow"]),
+            "waiting": ("等待中", COLORS["yellow"]),
             "completed": ("已完成", COLORS["accent_soft"]),
             "idle": ("空闲", COLORS["subtext"]),
         }
         status_text, status_color = status_map.get(status, (status, COLORS["subtext"]))
-        if knowledge_entries >= 8 or completed >= 4:
+        if knowledge_entries >= 8 or habit_count >= 3 or completed >= 4:
             growth = "成长快，已形成稳定经验"
-        elif knowledge_entries >= 3 or completed >= 2:
+        elif knowledge_entries >= 3 or habit_count > 0 or completed >= 2:
             growth = "持续积累中"
         elif journal_count > 0:
             growth = "刚起步，已有探索痕迹"
@@ -4143,11 +6158,14 @@ print(json.dumps(bundle, ensure_ascii=False))
         if self.workspace_mode == "ssh":
             remote_item = (self.fetch_remote_bundle().get("instances") or {}).get(instance_id, {})
             is_active = bool(remote_item.get("instance_running") or remote_item.get("qq_running"))
+        else:
+            is_active = self.instance_process_running(instance_id, instance_dir)
+        if is_active and status_text in {"空闲", "等待中"}:
+            status_text = "运行中"
+            status_color = COLORS["green"]
         elif not is_active:
-            hb = parse_iso(heartbeat.get("last_heartbeat") or plan.get("last_heartbeat"))
-            if hb:
-                now = datetime.now(hb.tzinfo) if hb.tzinfo else datetime.now()
-                is_active = (now - hb).total_seconds() < 24 * 3600
+            status_text = "未运行"
+            status_color = COLORS["subtext"]
 
         return InstanceSnapshot(
             id=instance_id,
@@ -4164,6 +6182,7 @@ print(json.dumps(bundle, ensure_ascii=False))
             progress_text=f"{completed}/{total_phases} 阶段" if total_phases else ("已完成" if plan.get("status") == "completed" else "未拆分阶段"),
             progress_pct=int((completed / total_phases) * 100) if total_phases else (100 if plan.get("status") == "completed" else 0),
             knowledge_entries=knowledge_entries or 0,
+            habit_count=habit_count,
             journal_count=journal_count,
             growth=growth,
             token_total=token_total,
@@ -4200,8 +6219,123 @@ print(json.dumps(bundle, ensure_ascii=False))
             self.mode_label.setText(tr("mode_wsl", self.lang))
         else:
             self.mode_label.setText(tr("mode_local", self.lang))
+        if hasattr(self, "switch_local_btn"):
+            self.switch_local_btn.setVisible(self.workspace_mode != "local")
+        if hasattr(self, "switch_linux_btn"):
+            self.switch_linux_btn.setVisible(self.workspace_mode != "wsl")
+        if hasattr(self, "switch_ssh_btn"):
+            self.switch_ssh_btn.setVisible(self.workspace_mode != "ssh")
         if hasattr(self, "footer_config_label"):
-            self.footer_config_label.setText(self.text("config_footer", path=self.compact_config_display_path()))
+            self.footer_config_label.hide()
+
+    def switch_to_local_workspace(self):
+        from partner.config import save_partner_config_data
+        from partner.setup import save_workspace_pointer
+
+        ws = ""
+        if self.workspace_mode == "local" and self.workspace:
+            ws = self.workspace
+        elif hasattr(self, "setup_workspace_input"):
+            ws = self.setup_workspace_input.text().strip()
+        if not ws:
+            ws = str(self.bridge_settings.get("local_workspace") or "")
+        if not ws:
+            try:
+                pointer_ws = find_workspace() or ""
+            except Exception:
+                pointer_ws = ""
+            if pointer_ws and not is_wsl_unc_path(pointer_ws):
+                ws = pointer_ws
+        ws = ws or default_local_workspace_path()
+        os.makedirs(ws, exist_ok=True)
+        for sub in ["state", "logs", "data", "00_config"]:
+            os.makedirs(os.path.join(ws, sub), exist_ok=True)
+        config = {
+            "workspace": {"path": ws, "readonly_dirs": []},
+            "agent": {"backend": "hermes"},
+            "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
+            "name": "Partner",
+        }
+        save_partner_config_data(ws, config)
+        save_workspace_pointer(ws)
+        ensure_first_local_instance(ws)
+        settings = dict(self.bridge_settings or {})
+        settings.update(
+            {
+                "mode": "local",
+                "local_workspace": ws,
+                "saved_at": datetime.now().isoformat(),
+            }
+        )
+        save_gui_bridge_settings(settings, workspace_hint=ws)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        self.workspace = ws
+        self.workspace_mode = "local"
+        self.update_mode_label()
+        self.set_status_indicator(COLORS["green"], self.text("switched_to_local"))
+        current = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        self.request_refresh(force=True, page_index=current)
+
+    def switch_to_linux_workspace(self):
+        from partner.setup import save_workspace_pointer
+
+        distro = str(self.bridge_settings.get("wsl_distro") or "").strip()
+        linux_workspace = str(self.bridge_settings.get("linux_workspace") or "").strip()
+        if hasattr(self, "linux_distro_combo"):
+            distro = self.linux_distro_combo.currentText().strip() or distro
+        if hasattr(self, "linux_workspace_input"):
+            linux_workspace = self.linux_workspace_input.text().strip() or linux_workspace
+        if not distro:
+            distros = detect_wsl_distros()
+            distro = preferred_wsl_distro("", distros)
+            if not distro and len(distros) > 1:
+                self.switch_page(4)
+                show_partner_notice(self, "Partner", "检测到多个 WSL 发行版。请在 WSL / Linux 页面明确选择要使用的发行版，再点击“保存并切到 WSL”。")
+                return
+        if not distro or not linux_workspace:
+            self.switch_page(4)
+            show_partner_notice(self, "Partner", "请先在 WSL / Linux 页面点击“检查 WSL”，选择具体 WSL 发行版并保存 workspace。远程 Linux 请使用 SSH。")
+            return
+        unc = linux_path_to_unc(linux_workspace, distro)
+        settings = dict(self.bridge_settings or {})
+        settings.update(
+            {
+                "mode": "wsl",
+                "wsl_distro": distro,
+                "linux_workspace": linux_workspace,
+                "unc_workspace": unc,
+                "saved_at": datetime.now().isoformat(),
+            }
+        )
+        save_gui_bridge_settings(settings)
+        save_workspace_pointer(unc)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        self.workspace = unc
+        self.workspace_mode = "wsl"
+        self.update_mode_label()
+        self.set_status_indicator(COLORS["green"], self.text("switched_to_linux"))
+        current = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        self.request_refresh(force=True, page_index=current)
+
+    def switch_to_ssh_workspace(self):
+        host = str(self.bridge_settings.get("ssh_host") or "").strip()
+        user = str(self.bridge_settings.get("ssh_user") or "").strip()
+        key = str(self.bridge_settings.get("ssh_key") or "").strip()
+        remote_ws = str(self.bridge_settings.get("ssh_workspace") or "").strip()
+        if not host or not user or not key or not remote_ws:
+            self.switch_page(6)
+            show_partner_notice(self, "Partner", "请先在“配置服务器”页面填写 SSH host / user / key / remote workspace，并保存。")
+            return
+        settings = dict(self.bridge_settings or {})
+        settings.update({"mode": "ssh", "saved_at": datetime.now().isoformat()})
+        save_gui_bridge_settings(settings)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        self.workspace = remote_ws
+        self.workspace_mode = "ssh"
+        self.update_mode_label()
+        self.set_status_indicator(COLORS["green"], self.text("switched_to_ssh"))
+        current = self.stack.currentIndex() if hasattr(self, "stack") else 0
+        self.request_refresh(force=True, page_index=current)
 
     def set_refresh_state(self, refreshing: bool, message: str | None = None):
         if refreshing:
@@ -4224,17 +6358,39 @@ print(json.dumps(bundle, ensure_ascii=False))
         elif current == 2:
             self.refresh_qq_page()
         elif current == 3:
-            self.refresh_ollama_page()
+            self.refresh_agent_api_page()
         elif current == 4:
+            self.refresh_linux_page()
+        elif current == 5:
+            self.refresh_ollama_page()
+        elif current == 6:
             self.refresh_settings_page()
+        elif current == 7:
+            self.refresh_setup_page()
 
     def auto_refresh_tick(self):
         if self._refresh_inflight:
             return
-        if self.stack.currentIndex() == 1:
-            self.request_refresh(force=False, silent=True)
+        if QApplication.activeModalWidget():
             return
-        self.request_refresh(force=False, page_index=-1, silent=True)
+        if self.isMinimized() or not self.isActiveWindow():
+            return
+        now = time.time()
+        if now - self._last_user_activity_ts < (AUTO_REFRESH_IDLE_GRACE_MS / 1000):
+            return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox)):
+            return
+        current = self.stack.currentIndex()
+        if current == 1:
+            if now - self._last_dashboard_render_ts < (AUTO_REFRESH_MIN_DASHBOARD_RENDER_MS / 1000):
+                return
+            self._last_auto_refresh_ts = now
+            self.request_refresh(force=False, page_index=1, silent=True, auto=True)
+            return
+        if current == 0 and self.workspace_mode == "ssh":
+            self._last_auto_refresh_ts = now
+            self.request_refresh(force=False, page_index=0, silent=True, auto=True)
 
     def auto_start_instances_once(self):
         if self._auto_start_done or not self.workspace:
@@ -4249,14 +6405,26 @@ print(json.dumps(bundle, ensure_ascii=False))
             return
 
         def _start():
+            failures = []
             for inst_id, inst_dir in instances:
                 if not self.instance_process_running(inst_id, inst_dir):
-                    self.start_instance_runtime(inst_id, inst_dir)
+                    ok, msg = self.start_instance_runtime(inst_id, inst_dir)
+                    if not ok:
+                        failures.append(f"{self.display_instance_label(inst_id, inst_dir)}: {msg or self.text('instance_start_failed')}")
+            if failures:
+                self._auto_start_failures = failures
+                QTimer.singleShot(0, self.show_auto_start_failures)
 
         threading.Thread(target=_start, daemon=True).start()
-        QTimer.singleShot(3000, lambda: self.request_refresh(force=False, page_index=self.stack.currentIndex(), silent=True))
+        QTimer.singleShot(3000, lambda: self.request_refresh(force=False, page_index=self.stack.currentIndex(), silent=True, auto=True))
 
-    def request_refresh(self, force: bool = False, page_index: int | None = None, silent: bool = False):
+    def show_auto_start_failures(self):
+        failures = list(getattr(self, "_auto_start_failures", []) or [])
+        self._auto_start_failures = []
+        if failures:
+            show_partner_notice(self, "Partner", self.text("instance_auto_start_failed", items="\n".join(failures[:5])))
+
+    def request_refresh(self, force: bool = False, page_index: int | None = None, silent: bool = False, auto: bool = False):
         self.update_mode_label()
         current = self.stack.currentIndex() if page_index is None else page_index
         if self._refresh_inflight:
@@ -4266,18 +6434,26 @@ print(json.dumps(bundle, ensure_ascii=False))
         self._refresh_inflight = True
         if force or not silent:
             self.show_loading("正在刷新", "正在同步工作区状态…" if self.workspace_mode != "ssh" else "正在同步远端服务器状态…")
-        self.set_refresh_state(True, "正在刷新…" if self.workspace_mode != "ssh" else "正在同步远端状态…")
+            self.set_refresh_state(True, "正在刷新…" if self.workspace_mode != "ssh" else "正在同步远端状态…")
         if self.workspace_mode != "ssh":
             QTimer.singleShot(
                 0,
                 lambda idx=current: self.finish_refresh(
-                    {"page_index": idx, "finished_at": datetime.now().strftime("%H:%M:%S"), "error": ""}
+                    {
+                        "page_index": idx,
+                        "finished_at": datetime.now().strftime("%H:%M:%S"),
+                        "error": "",
+                        "silent": silent,
+                        "auto": auto,
+                    }
                 ),
             )
             return
         chat_instance = self.current_chat_instance() if current == 0 else (None, None)
         log_instance = (None, None)
         worker = RefreshWorker(self, current, force, chat_instance, log_instance)
+        worker.silent = silent
+        worker.auto = auto
         self._refresh_worker = worker
         worker.finished.connect(self.finish_refresh)
         threading.Thread(target=worker.run, daemon=True).start()
@@ -4285,15 +6461,20 @@ print(json.dumps(bundle, ensure_ascii=False))
     def finish_refresh(self, result: dict):
         self._refresh_inflight = False
         self._refresh_worker = None
+        silent = bool(result.get("silent"))
         self._last_refresh_at = result.get("finished_at") or datetime.now().strftime("%H:%M:%S")
-        if result.get("page_index", self.stack.currentIndex()) >= 0:
-            self.render_current_page(self.stack.currentIndex())
-        self.hide_loading(minimum_ms=MIN_PAGE_LOADING_MS)
+        page_index = result.get("page_index", self.stack.currentIndex())
+        if page_index >= 0 and page_index == self.stack.currentIndex():
+            self.render_current_page(page_index)
+            if page_index == 1:
+                self._last_dashboard_render_ts = time.time()
+        if not silent:
+            self.hide_loading(minimum_ms=MIN_PAGE_LOADING_MS)
         self.refresh_btn.setEnabled(True)
         self.refresh_btn.setText(self.text("refresh"))
         if result.get("error"):
             self.set_status_indicator(COLORS["yellow"], f"刷新失败 · {self._last_refresh_at}")
-        elif self.stack.currentIndex() != 1:
+        elif not silent and self.stack.currentIndex() != 1:
             self.set_status_indicator(COLORS["green"], f"已刷新 · {self._last_refresh_at}")
 
     def clear_layout(self, layout: QVBoxLayout):
@@ -4444,7 +6625,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         return f"{value:.1f} {units[idx]}"
 
     def chat_files_dir(self, inst_dir: str) -> str:
-        path = os.path.join(inst_dir, "state", "chat_files")
+        path = os.path.join(self.readable_path(inst_dir), "state", "chat_files")
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -4470,11 +6651,12 @@ print(json.dumps(bundle, ensure_ascii=False))
         if not inst_dir or not isinstance(attachment, dict):
             return ""
         rel_path = str(attachment.get("rel_path") or "").replace("/", os.sep)
+        base_dir = self.readable_path(inst_dir)
         if rel_path:
-            return os.path.join(inst_dir, rel_path)
+            return os.path.join(base_dir, rel_path)
         stored = str(attachment.get("stored_name") or "")
         if stored:
-            return os.path.join(inst_dir, "state", "chat_files", stored)
+            return os.path.join(base_dir, "state", "chat_files", stored)
         path = str(attachment.get("path") or attachment.get("source_path") or "")
         return path if os.path.isabs(path) else ""
 
@@ -4648,7 +6830,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         chips.setSpacing(10)
         chips.addWidget(self.build_mini_pill("runtime", item.run_duration, item.status_color))
         chips.addWidget(self.build_mini_pill("progress", item.progress_text, COLORS["accent"]))
-        chips.addWidget(self.build_mini_pill("growth", f"{item.knowledge_entries} 经验 / {item.journal_count} 探索", COLORS["text"]))
+        chips.addWidget(self.build_mini_pill("growth", f"{item.knowledge_entries}经验/{item.habit_count}习惯/{item.journal_count}探索", COLORS["text"]))
         layout.addLayout(chips)
 
         footer = QLabel(
@@ -4753,7 +6935,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         if hasattr(self, "chat_target_hint"):
             self.chat_target_hint.setText(target_text if inst_dir else self.text("chat_no_instance"))
         if self.workspace_mode == "wsl":
-            mode_text = "Linux / WSL"
+            mode_text = "WSL / Linux"
             self.add_chat_notice(f"当前连接的是 {mode_text} 工作区")
             self.add_chat_notice(f"当前目标：{self.display_instance_label(inst_id, inst_dir)}")
             self.add_chat_notice("Windows 端当前只展示状态，不直接接管 Linux 侧聊天。")
@@ -4888,7 +7070,8 @@ print(json.dumps(bundle, ensure_ascii=False))
 
     def get_instance_root_and_config(self):
         ws = self.workspace or ""
-        global_cfg_path = os.path.join(ws, "global_config.json")
+        readable_ws = self.readable_path(ws)
+        global_cfg_path = os.path.join(readable_ws, "global_config.json")
         if self.workspace_mode == "ssh":
             return ws, (self.fetch_remote_bundle().get("global_config") or {}), global_cfg_path
         if os.path.exists(global_cfg_path):
@@ -4898,6 +7081,9 @@ print(json.dumps(bundle, ensure_ascii=False))
     def global_config(self) -> dict:
         _, cfg, _ = self.get_instance_root_and_config()
         return cfg or {}
+
+    def readable_path(self, path: str) -> str:
+        return readable_filesystem_path(path, self.workspace_mode, self.bridge_settings.get("wsl_distro"))
 
     def load_instance_partner_agent_config(self, instance_dir: str) -> dict:
         if self.workspace_mode == "ssh":
@@ -4909,7 +7095,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         try:
             from partner.config import load_partner_config_data
 
-            data = load_partner_config_data(instance_dir)
+            data = load_partner_config_data(self.readable_path(instance_dir))
             agent = data.get("agent") if isinstance(data, dict) else {}
             return agent if isinstance(agent, dict) else {}
         except Exception:
@@ -4952,14 +7138,14 @@ print(json.dumps(bundle, ensure_ascii=False))
         try:
             from partner.config import load_partner_config_data, save_partner_config_data
 
-            data = load_partner_config_data(instance_dir)
+            data = load_partner_config_data(self.readable_path(instance_dir))
         except Exception:
             data = {"workspace": {"path": instance_dir, "readonly_dirs": []}, "name": "Partner"}
         data["agent"] = agent_cfg
         try:
             from partner.config import save_partner_config_data
 
-            save_partner_config_data(instance_dir, data)
+            save_partner_config_data(self.readable_path(instance_dir), data)
             return True, "已保存。"
         except Exception as exc:
             return False, str(exc)
@@ -4977,12 +7163,13 @@ print(json.dumps(bundle, ensure_ascii=False))
         try:
             from partner.runtime_monitor import summarize_agent_runs
 
-            runtime = summarize_agent_runs(instance_dir)
+            runtime = summarize_agent_runs(self.readable_path(instance_dir))
         except Exception:
             runtime = {}
-        pool_status = load_json_file(os.path.join(instance_dir, "state", "ollama_pool_status.json"))
-        dynamic_status = load_json_file(os.path.join(instance_dir, "state", "dynamic_ollama_status.json"))
-        lite_status = load_json_file(os.path.join(instance_dir, "state", "ollama_lite_status.json"))
+        read_dir = self.readable_path(instance_dir)
+        pool_status = load_json_file(os.path.join(read_dir, "state", "ollama_pool_status.json"))
+        dynamic_status = load_json_file(os.path.join(read_dir, "state", "dynamic_ollama_status.json"))
+        lite_status = load_json_file(os.path.join(read_dir, "state", "ollama_lite_status.json"))
         return {
             "agent": agent,
             "pool_status": pool_status,
@@ -4992,31 +7179,11 @@ print(json.dumps(bundle, ensure_ascii=False))
         }
 
     def populate_ollama_instances(self):
-        if not hasattr(self, "ollama_instance_combo"):
-            return
-        current_data = self.ollama_instance_combo.currentData()
-        current_id = current_data[0] if current_data else None
-        self.ollama_instance_combo.blockSignals(True)
-        self.ollama_instance_combo.clear()
-        for inst_id, inst_dir in self.available_instances():
-            self.ollama_instance_combo.addItem(self.display_instance_label(inst_id, inst_dir), (inst_id, inst_dir))
-        if self.ollama_instance_combo.count():
-            target_idx = 0
-            for idx in range(self.ollama_instance_combo.count()):
-                data = self.ollama_instance_combo.itemData(idx)
-                if data and data[0] == current_id:
-                    target_idx = idx
-                    break
-            self.ollama_instance_combo.setCurrentIndex(target_idx)
-        self.ollama_instance_combo.blockSignals(False)
+        return
 
     def current_ollama_instance(self) -> tuple[str | None, str | None]:
-        if not hasattr(self, "ollama_instance_combo") or self.ollama_instance_combo.count() == 0:
-            return None, None
-        data = self.ollama_instance_combo.currentData()
-        if not data:
-            return None, None
-        return data[0], data[1]
+        instances = self.available_instances()
+        return instances[0] if instances else (None, None)
 
     def control_backend(self) -> str:
         if self.workspace_mode == "ssh":
@@ -5029,7 +7196,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         return "local"
 
     def control_distro(self) -> str:
-        return (self.bridge_settings.get("wsl_distro") or (detect_wsl_distros()[0] if detect_wsl_distros() else "")).strip()
+        return preferred_wsl_distro(self.bridge_settings.get("wsl_distro")).strip()
 
     def workspace_python_cmd(self) -> str:
         if self.workspace_mode == "ssh":
@@ -5043,23 +7210,33 @@ print(json.dumps(bundle, ensure_ascii=False))
         cfg = self.global_config()
         return str(cfg.get("partner_dir") or PARTNER_DIR)
 
+    def runtime_path_join(self, *parts: str) -> str:
+        if self.control_backend() in {"ssh", "wsl"}:
+            return remote_path_join(*parts)
+        return os.path.join(*parts)
+
+    def runtime_dirname(self, path: str) -> str:
+        if self.control_backend() in {"ssh", "wsl"}:
+            return posixpath.dirname(str(path).replace("\\", "/"))
+        return os.path.dirname(path)
+
     def instance_pid_path(self, instance_dir: str) -> str:
-        return os.path.join(instance_dir, "instance.pid")
+        return self.runtime_path_join(instance_dir, "instance.pid")
 
     def bot_pid_path(self, instance_dir: str) -> str:
-        return os.path.join(instance_dir, "state", "qq_bot.pid")
+        return self.runtime_path_join(instance_dir, "state", "qq_bot.pid")
 
     def instance_config_path(self, instance_dir: str) -> str:
-        primary = os.path.join(instance_dir, "00_config", "qq_config.json")
-        legacy = os.path.join(instance_dir, "qq_config.json")
+        primary = self.runtime_path_join(instance_dir, "00_config", "qq_config.json")
+        legacy = self.runtime_path_join(instance_dir, "qq_config.json")
         if self.workspace_mode == "ssh":
             return primary if self.remote_exists(primary) else legacy
-        return primary if os.path.exists(primary) else legacy
+        return primary if os.path.exists(self.readable_path(primary)) else legacy
 
     def compatible_qq_config_paths(self, instance_dir: str) -> tuple[str, str]:
         return (
-            os.path.join(instance_dir, "00_config", "qq_config.json"),
-            os.path.join(instance_dir, "qq_config.json"),
+            self.runtime_path_join(instance_dir, "00_config", "qq_config.json"),
+            self.runtime_path_join(instance_dir, "qq_config.json"),
         )
 
     def sync_compatible_qq_config(self, instance_dir: str, bot: dict | None = None) -> tuple[bool, str]:
@@ -5073,9 +7250,10 @@ print(json.dumps(bundle, ensure_ascii=False))
             return False, "当前实例还没有可用的 QQ 机器人配置。"
         primary, legacy = self.compatible_qq_config_paths(instance_dir)
         try:
-            os.makedirs(os.path.dirname(primary), exist_ok=True)
             for path in (primary, legacy):
-                with open(path, "w", encoding="utf-8") as f:
+                writable_path = self.readable_path(path)
+                os.makedirs(os.path.dirname(writable_path), exist_ok=True)
+                with open(writable_path, "w", encoding="utf-8") as f:
                     json.dump(selected, f, ensure_ascii=False, indent=2)
             return True, ""
         except Exception as exc:
@@ -5133,10 +7311,11 @@ print(json.dumps(bundle, ensure_ascii=False))
                 return (now - dt).total_seconds() < 600
             return False
         pid_path = self.instance_pid_path(instance_dir)
-        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_path)
+        pid_read_path = self.readable_path(pid_path)
+        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_read_path)
         if pid_exists:
             try:
-                pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_path)
+                pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_read_path)
                 pid = int(pid_text or "0")
             except ValueError:
                 pid = 0
@@ -5149,7 +7328,7 @@ print(json.dumps(bundle, ensure_ascii=False))
                     return True
         if self.workspace_mode == "local":
             return False
-        heartbeat = load_json_file(os.path.join(instance_dir, "state", "heartbeat.json"))
+        heartbeat = load_json_file(os.path.join(self.readable_path(instance_dir), "state", "heartbeat.json"))
         dt = parse_iso((heartbeat.get("last_heartbeat") or "")) if heartbeat else None
         if dt:
             now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
@@ -5162,11 +7341,12 @@ print(json.dumps(bundle, ensure_ascii=False))
             item = (self.fetch_remote_bundle().get("instances") or {}).get(inst_id) or {}
             return bool(item.get("qq_running"))
         pid_path = self.bot_pid_path(instance_dir)
-        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_path)
+        pid_read_path = self.readable_path(pid_path)
+        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_read_path)
         if not pid_exists:
             return self.instance_has_qq_config(instance_dir) and self.instance_pid_running(instance_dir)
         try:
-            pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_path)
+            pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_read_path)
             pid = int(pid_text or "0")
         except ValueError:
             return self.instance_has_qq_config(instance_dir) and self.instance_pid_running(instance_dir)
@@ -5181,11 +7361,12 @@ print(json.dumps(bundle, ensure_ascii=False))
 
     def instance_pid_running(self, instance_dir: str) -> bool:
         pid_path = self.instance_pid_path(instance_dir)
-        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_path)
+        pid_read_path = self.readable_path(pid_path)
+        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_read_path)
         if not pid_exists:
             return False
         try:
-            pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_path)
+            pid_text = self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_read_path)
             pid = int(pid_text or "0")
         except ValueError:
             return False
@@ -5198,7 +7379,7 @@ print(json.dumps(bundle, ensure_ascii=False))
 
     def instance_has_qq_config(self, instance_dir: str) -> bool:
         cfg_path = self.instance_config_path(instance_dir)
-        return self.remote_exists(cfg_path) if self.workspace_mode == "ssh" else os.path.exists(cfg_path)
+        return self.remote_exists(cfg_path) if self.workspace_mode == "ssh" else os.path.exists(self.readable_path(cfg_path))
 
     def runtime_process_running(self, instance_id: str, instance_dir: str) -> bool:
         return self.instance_process_running(instance_id, instance_dir)
@@ -5206,7 +7387,7 @@ print(json.dumps(bundle, ensure_ascii=False))
     def write_runtime_pidfiles_command(self, instance_dir: str, pid_expr: str = "$!") -> str:
         instance_pid = shlex.quote(self.instance_pid_path(instance_dir))
         bot_pid = shlex.quote(self.bot_pid_path(instance_dir))
-        state_dir = shlex.quote(os.path.dirname(self.bot_pid_path(instance_dir)))
+        state_dir = shlex.quote(self.runtime_dirname(self.bot_pid_path(instance_dir)))
         return f"mkdir -p {state_dir} && echo {pid_expr} > {instance_pid} && echo {pid_expr} > {bot_pid}"
 
     def start_instance_runtime(self, instance_id: str, instance_dir: str) -> tuple[bool, str]:
@@ -5217,19 +7398,23 @@ print(json.dumps(bundle, ensure_ascii=False))
             ok, sync_msg = self.sync_compatible_qq_config(instance_dir, bots[0])
             if not ok:
                 return False, sync_msg
-        log_path = os.path.join(instance_dir, "10_logs", "instance.log")
+        log_path = self.runtime_path_join(instance_dir, "10_logs", "instance.log")
         if self.control_backend() in {"wsl", "ssh"}:
             python_cmd = shlex.quote(self.workspace_python_cmd())
             partner_dir = shlex.quote(self.workspace_partner_dir())
             workspace = shlex.quote(instance_dir)
             inst = shlex.quote(instance_id)
             log = shlex.quote(log_path)
-            mkdir = shlex.quote(os.path.dirname(log_path))
-            write_pids = self.write_runtime_pidfiles_command(instance_dir)
-            if self.control_backend() == "ssh":
-                cmd = f"mkdir -p {mkdir} && cd {partner_dir} && nohup {python_cmd} -m partner --instance-id {inst} --workspace {workspace} >> {log} 2>&1 & {write_pids}"
-            else:
-                cmd = f"mkdir -p {mkdir} && cd {partner_dir} && nohup {python_cmd} -m partner --instance-id {inst} --workspace {workspace} >> {log} 2>&1 & {write_pids}"
+            mkdir = shlex.quote(self.runtime_dirname(log_path))
+            instance_pid = shlex.quote(self.instance_pid_path(instance_dir))
+            bot_pid = shlex.quote(self.bot_pid_path(instance_dir))
+            state_dir = shlex.quote(self.runtime_dirname(self.bot_pid_path(instance_dir)))
+            cmd = (
+                f"mkdir -p {mkdir} {state_dir} && cd {partner_dir} && "
+                f"(nohup {python_cmd} -m partner --instance-id {inst} --workspace {workspace} "
+                f">> {log} 2>&1 < /dev/null & pid=$!; "
+                f"echo $pid > {instance_pid}; echo $pid > {bot_pid}; echo $pid)"
+            )
             ok, out = self.run_workspace_command(cmd, capture=True)
             return ok, out or (self.text("instance_started") if ok else self.text("instance_start_failed"))
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -5250,18 +7435,33 @@ print(json.dumps(bundle, ensure_ascii=False))
                 f.write(str(proc.pid))
             with open(self.bot_pid_path(instance_dir), "w", encoding="utf-8") as f:
                 f.write(str(proc.pid))
+            time.sleep(0.8)
+            if proc.poll() is not None:
+                tail = read_text_file(log_path).splitlines()[-8:]
+                detail = "\n".join(tail).strip()
+                return False, detail or f"{self.text('instance_start_failed')} (exit {proc.returncode})"
             return True, f"{self.text('instance_started')} (PID {proc.pid})"
         except Exception as exc:
             return False, str(exc)
 
     def stop_instance_runtime(self, instance_id: str, instance_dir: str) -> tuple[bool, str]:
         pid_path = self.instance_pid_path(instance_dir)
-        pid_exists = self.remote_exists(pid_path) if self.workspace_mode == "ssh" else os.path.exists(pid_path)
-        pid = int((self.remote_text(pid_path).strip() if self.workspace_mode == "ssh" else read_text_file(pid_path)) or "0") if pid_exists else 0
+        if self.workspace_mode == "ssh":
+            remote_item = (self.fetch_remote_bundle(force=True).get("instances") or {}).get(instance_id, {})
+            pid_text = str(remote_item.get("instance_pid") or "").strip()
+            if not pid_text:
+                pid_text = self.remote_text(pid_path).strip() if self.remote_exists(pid_path) else ""
+        else:
+            pid_read_path = self.readable_path(pid_path)
+            pid_text = read_text_file(pid_read_path) if os.path.exists(pid_read_path) else ""
+        try:
+            pid = int(pid_text or "0")
+        except ValueError:
+            pid = 0
         if self.control_backend() in {"wsl", "ssh"}:
             if pid:
                 bot_pid_path = shlex.quote(self.bot_pid_path(instance_dir))
-                ok, out = self.run_workspace_command(f"kill {pid} ; rm -f {shlex.quote(pid_path)} {bot_pid_path}")
+                ok, out = self.run_workspace_command(f"kill {pid} 2>/dev/null || true; rm -f {shlex.quote(pid_path)} {bot_pid_path}")
                 return ok, out or (self.text("instance_stopped") if ok else self.text("instance_stop_failed"))
             return False, self.text("instance_no_pid")
         if pid and pid_is_alive(pid):
@@ -5342,7 +7542,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         root, cfg, _ = self.get_instance_root_and_config()
         instances = []
         if isinstance(cfg.get("instances"), dict) and cfg.get("instances"):
-            for inst_id, meta in sorted(cfg["instances"].items()):
+            for inst_id, meta in sorted(cfg["instances"].items(), key=lambda item: instance_sort_key(item[0])):
                 if self.workspace_mode == "ssh":
                     instances.append((inst_id, remote_path_join(root, "instances", inst_id)))
                 else:
@@ -5353,25 +7553,25 @@ print(json.dumps(bundle, ensure_ascii=False))
             if remote_instances:
                 return [
                     (inst_id, item.get("dir") or remote_path_join(root, "instances", inst_id))
-                    for inst_id, item in sorted(remote_instances.items())
+                    for inst_id, item in sorted(remote_instances.items(), key=lambda item: instance_sort_key(item[0]))
                 ]
             return []
+        if root and self.workspace_mode == "local":
+            created, inst_id = ensure_first_local_instance(root)
+            inst_dir = os.path.join(root, "instances", inst_id or "01")
+            if created:
+                self._first_instance_created_notice = True
+            return [(inst_id or "01", inst_dir)]
         if root:
             return [(workspace_instance_label(root), root)]
         return []
 
     def display_instance_id(self, inst_id: str | None, inst_dir: str | None = None) -> str:
         raw_id = str(inst_id or "").strip()
-        raw_dir = str(inst_dir or "").replace("\\", "/").rstrip("/")
-        workspace_dir = str(self.workspace or "").replace("\\", "/").rstrip("/")
-        if raw_id == "partner_workspace" or raw_dir.endswith("/partner_workspace") or (workspace_dir and raw_dir == workspace_dir and raw_dir.endswith("/partner_workspace")):
-            return "02"
         return raw_id or "-"
 
     def display_instance_label(self, inst_id: str | None, inst_dir: str | None = None) -> str:
         display_id = self.display_instance_id(inst_id, inst_dir)
-        if display_id == "02":
-            return self.text("instance_label_02")
         return self.text("instance_label", id=display_id)
 
     def detect_ollama_location_type(self, base_url: str) -> str:
@@ -5466,15 +7666,15 @@ print(json.dumps(bundle, ensure_ascii=False))
             inst_id = os.path.basename(instance_dir)
             data = ((bundle.get("instances") or {}).get(inst_id) or {}).get("bots") or []
         else:
-            data = load_json_file(path)
+            data = load_json_file(self.readable_path(path))
         if isinstance(data, list):
             bots = data
         else:
             primary = os.path.join(instance_dir, "00_config", "qq_config.json")
             legacy = os.path.join(instance_dir, "qq_config.json")
-            single = self.remote_json(primary) if self.workspace_mode == "ssh" else load_json_file(primary)
+            single = self.remote_json(primary) if self.workspace_mode == "ssh" else load_json_file(self.readable_path(primary))
             if not single:
-                single = self.remote_json(legacy) if self.workspace_mode == "ssh" else load_json_file(legacy)
+                single = self.remote_json(legacy) if self.workspace_mode == "ssh" else load_json_file(self.readable_path(legacy))
             if single:
                 bots = [single]
         return bots, path
@@ -5495,8 +7695,32 @@ print(json.dumps(bundle, ensure_ascii=False))
         if bots:
             self.sync_compatible_qq_config(instance_dir, bots[0])
 
+    def agent_api_config_path(self, instance_dir: str) -> str:
+        return os.path.join(instance_dir, "00_config", "agent_api_config.json")
+
+    def load_agent_api_config(self, instance_dir: str) -> dict:
+        return load_json_file(self.agent_api_config_path(instance_dir))
+
+    def save_agent_api_config(self, instance_dir: str, data: dict) -> tuple[bool, str]:
+        try:
+            path = self.agent_api_config_path(instance_dir)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            agent_cfg = self.load_instance_partner_agent_config(instance_dir)
+            backend = str(agent_cfg.get("backend") or "hermes")
+            selected = data.get(backend) if isinstance(data.get(backend), dict) else {}
+            if selected.get("provider"):
+                agent_cfg["provider"] = selected.get("provider")
+            if selected.get("model"):
+                agent_cfg["model"] = selected.get("model")
+            ok, msg = self.save_instance_partner_agent_config(instance_dir, agent_cfg)
+            return ok, msg or "API 配置已保存。"
+        except Exception as exc:
+            return False, str(exc)
+
     def refresh_qq_page(self):
-        remote_managed = self.workspace_mode == "ssh"
+        remote_managed = self.workspace_mode != "local"
         current_item = self.instance_list.currentItem() if hasattr(self, "instance_list") else None
         current_inst = current_item.data(Qt.UserRole)[0] if current_item else None
         current_bot_name = None
@@ -5510,11 +7734,13 @@ print(json.dumps(bundle, ensure_ascii=False))
                 ws = self.bridge_settings.get("ssh_workspace") or (self.workspace or "")
                 self.qq_source_label.setText(f"数据来源：服务器 {host}  ·  工作区 {ws}")
             elif self.workspace_mode == "wsl":
-                self.qq_source_label.setText(f"数据来源：Linux / WSL  ·  工作区 {self.workspace or '-'}")
+                self.qq_source_label.setText(f"数据来源：WSL / Linux  ·  工作区 {self.workspace or '-'}")
             else:
                 self.qq_source_label.setText(f"数据来源：Windows 本地  ·  工作区 {self.workspace or '-'}")
         if hasattr(self, "add_instance_btn"):
             self.add_instance_btn.setEnabled(not remote_managed)
+            if hasattr(self, "rename_instance_btn"):
+                self.rename_instance_btn.setEnabled(not remote_managed)
             self.del_instance_btn.setEnabled(not remote_managed)
             self.add_bot_btn.setEnabled(not remote_managed)
             self.config_bot_btn.setEnabled(not remote_managed)
@@ -5524,7 +7750,8 @@ print(json.dumps(bundle, ensure_ascii=False))
         for inst_id, inst_dir in self.available_instances():
             running = self.instance_process_running(inst_id, inst_dir)
             state = self.text("qq_running") if running else self.text("qq_stopped")
-            item = QListWidgetItem(f"{self.display_instance_label(inst_id, inst_dir)}  ·  {state}")
+            item = QListWidgetItem(f"{self.display_instance_id(inst_id, inst_dir)}  ·  {state}")
+            item.setToolTip(self.display_instance_label(inst_id, inst_dir))
             item.setData(Qt.UserRole, (inst_id, inst_dir))
             self.instance_list.addItem(item)
             if current_inst and inst_id == current_inst:
@@ -5579,6 +7806,13 @@ print(json.dumps(bundle, ensure_ascii=False))
         bot_running = self.qq_bot_running(inst_dir)
         instance_label = self.display_instance_label(inst_id, inst_dir)
         display_id = self.display_instance_id(inst_id, inst_dir)
+        api_cfg = self.load_agent_api_config(inst_dir) if self.workspace_mode != "ssh" else {}
+        configured_apis = [
+            name
+            for name in ("hermes", "openclaw")
+            if isinstance(api_cfg.get(name), dict)
+            and (api_cfg[name].get("api_key") or api_cfg[name].get("base_url") or api_cfg[name].get("provider") or api_cfg[name].get("model"))
+        ]
         for idx, bot in enumerate(bots):
             name = self.bot_display_id(bot, idx + 1)
             bot_state = self.text("qq_running") if bot_running else self.text("qq_stopped")
@@ -5593,6 +7827,7 @@ print(json.dumps(bundle, ensure_ascii=False))
             f"<div><b>{self.text('status_label')}</b>：{instance_state}</div>"
             f"<div><b>{self.text('bot_count')}</b>：{len(bots)}</div>"
             f"<div><b>{self.text('qq_bot')}</b>：{self.text('qq_running') if bot_running else self.text('qq_stopped')}</div>"
+            f"<div><b>{self.text('agent_api')}</b>：{html.escape(', '.join(configured_apis) if configured_apis else '未配置')}</div>"
             f"<div><b>{self.text('control_backend')}</b>：{'SSH' if self.control_backend() == 'ssh' else ('WSL' if self.control_backend() == 'wsl' else 'Windows')}</div>"
             f"<div style='margin-top:12px; color:{COLORS['subtext']}; font-size:12px;'>{inst_dir}</div>"
             f"</div>"
@@ -5611,6 +7846,68 @@ print(json.dumps(bundle, ensure_ascii=False))
             self.bot_status.setText(self.text("qq_status_none"))
         self._pending_bot_name = None
 
+    def refresh_agent_api_page(self):
+        if not hasattr(self, "agent_api_instance_combo"):
+            return
+        remote_managed = self.workspace_mode == "ssh"
+        current = self.agent_api_instance_combo.currentData()
+        current_inst = current[0] if current else None
+        instances = self.available_instances()
+        self.agent_api_instance_combo.blockSignals(True)
+        self.agent_api_instance_combo.clear()
+        selected_idx = 0
+        for idx, (inst_id, inst_dir) in enumerate(instances):
+            self.agent_api_instance_combo.addItem(self.display_instance_label(inst_id, inst_dir), (inst_id, inst_dir))
+            if current_inst and inst_id == current_inst:
+                selected_idx = idx
+        if instances:
+            self.agent_api_instance_combo.setCurrentIndex(selected_idx)
+        self.agent_api_instance_combo.blockSignals(False)
+        if hasattr(self, "manage_agent_api_btn"):
+            self.manage_agent_api_btn.setEnabled(bool(instances) and not remote_managed)
+        if not instances:
+            self.render_agent_api_summary(None, None)
+            return
+        inst_id, inst_dir = self.agent_api_instance_combo.currentData()
+        self.render_agent_api_summary(inst_id, inst_dir)
+
+    def render_agent_api_summary(self, inst_id: str | None, inst_dir: str | None):
+        if not hasattr(self, "agent_api_summary"):
+            return
+        if not inst_dir:
+            self.agent_api_summary.setHtml("<span style='color:#64748b;'>请选择实例。</span>")
+            return
+        if self.workspace_mode == "ssh":
+            self.agent_api_summary.setHtml("<span style='color:#64748b;'>远程服务器模式暂不支持从桌面编辑 Agent/API。</span>")
+            return
+        api_cfg = self.load_agent_api_config(inst_dir)
+        agent_cfg = self.load_instance_partner_agent_config(inst_dir)
+        active_backend = str(agent_cfg.get("backend") or "hermes")
+        active_profiles = api_cfg.get("_active_profile") if isinstance(api_cfg.get("_active_profile"), dict) else {}
+        rows = []
+        for backend in ("hermes", "openclaw", "codex", "claude_code"):
+            section = api_cfg.get(backend) if isinstance(api_cfg.get(backend), dict) else {}
+            profile_name = str(active_profiles.get(backend) or "默认配置")
+            provider = section.get("provider") or "-"
+            model = section.get("model") or "-"
+            has_key = "已填写" if section.get("api_key") else "未填写"
+            marker = "当前" if backend == active_backend else ""
+            rows.append(
+                f"<tr>"
+                f"<td><b>{html.escape(backend)}</b> <span style='color:{COLORS['accent']};'>{marker}</span></td>"
+                f"<td>{html.escape(profile_name)}</td>"
+                f"<td>{html.escape(str(provider))}</td>"
+                f"<td>{html.escape(str(model))}</td>"
+                f"<td>{has_key}</td>"
+                f"</tr>"
+            )
+        self.agent_api_summary.setHtml(
+            "<table width='100%' cellspacing='0' cellpadding='5' style='font-size:13px;'>"
+            "<tr style='color:#64748b;'><td>Agent</td><td>生效 API 配置</td><td>Provider</td><td>Model</td><td>Key</td></tr>"
+            + "".join(rows)
+            + "</table>"
+        )
+
     def on_bot_selected(self, current, previous=None):
         inst_id, inst_dir = self.selected_instance()
         if not current or not inst_dir:
@@ -5628,23 +7925,78 @@ print(json.dumps(bundle, ensure_ascii=False))
             f"</div>"
         )
 
+    def set_runtime_buttons_enabled(self, enabled: bool):
+        for name in ("start_instance_btn", "stop_instance_btn"):
+            btn = getattr(self, name, None)
+            if btn:
+                btn.setEnabled(enabled)
+
+    def run_runtime_action(self, action: str, inst_id: str, inst_dir: str, payload: dict | None = None):
+        if self._runtime_action_inflight:
+            self.set_status_indicator(COLORS["yellow"], "上一个操作仍在执行…")
+            return
+        self._runtime_action_inflight = True
+        self.set_runtime_buttons_enabled(False)
+        label = {
+            "start_instance": "正在开启实例…",
+            "stop_instance": "正在关闭实例…",
+            "start_bot": "正在启动 QQ 机器人…",
+            "stop_bot": "正在停止 QQ 机器人…",
+        }.get(action, "正在执行操作…")
+        self.set_refresh_state(True, label)
+        worker = RuntimeActionWorker(self, action, inst_id, inst_dir, payload)
+        self._runtime_action_worker = worker
+        worker.finished.connect(self.finish_runtime_action)
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def finish_runtime_action(self, result: dict):
+        self._runtime_action_inflight = False
+        self._runtime_action_worker = None
+        self.set_runtime_buttons_enabled(True)
+        ok = bool(result.get("ok"))
+        msg = str(result.get("message") or "")
+        finished_at = result.get("finished_at") or datetime.now().strftime("%H:%M:%S")
+        if ok:
+            self.set_status_indicator(COLORS["green"], f"操作完成 · {finished_at}")
+        else:
+            self.set_status_indicator(COLORS["yellow"], f"操作失败 · {finished_at}")
+            show_partner_notice(self, "Partner", msg or "操作失败。")
+        self.request_refresh(force=True, page_index=2)
+
+    def run_background_task(self, name: str, status_text: str, fn: Callable[[], tuple[bool, str]], refresh_page: int | None = None):
+        if self._background_task_inflight:
+            self.set_status_indicator(COLORS["yellow"], "上一个后台操作仍在执行…")
+            return
+        self._background_task_inflight = True
+        self.set_refresh_state(True, status_text)
+        worker = BackgroundTaskWorker(name, fn)
+        self._background_task_worker = worker
+        worker.finished.connect(lambda result, page=refresh_page: self.finish_background_task(result, page))
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def finish_background_task(self, result: dict, refresh_page: int | None = None):
+        self._background_task_inflight = False
+        self._background_task_worker = None
+        ok = bool(result.get("ok"))
+        msg = str(result.get("message") or "")
+        finished_at = result.get("finished_at") or datetime.now().strftime("%H:%M:%S")
+        self.set_status_indicator(COLORS["green"] if ok else COLORS["yellow"], f"{'完成' if ok else '失败'} · {finished_at}")
+        if msg:
+            show_partner_notice(self, "Partner", msg, kind="ok" if ok else "warning")
+        if refresh_page is not None:
+            self.request_refresh(force=True, page_index=refresh_page)
+
     def start_selected_instance(self):
         inst_id, inst_dir = self.selected_instance()
         if not inst_id or not inst_dir:
             return
-        ok, msg = self.start_instance_runtime(inst_id, inst_dir)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or self.text("instance_start_failed"))
-        self.request_refresh(force=True, page_index=2)
+        self.run_runtime_action("start_instance", inst_id, inst_dir)
 
     def stop_selected_instance(self):
         inst_id, inst_dir = self.selected_instance()
         if not inst_id or not inst_dir:
             return
-        ok, msg = self.stop_instance_runtime(inst_id, inst_dir)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or self.text("instance_stop_failed"))
-        self.request_refresh(force=True, page_index=2)
+        self.run_runtime_action("stop_instance", inst_id, inst_dir)
 
     def start_selected_bot(self):
         inst_id, inst_dir = self.selected_instance()
@@ -5656,21 +8008,18 @@ print(json.dumps(bundle, ensure_ascii=False))
             payload = current.data(Qt.UserRole)
             if payload and len(payload) > 1:
                 bot = payload[1]
-        ok, msg = self.start_bot_runtime(inst_dir, bot)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or "QQ 机器人启动失败。")
-        self.request_refresh(force=True, page_index=2)
+        self.run_runtime_action("start_bot", inst_id or "", inst_dir, {"bot": bot})
 
     def stop_selected_bot(self):
         inst_id, inst_dir = self.selected_instance()
         if not inst_dir:
             return
-        ok, msg = self.stop_bot_runtime(inst_dir)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or "QQ 机器人停止失败。")
-        self.request_refresh(force=True, page_index=2)
+        self.run_runtime_action("stop_bot", inst_id or "", inst_dir)
 
     def add_instance(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接新增实例。请切回本地电脑，或在对应机器上修改配置。")
+            return
         root, cfg, cfg_path = self.get_instance_root_and_config()
         if not root:
             show_partner_notice(self, "Partner", "当前工作区不可用。")
@@ -5695,7 +8044,54 @@ print(json.dumps(bundle, ensure_ascii=False))
             json.dump(cfg, f, ensure_ascii=False, indent=2)
         self.refresh_qq_page()
 
+    def rename_instance(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接修改实例名称。")
+            return
+        inst_id, inst_dir = self.selected_instance()
+        root, cfg, cfg_path = self.get_instance_root_and_config()
+        if not inst_id or not inst_dir or not root:
+            return
+        new_id, ok = prompt_partner_text(self, "修改实例名称", "新的实例名称", text=inst_id)
+        if not ok:
+            return
+        new_id = new_id.strip()
+        if not new_id or new_id == inst_id:
+            return
+        if any(ch in new_id for ch in '\\/:*?"<>|'):
+            show_partner_notice(self, "Partner", "实例名称不能包含路径特殊字符。")
+            return
+        instances = cfg.get("instances") if isinstance(cfg.get("instances"), dict) else {}
+        if new_id in instances:
+            show_partner_notice(self, "Partner", f"实例 {new_id} 已存在。")
+            return
+        new_dir = os.path.join(root, "instances", new_id)
+        if os.path.exists(new_dir):
+            show_partner_notice(self, "Partner", f"目录已存在：{new_dir}")
+            return
+        if self.instance_process_running(inst_id, inst_dir):
+            show_partner_notice(self, "Partner", "请先关闭该实例，再修改名称。")
+            return
+        try:
+            if os.path.exists(inst_dir):
+                os.makedirs(os.path.dirname(new_dir), exist_ok=True)
+                os.rename(inst_dir, new_dir)
+            meta = dict(instances.get(inst_id) or {})
+            meta["working_dir"] = new_dir
+            instances.pop(inst_id, None)
+            instances[new_id] = meta
+            cfg["instances"] = instances
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            self.refresh_qq_page()
+            self.refresh_chat_page()
+        except Exception as exc:
+            show_partner_notice(self, "Partner", f"实例改名失败：{exc}")
+
     def delete_instance(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接删除实例。")
+            return
         inst_id, inst_dir = self.selected_instance()
         root, cfg, cfg_path = self.get_instance_root_and_config()
         if not inst_id or inst_dir == root:
@@ -5711,6 +8107,9 @@ print(json.dumps(bundle, ensure_ascii=False))
         self.refresh_qq_page()
 
     def add_bot(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接新增 QQ 机器人配置。")
+            return
         inst_id, inst_dir = self.selected_instance()
         if not inst_dir:
             return
@@ -5729,6 +8128,9 @@ print(json.dumps(bundle, ensure_ascii=False))
         self.on_instance_selected(self.instance_list.currentItem())
 
     def configure_bot(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接修改 QQ 机器人配置。")
+            return
         inst_id, inst_dir = self.selected_instance()
         current = self.bot_list.currentItem()
         if not inst_dir or not current:
@@ -5749,7 +8151,33 @@ print(json.dumps(bundle, ensure_ascii=False))
         self.save_bot_configs(inst_dir, bots)
         self.on_instance_selected(self.instance_list.currentItem())
 
+    def configure_agent_api(self):
+        if hasattr(self, "agent_api_instance_combo") and self.stack.currentIndex() == 3:
+            data = self.agent_api_instance_combo.currentData()
+            inst_id, inst_dir = data if data else (None, None)
+        else:
+            inst_id, inst_dir = self.selected_instance()
+        if not inst_dir:
+            return
+        if self.workspace_mode == "ssh":
+            show_partner_notice(self, "Partner", "远端实例暂不支持从桌面直接修改 API 配置。")
+            return
+        dialog = ApiConfigEditorDialog(self)
+        if hasattr(dialog, "instance_combo"):
+            for idx in range(dialog.instance_combo.count()):
+                data = dialog.instance_combo.itemData(idx)
+                if data and data[0] == inst_id:
+                    dialog.instance_combo.setCurrentIndex(idx)
+                    break
+        dialog.exec()
+        if hasattr(self, "instance_list") and self.instance_list.currentItem():
+            self.on_instance_selected(self.instance_list.currentItem())
+        self.refresh_agent_api_page()
+
     def delete_bot(self):
+        if self.workspace_mode != "local":
+            show_partner_notice(self, "Partner", "WSL / SSH 模式暂不支持从桌面直接删除 QQ 机器人配置。")
+            return
         inst_id, inst_dir = self.selected_instance()
         current = self.bot_list.currentItem()
         if not inst_dir or not current:
@@ -5915,41 +8343,204 @@ print(json.dumps(bundle, ensure_ascii=False))
         if path:
             self.settings_local_input.setText(path)
 
+    def refresh_linux_page(self):
+        if not hasattr(self, "linux_status_label"):
+            return
+        distros = detect_wsl_distros()
+        current = self.linux_distro_combo.currentText().strip() if hasattr(self, "linux_distro_combo") else ""
+        self.linux_distro_combo.blockSignals(True)
+        self.linux_distro_combo.clear()
+        self.linux_distro_combo.addItems(distros)
+        preferred_distro = current or preferred_wsl_distro(self.bridge_settings.get("wsl_distro"), distros)
+        self.linux_distro_combo.setCurrentText(preferred_distro)
+        self.linux_distro_combo.blockSignals(False)
+        if distros:
+            ubuntu = [d for d in distros if "ubuntu" in d.lower()]
+            default_distro = detect_default_wsl_distro()
+            chosen = self.linux_distro_combo.currentText().strip() or "未选择"
+            default_note = f" Windows 默认 WSL：{default_distro}。" if default_distro else ""
+            multi_note = ""
+            if len(ubuntu) > 1:
+                multi_note = "检测到多个 Ubuntu 注册项。普通使用建议只保留/使用默认 WSL；/mnt/e/work 是 Windows E 盘挂载，多个 Ubuntu 看到的是同一个目录。"
+            elif ubuntu:
+                multi_note = "/mnt/e/work 是 Windows E 盘在 WSL 里的挂载路径，不是 Ubuntu 私有目录。"
+            non_default_note = ""
+            if default_distro and chosen and chosen != default_distro:
+                non_default_note = f"当前选择不是默认 WSL，如非必要建议切回 {default_distro}。"
+            self.linux_status_label.setText(
+                f"已检测到 WSL 发行版：{'、'.join(distros[:6])}。当前使用：{chosen}。{default_note}{multi_note}{non_default_note}"
+            )
+        else:
+            self.linux_status_label.setText("未检测到 WSL。可以先安装 WSL，再安装 Ubuntu。")
+        if hasattr(self, "linux_workspace_input") and not self.linux_workspace_input.text().strip():
+            self.linux_workspace_input.setText(str(self.bridge_settings.get("linux_workspace") or ""))
+
+    def schedule_linux_path_check(self, force: bool = False, reason: str = "auto"):
+        if not hasattr(self, "linux_distro_combo") or not hasattr(self, "linux_workspace_input"):
+            return
+        distro = self.linux_distro_combo.currentText().strip()
+        if not distro:
+            self.linux_status_label.setText("请选择 WSL 发行版。")
+            return
+        if self._linux_path_inflight and not force:
+            return
+        self._linux_path_seq += 1
+        seq = self._linux_path_seq
+        self._linux_path_inflight = True
+        self.linux_check_wsl_btn.setEnabled(False)
+        current_text = self.linux_workspace_input.text().strip()
+        self.linux_status_label.setText(
+            f"正在后台检查 {distro} 能看到的 workspace 路径，不会阻塞界面拖动。/mnt/e/work 表示 Windows E 盘挂载。当前值：{current_text or '未填写'}"
+        )
+        local_ws = str(
+            self.bridge_settings.get("local_workspace")
+            or find_workspace()
+            or (self.workspace if self.workspace_mode == "local" else "")
+            or ""
+        )
+        worker = LinuxPathWorker(distro, local_ws, seq)
+        self._linux_path_worker = worker
+        worker.finished.connect(self.finish_linux_path_check)
+        threading.Thread(target=worker.run, daemon=True).start()
+
+    def finish_linux_path_check(self, result: dict):
+        if int(result.get("seq") or 0) != self._linux_path_seq:
+            return
+        self._linux_path_inflight = False
+        self._linux_path_worker = None
+        if hasattr(self, "linux_check_wsl_btn"):
+            self.linux_check_wsl_btn.setEnabled(True)
+        distro = str(result.get("distro") or "").strip()
+        path = str(result.get("path") or "").strip()
+        if result.get("error"):
+            self.linux_status_label.setText(f"检查 {distro} 失败：{result.get('error')}")
+            return
+        if path:
+            current_linux = self.linux_workspace_input.text().strip()
+            if (
+                not current_linux
+                or current_linux.startswith("/mnt/c/Users/")
+                or current_linux not in {path, str(self.bridge_settings.get("linux_workspace") or "")}
+            ):
+                self.linux_workspace_input.setText(path)
+            settings = dict(self.bridge_settings or {})
+            settings.update(
+                {
+                    "wsl_distro": distro,
+                    "linux_workspace": path,
+                    "unc_workspace": linux_path_to_unc(path, distro),
+                    "saved_at": datetime.now().isoformat(),
+                }
+            )
+            self.bridge_settings = settings
+            save_gui_bridge_settings(settings, workspace_hint=self.workspace if self.workspace_mode == "local" else None)
+            checked = result.get("checked") or []
+            checked_text = "、".join(item.get("path", "") for item in checked[:3] if item.get("path"))
+            self.linux_status_label.setText(
+                f"已在 {distro} 找到 workspace：{path}。这是 Windows workspace 在 WSL 中的挂载路径，不是该 Ubuntu 的私有目录。已检查：{checked_text or path}"
+            )
+        else:
+            checked = result.get("checked") or []
+            checked_text = "、".join(item.get("path", "") for item in checked[:4] if item.get("path"))
+            self.linux_status_label.setText(
+                f"{distro} 中没有找到可用 workspace。已检查：{checked_text or '无候选路径'}"
+            )
+
+    def open_linux_wsl_install(self):
+        if os.name != "nt":
+            show_partner_notice(self, "Partner", "当前系统不是 Windows，不需要通过 WSL 安装 Linux。")
+            return
+        subprocess.Popen(["cmd.exe", "/c", "start", "Partner WSL 安装", "cmd.exe", "/k", "wsl.exe --install"], creationflags=0)
+
+    def open_linux_ubuntu_install(self):
+        if os.name != "nt":
+            show_partner_notice(self, "Partner", "当前系统不是 Windows。")
+            return
+        subprocess.Popen(
+            [
+                "cmd.exe",
+                "/c",
+                "start",
+                "Partner Ubuntu 安装",
+                "cmd.exe",
+                "/k",
+                "wsl.exe --install -d Ubuntu && wsl.exe -d Ubuntu -- bash -lc \"sudo sed -i 's|http://.*archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g; s|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list 2>/dev/null || true; sudo apt update\"",
+            ],
+            creationflags=0,
+        )
+
+    def open_linux_terminal(self):
+        if os.name != "nt":
+            subprocess.Popen(["bash"], creationflags=0)
+            return
+        subprocess.Popen(["cmd.exe", "/c", "start", "Partner Linux", "wsl.exe"], creationflags=0)
+
+    def save_linux_page(self):
+        distro = self.linux_distro_combo.currentText().strip()
+        if not distro:
+            show_partner_notice(self, "Partner", "请选择或填写 WSL 发行版。")
+            return
+        linux_workspace = self.linux_workspace_input.text().strip() if hasattr(self, "linux_workspace_input") else ""
+        if not linux_workspace:
+            self.schedule_linux_path_check(force=True, reason="save")
+            show_partner_notice(self, "Partner", "还没有检测到 WSL workspace，已开始后台检查。检查完成后再保存。")
+            return
+        settings = dict(self.bridge_settings or {})
+        settings.update({"wsl_distro": distro, "saved_at": datetime.now().isoformat()})
+        if linux_workspace:
+            settings["linux_workspace"] = linux_workspace
+            settings["unc_workspace"] = linux_path_to_unc(linux_workspace, distro)
+        save_gui_bridge_settings(settings, workspace_hint=self.workspace if self.workspace_mode == "local" else None)
+        self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
+        if linux_workspace:
+            self.switch_to_linux_workspace()
+            show_partner_notice(self, "Partner", "WSL 配置已保存，并已切到所选 WSL 发行版。", kind="ok")
+        else:
+            show_partner_notice(self, "Partner", "WSL 配置已保存。", kind="ok")
+
     def refresh_settings_page(self):
         self._local_agents_cache = detect_local_agents()
-        if self.workspace_mode == "ssh":
-            mode_text = "SSH"
-        elif self.workspace_mode == "wsl":
-            mode_text = "WSL"
-        else:
-            mode_text = "本地"
-        ws_text = self.workspace or "-"
-        if len(ws_text) > 22:
-            ws_text = "…" + ws_text[-21:]
-        available_agents = [item["label"] for item in self._local_agents_cache if item.get("available")]
-        self.settings_mode_card.set_value(mode_text, COLORS["accent"])
-        self.settings_workspace_card.set_value(ws_text, COLORS["text"])
-        self.settings_agent_card.set_value(str(len(available_agents)), COLORS["green"] if available_agents else COLORS["subtext"])
 
         distros = detect_wsl_distros()
         current_distro = self.settings_distro_combo.currentText().strip()
         self.settings_distro_combo.blockSignals(True)
         self.settings_distro_combo.clear()
         self.settings_distro_combo.addItems(distros)
-        self.settings_distro_combo.setCurrentText(current_distro or str(self.bridge_settings.get("wsl_distro") or (distros[0] if distros else "")))
+        settings_distro = current_distro or preferred_wsl_distro(self.bridge_settings.get("wsl_distro"), distros)
+        self.settings_distro_combo.setCurrentText(settings_distro)
         self.settings_distro_combo.blockSignals(False)
 
         self.settings_local_radio.setChecked(self.workspace_mode == "local")
         self.settings_wsl_radio.setChecked(self.workspace_mode == "wsl")
-        self.settings_ssh_radio.setChecked(self.workspace_mode == "ssh")
-        self.settings_local_input.setText(self.workspace if self.workspace_mode == "local" else str(find_workspace() or self.workspace or ""))
-        self.settings_linux_path_input.setText(str(self.bridge_settings.get("linux_workspace") or "/mnt/e/work/partner_workspace"))
+        self.settings_ssh_radio.setChecked(True)
+        local_ws = str(find_workspace() or (self.workspace if self.workspace_mode == "local" else "") or default_local_workspace_path())
+        self.settings_local_input.setText(local_ws)
+        configured_linux_path = str(self.bridge_settings.get("linux_workspace") or "")
+        detected_linux_path = detect_linux_workspace_path(local_ws, settings_distro)
+        if detected_linux_path and (
+            not configured_linux_path
+            or configured_linux_path.startswith("/mnt/c/")
+            or not wsl_path_exists_in_distro(configured_linux_path, settings_distro)
+        ):
+            self.settings_linux_path_input.setText(detected_linux_path)
+        else:
+            self.settings_linux_path_input.setText(configured_linux_path or detected_linux_path)
         self.settings_ssh_host_input.setText(str(self.bridge_settings.get("ssh_host") or ""))
         self.settings_ssh_port_input.setText(str(self.bridge_settings.get("ssh_port") or 22))
         self.settings_ssh_user_input.setText(str(self.bridge_settings.get("ssh_user") or "ubuntu"))
-        self.settings_ssh_key_input.setText(str(self.bridge_settings.get("ssh_key") or "/mnt/e/work/temp/zty.pem"))
+        self.settings_ssh_key_input.setText(str(self.bridge_settings.get("ssh_key") or ""))
         self.settings_ssh_workspace_input.setText(str(self.bridge_settings.get("ssh_workspace") or "/home/ubuntu/partner_workspace"))
         self.settings_ssh_partner_dir_input.setText(str(self.bridge_settings.get("ssh_partner_dir") or "/home/ubuntu/partner"))
+        if hasattr(self, "settings_linux_status"):
+            if distros:
+                ubuntu = [d for d in distros if "ubuntu" in d.lower()]
+                mapped = configured_linux_path or detected_linux_path
+                self.settings_linux_status.setText(
+                    f"已检测到 WSL：{'、'.join(distros[:4])}。{'Ubuntu 已安装。' if ubuntu else '未检测到 Ubuntu。'}"
+                    + (f" workspace 映射已识别。" if mapped else " 未识别到 workspace 映射，保存 Linux 模式时会尝试自动推导。")
+                )
+            else:
+                self.settings_linux_status.setText("未检测到 WSL。可以点击“检查并安装 Linux”，会优先使用清华镜像源完成后续配置。")
 
         self.settings_agent_list.clear()
         lines = []
@@ -5976,7 +8567,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         from partner.config import save_partner_config_data
         from partner.setup import save_workspace_pointer
 
-        if self.settings_local_radio.isChecked():
+        if False and self.settings_local_radio.isChecked():
             ws = self.settings_local_input.text().strip()
             if not ws:
                 show_partner_notice(self, "Partner", "请选择本地工作区。")
@@ -5993,16 +8584,22 @@ print(json.dumps(bundle, ensure_ascii=False))
             }
             save_partner_config_data(ws, config)
             save_workspace_pointer(ws)
+            created, _ = ensure_first_local_instance(ws)
             local_settings = dict(self.bridge_settings or {})
             local_settings.update({"mode": "local", "saved_at": datetime.now().isoformat()})
             save_gui_bridge_settings(local_settings, workspace_hint=ws)
             self.workspace = ws
             self.workspace_mode = "local"
-        elif self.settings_wsl_radio.isChecked():
+            if created:
+                self._first_instance_created_notice = True
+        elif False and self.settings_wsl_radio.isChecked():
             distro = self.settings_distro_combo.currentText().strip()
-            linux_path = self.settings_linux_path_input.text().strip()
-            if not distro or not linux_path:
-                show_partner_notice(self, "Partner", "请填写 WSL 发行版和 Linux 路径。")
+            linux_path = self.settings_linux_path_input.text().strip() or detect_linux_workspace_path(str(find_workspace() or ""), distro)
+            if not distro:
+                show_partner_notice(self, "Partner", "请先选择或安装 WSL 发行版。")
+                return
+            if not linux_path:
+                show_partner_notice(self, "Partner", "没有识别到可映射的 workspace。请先在 Windows 本地模式保存 workspace，再切换 Linux。")
                 return
             unc = linux_path_to_unc(linux_path, distro)
             wsl_settings = dict(self.bridge_settings or {})
@@ -6050,27 +8647,53 @@ print(json.dumps(bundle, ensure_ascii=False))
             self.workspace = remote_ws
             self.workspace_mode = "ssh"
         self.bridge_settings, self.bridge_settings_path = load_gui_bridge_settings_with_path()
-        self.request_refresh(force=True, page_index=4)
+        self.request_refresh(force=True, page_index=6)
+        if getattr(self, "_first_instance_created_notice", False):
+            QTimer.singleShot(250, self.show_first_instance_notice)
+
+    def detect_settings_linux_path(self):
+        distro = self.settings_distro_combo.currentText().strip() if hasattr(self, "settings_distro_combo") else ""
+        detected = detect_linux_workspace_path(self.settings_local_input.text().strip() or self.workspace, distro)
+        if detected:
+            self.settings_linux_path_input.setText(detected)
+        else:
+            self.settings_linux_path_input.clear()
+            show_partner_notice(
+                self,
+                "Partner",
+                "没有检测到可映射的 Windows workspace。只有切换到 WSL 模式时才需要手动填写，例如 E:\\work\\partner_workspace 对应 /mnt/e/work/partner_workspace。",
+            )
+
+    def install_linux_with_mirror(self):
+        if os.name != "nt":
+            show_partner_notice(self, "Partner", "当前系统不是 Windows，不需要通过 WSL 安装 Linux。")
+            return
+        cmd = (
+            "wsl.exe --install -d Ubuntu; "
+            "wsl.exe -d Ubuntu -- bash -lc \""
+            "sudo sed -i 's|http://.*archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g; "
+            "s|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list 2>/dev/null || true; "
+            "sudo apt update\""
+        )
+        subprocess.Popen(["cmd.exe", "/c", "start", "Partner Linux 安装", "cmd.exe", "/k", cmd], creationflags=0)
 
     def refresh_ollama_page(self):
         self.populate_ollama_instances()
         inst_id, inst_dir = self.current_ollama_instance()
         if hasattr(self, "ollama_source_label"):
-            source = "Windows 本地" if self.workspace_mode == "local" else ("Linux / WSL" if self.workspace_mode == "wsl" else f"服务器 {self.bridge_settings.get('ssh_host') or '-'}")
+            source = "Windows 本地" if self.workspace_mode == "local" else ("WSL / Linux" if self.workspace_mode == "wsl" else f"服务器 {self.bridge_settings.get('ssh_host') or '-'}")
             self.ollama_source_label.setText(
-                f"{self.display_instance_label(inst_id, inst_dir) if inst_id else '实例 -'} 的 Ollama 连接管理 · 来源 {source}"
+                f"所有实例统一使用这组 Ollama 连接 · 当前来源 {source}"
             )
         if not inst_id or not inst_dir:
             self.ollama_endpoint_list.clear()
             self.clear_ollama_form()
-            self.ollama_runtime_summary.setText("当前没有可管理的实例。")
-            self.ollama_status_view.setPlainText("没有读取到实例，无法配置 Ollama 连接。")
             return
         snap = self.instance_ollama_snapshot(inst_id, inst_dir)
         agent = snap.get("agent") if isinstance(snap.get("agent"), dict) else {}
         pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
         endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
-        mode = str(pool.get("mode") or "off")
+        mode = str(pool.get("mode") or "project")
         enabled = bool(pool.get("enabled", False))
         runtime = snap.get("runtime") if isinstance(snap.get("runtime"), dict) else {}
         pool_status = snap.get("pool_status") if isinstance(snap.get("pool_status"), dict) else {}
@@ -6082,9 +8705,11 @@ print(json.dumps(bundle, ensure_ascii=False))
         selected_model = pool_status.get("selected") or dynamic_status.get("selected") or lite_status.get("model") or "-"
         self.ollama_model_card.set_value(selected_model, COLORS["green"] if selected_model != "-" else COLORS["subtext"])
         self.ollama_usage_card.set_value(str(runtime.get("calls") or 0), COLORS["yellow"])
-        self.ollama_mode_combo.blockSignals(True)
-        self.ollama_mode_combo.setCurrentText(mode if mode in {"off", "lite", "project", "all"} else "off")
-        self.ollama_mode_combo.blockSignals(False)
+        target = self.ollama_install_target_combo.currentText().strip() if hasattr(self, "ollama_install_target_combo") else "本地电脑"
+        model_choice = self.ollama_install_model_combo.currentText().strip() if hasattr(self, "ollama_install_model_combo") else "qwen2.5:7b"
+        runtime_place = self.current_runtime_location_label()
+        tunnel_note = "同一台机器，Partner 会直接连接 127.0.0.1:11434。" if target == runtime_place else "Ollama 和 Partner 不在同一台机器，Partner 会按自动隧道方式连接。"
+        recommend = "推荐启用" if target in {runtime_place, "本地电脑", "WSL / Linux", "SSH 服务器"} else "按需启用"
 
         current_name = None
         current = self.ollama_endpoint_list.currentItem()
@@ -6117,9 +8742,14 @@ print(json.dumps(bundle, ensure_ascii=False))
         else:
             self.clear_ollama_form()
 
-        self.ollama_scope_help.setText(f"当前实例：{self.display_instance_id(inst_id, inst_dir)}。先选使用范围，再维护下面这组连接。")
+        self.ollama_scope_help.setText("所有实例统一使用这组连接。保存时会同步到全部实例，默认使用程度由 Partner 统一管理。")
         status_lines = [
-            f"实例: {self.display_instance_id(inst_id, inst_dir)}",
+            f"安装位置: {target}",
+            f"当前 Partner 运行位置: {runtime_place}",
+            f"检查结论: {recommend}",
+            f"推荐模型: {model_choice}",
+            f"连接方式: {tunnel_note}",
+            "",
             f"已启用: {'是' if enabled else '否'}",
             f"使用范围: {mode}",
             f"连接数: {len(endpoints)}",
@@ -6140,10 +8770,8 @@ print(json.dumps(bundle, ensure_ascii=False))
                 status_lines.append(
                     f"- {row.get('endpoint') or row.get('model') or '-'} | {row.get('model') or '-'} | {'OK' if row.get('ok') else 'FAIL'} | {row.get('reason') or ''}"
                 )
-        self.ollama_runtime_summary.setText(
-            f"最近调用 {runtime.get('calls') or 0} 次，失败 {runtime.get('failed') or 0} 次，估算 token {runtime.get('total_tokens_est') or 0}。"
-        )
-        self.ollama_status_view.setPlainText("\n".join(status_lines))
+        self.ollama_runtime_summary.clear()
+        self.ollama_status_view.clear()
 
     def clear_ollama_form(self):
         self.ollama_location_combo.blockSignals(True)
@@ -6189,7 +8817,7 @@ print(json.dumps(bundle, ensure_ascii=False))
         agent = self.load_instance_partner_agent_config(inst_dir)
         pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
         endpoints = [e for e in (pool.get("endpoints") or []) if isinstance(e, dict)]
-        mode = self.ollama_mode_combo.currentText().strip() or "off"
+        mode = "all"
         name = self.ollama_name_input.text().strip()
         base_url = self.ollama_url_input.text().strip().rstrip("/")
         models = [x.strip() for x in self.ollama_models_input.text().split(",") if x.strip()]
@@ -6213,7 +8841,7 @@ print(json.dumps(bundle, ensure_ascii=False))
                 endpoints.append(updated)
         pool["enabled"] = mode != "off"
         pool["mode"] = mode
-        pool.setdefault("probe_timeout_sec", 2)
+        pool.setdefault("probe_timeout_sec", 5)
         pool.setdefault("chat_timeout_sec", 90)
         pool.setdefault("max_input_chars", 4000)
         pool["endpoints"] = endpoints
@@ -6221,11 +8849,22 @@ print(json.dumps(bundle, ensure_ascii=False))
         dynamic_cfg = agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}
         dynamic_cfg["enabled"] = mode in {"project", "all"}
         agent["dynamic_ollama"] = dynamic_cfg
-        ok, msg = self.save_instance_partner_agent_config(inst_dir, agent)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or "Ollama 配置保存失败。")
+        failures = []
+        for target_id, target_dir in self.available_instances():
+            target_agent = self.load_instance_partner_agent_config(target_dir)
+            target_pool = target_agent.get("ollama_pool") if isinstance(target_agent.get("ollama_pool"), dict) else {}
+            target_pool.update(pool)
+            target_agent["ollama_pool"] = target_pool
+            target_dynamic = target_agent.get("dynamic_ollama") if isinstance(target_agent.get("dynamic_ollama"), dict) else {}
+            target_dynamic["enabled"] = mode in {"project", "all"}
+            target_agent["dynamic_ollama"] = target_dynamic
+            ok, msg = self.save_instance_partner_agent_config(target_dir, target_agent)
+            if not ok:
+                failures.append(f"{self.display_instance_id(target_id, target_dir)}: {msg}")
+        if failures:
+            show_partner_notice(self, "Partner", "部分实例保存失败：\n" + "\n".join(failures[:5]))
             return
-        self.request_refresh(force=True, page_index=3)
+        self.request_refresh(force=True, page_index=5)
 
     def add_ollama_endpoint(self):
         self.clear_ollama_form()
@@ -6240,41 +8879,143 @@ print(json.dumps(bundle, ensure_ascii=False))
         name = str(endpoint.get("name") or "").strip()
         if not name:
             return
-        agent = self.load_instance_partner_agent_config(inst_dir)
-        pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
-        endpoints = [e for e in (pool.get("endpoints") or []) if isinstance(e, dict) and str(e.get("name") or "").strip() != name]
-        pool["endpoints"] = endpoints
-        agent["ollama_pool"] = pool
-        ok, msg = self.save_instance_partner_agent_config(inst_dir, agent)
-        if not ok:
-            show_partner_notice(self, "Partner", msg or "删除 Ollama 连接失败。")
+        failures = []
+        for target_id, target_dir in self.available_instances():
+            agent = self.load_instance_partner_agent_config(target_dir)
+            pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
+            endpoints = [e for e in (pool.get("endpoints") or []) if isinstance(e, dict) and str(e.get("name") or "").strip() != name]
+            pool["endpoints"] = endpoints
+            agent["ollama_pool"] = pool
+            ok, msg = self.save_instance_partner_agent_config(target_dir, agent)
+            if not ok:
+                failures.append(f"{self.display_instance_id(target_id, target_dir)}: {msg}")
+        if failures:
+            show_partner_notice(self, "Partner", "部分实例删除失败：\n" + "\n".join(failures[:5]))
             return
-        self.request_refresh(force=True, page_index=3)
+        self.request_refresh(force=True, page_index=5)
+
+    def install_ollama_with_mirror(self):
+        target = self.ollama_install_target_combo.currentText().strip() if hasattr(self, "ollama_install_target_combo") else "本地电脑"
+        model = self.ollama_install_model_combo.currentText().strip() if hasattr(self, "ollama_install_model_combo") else "qwen2.5:7b"
+        startup = self.ollama_startup_combo.currentText().strip() if hasattr(self, "ollama_startup_combo") else "开机自启"
+        if target == "本地电脑":
+            if os.name != "nt":
+                show_partner_notice(self, "Partner", "本地电脑安装入口目前用于 Windows。")
+                return
+            threading.Thread(target=lambda: self.save_auto_ollama_config(target, model), daemon=True).start()
+            cmd = (
+                "winget install --id Ollama.Ollama -e --accept-package-agreements --accept-source-agreements; "
+                f"ollama pull {model}; "
+            )
+            if startup == "开机自启":
+                cmd += "Write-Host '请在 Windows 启动应用或任务计划中保持 Ollama 自启。'; "
+            else:
+                cmd += "Write-Host '已选择手动启动：需要使用 ollama serve 或打开 Ollama 应用。'; "
+            cmd += "Read-Host '按 Enter 关闭窗口'"
+            subprocess.Popen(["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", cmd], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+            return
+        if target == "WSL / Linux":
+            threading.Thread(target=lambda: self.save_auto_ollama_config(target, model), daemon=True).start()
+            if os.name != "nt":
+                cmd = (
+                    "sudo sed -i 's|http://.*archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g; "
+                    "s|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list 2>/dev/null || true; "
+                    "sudo apt update; curl -fsSL https://ollama.com/install.sh | sh; "
+                    f"ollama pull {shlex.quote(model)}"
+                )
+                subprocess.Popen(["bash", "-lc", cmd])
+                return
+            distro = self.settings_distro_combo.currentText().strip() if hasattr(self, "settings_distro_combo") else ""
+            distro_part = ["-d", distro] if distro else []
+            linux_cmd = (
+                "sudo sed -i 's|http://.*archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g; "
+                "s|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list 2>/dev/null || true; "
+                "sudo apt update; curl -fsSL https://ollama.com/install.sh | sh; "
+                f"ollama pull {shlex.quote(model)}"
+            )
+            subprocess.Popen(["cmd.exe", "/c", "start", "Partner Ollama WSL", "wsl.exe", *distro_part, "--", "bash", "-lc", linux_cmd], creationflags=0)
+            return
+        if self.workspace_mode != "ssh" or not str(self.bridge_settings.get("ssh_host") or "").strip():
+            show_partner_notice(self, "Partner", "请先在 Server Config 下方保存 SSH 服务器配置，再安装远端 Ollama。")
+            return
+        script = (
+            "sudo sed -i 's|http://.*archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g; "
+            "s|http://security.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.edu.cn/ubuntu/|g' /etc/apt/sources.list 2>/dev/null || true; "
+            "sudo apt update; curl -fsSL https://ollama.com/install.sh | sh; "
+            f"ollama pull {shlex.quote(model)}"
+        )
+        def _install():
+            self.save_auto_ollama_config(target, model)
+            ok, out = self.run_ssh(script, capture=True)
+            return ok, out or ("远端 Ollama 安装命令已执行。" if ok else "远端 Ollama 安装失败。")
+
+        self.run_background_task("install_ollama", "正在远端安装 Ollama…", _install, refresh_page=5)
+
+    def save_auto_ollama_config(self, target: str, model: str):
+        if target == "本地电脑":
+            endpoint_name = "local-ollama"
+            base_url = "http://127.0.0.1:11434"
+        elif target == "WSL / Linux":
+            endpoint_name = "linux-ollama"
+            base_url = "http://127.0.0.1:11434"
+        else:
+            endpoint_name = "ssh-ollama"
+            base_url = "http://127.0.0.1:11434"
+        endpoint = {"name": endpoint_name, "base_url": base_url, "models": [model], "enabled": True, "auto_tunnel": target != self.current_runtime_location_label()}
+        for _, inst_dir in self.available_instances():
+            agent = self.load_instance_partner_agent_config(inst_dir)
+            pool = agent.get("ollama_pool") if isinstance(agent.get("ollama_pool"), dict) else {}
+            pool.update(
+                {
+                    "enabled": True,
+                    "mode": "all",
+                    "probe_timeout_sec": 5,
+                    "chat_timeout_sec": 90,
+                    "max_input_chars": 4000,
+                    "endpoints": [endpoint],
+                }
+            )
+            agent["ollama_pool"] = pool
+            dynamic_cfg = agent.get("dynamic_ollama") if isinstance(agent.get("dynamic_ollama"), dict) else {}
+            dynamic_cfg["enabled"] = True
+            agent["dynamic_ollama"] = dynamic_cfg
+            self.save_instance_partner_agent_config(inst_dir, agent)
+
+    def current_runtime_location_label(self) -> str:
+        if self.workspace_mode == "ssh":
+            return "SSH 服务器"
+        if self.workspace_mode == "wsl":
+            return "WSL / Linux"
+        return "本地电脑"
 
     def test_ollama_settings(self):
         inst_id, inst_dir = self.current_ollama_instance()
         if not inst_dir:
             return
-        self.set_refresh_state(True, "正在探测 Ollama…")
         if self.workspace_mode == "ssh":
-            script = (
-                "import json\n"
-                "from partner.ollama_pool import test_pool\n"
-                f"print(json.dumps(test_pool({inst_dir!r}, purpose='project'), ensure_ascii=False))\n"
-            )
-            ok, out = self.run_ssh(f"cd {shlex.quote(self.workspace_partner_dir())} && {self.remote_python_command(script)}", capture=True)
-            if not ok:
-                show_partner_notice(self, "Partner", out or "远端 Ollama 探测失败。")
-            self._remote_bundle_cache = None
-            self._remote_bundle_ts = 0.0
-        else:
-            try:
-                from partner.ollama_pool import test_pool
+            def _test_remote():
+                script = (
+                    "import json\n"
+                    "from partner.ollama_pool import test_pool\n"
+                    f"print(json.dumps(test_pool({inst_dir!r}, purpose='project'), ensure_ascii=False))\n"
+                )
+                ok, out = self.run_ssh(f"cd {shlex.quote(self.workspace_partner_dir())} && {self.remote_python_command(script)}", capture=True)
+                self._remote_bundle_cache = None
+                self._remote_bundle_ts = 0.0
+                return ok, out or ("远端 Ollama 探测完成。" if ok else "远端 Ollama 探测失败。")
 
-                test_pool(inst_dir, purpose="project")
-            except Exception as exc:
-                show_partner_notice(self, "Partner", str(exc))
-        self.request_refresh(force=True, page_index=3)
+            self.run_background_task("test_ollama", "正在探测远端 Ollama…", _test_remote, refresh_page=5)
+        else:
+            def _test_local():
+                try:
+                    from partner.ollama_pool import test_pool
+
+                    test_pool(inst_dir, purpose="project")
+                    return True, "Ollama 探测完成。"
+                except Exception as exc:
+                    return False, str(exc)
+
+            self.run_background_task("test_ollama", "正在探测 Ollama…", _test_local, refresh_page=5)
 
 
 def launch():

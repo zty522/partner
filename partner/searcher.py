@@ -110,10 +110,10 @@ def _extract_keywords_from_knowledge(topic: str, workspace: str) -> List[str]:
                         if isinstance(entry, dict):
                             title = entry.get("title", entry.get("content", ""))
                             content = entry.get("content", "")
-                            # 提取英文关键词：大写开头的复合词、常见模型名
+                            # 提取可复用英文术语，不预设具体领域。
                             eng = re.findall(
                                 r'[A-Z][a-z]+(?:_[A-Z][a-z]+)*|'
-                                r'scGPT|MAE|PLS|Transformer|RNA|CNN|LSTM|GNN|VAE|GAN|'
+                                r'MAE|MSE|RMSE|AUC|F1|Transformer|CNN|LSTM|GNN|GAN|'
                                 r'BERT|GPT|Diffusion|ResNet|UNet|Autoencoder|Attention',
                                 str(title) + " " + str(content)
                             )
@@ -129,32 +129,7 @@ def _extract_keywords_from_knowledge(topic: str, workspace: str) -> List[str]:
 
 
 def _get_domain_terms(topic: str) -> List[str]:
-    """根据 topic 返回领域泛词。
-
-    尝试生成英文领域相关搜索词，用于扩大搜索范围。
-    """
-    topic_lower = topic.lower()
-
-    # 中文到英文领域的映射
-    domain_map = {
-        "年龄预测": ["transcriptomic age prediction", "aging transcriptomics",
-                     "gene expression aging clock", "RNA-seq age biomarker"],
-        "转录组": ["transcriptomics", "RNA-seq", "gene expression profiling"],
-        "单细胞": ["single cell", "scRNA-seq", "single-cell transcriptomics"],
-        "衰老": ["aging", "senescence", "age-related disease", "biological age"],
-        "分子生成": ["molecular generation", "de novo drug design",
-                     "molecular optimization", "generative chemistry"],
-        "agent": ["autonomous agent", "AI agent", "LLM agent", "research agent"],
-        "文献": ["literature review", "scientific discovery", "research survey"],
-        "深度学习": ["deep learning", "neural network", "representation learning"],
-        "基因": ["gene expression", "genomics", "transcriptomics"],
-    }
-
-    for ch, eng_terms in domain_map.items():
-        if ch in topic_lower:
-            return eng_terms
-
-    # 默认：直接用 topic 的英文词
+    """Return query terms without hardcoded domain expansion."""
     return [topic]
 
 

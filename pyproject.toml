@@ -48,9 +48,10 @@ tts-cosyvoice = ["torchaudio>=2.0"]
 # Development
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 desktop = ["PySide6>=6.7"]
+content = ["playwright>=1.40", "yt-dlp>=2024.12.0", "pillow>=10.0", "pytesseract>=0.3"]
 # All optional dependencies
 all = [
-    "partner-research[wechat,qq,voice]",
+    "partner-research[wechat,qq,voice,content]",
 ]
 
 [project.scripts]

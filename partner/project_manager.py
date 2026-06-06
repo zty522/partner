@@ -14,16 +14,12 @@ logger = logging.getLogger(__name__)
 
 # 数据结构格式：
 # {
-#   "project_name": "年龄预测项目",
-#   "project_path": "",  # 如果项目在工作区外，记录路径
-#   "last_user_instruction": "继续推进年龄预测项目",
+#   "project_name": "用户当前项目",
+#   "project_path": "",
+#   "last_user_instruction": "用户最近一次项目指令",
 #   "last_instruction_time": "2026-05-30T21:38:07",
-#   "current_phase": "修复batch correction数据泄漏",
-#   "next_actions": [
-#     "修复 integrate_age_aware_correction.py 第239行泄漏",
-#     "重新运行 PLS 集成模型",
-#     "探索 Transformer 架构"
-#   ]
+#   "current_phase": "当前阶段",
+#   "next_actions": ["下一步动作"]
 # }
 
 
@@ -83,12 +79,12 @@ def save(workspace: str, project_data: Dict):
 def update_from_instruction(workspace: str, instruction: str):
     """从用户指令更新活跃项目。
 
-    用户说「推进年龄预测」时，更新 project_name 和时间。
+    用户要求推进某个项目时，更新 project_name 和时间。
     如果已存在相同项目，只更新时间；如果不同项目，切换。
 
     Args:
         workspace: 实例工作目录
-        instruction: 用户指令（如"继续推进年龄预测项目"）
+        instruction: 用户指令
     """
     current = load(workspace)
 

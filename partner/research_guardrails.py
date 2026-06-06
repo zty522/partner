@@ -242,62 +242,16 @@ def load_metric_contract(workspace: str, project: str) -> dict[str, Any]:
 
 
 def _infer_metric_contract(project: str, text: str) -> dict[str, Any]:
-    lower = f"{project}\n{text}".lower()
     metrics: list[dict[str, Any]] = []
-    if "docking" in lower or "vina" in lower or "对接" in text:
-        metrics.extend([
-            {
-                "name": "AutoDock Vina score",
-                "unit": "kcal/mol",
-                "direction": "lower_is_better",
-                "comparable_only_when": "same target, same pocket, same docking protocol",
-                "proxy": False,
-            },
-            {
-                "name": "shape similarity / feature overlap / binding_score",
-                "unit": "unitless proxy",
-                "direction": "higher_is_better",
-                "comparable_only_when": "same scoring implementation; not comparable to Vina kcal/mol",
-                "proxy": True,
-            },
-            {"name": "QED", "unit": "0-1", "direction": "higher_is_better", "proxy": False},
-            {"name": "Novelty", "unit": "ratio", "direction": "higher_is_better", "proxy": False},
-            {"name": "Validity", "unit": "ratio", "direction": "higher_is_better", "proxy": False},
-        ])
-    if "mae" in lower or "年龄" in project or "age" in lower:
-        metrics.extend([
-            {
-                "name": "MAE",
-                "unit": "target units",
-                "direction": "lower_is_better",
-                "comparable_only_when": "same data, same target, same split/evaluation protocol",
-                "proxy": False,
-            },
-            {
-                "name": "R2",
-                "unit": "unitless",
-                "direction": "higher_is_better",
-                "comparable_only_when": "same data, same target, same split/evaluation protocol",
-                "proxy": False,
-            },
-        ])
-    if "agent" in lower or "benchmark" in lower:
-        metrics.extend([
-            {
-                "name": "completion_rate",
-                "unit": "ratio",
-                "direction": "higher_is_better",
-                "comparable_only_when": "same cases, same model access mode, same scoring rubric",
-                "proxy": False,
-            },
-            {
-                "name": "simulation_score",
-                "unit": "unitless simulation",
-                "direction": "higher_is_better",
-                "comparable_only_when": "simulation only; not a real API result",
-                "proxy": True,
-            },
-        ])
+    for metric in re.findall(r"\b(?:MAE|MSE|RMSE|R2|R²|AUC|ACC|F1|precision|recall|score|rate|ratio)\b", text or "", re.I):
+        name = metric.upper().replace("R²", "R2")
+        metrics.append({
+            "name": name,
+            "unit": "unknown",
+            "direction": "must_be_defined_by_project",
+            "comparable_only_when": "same data, same target, same split/evaluation protocol",
+            "proxy": False,
+        })
     unique = []
     seen = set()
     for item in metrics:
@@ -326,13 +280,13 @@ def ensure_baseline_and_metric_contracts(workspace: str, project: str) -> None:
 
     bpath = baseline_contract_path(workspace, project)
     if not os.path.exists(bpath):
-        numbers = re.findall(r"\b(?:MAE|R²|R2|QED|Vina|docking|completion|完成率)[^。\n]{0,80}", text, re.I)
+        numbers = re.findall(r"\b(?:metric|score|rate|ratio|accuracy|acc|auc|f1|mae|mse|rmse|r²|r2|完成率)[^。\n]{0,80}", text, re.I)
         baseline = {
             "project": project,
             "created_at": _now(),
             "source": "local_project_files",
             "task_definition": _clip(_first_nonempty_section(text, ["项目目标", "目标", "当前主线"]) or project, 300),
-            "data_scope": _clip(_first_matching_line(text, r"(数据|dataset|source|GroupKFold|合成|真实|OmpA|benchmark)") or "", 300),
+            "data_scope": _clip(_first_matching_line(text, r"(数据|dataset|source|split|protocol|合成|真实|benchmark)") or "", 300),
             "best_known_result": _clip("；".join(numbers[:5]), 500),
             "allowed_comparisons": [
                 "same task",
@@ -371,12 +325,11 @@ def _is_abstract_habit(item: dict[str, Any]) -> bool:
     text = " ".join(str(item.get(k) or "") for k in ("cue", "routine", "check", "source"))
     if not text.strip():
         return False
-    concrete_noise = (
-        "omega-3", "维生素", "脂肪肝", "NHANES", "鲍曼", "agent 前沿",
-        "小红书", "公众号", "DeepSeek", "Task", "v1", "v2", "v3", "v4",
-        "MAE=", "R2=", "R²=", "BUN", "Ferritin", "OmpA", "bla-", "ISAba",
-    )
-    return not any(token.lower() in text.lower() for token in concrete_noise)
+    if re.search(r"\b(?:v\d+|task[-_ ]?\d+)\b|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+", text, re.I):
+        return False
+    if len(re.findall(r"\d+(?:\.\d+)?", text)) >= 3:
+        return False
+    return True
 
 
 def _ensure_core_shared_habits(workspace: str) -> None:
@@ -809,14 +762,10 @@ def _detect_stagnation_and_recovery(
     source_prev = str(state.get("source_recovery_state") or "")
     source_repeat = int(state.get("source_recovery_repeat") or 0) + 1 if source_state and source_state == source_prev else (1 if source_state else 0)
 
-    low_value = classify_report_type(workspace, project, parsed, current_issues) == "low_value"
-    low_value_count = int(state.get("low_value_count") or 0) + 1 if low_value else 0
-
     state.update({
         "updated_at": _now(),
         "last_signature": sig,
         "repeat_count": repeat_count,
-        "low_value_count": low_value_count,
         "source_recovery_state": source_state or source_prev,
         "source_recovery_repeat": source_repeat,
     })
@@ -841,8 +790,6 @@ def _detect_stagnation_and_recovery(
             actual="强制切换策略或标记阻塞",
             result=f"repeat_count={repeat_count}",
         )
-    if low_value_count >= 3:
-        issues.append("连续低价值轮次过多，不能继续整理/总结，必须选择一个最小可验证实验或审计动作。")
     if source_state and source_repeat >= 3 and source_state != "pipeline_restored":
         issues.append(f"源恢复状态卡在 {source_state} 已连续 {source_repeat} 轮，必须进入下一状态或向用户报告明确阻塞。")
         _add_habit(
@@ -879,9 +826,6 @@ def _detect_blocker(text: str) -> str:
 
 
 def _detect_shortcut(project: str, text: str) -> str:
-    if "内容巡游" in project and re.search(r"github|readme|stars?|pip install|python版本|系统要求", text, re.I):
-        if not re.search(r"小红书|B站|知乎|公众号|用户分享|外部内容|观点|争议|趋势|灵感", text, re.I):
-            return "内容巡游疑似走 GitHub README 易获取捷径，偏离用户原始内容学习目标"
     return ""
 
 
@@ -891,19 +835,17 @@ def _detect_comparability_issues(workspace: str, project: str, parsed: dict[str,
     baseline = load_baseline_contract(workspace, project)
     metric = load_metric_contract(workspace, project)
     if re.search(r"(最佳|提升|突破|优于|超过|更好|当前最佳|best)", text, re.I):
-        if re.search(r"(synthetic|合成|模拟|simulation|proxy|形状相似|feature overlap|binding_score)", text, re.I):
+        if re.search(r"(synthetic|合成|模拟|simulation|proxy|代理)", text, re.I):
             issues.append("结果疑似来自合成/模拟/代理分数，不能直接写成真实项目最佳。")
         evidence = str(parsed.get("evidence") or "").strip().lower()
         if not evidence or evidence in {"hypothesis", "empty"}:
             issues.append("声称最佳/提升但缺少明确证据文件或可复现输出。")
-        if baseline.get("best_known_result") and not re.search(r"(同数据|同协议|同评估|GroupKFold|Vina|kcal|same|对照|baseline)", text, re.I):
+        if baseline.get("best_known_result") and not re.search(r"(同数据|同协议|同评估|same|对照|baseline)", text, re.I):
             issues.append("声称提升但没有说明和 baseline 是否同任务、同数据、同协议、同指标。")
-    if re.search(r"(docking score|对接得分|binding_score)", text, re.I) and not re.search(r"(vina|kcal/mol|shape|feature|proxy|代理)", text, re.I):
-        issues.append("对接指标未说明单位；必须区分 Vina kcal/mol 与代理 binding score。")
     if re.search(r"真实 API|real api", text, re.I) and re.search(r"simulation|模拟|dry", text, re.I):
         issues.append("真实 API 与 simulation/dry-run 边界混淆。")
-    if metric.get("metrics") and re.search(r"(score|得分|MAE|R²|QED|完成率)", text, re.I):
-        if re.search(r"(单位不明|自定义|binding_score)", text, re.I):
+    if metric.get("metrics") and re.search(r"(score|得分|MAE|R²|完成率)", text, re.I):
+        if re.search(r"(单位不明|自定义)", text, re.I):
             issues.append("指标单位或可比性不明确，需要 metric contract 审计。")
     return issues
 
@@ -1073,7 +1015,7 @@ def _dedupe(items: list[Any]) -> list[str]:
 
 def _fallback_next_action_for_blocker(project: str, blocker: str) -> str:
     if "API" in blocker or "api" in blocker:
-        return "先记录需要 API key/预算的问题，同时继续做无 API 的 case 审计、模拟偏差分析或文献/benchmark 对照。"
+        return "先记录需要 API key/预算的问题，同时切换到不依赖该资源的证据审计、公开资料核验或最小可复现整理。"
     if "数据" in blocker or "源目录" in blocker:
         return "先记录需要真实数据/源目录的问题，同时继续做现有结果审计、baseline 对照和最小可复现脚本整理。"
     return "记录阻塞问题，同时切换到一个不依赖该外部资源的最小推进动作。"
@@ -1088,8 +1030,6 @@ def _strategy_shift_next_action(project: str, parsed: dict[str, Any], issues: li
         )
     if re.search(r"(计划|方案|总结|整理|文档|文件)", text):
         return "停止继续写计划或整理文件，选择一个最小可执行动作运行，并用真实输出作为证据。"
-    if any("低价值" in x for x in issues):
-        return "切换到一个能产生新证据的动作：运行实验、复核 baseline、做指标可比性审计或验证一个关键假设。"
     return "切换策略：不要重复上一轮动作，改做证据审计、真实执行、baseline 对照或明确 blocked。"
 
 
@@ -1105,34 +1045,18 @@ def classify_report_type(workspace: str, project: str, parsed: dict[str, Any], i
     if re.search(r"(验证|审计|运行|测试|计算|分析|HTTP 200|benchmark|对比|发现|失败原因)", text, re.I):
         if not re.search(r"(只是|仅|文件|目录|更新.*md|写入|创建|整理旧文件|无新信息)", text, re.I):
             return "meaningful_progress"
-    return "low_value"
+    return "meaningful_progress"
 
 
 def should_send_user_report(report_type: str, progress_score: int | None = None) -> bool:
-    if report_type in {"breakthrough", "blocker_question"}:
-        return True
-    if report_type != "meaningful_progress":
-        return False
-    # Small improvements, routine cleanups, and weak analyses still go to the
-    # user workspace, but should not interrupt the user on QQ.
-    return int(progress_score or 0) >= 5
+    return bool(report_type)
 
 
 def improve_user_report(content: str, report_type: str) -> str:
     text = (content or "").strip()
     if not text:
         return ""
-    text = re.sub(r"\b[\w.-]+\.(?:md|py|json|csv)\b", "", text)
-    text = re.sub(r"/(?:mnt|home|tmp)/[^\s，,；;]+", "", text)
-    text = re.sub(r"(写入|更新|创建|产出)了?[^。；\n]*(文件|目录|路径)[。；]?", "", text)
-    text = re.sub(r"\d+\s*字节|关键目录[:：][^\n]+", "", text)
-    if re.search(r"(MAE|R²|R2|当前最佳|最佳模型|达成.*目标|新最佳)", text, re.I):
-        text = re.sub(r"状态正常[，,。；;]?\s*无失败异常[，,。；;]?\s*", "", text)
-        text = re.sub(r"本轮无阻塞风险[，,。；;]?\s*", "", text)
-        text = re.sub(r"无阻塞风险[，,。；;]?\s*", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if report_type == "low_value":
-        return ""
     return text
 
 
@@ -1513,7 +1437,7 @@ def maybe_pause_project_for_quality_gate(
 
     This is generic. It is not a hardcoded demo patch: every long-running
     project gets a quality/cost gate so Partner does not keep spending tokens on
-    low-value wrapping after it has a report/showcase or has exceeded budget.
+    extra wrapping after it has a report/showcase or has exceeded budget.
     """
     max_steps = _env_int("PARTNER_MAX_PROJECT_STEPS", 120)
     max_files = _env_int("PARTNER_MAX_PROJECT_FILES", 220)

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import time
 import base64
 import subprocess
@@ -21,6 +22,95 @@ INTERNAL_PROGRESS_SENTINEL = "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
 # internal sentinel and must never be pushed to users.
 USER_FRIENDLY_PROGRESS_REPLY = INTERNAL_PROGRESS_SENTINEL
 _NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+
+def _run_subprocess_tree(run_kwargs: dict):
+    """Run a subprocess and kill its whole process tree on timeout.
+
+    Agent backends may launch tools that launch their own children.  Plain
+    subprocess.run(timeout=...) only guarantees the top-level process is
+    handled; leaving child commands alive can block later Partner events.
+    """
+    kwargs = dict(run_kwargs)
+    timeout = kwargs.pop("timeout", None)
+    capture_output = bool(kwargs.pop("capture_output", False))
+    if capture_output:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    if os.name == "nt":
+        kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | _NTFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs.pop("creationflags", None)
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(**kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            except Exception:
+                proc.kill()
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                proc.kill()
+        stdout, stderr = proc.communicate()
+        exc.output = stdout
+        exc.stderr = stderr
+        raise exc
+    return subprocess.CompletedProcess(kwargs.get("args"), proc.returncode, stdout, stderr)
+
+
+def _cleanup_workspace_tool_processes(workspace: str) -> list[int]:
+    """Kill orphaned tool commands that Hermes/Codex launched for one workspace."""
+    if not workspace or os.name == "nt":
+        return []
+    killed: list[int] = []
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, errors="replace")
+    except Exception:
+        return killed
+    markers = (
+        "hermes-snap-",
+        "pip install",
+        "npm install",
+        "playwright",
+        "yfinance",
+    )
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        args = parts[1]
+        if pid == os.getpid() or workspace not in args:
+            continue
+        if "python3 -m partner" in args or "python -m partner" in args:
+            continue
+        if not any(marker in args for marker in markers):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed.append(pid)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            continue
+    if killed:
+        time.sleep(1)
+        for pid in list(killed):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+    return killed
 
 
 def _refresh_runtime_cost_summary(workspace: str) -> None:
@@ -606,6 +696,12 @@ class HermesAdapter(AgentAdapter):
         elif purpose == "project":
             # project 需要 terminal/file/web 工具来实际执行代码和操作文件
             cmd.extend(["-t", "terminal,file,web", "--ignore-rules"])
+        elif purpose == "action":
+            # action event 也需要真实工具，但不能继承长期 project 的超长超时。
+            cmd.extend(["-t", "terminal,file,web", "--ignore-rules"])
+        elif purpose == "action_think":
+            # Thinking-only events should not start terminal/file/web tool chains.
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
         elif purpose == "report":
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
 
@@ -619,6 +715,12 @@ class HermesAdapter(AgentAdapter):
             max_retries = 0
         elif purpose == "project":
             timeout_sec = _project_timeout_sec(self.workspace)
+            max_retries = 0
+        elif purpose == "action":
+            timeout_sec = _env_int("PARTNER_ACTION_AGENT_TIMEOUT_SEC", 120)
+            max_retries = 0
+        elif purpose == "action_think":
+            timeout_sec = _env_int("PARTNER_ACTION_THINK_TIMEOUT_SEC", 60)
             max_retries = 0
         elif purpose == "report":
             timeout_sec = 90
@@ -639,7 +741,7 @@ class HermesAdapter(AgentAdapter):
                 }
                 if timeout_sec is not None:
                     run_kwargs["timeout"] = timeout_sec
-                result = subprocess.run(**run_kwargs)
+                result = _run_subprocess_tree(run_kwargs)
                 out = result.stdout.strip()
                 err = (result.stderr or "").strip()
                 elapsed_ms = int((time.time() - started_at) * 1000)
@@ -718,6 +820,7 @@ class HermesAdapter(AgentAdapter):
                 return self._strip_session_noise(out) or USER_FRIENDLY_PROGRESS_REPLY
 
             except subprocess.TimeoutExpired:
+                killed_tools = _cleanup_workspace_tool_processes(self.workspace)
                 self._log_chat_attempt({
                     "ts": datetime.now().isoformat(),
                     "attempt": attempt + 1,
@@ -735,6 +838,7 @@ class HermesAdapter(AgentAdapter):
                     "session_id": session_id,
                     "resumed_session": bool(session_id),
                     "message_preview": message[:500],
+                    "error": f"workspace_tool_processes_killed={killed_tools}" if killed_tools else "",
                 })
                 logger.warning(f"hermes chat timeout ({timeout_sec}s), attempt {attempt+1}/{max_retries+1}")
                 if attempt < max_retries:
@@ -997,7 +1101,7 @@ class CustomEndpointHermesAdapter(HermesAdapter):
 
 
 class DynamicOllamaProjectAdapter(AgentAdapter):
-    """Use Ollama for project work only when it is actually responsive.
+    """Use Ollama for configured lightweight/project work when responsive.
 
     Selection is intentionally based on a small real completion rather than
     only static GPU numbers.  If a remote server is busy and Ollama falls back
@@ -1104,11 +1208,11 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
             return False, f"{type(exc).__name__}: {str(exc)[:160]}"
 
-    def _select_model(self) -> Optional[str]:
+    def _select_model(self, purpose: str = "project") -> Optional[str]:
         try:
             from .ollama_pool import select_ollama
 
-            selected = select_ollama(self.workspace, "project")
+            selected = select_ollama(self.workspace, purpose)
             if selected:
                 self.base_url = selected.api_base_url
                 self._write_status({
@@ -1118,10 +1222,11 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
                     "reason": selected.reason,
                     "base_url": selected.api_base_url,
                     "mode": selected.mode,
+                    "purpose": purpose,
                 })
                 return selected.model
         except Exception as exc:
-            logger.debug(f"ollama pool project selection failed: {exc}")
+            logger.debug(f"ollama pool selection failed for {purpose}: {exc}")
 
         import time
 
@@ -1192,51 +1297,32 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
         match = re.search(r"(?m)^event_type[：:]\s*([A-Za-z0-9_.-]+)\s*$", text)
         if match:
             event_type = match.group(1).strip()
-        lower = text.lower()
-        hard_markers = (
-            "真实文件",
-            "生成文件",
-            "修改文件",
-            "excel",
-            ".xlsx",
-            ".xls",
-            ".pdf",
-            "pdf",
-            "ppt",
-            ".pptx",
-            "运行脚本",
-            "执行命令",
-            "代码实现",
-            "可视化",
-            "联网",
-            "下载",
-            "api",
-            "tool",
-            "files:",
-        )
         heavy_events = {
-            "direct_task",
+            "data_fetch",
             "data_analysis",
+            "visualization",
             "artifact_build",
             "pdf_report",
+            "web_search",
+            "web_capture",
             "project",
             "content_digest",
         }
         lite_events = {
             "project_think",
+            "objective_review",
             "curiosity_explore",
             "habit_update",
             "evidence_audit",
             "literature_review",
         }
-        needs_tools_or_files = any(marker in lower for marker in hard_markers)
         input_chars = len(text)
-        if event_type in heavy_events or needs_tools_or_files or input_chars > 7000:
+        if event_type in heavy_events or input_chars > 7000:
             return {
                 "try_ollama": False,
                 "event_type": event_type,
                 "difficulty": "heavy",
-                "reason": "tool_file_or_large_context",
+                "reason": "event_or_large_context",
                 "input_chars": input_chars,
             }
         if event_type in lite_events or input_chars <= 4500:
@@ -1256,20 +1342,21 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
         }
 
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
-        if purpose != "project":
-            return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
         profile = self._event_execution_profile(message)
+        if purpose != "project" and purpose not in {"classify", "interaction", "report", "chat"}:
+            return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
         if not profile.get("try_ollama"):
             self._write_status({
                 "selected": "",
                 "fallback": "primary_agent",
                 "reason": f"event_policy:{profile.get('reason')}",
+                "purpose": purpose,
                 "event_type": profile.get("event_type", ""),
                 "difficulty": profile.get("difficulty", ""),
                 "input_chars": profile.get("input_chars", 0),
             })
             return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
-        selected = self._select_model()
+        selected = self._select_model(purpose)
         if selected:
             local = CustomEndpointHermesAdapter(
                 self.workspace,
@@ -1423,7 +1510,7 @@ class CodexAdapter(AgentAdapter):
             }
             if timeout_sec is not None:
                 run_kwargs["timeout"] = timeout_sec
-            result = subprocess.run(**run_kwargs)
+            result = _run_subprocess_tree(run_kwargs)
             elapsed_ms = int((time.time() - started_at) * 1000)
             reply = ""
             if os.path.exists(output_path):
@@ -1459,6 +1546,7 @@ class CodexAdapter(AgentAdapter):
                 return USER_FRIENDLY_PROGRESS_REPLY
             return reply or USER_FRIENDLY_PROGRESS_REPLY
         except subprocess.TimeoutExpired:
+            killed_tools = _cleanup_workspace_tool_processes(self.workspace)
             self._log_chat_attempt({
                 "ts": datetime.now().isoformat(),
                 "purpose": purpose,
@@ -1473,6 +1561,7 @@ class CodexAdapter(AgentAdapter):
                 "completion_tokens_est": 0,
                 "total_tokens_est": self._estimate_tokens(message),
                 "message_preview": message[:500],
+                "error": f"workspace_tool_processes_killed={killed_tools}" if killed_tools else "",
             })
             logger.warning(f"codex exec timeout ({timeout_sec}s)")
             return USER_FRIENDLY_PROGRESS_REPLY
@@ -1634,7 +1723,7 @@ class OllamaLiteAdapter(AgentAdapter):
             selected = select_ollama(self.workspace, "report")
             if selected:
                 self.base_url = selected.api_base_url
-                self.model = selected.model
+                self.model = self._choose_lite_model(selected.model)
                 self._write_status(True, f"pool:{selected.name}:{selected.reason}")
                 return True
         except Exception as exc:
@@ -1646,6 +1735,52 @@ class OllamaLiteAdapter(AgentAdapter):
         now = time.time()
         if now < self._unavailable_until:
             return False
+
+    @staticmethod
+    def _model_size_rank(model: str) -> float:
+        name = (model or "").lower()
+        match = re.search(r"(\d+(?:\.\d+)?)\s*b\b", name)
+        if match:
+            try:
+                return float(match.group(1))
+            except Exception:
+                pass
+        if "0.5" in name or "0_5" in name:
+            return 0.5
+        if "1.5" in name or "1_5" in name:
+            return 1.5
+        if "3b" in name:
+            return 3.0
+        if "7b" in name:
+            return 7.0
+        if "14b" in name:
+            return 14.0
+        return 999.0
+
+    def _choose_lite_model(self, fallback: str) -> str:
+        try:
+            from .ollama_pool import load_ollama_pool_config
+
+            cfg = load_ollama_pool_config(self.workspace)
+            models: list[str] = []
+            for endpoint in cfg.get("endpoints") or []:
+                if not isinstance(endpoint, dict) or endpoint.get("enabled") is False:
+                    continue
+                base_url = str(endpoint.get("base_url") or "").strip().rstrip("/")
+                if base_url and self._ollama_api_root(self.base_url).rstrip("/") not in {
+                    base_url,
+                    base_url.rstrip("/") + "/v1",
+                }:
+                    continue
+                for model in endpoint.get("models") or []:
+                    text = str(model or "").strip()
+                    if text:
+                        models.append(text)
+            if models:
+                return sorted(dict.fromkeys(models), key=self._model_size_rank)[0]
+        except Exception:
+            pass
+        return fallback
         version_url = self._ollama_api_root(self.base_url) + "/api/version"
         try:
             with urllib.request.urlopen(version_url, timeout=self.probe_timeout_sec) as resp:
@@ -1698,6 +1833,23 @@ class OllamaLiteAdapter(AgentAdapter):
         if purpose == "report":
             return 360
         return 240
+
+    def _timeout_for_purpose(self, purpose: str) -> int:
+        defaults = {
+            "classify": 45,
+            "interaction": 20,
+            "report": 25,
+            "chat": 25,
+        }
+        env_name = f"PARTNER_OLLAMA_{str(purpose or 'CHAT').upper()}_TIMEOUT_SEC"
+        raw = os.getenv(env_name)
+        if raw is None:
+            raw = os.getenv("PARTNER_OLLAMA_LITE_TIMEOUT_SEC")
+        try:
+            limit = int(float(raw)) if raw else defaults.get(purpose, self.timeout_sec)
+        except Exception:
+            limit = defaults.get(purpose, self.timeout_sec)
+        return max(3, min(int(self.timeout_sec), int(limit)))
 
     @staticmethod
     def _clean_reply(reply: str, purpose: str) -> str:
@@ -1760,11 +1912,12 @@ class OllamaLiteAdapter(AgentAdapter):
         import urllib.request
 
         if purpose == "project":
+            timeout_sec = self._timeout_for_purpose(purpose)
             self._log_chat_attempt({
                 "ts": datetime.now().isoformat(),
                 "purpose": purpose,
                 "status": "unsupported_project",
-                "timeout_sec": self.timeout_sec,
+                "timeout_sec": timeout_sec,
                 "elapsed_ms": 0,
                 "model": self.model,
                 "provider": self.base_url,
@@ -1795,10 +1948,12 @@ class OllamaLiteAdapter(AgentAdapter):
             "stream": False,
             "temperature": 0.1,
             "max_tokens": self._max_tokens(purpose, max_tokens),
+            "keep_alive": os.getenv("PARTNER_OLLAMA_KEEP_ALIVE", "30m"),
         }
         if purpose == "classify":
             payload["response_format"] = {"type": "json_object"}
         started_at = time.time()
+        timeout_sec = self._timeout_for_purpose(purpose)
         try:
             req = urllib.request.Request(
                 self.base_url + "/chat/completions",
@@ -1806,7 +1961,7 @@ class OllamaLiteAdapter(AgentAdapter):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=self.timeout_sec) as resp:
+            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             reply = (
                 data.get("choices", [{}])[0]
@@ -1820,7 +1975,7 @@ class OllamaLiteAdapter(AgentAdapter):
                 "ts": datetime.now().isoformat(),
                 "purpose": purpose,
                 "status": "ok" if reply else "empty",
-                "timeout_sec": self.timeout_sec,
+                "timeout_sec": timeout_sec,
                 "elapsed_ms": elapsed_ms,
                 "model": self.model,
                 "provider": self.base_url,
@@ -1836,7 +1991,7 @@ class OllamaLiteAdapter(AgentAdapter):
                 "ts": datetime.now().isoformat(),
                 "purpose": purpose,
                 "status": "failed",
-                "timeout_sec": self.timeout_sec,
+                "timeout_sec": timeout_sec,
                 "elapsed_ms": int((time.time() - started_at) * 1000),
                 "model": self.model,
                 "provider": self.base_url,

@@ -20,6 +20,10 @@ from typing import Any
 
 DEFAULT_MODE = "lite"
 VALID_MODES = {"off", "lite", "project", "all"}
+DEFAULT_LOCAL_ENDPOINTS = (
+    ("auto-local", "http://127.0.0.1:11434"),
+    ("auto-tunnel", "http://127.0.0.1:11435"),
+)
 
 
 @dataclass
@@ -103,13 +107,43 @@ def load_ollama_pool_config(workspace: str) -> dict:
     mode = str(pool.get("mode") or DEFAULT_MODE).strip().lower()
     if mode not in VALID_MODES:
         mode = DEFAULT_MODE
+    endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
+    auto_discover = pool.get("auto_discover")
+    if auto_discover is None:
+        auto_discover = True
+    if auto_discover:
+        seen_urls = {
+            str(endpoint.get("base_url") or "").strip().rstrip("/")
+            for endpoint in endpoints
+            if isinstance(endpoint, dict)
+        }
+        default_models = (
+            os.getenv("PARTNER_OLLAMA_AUTO_MODELS")
+            or os.getenv("PARTNER_OLLAMA_POOL_MODELS")
+            or os.getenv("PARTNER_OLLAMA_MODEL")
+            or "qwen2.5:7b,qwen2.5:14b,qwen2.5:0.5b"
+        )
+        for name, base_url in DEFAULT_LOCAL_ENDPOINTS:
+            if base_url not in seen_urls:
+                endpoints.append({
+                    "name": name,
+                    "base_url": base_url,
+                    "models": _split_models(default_models),
+                    "enabled": True,
+                    "auto_discovered": True,
+                    "location": "local" if name == "auto-local" else "tunnel",
+                })
+                seen_urls.add(base_url)
+
     return {
         "enabled": bool(pool.get("enabled", False)),
         "mode": mode,
         "probe_timeout_sec": float(pool.get("probe_timeout_sec") or os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC") or 2.0),
+        "heartbeat_probe_timeout_sec": float(pool.get("heartbeat_probe_timeout_sec") or os.getenv("PARTNER_OLLAMA_HEARTBEAT_PROBE_TIMEOUT_SEC") or 1.5),
         "chat_timeout_sec": int(float(pool.get("chat_timeout_sec") or os.getenv("PARTNER_OLLAMA_TIMEOUT_SEC") or 90)),
         "max_input_chars": int(float(pool.get("max_input_chars") or os.getenv("PARTNER_OLLAMA_MAX_INPUT_CHARS") or 4000)),
-        "endpoints": pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else [],
+        "auto_discover": bool(auto_discover),
+        "endpoints": endpoints,
     }
 
 
@@ -238,6 +272,82 @@ def select_ollama(workspace: str, purpose: str) -> OllamaSelection | None:
     return None
 
 
+def heartbeat_probe(workspace: str, purpose: str = "report") -> dict:
+    """Fast heartbeat probe for configured/local/tunnel Ollama endpoints.
+
+    This intentionally does not run a chat completion.  It keeps status fresh
+    and detects when same-machine Ollama or a reverse SSH tunnel becomes
+    reachable; the real call path still performs a model/chat probe before use.
+    """
+    cfg = load_ollama_pool_config(workspace)
+    mode = cfg["mode"]
+    timeout = max(0.2, min(float(cfg.get("heartbeat_probe_timeout_sec") or 1.5), float(cfg.get("probe_timeout_sec") or 2.0), 3.0))
+    if not cfg["enabled"] or not purpose_allowed(mode, purpose):
+        payload = {
+            "selected": "",
+            "fallback": "primary_agent",
+            "purpose": purpose,
+            "mode": mode,
+            "reason": "disabled_or_purpose_not_allowed",
+            "heartbeat_probe": True,
+        }
+        write_status(workspace, payload)
+        return payload
+
+    probe_results: list[dict] = []
+    selected = None
+    for endpoint in cfg["endpoints"]:
+        if not isinstance(endpoint, dict) or endpoint.get("enabled") is False:
+            continue
+        name = str(endpoint.get("name") or endpoint.get("base_url") or "ollama").strip()
+        base_url = str(endpoint.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            probe_results.append({"endpoint": name, "ok": False, "reason": "missing_base_url"})
+            continue
+        try:
+            available = _available_models(base_url, timeout)
+        except Exception as exc:
+            probe_results.append({
+                "endpoint": name,
+                "base_url": base_url,
+                "ok": False,
+                "reason": f"tags_failed:{str(exc)[:160]}",
+                "auto_discovered": bool(endpoint.get("auto_discovered")),
+            })
+            continue
+        models = _split_models(endpoint.get("models") or endpoint.get("model") or "qwen2.5:7b")
+        usable = [model for model in models if model in available]
+        row = {
+            "endpoint": name,
+            "base_url": base_url,
+            "ok": bool(usable),
+            "available_models": sorted(str(x) for x in available if x)[:20],
+            "usable_models": usable,
+            "auto_discovered": bool(endpoint.get("auto_discovered")),
+        }
+        if not usable:
+            row["reason"] = "no_configured_model_installed"
+        else:
+            row["reason"] = "tags_ok"
+        probe_results.append(row)
+        if usable and selected is None:
+            selected = {"endpoint": name, "base_url": base_url, "model": usable[0], "reason": "tags_ok"}
+
+    payload = {
+        "selected": (selected or {}).get("model", ""),
+        "endpoint": (selected or {}).get("endpoint", ""),
+        "base_url": (selected or {}).get("base_url", ""),
+        "fallback": "" if selected else "primary_agent",
+        "purpose": purpose,
+        "mode": mode,
+        "reason": (selected or {}).get("reason") or "no_configured_endpoint_available",
+        "heartbeat_probe": True,
+        "probe_results": probe_results,
+    }
+    write_status(workspace, payload)
+    return payload
+
+
 def test_pool(workspace: str, purpose: str = "report") -> dict:
     selected = select_ollama(workspace, purpose)
     cfg = load_ollama_pool_config(workspace)
@@ -253,4 +363,3 @@ def test_pool(workspace: str, purpose: str = "report") -> dict:
         "selected": selected.__dict__ if selected else None,
         "status": status,
     }
-

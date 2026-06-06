@@ -310,7 +310,7 @@ class SelfChecker:
         return None
 
     def _check_data_leakage(self) -> Optional[PushEvent]:
-        """扫描实验脚本，检测 batch correction 在 CV 外部的泄漏问题。"""
+        """扫描实验脚本，检测可能在划分前拟合预处理器的泄漏问题。"""
         workspace_root = os.path.dirname(self.state_dir)
         script_dir = os.path.join(workspace_root, "scripts")
         research_dir = os.path.join(workspace_root, "research_results")
@@ -332,23 +332,23 @@ class SelfChecker:
                     except (OSError, UnicodeDecodeError):
                         continue
 
-                    has_correction = bool(re.search(r"(ComBat|age_aware_correction|batch.correct)", content))
-                    has_cv = bool(re.search(r"(GroupKFold|KFold|StratifiedKFold)", content))
-                    if not (has_correction and has_cv):
+                    has_preprocess_fit = bool(re.search(r"\b(?:fit_transform|fit)\s*\(", content))
+                    has_split = bool(re.search(r"\b(?:train_test_split|KFold|StratifiedKFold|GroupKFold|\.split\s*\()", content))
+                    if not (has_preprocess_fit and has_split):
                         continue
 
                     lines = content.split("\n")
-                    correction_line = -1
-                    cv_line = -1
+                    preprocess_line = -1
+                    split_line = -1
                     for i, line in enumerate(lines):
-                        if re.search(r"(ComBat|age_aware_correction|batch\s*=\s*correct)", line):
-                            correction_line = i
-                        if re.search(r"(GroupKFold|\.split\()", line):
-                            cv_line = i
+                        if preprocess_line < 0 and re.search(r"\b(?:fit_transform|fit)\s*\(", line):
+                            preprocess_line = i
+                        if split_line < 0 and re.search(r"\b(?:train_test_split|KFold|StratifiedKFold|GroupKFold|\.split\s*\()", line):
+                            split_line = i
 
-                    if correction_line >= 0 and cv_line >= 0 and correction_line < cv_line:
+                    if preprocess_line >= 0 and split_line >= 0 and preprocess_line < split_line:
                         in_fold_loop = False
-                        for j in range(correction_line, min(correction_line + 20, len(lines))):
+                        for j in range(preprocess_line, min(preprocess_line + 20, len(lines))):
                             if re.search(r"for\s+\w+\s+in\s+.*split\(", lines[j]):
                                 in_fold_loop = True
                                 break
@@ -357,8 +357,8 @@ class SelfChecker:
                                 type="self_check",
                                 subtype="leak_warning",
                                 title=f"数据泄漏风险: {f}",
-                                body=f"batch correction (第{correction_line+1}行) 在 CV (第{cv_line+1}行) 外部。"
-                                     f"修正必须在 fold 内部执行才诚实。",
+                                body=f"预处理拟合 (第{preprocess_line+1}行) 可能发生在数据划分 (第{split_line+1}行) 前。"
+                                     f"请确认拟合只使用训练折/训练集。",
                                 priority=9,
                             )
         return None

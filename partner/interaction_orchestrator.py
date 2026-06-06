@@ -38,41 +38,13 @@ from .project_registry import (
 from .state import StateManager
 from .user_text_safety import has_internal_diff, strip_internal_diff
 from .task_queue import TaskQueue, Task
-from .outbound_policy import prefix_event_notice
+from .outbound_policy import UNAVAILABLE_NOTICE, prefix_event_notice
 
 logger = logging.getLogger(__name__)
 
 
 def _clip_title(text: str, suffix: str = "") -> str:
     return ""
-
-
-def _is_reference_gathering_request(text: str) -> bool:
-    """Deprecated: event selection is handled by the LLM selector."""
-    return False
-
-
-def _derive_task_contract(text: str) -> dict:
-    """Deprecated: task contract fields must come from the LLM decision."""
-    return {
-        "mainline": "",
-        "allowed_scope": [],
-        "forbidden_scope": [],
-        "completion_criteria": [],
-    }
-
-
-def _derive_delivery_mode(text: str, contract: dict | None = None) -> str:
-    return "research_project"
-
-
-def _derive_event_type(text: str, delivery_mode: str = "research_project") -> str:
-    """Deprecated: event_type must come from the LLM selector."""
-    return "project_think"
-
-
-def _task_description_from_contract(text: str, contract: dict) -> str:
-    return text or ""
 
 
 @dataclass
@@ -141,6 +113,7 @@ class InteractionOrchestrator:
                 f"已写入一条可复用经验：{str(learned or '后续会按这次经验调整判断和推进方式。')[:120]}",
                 EventType.HABIT_UPDATE.value,
                 event_kind=project or "当前项目",
+                workspace=self.workspace,
             )
             pool.put_threadsafe(MindEvent(
                 type=EventType.REPORT,
@@ -177,6 +150,53 @@ class InteractionOrchestrator:
         state = self._load_conversation_state()
         sender_state = state.get(str(sender_id or ""))
         return sender_state if isinstance(sender_state, dict) else {}
+
+    def _recent_deliverable_context(self, limit: int = 12, query: str = "") -> str:
+        """Return recent user-facing files so selector can attach follow-up requests.
+
+        This is not intent routing; it is external context. The selector still
+        decides whether a file is relevant to the user message.
+        """
+        exts = {".xlsx", ".xls", ".csv", ".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg", ".webp", ".txt"}
+        skip_prefixes = (
+            "state/",
+            "logs/",
+            "10_logs/",
+            "system/hermes_home/",
+            "system/checks/",
+        )
+        rows: list[tuple[float, str]] = []
+        root = os.path.abspath(self.workspace)
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+            if rel_dir == ".":
+                rel_dir = ""
+            if rel_dir.startswith(("system/hermes_home", "logs", "10_logs", "state")):
+                dirnames[:] = []
+                continue
+            for name in filenames:
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in exts:
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    rel = os.path.relpath(path, root).replace(os.sep, "/")
+                    if rel.startswith(skip_prefixes):
+                        continue
+                    rows.append((os.path.getmtime(path), rel))
+                except OSError:
+                    continue
+        if not rows:
+            return "（无）"
+        rows.sort(reverse=True)
+        out = []
+        for ts, rel in rows[:limit]:
+            try:
+                stamp = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+            except Exception:
+                stamp = ""
+            out.append(f"- {stamp} {rel}")
+        return "\n".join(out)
 
     def _update_sender_dialog_state(self, sender_id: str, decision: InteractionDecision, user_text: str) -> None:
         action = (decision.pending_action or "none").strip()
@@ -238,110 +258,474 @@ class InteractionOrchestrator:
             text = strip_internal_diff(text)
             if not text or has_internal_diff(text):
                 return ""
-        if re.search(r"(还没有确定具体方向|没有确定具体方向|你这边有什么想做|有什么想做的|可以直接跟我说|我来安排推进)", text):
-            return ""
         lines = []
-        removed = False
         for raw in text.splitlines():
             line = raw.strip()
             if not line:
                 continue
-            trimmed = re.sub(
-                r"[，,。；;]?\s*(?:需要的话|如果需要|如需)?\s*随时(?:说|告诉我|跟我说).*",
-                "",
-                line,
-            ).strip("，,。；; ")
-            if trimmed and trimmed != line:
-                removed = True
-                lines.append(trimmed)
-                continue
-            if re.search(
-                r"(有啥想继续搞|随时说|随时告诉我|你想让我|你要我|要不要|请选择|你想怎么|你想先|给我方向|你看.*方向|还是我|你这边有什么想做|有什么想做的|直接跟我说)",
-                line,
-            ):
-                removed = True
-                continue
-            if ("?" in line or "？" in line) and re.search(r"(什么|吗|要不要|还是|想不想|方向|继续)", line):
-                removed = True
-                continue
             lines.append(line)
         text = "\n".join(lines).strip()
-        text = re.sub(
-            r"(如需|如果你需要|请告知|等待你|待用户).*",
-            "",
-            text,
-        ).strip()
-        if removed and not text:
-            return ""
         return text
 
     @staticmethod
-    def _is_status_query(text: str) -> bool:
-        return False
-
-    @staticmethod
-    def _is_external_content_share(text: str) -> bool:
-        raw = (text or "").strip()
-        if not raw:
-            return False
-        if re.search(r"(https?://|www\.|mp\.weixin\.qq\.com|xiaohongshu\.com|bilibili\.com|zhihu\.com|卡片消息|图文H5|jump_url)", raw, re.I):
+    def _selector_has_placeholder_values(*, route: str, event_type: str, event_kind: str,
+                                         reply: str, pending_action: str) -> bool:
+        """Detect schema-template output that parsed as JSON but is not a decision."""
+        enum_values = [route, event_type, pending_action]
+        if any("|" in str(value) for value in enum_values if value):
             return True
-        return False
+        placeholders = {
+            "自由短标签",
+            "短标签",
+            "event_kind",
+            "给用户的自然回复",
+            "direct_reply|mind_event|pause_project|none",
+            "none|set|keep|clear",
+        }
+        values = {str(v).strip() for v in (route, event_type, event_kind, reply, pending_action) if str(v).strip()}
+        if values & placeholders:
+            return True
+        return bool(re.search(r"(给用户的自然回复|自由短标签|none\|set\|keep\|clear|direct_reply\|mind_event)", reply or ""))
+
+    def _objective_review_for_selector_gap(self, *, text: str, snapshot: dict, context_resolution: dict,
+                                           selector_data: dict, reply: str, pending_action: str,
+                                           pending: dict, priority: int) -> InteractionDecision:
+        resolved = str(context_resolution.get("resolved_objective") or selector_data.get("objective") or text).strip()
+        target = str(selector_data.get("target_project") or "").strip()
+        event_kind = re.sub(
+            r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+",
+            "_",
+            str(selector_data.get("event_kind") or ""),
+        ).strip("_")[:80]
+        if event_kind in {"自由短标签", "短标签", "event_kind"}:
+            event_kind = "selector_repair"
+        if not target:
+            target = event_kind or "用户任务"
+        current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
+        objective = (
+            "selector 输出可解析但不是一个可执行决策。先对齐用户根目标、context_resolution 已知信息、"
+            "当前项目状态和缺口，然后选择下一个最小可验证 event；不要因为 selector 模板输出而停止或要求用户重复已知信息。"
+            f"\n用户消息：{text[:1200]}"
+            f"\ncontext_resolution：{json.dumps(context_resolution, ensure_ascii=False)[:1400]}"
+            f"\n上一轮 selector 输出：{json.dumps(selector_data, ensure_ascii=False)[:900]}"
+            f"\n当前推进摘要：{current}"
+            f"\n根目标：{resolved[:1200]}"
+        )
+        return InteractionDecision(
+            reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            need_lifeline_update=True,
+            lifeline_action="add_task",
+            target_project=target,
+            task_title=target,
+            task_description=objective,
+            note=f"SELECTOR_REPAIR_OBJECTIVE_REVIEW: {text[:1200]}",
+            event_type="objective_review",
+            event_kind=event_kind or "selector_repair",
+            stop_after_completion=True,
+            priority=max(1, min(priority, 3)),
+            pending_action=pending_action,
+            pending_followup=pending,
+        )
+
+    def _objective_review_from_route_review(self, *, text: str, snapshot: dict, context_resolution: dict,
+                                            selector_data: dict | None = None, route_review: dict | None = None,
+                                            reply: str = "", pending_action: str = "none",
+                                            pending: dict | None = None, priority: int = 2) -> InteractionDecision:
+        selector_data = selector_data or {}
+        route_review = route_review or {}
+        pending = pending if isinstance(pending, dict) else {}
+        resolved = str(
+            route_review.get("objective")
+            or context_resolution.get("resolved_objective")
+            or selector_data.get("objective")
+            or text
+        ).strip()
+        target = str(
+            route_review.get("target_project")
+            or selector_data.get("target_project")
+            or context_resolution.get("related_project")
+            or ""
+        ).strip() or _clip_title(resolved or text) or "用户任务"
+        event_kind = re.sub(
+            r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+",
+            "_",
+            str(route_review.get("event_kind") or selector_data.get("event_kind") or "route_review").strip(),
+        ).strip("_")[:80] or "route_review"
+        current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
+        objective = (
+            "route_review 判断入口路由存在矛盾或不确定。请只做目标/上下文对齐：核对用户消息、"
+            "context_resolution、selector 输出、最近项目状态和缺口，然后选择下一个最小可验证 event；"
+            "不要因为入口 selector 失败而停止，不要要求用户重复已知信息。"
+            f"\n触发原因：{str(route_review.get('reason') or '')[:500]}"
+            f"\n建议动作：{str(route_review.get('recommended_action') or '')[:300]}"
+            f"\n用户消息：{text[:1200]}"
+            f"\ncontext_resolution：{json.dumps(context_resolution, ensure_ascii=False)[:1400]}"
+            f"\nselector 输出：{json.dumps(selector_data, ensure_ascii=False)[:1000]}"
+            f"\n当前推进摘要：{current}"
+            f"\n根目标：{resolved[:1200]}"
+        )
+        return InteractionDecision(
+            reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            need_lifeline_update=True,
+            lifeline_action="add_task",
+            target_project=target,
+            task_title=target,
+            task_description=objective,
+            note=f"ROUTE_REVIEW_OBJECTIVE_REVIEW: {text[:1200]}",
+            event_type="objective_review",
+            event_kind=event_kind,
+            stop_after_completion=True,
+            priority=max(1, min(priority, 3)),
+            pending_action=pending_action if pending_action in {"none", "set", "keep", "clear"} else "none",
+            pending_followup=pending,
+        )
 
     @staticmethod
-    def _is_project_start_or_research_request(text: str) -> bool:
-        return False
+    def _action_event_types() -> set[str]:
+        return {
+            "direct_task",
+            "literature_review",
+            "data_fetch",
+            "data_analysis",
+            "visualization",
+            "evidence_audit",
+            "artifact_build",
+            "pdf_report",
+            "email_delivery",
+            "web_search",
+            "web_capture",
+            "project_think",
+            "objective_review",
+            "curiosity_explore",
+            "habit_update",
+            "project",
+        }
 
-    @staticmethod
-    def _is_project_pause_request(text: str) -> bool:
-        return False
+    def _objective_review_for_unavailable_selector(self, *, text: str, snapshot: dict,
+                                                   reason: str = "selector_unavailable") -> InteractionDecision:
+        current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
+        objective = (
+            "入口 selector 没有在时限内产出可执行决策。不要停止，也不要要求用户重复原话。"
+            "先用当前上下文对齐用户消息、已有项目、待续参数、可交付物和缺口，再选择下一个最小可验证 event。"
+            f"\n失败原因：{reason}"
+            f"\n用户消息：{text[:1200]}"
+            f"\n当前推进摘要：{current}"
+        )
+        target = _clip_title(text) or "用户任务"
+        return InteractionDecision(
+            reply_to_user="__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            need_lifeline_update=True,
+            lifeline_action="add_task",
+            target_project=target,
+            task_title=target,
+            task_description=objective,
+            note=f"SELECTOR_UNAVAILABLE_OBJECTIVE_REVIEW: {text[:1200]}",
+            event_type="objective_review",
+            event_kind=reason,
+            stop_after_completion=True,
+            priority=2,
+            pending_action="none",
+        )
 
-    @staticmethod
-    def _infer_project_title_from_user_text(text: str) -> str:
-        return ""
+    def _route_review_with_llm(self, adapter: object, *, text: str, snapshot: dict,
+                               context_resolution: dict | None = None,
+                               selector_data: dict | None = None,
+                               trigger: str = "",
+                               pool_stats: dict | None = None) -> dict:
+        """One small judge for suspicious route decisions.
 
-    def _infer_project_title_with_llm(self, adapter: object, text: str, snapshot: dict) -> str:
+        It handles direct_reply suspicion, selector schema contradictions and
+        route=none suspicion through the same path, so routing recovery stays a
+        mechanism instead of a pile of task-specific patches.
+        """
         if not adapter or not (text or "").strip():
-            return ""
-        prompt = f"""从用户消息中提取最合适的新项目名。只输出 JSON。
+            return {}
+        context_resolution = context_resolution or {}
+        selector_data = selector_data or {}
+        pool_stats = pool_stats or {}
+        prompt = f"""你是 Partner 的 route_review 小 judge。你只审计入口路由是否自洽，不回答用户、不执行任务。
+
+可用动作：
+- accept: 当前 route 可以执行。
+- objective_review: 当前 route 矛盾/不确定，需要进入 objective_review 对齐目标、上下文、缺口和下一最小 event。
+
+审计重点：
+- direct_reply 是否误吞了需要执行、搜索、生成文件、发送、读附件、继续项目或获取当前事实的目标。
+- selector 是否输出了 schema 模板、无效 event_type、route 与 context_resolution 矛盾。
+- route=none 是否误吞了新约束、补充参数、附件/链接/合并转发、状态恢复或未完成交付。
+- 如果只是缺关键参数且 context_resolution 已明确 missing_slots/user_visible_boundary，accept。
+- 不按关键词硬匹配；根据语义、上下文和已有状态判断。
 
 当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-用户消息或最近上下文：
+状态摘要：{(snapshot.get('summary', '') or snapshot.get('current', '') or snapshot.get('active_plan', '') or '')[:360]}
+Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:260]}
+触发点：{trigger}
+
+用户消息：
 {text[:1200]}
 
-要求：
-- 项目名只能来自当前这条用户消息中明确出现的主题，不要沿用当前项目
-- 如果只是“重新开一个项目/不要接着之前”但没有新主题，输出空字符串
-- 如果是“根据这个/基于这个”并且当前消息里出现了研究主题、疾病、数据类型或方法方向，可提取这些主题
-- 项目名控制在 8-24 个中文字符，不要写成完整句子
-- 不确定就输出空字符串
+context_resolution：
+{json.dumps(context_resolution, ensure_ascii=False)[:1400]}
 
-JSON:
-{{"project_title": ""}}
+selector/direct route：
+{json.dumps(selector_data, ensure_ascii=False)[:1200]}
+
+只输出 JSON：
+{{"action":"accept|objective_review","reason":"","event_kind":"route_review","target_project":"","objective":"","recommended_action":""}}
 """
-        try:
-            raw = adapter.chat(prompt, purpose="classify") or ""
-        except Exception as exc:
-            logger.debug(f"project title LLM failed: {exc}")
-            return ""
+        raw = self._quick_classify_chat(adapter, prompt, max_tokens=120)
+        if not raw:
+            return {}
         text_out = raw.strip()
         if text_out.startswith("```"):
             text_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", text_out, flags=re.DOTALL).strip()
         start = text_out.find("{")
         end = text_out.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            return ""
+            return {}
         try:
             data = json.loads(text_out[start:end + 1])
         except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        action = str(data.get("action") or "").strip()
+        if action not in {"accept", "objective_review"}:
+            action = "objective_review"
+        return {
+            "action": action,
+            "reason": str(data.get("reason") or "").strip()[:500],
+            "event_kind": str(data.get("event_kind") or "route_review").strip()[:120],
+            "target_project": str(data.get("target_project") or "").strip()[:120],
+            "objective": str(data.get("objective") or "").strip()[:1200],
+            "recommended_action": str(data.get("recommended_action") or "").strip()[:500],
+        }
+
+    def _quick_classify_chat(self, adapter: object, prompt: str, *, max_tokens: int = 180) -> str:
+        """Use the fastest available classifier path without waiting on large fallbacks."""
+        lite = getattr(adapter, "lite", None)
+        if lite is not None:
+            try:
+                raw = lite.chat(prompt, max_tokens=max_tokens, purpose="classify") or ""
+                if raw and raw != "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
+                    return raw
+            except Exception as exc:
+                logger.debug(f"quick lite classify failed: {exc}")
             return ""
-        title = str(data.get("project_title") or "").strip()
-        title = re.sub(r"[“”\"'「」]", "", title).strip("，,。；;:： ")
-        if not title or len(title) > 50:
+        try:
+            return adapter.chat(prompt, max_tokens=max_tokens, purpose="classify") or ""
+        except Exception as exc:
+            logger.debug(f"quick classify failed: {exc}")
             return ""
-        if title in {"当前项目", "这个项目", "新项目", "重新开一个项目"}:
-            return ""
-        return title[:36]
+
+    def _lean_decide_with_llm(self, adapter: object, *, sender_id: str, text: str, snapshot: dict,
+                              ctx_lines: list[str], pending_followup: dict,
+                              pool_stats: dict) -> Optional[InteractionDecision]:
+        """Small selector for short inbound messages so long context cannot block the entrance."""
+        if not adapter or len(text or "") > 120:
+            return None
+        prompt = f"""你是 Partner 的 lean event selector。只根据最少上下文选择下一步，不回答任务本身。
+
+可选 route：
+- direct_reply：只适合无需当前信息、无需外部访问、无需文件/产物、无需继续项目的普通对话或澄清。
+- mind_event：需要执行、搜索、读取当前信息、生成文件、继续项目、整理产物或写记忆。
+- none：只有同一消息已在执行时才用。
+
+可选 event_type：
+direct_task, literature_review, data_fetch, data_analysis, visualization, evidence_audit, artifact_build, pdf_report, email_delivery, web_search, web_capture, project_think, objective_review, curiosity_explore, habit_update, project, content_digest, reflection, memory_consolidate
+
+当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+状态摘要：{(snapshot.get('summary', '') or '')[:180]}
+最近对话：
+{chr(10).join(ctx_lines[-3:]) if ctx_lines else '（无）'}
+待续参数：
+{json.dumps(pending_followup, ensure_ascii=False)[:500] if pending_followup else '（无）'}
+Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
+
+用户消息：
+{text}
+
+只输出 JSON：
+{{"route":"","event_type":"","event_kind":"","target_project":"","objective":"","reply_to_user":"","pending_action":"none","stop_after_completion":true,"priority":1,"confidence":0.0,"reason":""}}
+"""
+        raw = self._quick_classify_chat(adapter, prompt, max_tokens=180)
+        if not raw:
+            return None
+        text_out = raw.strip()
+        if text_out.startswith("```"):
+            text_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", text_out, flags=re.DOTALL).strip()
+        start = text_out.find("{")
+        end = text_out.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            data = json.loads(text_out[start:end + 1])
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        route = str(data.get("route") or "none").strip()
+        event_type = str(data.get("event_type") or "").strip()
+        event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or "")).strip("_")[:80]
+        if event_kind in {"自由短标签", "短标签", "event_kind"}:
+            event_kind = "lean_selector"
+        reply = self._sanitize_reply_to_user(str(data.get("reply_to_user") or ""))
+        pending_action = str(data.get("pending_action") or "none").strip()
+        if pending_action not in {"none", "set", "keep", "clear"}:
+            pending_action = "none"
+        if self._selector_has_placeholder_values(
+            route=route,
+            event_type=event_type,
+            event_kind=event_kind,
+            reply=reply,
+            pending_action=pending_action,
+        ):
+            return None
+        action_event_types = self._action_event_types()
+        if route in action_event_types:
+            event_type = route
+            route = "mind_event"
+        if route not in {"direct_reply", "mind_event", "none"} and event_type in action_event_types:
+            route = "mind_event"
+        try:
+            confidence = float(data.get("confidence") if data.get("confidence") is not None else 0.7)
+        except Exception:
+            confidence = 0.7
+        if confidence < 0.45:
+            return None
+        try:
+            priority = max(1, min(10, int(data.get("priority", 3))))
+        except Exception:
+            priority = 3
+        objective = str(data.get("objective") or "").strip()
+        target = str(data.get("target_project") or "").strip()
+        route, event_type, event_kind, objective = self._normalize_to_small_event_with_llm(
+            adapter,
+            route=route,
+            event_type=event_type,
+            event_kind=event_kind,
+            objective=objective,
+            user_text=text,
+            context_resolution={},
+        )
+        if route == "direct_reply":
+            local_reply = self._direct_reply_from_selector_draft(
+                adapter,
+                text=text,
+                draft=reply,
+                snapshot=snapshot,
+                ctx_lines=ctx_lines,
+            )
+            return InteractionDecision(
+                reply_to_user=local_reply or reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                need_lifeline_update=False,
+                lifeline_action="none",
+                event_type="direct_reply",
+                event_kind=event_kind or "lean_direct_reply",
+                stop_after_completion=True,
+                priority=priority,
+                pending_action=pending_action,
+            )
+        if route == "mind_event" and event_type in action_event_types:
+            if not target:
+                target = event_kind or _clip_title(objective or text) or "用户任务"
+            return InteractionDecision(
+                reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                need_lifeline_update=True,
+                lifeline_action="add_task",
+                target_project=target,
+                task_title=target,
+                task_description=objective or text,
+                event_type=event_type,
+                event_kind=event_kind or "lean_selector",
+                stop_after_completion=bool(data.get("stop_after_completion", True)),
+                priority=priority,
+                pending_action=pending_action,
+            )
+        return None
+
+    def _normalize_to_small_event_with_llm(
+        self,
+        adapter: object,
+        *,
+        route: str,
+        event_type: str,
+        event_kind: str,
+        objective: str,
+        user_text: str,
+        context_resolution: dict | None = None,
+    ) -> tuple[str, str, str, str]:
+        """Ask a small judge whether an execution event is too large."""
+        if route != "mind_event":
+            return route, event_type, event_kind, objective
+        context_resolution = context_resolution or {}
+        if context_resolution.get("relation") in {"existing_artifact", "pending_followup"}:
+            return route, event_type, event_kind, objective
+        action_types = {
+            "direct_task",
+            "data_fetch",
+            "data_analysis",
+            "visualization",
+            "artifact_build",
+            "web_search",
+            "web_capture",
+            "literature_review",
+            "evidence_audit",
+            "pdf_report",
+        }
+        if event_type not in action_types:
+            return route, event_type, event_kind, objective
+        if not adapter:
+            return route, event_type, event_kind, objective
+        prompt = f"""你是 Partner 的 small_event_boundary judge。判断 selector 选出的执行 event 是否太大。
+
+原则：
+- 一个执行 event 只能做一个可验证动作，并有一个清楚验收标准。
+- 如果它把多个依赖阶段合在一起，例如取数+分析+绘图+报告+发送，应判 too_large。
+- 如果它只是澄清、拆解、审计一个结论、生成一个文件、读取一个数据源、画一张图等单步动作，应判 ok。
+- 不要按关键词硬匹配；根据 objective 是否能被一次 event 稳定完成判断。
+
+用户原始消息：
+{user_text[:1000]}
+
+selector event：{event_type}/{event_kind}
+selector objective：
+{objective[:1400]}
+
+context_resolution：
+{json.dumps(context_resolution, ensure_ascii=False)[:900]}
+
+只输出 JSON：
+{{"verdict":"ok|too_large","reason":"","first_step_objective":""}}
+"""
+        raw = self._quick_classify_chat(adapter, prompt, max_tokens=120)
+        if not raw:
+            return route, event_type, event_kind, objective
+        text_out = raw.strip()
+        if text_out.startswith("```"):
+            text_out = re.sub(r"^```(?:json)?\s*|\s*```$", "", text_out, flags=re.DOTALL).strip()
+        start = text_out.find("{")
+        end = text_out.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return route, event_type, event_kind, objective
+        try:
+            data = json.loads(text_out[start:end + 1])
+        except Exception:
+            return route, event_type, event_kind, objective
+        if str(data.get("verdict") or "").strip() == "too_large":
+            first_step = str(data.get("first_step_objective") or "").strip()
+            return (
+                route,
+                "project_think",
+                event_kind or "split_goal",
+                (
+                    "把用户目标拆成多个小 event。本轮只做目标拆解、验收标准和第一个最小可验证动作选择；"
+                    "不要在本 event 里执行取数、搜索、分析、绘图、写报告、发邮件或安装依赖。"
+                    f"\n原始目标：{user_text[:1200]}"
+                    + (f"\nsmall_event_boundary 建议的第一步：{first_step[:800]}" if first_step else "")
+                ),
+            )
+        return route, event_type, event_kind, objective
 
     def handle_message(self, sender_id: str, sender_name: str, text: str) -> InteractionDecision:
         decision = self._decide(sender_id, text)
@@ -380,136 +764,64 @@ JSON:
         except Exception as exc:
             logger.debug(f"failed to record event decision: {exc}")
 
-    def _record_user_research_signal(self, text: str):
-        """Deprecated: user-message classification belongs to the LLM selector."""
-        return
-
-    def _mentions_possible_correction(self, text: str) -> bool:
-        return False
-
-    def _mentions_risk_or_quality_signal(self, text: str) -> bool:
-        return False
-
-    @staticmethod
-    def _correction_reply(guardrail: dict) -> str:
-        return ""
-
-    def _project_start_reply(self, adapter: object, text: str, title: str, snapshot: dict) -> str:
-        """Generate a natural user reply while code handles reliable lifeline enqueue."""
-        prompt = f"""你是 Partner，用户刚给你启动/推进了一个长期研究方向。
-请只回复一小段自然中文，2 句以内。
-
-要求：
-- 不要像模板，不要说“收到，我会把...作为当前主线”这类固定句
-- 不要问用户下一步，不要让用户选择
-- 简短说明你理解的方向，以及你接下来会先从哪里切入
-- 不暴露内部机制、lifeline、active_plan、workspace 等词
-
-用户消息：
-{text}
-
-系统识别到的项目方向：{title}
-当前已有项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-"""
-        try:
-            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
-        except Exception as exc:
-            logger.debug(f"project-start reply LLM failed: {exc}")
-            raw = ""
-        reply = self._sanitize_reply_to_user(raw)
-        if reply:
-            return reply[:260]
-        return "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
-
-    def _project_location_reply(self, title: str, hint: str) -> str:
-        return ""
-
-    def _status_reply_with_llm(self, adapter: object, text: str, snapshot: dict) -> str:
-        prompt = f"""你是 Partner，用户在问你当前进展。
-请基于下面状态写一段自然中文，80-180 字。
-
-要求：
-- 不要模板化，不要输出字段名，不要说 workspace、active_plan、FINDINGS、NEXT
-- 只讲用户关心的：现在在研究什么、真正完成了什么判断、下一步会做什么
-- 如果状态里没有实质进展，就坦诚说还没有可靠新结论，但不要问用户下一步
-- 不要暴露内部日志、文件名、路径、JSON、队列、cron、backend
-
-用户消息：{text}
-当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-状态摘要：{snapshot.get('summary', '')}
-当前推进：{snapshot.get('current', '') or snapshot.get('active_plan', '')}
-最近完成：{snapshot.get('recent', '')}
-卡点：{snapshot.get('blockers', '')}
-下一步：{snapshot.get('next_step', '')}
-"""
-        try:
-            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
-        except Exception as exc:
-            logger.debug(f"status reply LLM failed: {exc}")
-            raw = ""
-        reply = self._sanitize_reply_to_user(raw)
-        return reply[:320] if reply else "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
-
-    def _content_share_reply_with_llm(self, adapter: object, text: str, snapshot: dict) -> str:
-        prompt = f"""用户刚分享了一条外部内容，可能是公众号、小红书、B站、知乎链接或长文本。
-请以 Partner 的口吻回复一小段自然中文，2 句以内。
-
-要求：
-- 明确表示你会把这条内容当作研究信号来消化
-- 不要假装已经读完整链接；如果只是卡片/链接，就说会先基于可见标题摘要判断
-- 不要问用户下一步，不要暴露 content_feed、workspace、队列等内部词
-- 不要使用固定模板
-
-当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-用户分享内容：
-{text[:1200]}
-"""
-        try:
-            raw = adapter.chat(prompt, purpose="interaction") if adapter else ""
-        except Exception as exc:
-            logger.debug(f"content-share reply LLM failed: {exc}")
-            raw = ""
-        reply = self._sanitize_reply_to_user(raw)
-        return reply[:260] if reply else "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
-
-    def _classify_user_intent_with_llm(self, adapter: object, text: str, snapshot: dict) -> dict:
-        """Classify user intent before rule fallbacks.
-
-        Rules are useful for outages, but long-running project state changes
-        should not depend on enumerating every possible Chinese expression.
-        """
+    def _resolve_context_with_llm(self, adapter: object, *, sender_id: str, text: str,
+                                  snapshot: dict, ctx_lines: list[str],
+                                  pending_followup: dict, recent_files: str,
+                                  pool_stats: dict) -> dict:
+        """Preflight context-resolution event before choosing an action event."""
         if not adapter or not (text or "").strip():
             return {}
-        prompt = f"""你是 Partner 的轻量意图分类器。只判断用户这条消息要触发什么交互动作。
+        prompt = f"""你是 Partner 的 context_resolution event。
+
+你的任务不是回答用户，也不是选择执行 event，而是先判断用户这条消息和已有上下文的关系。
+
+可用上下文：
+- 普通对话记录：判断是否是在接上刚才说的话。
+- 短期待续对话状态：判断是否是在补充缺失参数。
+- 当前/历史项目状态：判断是否和已有 project 相关。
+- 最近可交付文件：判断是否是在索要、转发、邮件发送、转换或继续处理已有产物。
+- Mind pool 状态：判断是否只是重复催促正在执行的同一任务。
 
 当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-当前摘要：{(snapshot.get('summary', '') or '')[:400]}
+状态摘要：{(snapshot.get('summary', '') or '')[:320]}
+当前推进：{(snapshot.get('current', '') or snapshot.get('active_plan', '') or '')[:320]}
+最近对话：
+{chr(10).join(ctx_lines) if ctx_lines else '（无）'}
+短期待续对话状态：
+{json.dumps(pending_followup, ensure_ascii=False)[:900] if pending_followup else '（无）'}
+最近可交付文件：
+{recent_files}
+Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:400]}
 
 用户消息：
 {text}
 
-严格只输出 JSON，不要解释：
+严格只输出 JSON：
 {{
-  "intent": "status_query|pause_project|start_project|switch_project|share_content|risk_signal|correction|casual|unknown",
-  "confidence": 0.0,
-  "target_project": "",
+  "relation": "new_task|direct_conversation|pending_followup|existing_project|existing_artifact|status_check|duplicate_or_running|unclear",
+  "should_direct_reply": false,
+  "should_enter_mind": true,
+  "related_project": "",
+  "related_files": [],
+  "known_slots": {{}},
+  "missing_slots": [],
+  "resolved_objective": "把用户消息和相关上下文合并后的目标；不要编造",
+  "user_visible_boundary": "需要向用户说明的边界或缺失信息；没有写空",
   "reason": ""
 }}
 
-判断标准：
-- 用户说“先做到这/先放一下/以后再继续/换个话题/先停这个”等，intent=pause_project
-- 用户提出一个新研究、小项目、demo、调研方向，intent=start_project
-- 用户明确要接着另一个已有项目或换到某项目，intent=switch_project
-- 用户转发截图、链接、公众号、小红书、B站、知乎、长文、老师建议、灵感材料，intent=share_content
-- 用户指出数据泄露、异常好、过拟合、结果不可信、走捷径、幻觉，intent=risk_signal
-- 用户纠正项目方向或说“不是做X，是做Y”，intent=correction
-- 用户问进展/在做什么/运行如何，intent=status_query
-- 不确定时 intent=unknown，confidence<=0.5
+判断原则：
+- 如果用户说“今天生成的/刚才那个/之前的/近期的表格/报告/文件”，优先检查最近可交付文件；如果有明显匹配，relation=existing_artifact，related_files 写相对路径或文件名，不要再要求用户重复说明已能从文件名看出的主题/城市。
+- 如果用户是在补 SMTP 授权码、发件邮箱、地点、文件路径等缺失信息，relation=pending_followup。
+- 如果只是普通闲聊或知识问答且无需工具/文件/项目，should_direct_reply=true。
+- 如果需要搜索、生成文件、发邮件、改文件、读附件、继续项目，should_enter_mind=true。
+- 如果上下文不足但必须澄清，missing_slots 写具体缺什么，user_visible_boundary 写清楚该问什么。
+- 不要输出自然语言解释，只输出 JSON。
 """
         try:
             raw = adapter.chat(prompt, purpose="classify") or ""
         except Exception as exc:
-            logger.debug(f"intent classifier LLM failed: {exc}")
+            logger.debug(f"context resolution LLM failed: {exc}")
             return {}
         text_out = raw.strip()
         if text_out.startswith("```"):
@@ -524,23 +836,90 @@ JSON:
             return {}
         if not isinstance(data, dict):
             return {}
-        intent = str(data.get("intent") or "unknown").strip()
-        allowed = {
-            "status_query", "pause_project", "start_project", "switch_project",
-            "share_content", "risk_signal", "correction", "casual", "unknown",
-        }
-        if intent not in allowed:
-            intent = "unknown"
-        try:
-            confidence = float(data.get("confidence", 0))
-        except Exception:
-            confidence = 0.0
+        relation = str(data.get("relation") or "unclear").strip()
+        if relation not in {
+            "new_task",
+            "direct_conversation",
+            "pending_followup",
+            "existing_project",
+            "existing_artifact",
+            "status_check",
+            "duplicate_or_running",
+            "unclear",
+        }:
+            relation = "unclear"
         return {
-            "intent": intent,
-            "confidence": max(0.0, min(1.0, confidence)),
-            "target_project": str(data.get("target_project") or "").strip()[:50],
-            "reason": str(data.get("reason") or "").strip()[:200],
+            "relation": relation,
+            "should_direct_reply": bool(data.get("should_direct_reply")),
+            "should_enter_mind": bool(data.get("should_enter_mind")),
+            "related_project": str(data.get("related_project") or "").strip()[:120],
+            "related_files": [str(x).strip() for x in (data.get("related_files") or []) if str(x).strip()][:8],
+            "known_slots": data.get("known_slots") if isinstance(data.get("known_slots"), dict) else {},
+            "missing_slots": [str(x).strip() for x in (data.get("missing_slots") or []) if str(x).strip()][:8],
+            "resolved_objective": str(data.get("resolved_objective") or "").strip()[:1800],
+            "user_visible_boundary": str(data.get("user_visible_boundary") or "").strip()[:800],
+            "reason": str(data.get("reason") or "").strip()[:500],
         }
+
+    def _direct_reply_from_context_resolution(self, adapter: object, *, text: str, snapshot: dict,
+                                              ctx_lines: list[str], context_resolution: dict) -> str:
+        if not adapter:
+            return ""
+        prompt = f"""你是 Partner 的轻量直接回复模块。用户消息不需要进入任务队列或工具执行。
+
+要求：
+- 只自然回复用户当前消息，不创建任务、不承诺后台执行。
+- 可以参考最近对话和 context_resolution，但不要机械复述项目状态。
+- 如果 context_resolution.user_visible_boundary 有内容，简短说明边界并询问必要补充。
+- 不暴露 event、queue、workspace、backend。
+- 输出纯文本，不要 JSON。
+
+当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+状态摘要：{(snapshot.get('summary', '') or '')[:220]}
+最近对话：
+{chr(10).join(ctx_lines[-3:]) if ctx_lines else '（无）'}
+context_resolution：
+{json.dumps(context_resolution, ensure_ascii=False)[:900]}
+
+用户消息：
+{text}
+"""
+        try:
+            return self._sanitize_reply_to_user(adapter.chat(prompt, purpose="interaction") or "")
+        except Exception as exc:
+            logger.debug(f"direct reply generation failed: {exc}")
+            return ""
+
+    def _direct_reply_from_selector_draft(self, adapter: object, *, text: str, draft: str,
+                                          snapshot: dict, ctx_lines: list[str]) -> str:
+        if not adapter or not (draft or "").strip():
+            return ""
+        prompt = f"""你是 Partner 的轻量直接回复模块。上游 selector 已判断这条消息只需要直接回复，不需要进入任务队列。
+
+请基于用户消息和上游草稿，生成一句自然、简短、不过度展开的中文回复。
+
+约束：
+- 保持草稿的核心意思，但可以去掉多余项目状态或机械套话。
+- 不创建任务，不承诺后台执行。
+- 不暴露 event、queue、workspace、backend。
+- 输出纯文本，不要 JSON。
+
+当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
+状态摘要：{(snapshot.get('summary', '') or '')[:180]}
+最近对话：
+{chr(10).join(ctx_lines[-3:]) if ctx_lines else '（无）'}
+
+用户消息：
+{text}
+
+上游草稿：
+{draft[:800]}
+"""
+        try:
+            return self._sanitize_reply_to_user(adapter.chat(prompt, purpose="interaction") or "")
+        except Exception as exc:
+            logger.debug(f"direct reply draft generation failed: {exc}")
+            return ""
 
     def _decide_event_with_llm(self, adapter: object, sender_id: str, text: str, snapshot: dict) -> Optional[InteractionDecision]:
         """Let the LLM choose the next event from the current mind context.
@@ -559,9 +938,9 @@ JSON:
         if not isinstance(pending_followup, dict):
             pending_followup = {}
         ctx_lines = []
-        for item in context[-6:]:
+        for item in context[-3:]:
             role = "用户" if item.get("role") == "user" else "Partner"
-            ctx_lines.append(f"{role}: {item.get('text', '')[:180]}")
+            ctx_lines.append(f"{role}: {item.get('text', '')[:120]}")
         try:
             from .mind.pool import MindPool
 
@@ -569,35 +948,125 @@ JSON:
             pool_stats = pool.stats() if pool else {}
         except Exception:
             pool_stats = {}
-        prompt = f"""你是 Partner 的 event selector。你的任务不是给任务贴固定类型标签，而是根据用户消息和当前上下文选择下一步 runtime event。
+        recent_files = self._recent_deliverable_context(limit=12, query=text)
+        lean_decision = self._lean_decide_with_llm(
+            adapter,
+            sender_id=sender_id,
+            text=text,
+            snapshot=snapshot,
+            ctx_lines=ctx_lines,
+            pending_followup=pending_followup,
+            pool_stats=pool_stats,
+        )
+        if lean_decision:
+            return lean_decision
+        context_resolution = self._resolve_context_with_llm(
+            adapter,
+            sender_id=sender_id,
+            text=text,
+            snapshot=snapshot,
+            ctx_lines=ctx_lines,
+            pending_followup=pending_followup,
+            recent_files=recent_files,
+            pool_stats=pool_stats,
+        )
+        consistency = self._route_review_with_llm(
+            adapter,
+            text=text,
+            snapshot=snapshot,
+            context_resolution=context_resolution,
+            selector_data={
+                "route": "direct_reply",
+                "event_type": "direct_reply",
+                "event_kind": "context_direct_reply",
+            },
+            trigger="context_resolution_direct_reply",
+            pool_stats=pool_stats,
+        ) if context_resolution and context_resolution.get("should_direct_reply") and not context_resolution.get("should_enter_mind") else {}
+        if (
+            context_resolution
+            and context_resolution.get("should_direct_reply")
+            and not context_resolution.get("should_enter_mind")
+            and consistency
+            and consistency.get("action") == "objective_review"
+        ):
+            return self._objective_review_from_route_review(
+                text=text,
+                snapshot=snapshot,
+                context_resolution={
+                    **context_resolution,
+                    "route_review": consistency,
+                },
+                selector_data={"route": "direct_reply", "event_type": "direct_reply"},
+                route_review=consistency,
+                priority=2,
+            )
+        if (
+            context_resolution
+            and context_resolution.get("should_direct_reply")
+            and not context_resolution.get("should_enter_mind")
+        ):
+            boundary = str(context_resolution.get("user_visible_boundary") or "").strip()
+            missing = context_resolution.get("missing_slots") or []
+            reply = self._direct_reply_from_context_resolution(
+                adapter,
+                text=text,
+                snapshot=snapshot,
+                ctx_lines=ctx_lines,
+                context_resolution=context_resolution,
+            )
+            pending_action = "set" if missing else "clear"
+            pending = {
+                "original_user_request": text[:1200],
+                "current_objective": str(context_resolution.get("resolved_objective") or text)[:1200],
+                "missing_slots": [str(x) for x in missing][:8],
+                "known_slots": context_resolution.get("known_slots") if isinstance(context_resolution.get("known_slots"), dict) else {},
+                "last_question": boundary[:800] if boundary else "",
+            } if missing else {}
+            return InteractionDecision(
+                reply_to_user=reply or boundary or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                need_lifeline_update=False,
+                lifeline_action="none",
+                event_type="direct_reply",
+                event_kind="context_direct_reply",
+                stop_after_completion=True,
+                priority=1,
+                pending_action=pending_action,
+                pending_followup=pending,
+            )
+        prompt = f"""你是 Partner 的 event selector。只选择下一步 route/event，不执行任务，不写详细执行方案。
 
-可用 event primitive：
-- direct_reply: 直接用 LLM 回复用户，不进入 agent/mind loop。适合问候、简单问答、无需文件/工具/长期上下文的请求。
-- none: 不回复、不进入 agent/mind loop。适合同一用户刚刚重复发送的同一任务，且最近对话或运行状态显示任务已经被接收或正在处理。
-- direct_task: 一次性直接交付或具体操作。
-- literature_review: 资料、文献、参考依据或方法综述。
-- data_analysis: 数据读取、统计、作图、脚本运行或最小分析。
-- evidence_audit: 证据真实性、可靠性、泄露、过拟合、引用或结论边界审计。
-- artifact_build: 构建用户可看的文件、图表、表格、PPT 或其它非 PDF 产物。
-- pdf_report: 把已有结果或摘要整理成 PDF 报告并交付；用户要求“报告/发报告/整理报告/最终汇报”且需要实际交付时选这个。
-- project_think: 项目起步、目标拆解、难点识别、路线设计或下一步选择。
-- curiosity_explore: 好奇探索。和其它 action event 一样由 selector 根据上下文选择；用于产生新问题、新假设或新探索动作，不由关键词或任务类别硬编码触发/禁止。
-	- habit_update: 把用户经验、失败教训、行为习惯写成可复用成长记录。
-- project: 兼容旧长期项目生命线；仅当用户明确要求持续推进/长期运行/项目循环时使用。
-- content_digest: 消化用户分享的链接、截图、长文或外部材料。
-- reflection: 做项目、习惯或经验反思。
-- memory_consolidate: 压缩记忆，不直接面向用户。
-- pause_project: 用户明确说先做到这里/先放一下/换别的时保存当前项目。
-- report: 内部传输事件，不要作为用户请求的目标 event；用户要报告时选择 pdf_report。
+可用 route：direct_reply, mind_event, pause_project, none。
+可用 event：
+- direct_task: 单步直接交付或具体操作
+- literature_review: 资料/文献/方法依据整理
+- data_fetch: 只获取/下载/保存一个真实数据源
+- data_analysis: 只读取已有数据并做统计、质量检查或最小分析
+- visualization: 只基于已有数据/结果绘制图表
+- evidence_audit: 证据、结论、泄露、可靠性审计
+- artifact_build: 非 PDF 文件、表格、PPT、代码等产物构建
+- pdf_report: 把已有或本轮结果整理成真实 PDF 报告
+- email_delivery: 发送已有或本轮文件到邮箱
+- web_search: 搜索公开网页、平台、论文库、数据库并整理来源
+- web_capture: 下载公开图片/文件或网页截图
+- project_think: 拆解目标、选择路线、定义验收和第一个小 event
+- objective_review: 对齐用户目标、上下文、已完成内容、缺口和下一 event
+- curiosity_explore: 好奇探索与新假设
+- habit_update: 写入习惯/经验/成长
+- project, content_digest, reflection, memory_consolidate: 兼容长期项目、内容消化、反思、记忆压缩
 
 当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-状态摘要：{(snapshot.get('summary', '') or '')[:500]}
-当前推进：{(snapshot.get('current', '') or snapshot.get('active_plan', '') or '')[:500]}
+状态摘要：{(snapshot.get('summary', '') or '')[:260]}
+当前推进：{(snapshot.get('current', '') or snapshot.get('active_plan', '') or '')[:260]}
 最近对话：
 {chr(10).join(ctx_lines) if ctx_lines else '（无）'}
 短期待续对话状态：
-{json.dumps(pending_followup, ensure_ascii=False)[:1200] if pending_followup else '（无）'}
-Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
+{json.dumps(pending_followup, ensure_ascii=False)[:500] if pending_followup else '（无）'}
+最近可交付文件：
+{recent_files}
+context_resolution 结果：
+{json.dumps(context_resolution, ensure_ascii=False)[:1600] if context_resolution else '（无，按原始上下文保守判断）'}
+Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 
 用户消息：
 {text}
@@ -605,7 +1074,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
 严格只输出 JSON：
 {{
   "route": "direct_reply|mind_event|pause_project|none",
-  "event_type": "direct_task|literature_review|data_analysis|evidence_audit|artifact_build|pdf_report|project_think|curiosity_explore|habit_update|project|content_digest|reflection|memory_consolidate|report",
+  "event_type": "direct_task|literature_review|data_fetch|data_analysis|visualization|evidence_audit|artifact_build|pdf_report|email_delivery|web_search|web_capture|project_think|objective_review|curiosity_explore|habit_update|project|content_digest|reflection|memory_consolidate|report",
   "event_kind": "自由短标签",
   "target_project": "",
   "objective": "给 agent 的具体目标；如果 direct_reply 可空",
@@ -625,17 +1094,12 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
 }}
 
 选择原则：
-- 不要用关键词模板或固定规则匹配用户消息；基于上下文、最近对话、Mind pool、用户目标和可用 event 定义选择。
-- route=none 只在语义重复、已在处理、或确实不应回应时使用。
-- direct_reply 只用于不需要进入 mind pool 的即时回答或最小澄清。
-- mind_event 用于任何需要执行、产物、资料、审计、分析、探索、记忆或持续推进的任务；event_type 由你选择。
-- 用户追问“怎么没发报告 / 做咋样了 / 给我报告 / 整理状态报告”且已有项目结果时，选择 pdf_report，让 mind loop 生成并交付真实 PDF；不要选择 report。
-- 如果短期待续状态存在，并且用户新消息是在补充缺失参数，必须把 original_user_request、已知参数和新消息合并成 objective，选择 mind_event；不要把补充参数当成一个新闲聊话题。
-- 如果本轮需要向用户追问关键参数，route=direct_reply，pending_action=set，pending_followup 记录原始任务、缺失参数、已知参数和你刚问的问题。
-- 如果用户明显换话题且不再继续待续任务，pending_action=clear。
-- pause_project 只表示保存/暂停当前生命线。
-- target_project、objective、stop_after_completion 必须由你根据用户目标和上下文填写；不确定就保守、具体、可执行。
-- reply_to_user 不暴露 event、queue、workspace、backend。
+- 先服从 context_resolution；如果它和你的选择矛盾，写明 reason。
+- direct_reply 只用于即时回答或缺参澄清；需要执行/文件/搜索/发送/继续项目时选 mind_event。
+- route=none 只用于确实同一任务正在处理且无需吸收新信息。
+- mind_event 的 objective 只写一个最小可验证目标；多阶段目标选 project_think。
+- 需要追问时 pending_action=set，并记录 pending_followup；补齐参数时合并上下文进入 mind_event。
+- 输出必须是合法 JSON，不暴露 queue/workspace/backend。
 """
         try:
             raw = adapter.chat(prompt, purpose="classify") or ""
@@ -652,22 +1116,31 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
         try:
             data = json.loads(text_out[start:end + 1])
         except Exception:
-            return None
+            return self._recover_selector_decision_from_text(text_out)
         if not isinstance(data, dict):
             return None
-        try:
-            confidence = float(data.get("confidence") or 0)
-        except Exception:
-            confidence = 0.0
-        if confidence < 0.45:
-            return None
-
         route = str(data.get("route") or "none").strip()
         event_type = str(data.get("event_type") or "").strip()
         event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or "")).strip("_")[:80]
+        if event_kind in {"自由短标签", "短标签", "event_kind"}:
+            event_kind = ""
         target = str(data.get("target_project") or "").strip()
         objective = str(data.get("objective") or "").strip()
         reply = self._sanitize_reply_to_user(str(data.get("reply_to_user") or ""))
+        action_event_types = self._action_event_types()
+        if route in action_event_types:
+            if not event_type or event_type not in action_event_types:
+                event_type = route
+            route = "mind_event"
+        if route not in {"direct_reply", "mind_event", "pause_project", "none"} and event_type in action_event_types:
+            route = "mind_event"
+        try:
+            raw_confidence = data.get("confidence")
+            confidence = float(raw_confidence) if raw_confidence is not None else 0.7
+        except Exception:
+            confidence = 0.7 if (route in {"direct_reply", "mind_event", "pause_project"} or event_type or reply) else 0.0
+        if confidence < 0.45 and not (route == "mind_event" and event_type in action_event_types):
+            return None
         stop_after = bool(data.get("stop_after_completion"))
         priority = data.get("priority", 5)
         try:
@@ -688,10 +1161,69 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
                 )
             else:
                 objective = "整理当前项目已有结果，生成真实 PDF 报告文件并交付给用户。"
+        route, event_type, event_kind, objective = self._normalize_to_small_event_with_llm(
+            adapter,
+            route=route,
+            event_type=event_type,
+            event_kind=event_kind,
+            objective=objective,
+            user_text=text,
+            context_resolution=context_resolution,
+        )
+        content_event_types = {"content_digest", "reflection", "memory_consolidate"}
+        selector_placeholder = self._selector_has_placeholder_values(
+            route=route,
+            event_type=event_type,
+            event_kind=event_kind,
+            reply=reply,
+            pending_action=pending_action,
+        )
+        invalid_mind_event = route == "mind_event" and event_type not in (action_event_types | content_event_types)
+        none_against_context = route == "none" and bool(context_resolution.get("should_enter_mind"))
+        suspicious_route = selector_placeholder or invalid_mind_event or none_against_context
+        route_review = self._route_review_with_llm(
+            adapter,
+            text=text,
+            snapshot=snapshot,
+            context_resolution=context_resolution,
+            selector_data=data,
+            trigger=(
+                "selector_placeholder" if selector_placeholder else
+                "invalid_mind_event" if invalid_mind_event else
+                "none_against_context" if none_against_context else
+                "selector_review"
+            ),
+            pool_stats=pool_stats,
+        ) if suspicious_route else {}
+        if suspicious_route and route_review.get("action") != "accept":
+            if not route_review:
+                route_review = {
+                    "action": "objective_review",
+                    "reason": "route_review_unavailable_after_suspicious_selector",
+                    "event_kind": "route_review_unavailable",
+                }
+            return self._objective_review_from_route_review(
+                text=text,
+                snapshot=snapshot,
+                context_resolution=context_resolution,
+                selector_data=data,
+                route_review=route_review,
+                reply=reply,
+                pending_action=pending_action,
+                pending=pending,
+                priority=priority,
+            )
 
         if route == "direct_reply":
+            local_reply = self._direct_reply_from_selector_draft(
+                adapter,
+                text=text,
+                draft=reply,
+                snapshot=snapshot,
+                ctx_lines=ctx_lines,
+            )
             return InteractionDecision(
-                reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=local_reply or reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
                 need_lifeline_update=False,
                 lifeline_action="none",
                 event_type="direct_reply",
@@ -702,6 +1234,35 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
                 pending_followup=pending,
             )
         if route == "none":
+            route_review = self._route_review_with_llm(
+                adapter,
+                text=text,
+                snapshot=snapshot,
+                context_resolution=context_resolution,
+                selector_data=data,
+                trigger="route_none",
+                pool_stats=pool_stats,
+            )
+            if route_review.get("action") != "accept":
+                if not route_review:
+                    route_review = {
+                        "action": "objective_review",
+                        "reason": "route_review_unavailable_after_route_none",
+                        "event_kind": "route_none_review_unavailable",
+                    }
+                active_target = (snapshot.get("display_project", "") or snapshot.get("focus_project", "") or target or get_active(self.workspace) or "").strip()
+                route_review = {**route_review, "target_project": route_review.get("target_project") or active_target}
+                return self._objective_review_from_route_review(
+                    text=text,
+                    snapshot=snapshot,
+                    context_resolution=context_resolution,
+                    selector_data=data,
+                    route_review=route_review,
+                    reply=reply,
+                    pending_action=pending_action,
+                    pending=pending,
+                    priority=2,
+                )
             return InteractionDecision(
                 reply_to_user="",
                 need_lifeline_update=False,
@@ -726,21 +1287,12 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
                 priority=priority,
                 pending_action="clear",
             )
-        action_event_types = {
-            "direct_task",
-            "literature_review",
-            "data_analysis",
-            "evidence_audit",
-            "artifact_build",
-            "pdf_report",
-            "project_think",
-            "curiosity_explore",
-            "habit_update",
-            "project",
-        }
         if route == "mind_event" and event_type in action_event_types:
+            current_project = (snapshot.get("display_project", "") or snapshot.get("focus_project", "") or "").strip()
+            if context_resolution.get("relation") == "new_task" and target and current_project and target == current_project:
+                target = ""
             if not target:
-                target = self._infer_project_title_with_llm(adapter, text, snapshot) or "用户任务"
+                target = event_kind or _clip_title(objective or text) or "用户任务"
             return InteractionDecision(
                 reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
                 need_lifeline_update=True,
@@ -772,67 +1324,63 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:800]}
             )
         return None
 
+    def _recover_selector_decision_from_text(self, raw: str) -> Optional[InteractionDecision]:
+        """Recover a user-visible LLM decision when JSON breaks on natural text.
+
+        The selector sometimes writes a useful reply but forgets to escape quotes
+        inside reply_to_user. We should not drop that LLM output and leave QQ with
+        only the thinking notice.
+        """
+        route = self._extract_selector_string_field(raw, "route")
+        reply = self._sanitize_reply_to_user(self._extract_selector_string_field(raw, "reply_to_user"))
+        if route == "direct_reply" and reply:
+            event_kind = self._extract_selector_string_field(raw, "event_kind") or "direct_reply"
+            event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", event_kind).strip("_")[:80]
+            return InteractionDecision(
+                reply_to_user=reply,
+                need_lifeline_update=False,
+                lifeline_action="none",
+                event_type="direct_reply",
+                event_kind=event_kind or "direct_reply",
+                stop_after_completion=True,
+                priority=5,
+                pending_action="none",
+            )
+        return None
+
+    @staticmethod
+    def _extract_selector_string_field(raw: str, field: str) -> str:
+        text = raw or ""
+        key = re.escape(field)
+        next_key = r'"[A-Za-z_][A-Za-z0-9_]*"\s*:'
+        pattern = rf'"{key}"\s*:\s*"(?P<value>.*?)(?="\s*,\s*{next_key}|"\s*\}})'
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if not match:
+            return ""
+        value = match.group("value")
+        value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\t", "\t")
+        return value.strip()
+
     def _decide(self, sender_id: str, text: str) -> InteractionDecision:
         snapshot = self.snapshot_builder() or {}
         adapter = self.get_adapter()
         event_decision = self._decide_event_with_llm(adapter, sender_id, text, snapshot)
         if event_decision:
             return event_decision
+        if (text or "").strip():
+            return self._objective_review_for_unavailable_selector(
+                text=text,
+                snapshot=snapshot,
+                reason="selector_unavailable",
+            )
         return InteractionDecision(
-            reply_to_user="__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            reply_to_user=UNAVAILABLE_NOTICE,
             need_lifeline_update=False,
             lifeline_action="none",
             event_type="direct_reply",
             event_kind="selector_unavailable",
             stop_after_completion=True,
             priority=9,
-        )
-
-    def _parse_decision(self, raw: str) -> Optional[InteractionDecision]:
-        if not raw:
-            return None
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            data = json.loads(text[start:end + 1])
-        except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        reply = self._sanitize_reply_to_user(data.get("reply_to_user") or "")
-        if not reply:
-            reply = "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__"
-        priority = data.get("priority", 6)
-        try:
-            priority = max(1, min(10, int(priority)))
-        except Exception:
-            priority = 6
-        return InteractionDecision(
-            reply_to_user=reply,
-            need_lifeline_update=bool(data.get("need_lifeline_update")),
-            lifeline_action=(data.get("lifeline_action") or "none").strip() or "none",
-            target_project=(data.get("target_project") or "").strip(),
-            task_title=(data.get("task_title") or "").strip(),
-            task_description=(data.get("task_description") or "").strip(),
-            note=(data.get("note") or "").strip(),
-            knowledge_title=(data.get("knowledge_title") or "").strip(),
-            knowledge_content=(data.get("knowledge_content") or "").strip(),
-            allowed_scope=[str(x).strip() for x in (data.get("allowed_scope") or []) if str(x).strip()][:8],
-            forbidden_scope=[str(x).strip() for x in (data.get("forbidden_scope") or []) if str(x).strip()][:12],
-            current_mainline=(data.get("current_mainline") or "").strip(),
-            source_roots=[str(x).strip() for x in (data.get("source_roots") or []) if str(x).strip()][:8],
-            forbidden_evidence_patterns=[str(x).strip() for x in (data.get("forbidden_evidence_patterns") or []) if str(x).strip()][:12],
-            completion_criteria=[str(x).strip() for x in (data.get("completion_criteria") or []) if str(x).strip()][:12],
-            event_type=str(data.get("event_type") or "project").strip() or "project",
-            delivery_mode=str(data.get("delivery_mode") or "research_project").strip()
-            if str(data.get("delivery_mode") or "").strip() in {"research_project", "reference_brief", "direct_deliverable", "audit_only"}
-            else "research_project",
-            priority=priority,
         )
 
     @staticmethod

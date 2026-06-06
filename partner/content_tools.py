@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import html
 import base64
+import argparse
 import json
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, asdict
 from typing import Any
@@ -49,9 +53,16 @@ class AcquisitionResult:
     next_request: str = ""
     source_url: str = ""
     tool_name: str = ""
+    files: list[str] = None
+    media_urls: list[str] = None
+    metadata: dict[str, Any] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["files"] = data.get("files") or []
+        data["media_urls"] = data.get("media_urls") or []
+        data["metadata"] = data.get("metadata") or {}
+        return data
 
 
 def _clip(text: str, limit: int = 1600) -> str:
@@ -81,6 +92,7 @@ def _clean_document_text(text: str) -> str:
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 DOC_EXTS = (".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".csv", ".tsv")
+VIDEO_EXTS = (".mp4", ".m4v", ".mov", ".webm", ".mkv")
 
 
 def is_image_url(url: str) -> bool:
@@ -425,6 +437,230 @@ def _platform_for_url(url: str) -> str:
     return "web"
 
 
+def _safe_name(name: str, default: str = "content") -> str:
+    text = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", name or default).strip("_")
+    return text[:80] or default
+
+
+def _json_request(url: str, timeout: int = 15, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    req_headers = {
+        "User-Agent": "Mozilla/5.0 PartnerResearchBot/0.7 (public content reader)",
+        "Accept": "application/json,text/plain,*/*;q=0.5",
+        "Referer": "https://www.bilibili.com/",
+    }
+    if headers:
+        req_headers.update(headers)
+    req = urllib.request.Request(url, headers=req_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read(3_000_000).decode("utf-8", errors="ignore")
+    data = json.loads(raw)
+    return data if isinstance(data, dict) else {}
+
+
+def _bilibili_bvid(url: str) -> str:
+    match = re.search(r"/video/(BV[A-Za-z0-9]+)", url or "")
+    if match:
+        return match.group(1)
+    match = re.search(r"\b(BV[A-Za-z0-9]{8,})\b", url or "")
+    return match.group(1) if match else ""
+
+
+def fetch_bilibili_video(url: str, dest_dir: str = "", timeout: int = 20) -> AcquisitionResult:
+    """Read public Bilibili video metadata, intro, pages and top comments."""
+    bvid = _bilibili_bvid(url)
+    if not bvid:
+        return AcquisitionResult(
+            mode="bilibili_api",
+            status="metadata_only",
+            reason="未识别到 BV 号。",
+            next_request="请提供 B站视频 BV 链接或公开视频 URL。",
+            source_url=url,
+        )
+    try:
+        view = _json_request(
+            "https://api.bilibili.com/x/web-interface/view?bvid=" + urllib.parse.quote(bvid),
+            timeout=timeout,
+        )
+        data = view.get("data") or {}
+        if not data:
+            return AcquisitionResult(
+                mode="bilibili_api",
+                status="fetch_failed",
+                reason=str(view.get("message") or "B站 API 未返回视频数据")[:180],
+                source_url=url,
+            )
+        aid = data.get("aid")
+        title = str(data.get("title") or bvid)
+        desc = str(data.get("desc") or "")
+        owner = data.get("owner") or {}
+        stat = data.get("stat") or {}
+        pages = data.get("pages") or []
+        comments: list[str] = []
+        if aid:
+            try:
+                reply = _json_request(
+                    f"https://api.bilibili.com/x/v2/reply/main?type=1&oid={aid}&mode=3&next=0",
+                    timeout=timeout,
+                )
+                replies = ((reply.get("data") or {}).get("replies") or [])[:10]
+                for item in replies:
+                    member = item.get("member") or {}
+                    content = item.get("content") or {}
+                    message = str(content.get("message") or "").strip()
+                    pictures = content.get("pictures") or []
+                    if message:
+                        comments.append(f"{member.get('uname') or '用户'}: {message}")
+                    for pic in pictures[:4]:
+                        img = pic.get("img_src") or pic.get("src")
+                        if img:
+                            comments.append(f"{member.get('uname') or '用户'} image: {img}")
+            except Exception:
+                pass
+        lines = [
+            f"Title: {title}",
+            f"Owner: {owner.get('name') or ''} uid={owner.get('mid') or ''}",
+            f"Stats: view={stat.get('view')} like={stat.get('like')} coin={stat.get('coin')} reply={stat.get('reply')}",
+            f"Published: {data.get('pubdate')}",
+            f"Description: {desc}",
+            "Pages: " + "; ".join(str(p.get("part") or p.get("page") or "") for p in pages[:12]),
+        ]
+        if comments:
+            lines.append("Top comments/public images:")
+            lines.extend(comments[:18])
+        media_urls = []
+        pic = str(data.get("pic") or "")
+        if pic:
+            media_urls.append(pic)
+        face = str(owner.get("face") or "")
+        if face:
+            media_urls.append(face)
+        return AcquisitionResult(
+            mode="bilibili_api",
+            status="text_available",
+            title=title,
+            text_preview=_clip("\n".join(lines), 3200),
+            source_url=url,
+            media_urls=media_urls,
+            metadata={"bvid": bvid, "aid": aid, "owner": owner, "stat": stat},
+        )
+    except Exception as exc:
+        return AcquisitionResult(
+            mode="bilibili_api",
+            status="fetch_failed",
+            reason=str(exc)[:180],
+            next_request="如果公开视频 API 不可用，请配置登录态浏览器/cookie 工具或转发页面正文。",
+            source_url=url,
+        )
+
+
+def download_video_url(url: str, dest_dir: str, timeout: int = 180) -> AcquisitionResult:
+    """Download public video with yt-dlp when available and explicitly allowed."""
+    if os.getenv("PARTNER_ENABLE_VIDEO_DOWNLOAD", "").lower() not in {"1", "true", "on", "yes"}:
+        return AcquisitionResult(
+            mode="video_download",
+            status="disabled",
+            reason="视频下载默认关闭。",
+            next_request="设置 PARTNER_ENABLE_VIDEO_DOWNLOAD=1 并安装 yt-dlp；只下载有权访问的公开内容。",
+            source_url=url,
+        )
+    exe = shutil.which("yt-dlp")
+    if not exe:
+        return AcquisitionResult(
+            mode="video_download",
+            status="dependency_missing",
+            reason="yt-dlp 未安装。",
+            next_request="安装 yt-dlp，或只发送公开视频链接和元数据。",
+            source_url=url,
+        )
+    os.makedirs(dest_dir, exist_ok=True)
+    out_tpl = os.path.join(dest_dir, "%(title).80s_%(id)s.%(ext)s")
+    cookie_args: list[str] = []
+    cookie_file = os.getenv("PARTNER_YTDLP_COOKIES", "").strip()
+    if cookie_file:
+        cookie_args = ["--cookies", cookie_file]
+    cmd = [
+        exe,
+        "--no-playlist",
+        "--restrict-filenames",
+        "--write-info-json",
+        "-f",
+        os.getenv("PARTNER_YTDLP_FORMAT", "bv*+ba/best"),
+        "-o",
+        out_tpl,
+        *cookie_args,
+        url,
+    ]
+    try:
+        subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return AcquisitionResult(mode="video_download", status="tool_timeout", reason="yt-dlp 超时。", source_url=url)
+    except Exception as exc:
+        return AcquisitionResult(mode="video_download", status="tool_failed", reason=str(exc)[:180], source_url=url)
+    files: list[str] = []
+    for cur, _, names in os.walk(dest_dir):
+        for name in names:
+            if os.path.splitext(name)[1].lower() in VIDEO_EXTS + (".json",):
+                files.append(os.path.join(cur, name))
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    video_files = [p for p in files if os.path.splitext(p)[1].lower() in VIDEO_EXTS]
+    if not video_files:
+        return AcquisitionResult(
+            mode="video_download",
+            status="fetch_failed",
+            reason="yt-dlp 未生成视频文件。",
+            next_request="检查 URL、cookie、平台权限或只发送公开链接。",
+            source_url=url,
+            files=files[:4],
+        )
+    return AcquisitionResult(
+        mode="video_download",
+        status="file_available",
+        title=os.path.basename(video_files[0]),
+        text_preview=video_files[0],
+        source_url=url,
+        files=video_files[:3] + [p for p in files if p.endswith(".json")][:2],
+    )
+
+
+def extract_video_keyframes(path: str, dest_dir: str, *, count: int = 6) -> AcquisitionResult:
+    if not path or not os.path.exists(path):
+        return AcquisitionResult(mode="video_keyframes", status="missing_file", reason="视频文件不存在。", source_url=path)
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return AcquisitionResult(
+            mode="video_keyframes",
+            status="dependency_missing",
+            reason="ffmpeg 未安装。",
+            next_request="安装 ffmpeg 后可抽取视频关键帧供视觉模型读取。",
+            source_url=path,
+        )
+    os.makedirs(dest_dir, exist_ok=True)
+    pattern = os.path.join(dest_dir, _safe_name(os.path.splitext(os.path.basename(path))[0]) + "_frame_%02d.jpg")
+    cmd = [
+        exe,
+        "-y",
+        "-i",
+        path,
+        "-vf",
+        f"fps=1/{max(1, int(60 / max(1, count)))}",
+        "-frames:v",
+        str(max(1, count)),
+        pattern,
+    ]
+    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120, check=False)
+    files = sorted(os.path.join(dest_dir, name) for name in os.listdir(dest_dir) if name.endswith(".jpg"))
+    if not files:
+        return AcquisitionResult(mode="video_keyframes", status="tool_failed", reason=(proc.stderr or "")[-300:], source_url=path)
+    return AcquisitionResult(
+        mode="video_keyframes",
+        status="image_available",
+        title=os.path.basename(path),
+        text_preview="\n".join(files[:count]),
+        source_url=path,
+        files=files[:count],
+    )
+
+
 def _load_command_tools() -> list[dict[str, Any]]:
     """Load optional content acquisition command adapters.
 
@@ -649,6 +885,10 @@ def acquire_url(url: str, timeout: int = 12) -> AcquisitionResult:
     external = fetch_with_external_tools(url, platform=platform)
     if external.status == "text_available":
         return external
+    if platform == "bilibili":
+        bili = fetch_bilibili_video(url, timeout=max(timeout, 20))
+        if bili.status == "text_available":
+            return bili
 
     # Jina is useful for public articles, WeChat pages, PDFs, and many normal
     # web pages. It does not bypass login and may still fail on app-only pages.
@@ -702,6 +942,7 @@ def fetch_public_url(url: str, timeout: int = 10) -> AcquisitionResult:
             )
         raw = raw_bytes.decode("utf-8", errors="ignore")
         title, text = _strip_html(raw)
+        media_urls = sorted(set(re.findall(r'https?://[^"\'<>\s]+\.(?:jpg|jpeg|png|webp|gif|mp4|webm)(?:\?[^"\'<>\s]*)?', raw, flags=re.I)))[:20]
         if len(text) < 120:
             return AcquisitionResult(
                 mode="public_web",
@@ -711,6 +952,7 @@ def fetch_public_url(url: str, timeout: int = 10) -> AcquisitionResult:
                 reason="公开页面正文过短，可能需要登录、动态渲染或反爬。",
                 next_request="请用户转发正文/截图，或配置登录态浏览器读取。",
                 source_url=url,
+                media_urls=media_urls,
             )
         return AcquisitionResult(
             mode="public_web",
@@ -718,6 +960,7 @@ def fetch_public_url(url: str, timeout: int = 10) -> AcquisitionResult:
             title=title,
             text_preview=_clip(text),
             source_url=url,
+            media_urls=media_urls,
         )
     except urllib.error.HTTPError as exc:
         return AcquisitionResult(
@@ -778,6 +1021,21 @@ def fetch_with_login_browser(url: str, timeout: int = 20) -> AcquisitionResult:
                 pass
             title = page.title() or ""
             text = page.locator("body").inner_text(timeout=5000)
+            media_urls = page.evaluate(
+                """() => Array.from(new Set([
+                    ...Array.from(document.images || []).map(x => x.currentSrc || x.src),
+                    ...Array.from(document.querySelectorAll('video, source')).map(x => x.currentSrc || x.src)
+                ].filter(Boolean)))"""
+            )
+            screenshot_path = ""
+            if os.getenv("PARTNER_BROWSER_SAVE_SCREENSHOT", "1").lower() not in {"0", "false", "off", "no"}:
+                out_dir = os.getenv("PARTNER_BROWSER_CAPTURE_DIR", "").strip() or tempfile.gettempdir()
+                os.makedirs(out_dir, exist_ok=True)
+                screenshot_path = os.path.join(out_dir, f"partner_page_{abs(hash(url))}.png")
+                try:
+                    page.screenshot(path=screenshot_path, full_page=True)
+                except Exception:
+                    screenshot_path = ""
             context.close()
         if len(text.strip()) < 120:
             return AcquisitionResult(
@@ -788,6 +1046,8 @@ def fetch_with_login_browser(url: str, timeout: int = 20) -> AcquisitionResult:
                 reason="登录态浏览器只读到很少正文，可能仍需 App、验证码或动态权限。",
                 next_request="请用户转发正文/截图或视频摘要。",
                 source_url=url,
+                files=[screenshot_path] if screenshot_path else [],
+                media_urls=[str(x) for x in (media_urls or []) if str(x).strip()][:40],
             )
         return AcquisitionResult(
             mode="login_browser",
@@ -795,6 +1055,8 @@ def fetch_with_login_browser(url: str, timeout: int = 20) -> AcquisitionResult:
             title=title,
             text_preview=_clip(text),
             source_url=url,
+            files=[screenshot_path] if screenshot_path else [],
+            media_urls=[str(x) for x in (media_urls or []) if str(x).strip()][:40],
         )
     except Exception as exc:
         return AcquisitionResult(
@@ -925,6 +1187,8 @@ def write_tool_status(workspace: str) -> None:
         "外部工具配置：通过 PARTNER_CONTENT_TOOL_COMMANDS 注册 Agent-Reach、weixin-mcp、zhihu-mcp、yt-dlp 或自定义 MCP wrapper；这些属于 Partner 工具层，不写入 Hermes skill。",
         "",
         "原则：不绕过登录、不破解反爬、不把链接卡片当正文。读不到正文时会记录限制，并请求用户转发正文/截图，或切换到公开替代源继续推进。",
+        "",
+        "命令行：python -m partner.content_tools acquire <url> --dest <dir> --json",
     ]
     with open(os.path.join(user_dir, "content_tools_status.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
@@ -932,3 +1196,105 @@ def write_tool_status(workspace: str) -> None:
 
 def dump_result(result: AcquisitionResult) -> str:
     return json.dumps(result.to_dict(), ensure_ascii=False)
+
+
+def acquire_and_materialize(url: str, dest_dir: str, *, timeout: int = 20,
+                            download_media: bool = True,
+                            download_video: bool = False,
+                            keyframes: bool = False) -> AcquisitionResult:
+    """Acquire URL content and optionally save linked media/video artifacts."""
+    os.makedirs(dest_dir, exist_ok=True)
+    result = acquire_url(url, timeout=timeout)
+    files = list(result.files or [])
+    media_urls = list(result.media_urls or [])
+    if download_media:
+        media_dir = os.path.join(dest_dir, "media")
+        for media_url in media_urls[:20]:
+            if not is_image_url(media_url):
+                continue
+            item = download_media_url(media_url, media_dir, timeout=timeout)
+            if item.status == "image_available" and item.text_preview:
+                files.append(item.text_preview)
+    if download_video:
+        video_dir = os.path.join(dest_dir, "video")
+        video = download_video_url(url, video_dir)
+        if video.files:
+            files.extend(video.files)
+        if keyframes:
+            for path in video.files or []:
+                if os.path.splitext(path)[1].lower() in VIDEO_EXTS:
+                    frames = extract_video_keyframes(path, os.path.join(dest_dir, "keyframes"))
+                    files.extend(frames.files or [])
+                    break
+    text_path = os.path.join(dest_dir, "content_acquisition.md")
+    lines = [
+        f"# Content Acquisition",
+        "",
+        f"- URL: {url}",
+        f"- Mode: {result.mode}",
+        f"- Status: {result.status}",
+        f"- Title: {result.title}",
+        f"- Tool: {result.tool_name}",
+        f"- Reason: {result.reason}",
+        f"- Next request: {result.next_request}",
+        "",
+        "## Text",
+        result.text_preview or "",
+        "",
+        "## Media URLs",
+        "\n".join(f"- {x}" for x in media_urls[:80]) or "EMPTY",
+        "",
+        "## Files",
+        "\n".join(f"- {x}" for x in files[:80]) or "EMPTY",
+    ]
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+    files.append(text_path)
+    result.files = [x for x in files if x]
+    result.media_urls = media_urls
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Partner external content acquisition tool")
+    sub = parser.add_subparsers(dest="cmd")
+    acquire = sub.add_parser("acquire", help="read a public/platform URL and save artifacts")
+    acquire.add_argument("url")
+    acquire.add_argument("--dest", default=os.path.join(os.getcwd(), "content_acquisition"))
+    acquire.add_argument("--timeout", type=int, default=20)
+    acquire.add_argument("--no-media", action="store_true")
+    acquire.add_argument("--download-video", action="store_true")
+    acquire.add_argument("--keyframes", action="store_true")
+    acquire.add_argument("--json", action="store_true")
+    status = sub.add_parser("status", help="show configured content tools")
+    status.add_argument("--workspace", default="")
+    args = parser.parse_args(argv)
+    if args.cmd == "acquire":
+        result = acquire_and_materialize(
+            args.url,
+            args.dest,
+            timeout=args.timeout,
+            download_media=not args.no_media,
+            download_video=args.download_video,
+            keyframes=args.keyframes,
+        )
+        if args.json:
+            print(dump_result(result))
+        else:
+            print(f"{result.status}: {result.title or result.source_url}")
+            if result.text_preview:
+                print(result.text_preview)
+            if result.files:
+                print("FILES:")
+                for path in result.files:
+                    print(path)
+        return 0 if result.status in {"text_available", "image_available", "file_available", "metadata_only"} else 2
+    if args.cmd == "status":
+        print(json.dumps(describe_tool_status(args.workspace), ensure_ascii=False, indent=2))
+        return 0
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

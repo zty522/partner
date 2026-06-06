@@ -25,16 +25,9 @@ logger = logging.getLogger(__name__)
 PROJECT_SUBDIRS = ["code", "ideas", "notes", "dialogue", "data", "figures"]
 ROOT_SHARED_DIRS = ["code", "ideas", "knowledge", "logs", "state", "dialogue"]
 
-# Known projects with aliases for duplicate merging
-# format: canonical_key -> (display_name, [aliases])
-PROJECT_REGISTRY: Dict[str, Tuple[str, list]] = {
-    "age_prediction": ("年龄预测", ["aging", "age", "age_pred"]),
-    "cytobridge": ("CytoBridge 基准测试", ["cytobridge_benchmark", "cytobridge_bench"]),
-    "ligand_design": ("配体设计", ["molecular_generation", "drug_discovery"]),
-    "mog": ("多组学 MOG", ["multi_omics_mog", "multi_omics"]),
-    "acinetobacter": ("鲍曼不动杆菌 AMP", ["amp", "antibacterial", "prodcarl"]),
-    "partner": ("Partner 自身开发", ["design", "architecture", "self_evolution"]),
-}
+# Optional project alias registry. Keep empty by default; users/config can add
+# aliases without baking historical local projects into the codebase.
+PROJECT_REGISTRY: Dict[str, Tuple[str, list]] = {}
 
 # Map aliases to canonical keys
 PROJECT_ALIASES = {}
