@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from .content_tools import acquire_url, download_attachment_url, download_media_url, is_image_url, write_tool_status
+from .workspace_layout import external_content_dir, external_dir
 
 
 URL_RE = re.compile(r"https?://[^\s，。；、<>\"']+", re.I)
@@ -32,6 +33,12 @@ def _state_path(workspace: str, *parts: str) -> str:
 
 def _system_path(workspace: str, *parts: str) -> str:
     path = os.path.join(workspace, "system", *parts)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def _external_path(workspace: str, *parts: str) -> str:
+    path = os.path.join(external_content_dir(workspace), *parts)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     return path
 
@@ -268,7 +275,8 @@ def record_shared_content(
     has_raw_media = raw_has_media(raw)
     attachment_results: list[dict[str, str]] = []
     if has_raw_media and raw_urls:
-        attachment_dir = _system_path(workspace, "attachments")
+        attachment_dir = os.path.join(external_dir(workspace), "incoming")
+        os.makedirs(attachment_dir, exist_ok=True)
         for url in raw_urls[:4]:
             result = download_attachment_url(url, attachment_dir)
             row = result.to_dict()
@@ -309,7 +317,8 @@ def record_shared_content(
         or "multimedia.nt.qq.com.cn/" in url.lower()
     ]
     if media_urls and not acquisition:
-        media_dir = _system_path(workspace, "media")
+        media_dir = os.path.join(external_dir(workspace), "media")
+        os.makedirs(media_dir, exist_ok=True)
         for url in media_urls[:4]:
             result = download_media_url(url, media_dir)
             row = result.to_dict()
@@ -402,7 +411,7 @@ def record_shared_content(
     feed.setdefault("items", []).append(item)
     _save_feed(workspace, feed)
     write_tool_status(workspace)
-    _append_jsonl(_system_path(workspace, "content_feed", "inbox.jsonl"), item)
+    _append_jsonl(_external_path(workspace, "inbox.jsonl"), item)
     return item
 
 
@@ -446,7 +455,7 @@ def mark_content_processed(workspace: str, item_id: str, digest: str = "", statu
 
 def ensure_content_sources(workspace: str) -> dict[str, Any]:
     """Create/read controlled autonomous content patrol configuration."""
-    path = _system_path(workspace, "content_feed", "sources.json")
+    path = _external_path(workspace, "sources.json")
     defaults = {
         "enabled": False,
         "interval_hours": 6,
@@ -544,7 +553,7 @@ def build_content_feed_context(workspace: str, project: str = "", limit_chars: i
 
 
 def _write_user_summary(workspace: str, feed: dict[str, Any]):
-    user_dir = os.path.join(workspace, "user")
+    user_dir = os.path.join(workspace, "state", "user")
     os.makedirs(user_dir, exist_ok=True)
     path = os.path.join(user_dir, "content_feed_summary.md")
     items = feed.get("items") or []

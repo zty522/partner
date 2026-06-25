@@ -1,11 +1,12 @@
 <div align="center">
 
-# Partner
+# Partner v1.0.0
 
-### An event-driven AI companion for long-running work
+### An event-driven AI companion for long-running research work
 
 Partner is not a chatbot and not a normal agent runner.
-It is a runtime for staged execution, persistent memory, habits, growth, and event-by-event collaboration.
+It is a runtime for staged execution, persistent memory, habits, growth, event-by-event collaboration,
+and **external agent orchestration**.
 
 [![Latest Release](https://img.shields.io/github/v/release/zty522/partner?label=Latest&style=flat-square)](https://github.com/zty522/partner/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -25,34 +26,104 @@ Partner: context/memory/habits -> selector chooses an event -> agent executes on
          -> Partner analyzes the result, updates state, learns, and chooses the next event
 ```
 
-Partner is built around staged execution. Each stage has a goal, an event, an action, a result, and a follow-up decision. A backend agent still performs concrete work, but Partner keeps continuity outside the agent call.
+Partner is built around **staged execution**. Each stage has a goal, an event, an action, a result, and a follow-up decision. A backend agent still performs concrete work, but Partner keeps continuity outside the agent call.
 
-This makes Partner closer to a long-term collaborator:
+### v1.0.0 Key Upgrades
 
-- it remembers project context and ordinary conversation context
-- it can ask for missing parameters instead of guessing
-- it can reconnect a user's answer to the previous unfinished request
-- it can choose whether the next event should be search, audit, artifact creation, PDF reporting, curiosity exploration, or project stop
-- it records habits, growth, risks, failures, and cross-project lessons
-- it reports at event boundaries instead of sending vague background updates
-
-Partner does not reject tools or skills. Tools and skills answer "how should this step be executed?" Partner also asks "is this the right next step now?"
+| Area | Change |
+|---|---|
+| **Agent Interface** | Standardized AgentRegistry + AgentDispatcher + AgentManifest system for pluggable external agents |
+| **CLI** | Monolithic `cli.py` → modular `partner/cli/` package with subcommand modules |
+| **Desktop GUI** | Refactored PySide6 GUI with modern pages (agents, settings, conversation) |
+| **Harness Core** | New `robust_executor`, `task_instance`, `artifact_validator`, `remediation_handler` |
+| **Skill System** | `partner/skills/` with registry, store, discovery, external agent skills |
+| **LLM Layer** | Centralized `partner/llm/` module for provider-agnostic inference |
+| **External Agents** | `partner/agents/` package — manifests, registry, dispatcher for any CLI/HTTP/MCP agent |
+| **Project Planner** | `partner/planner/` batch planner + prompt builder |
+| **World Model** | `partner/world_model/` and HTTP server |
+| **QQ Bot** | Replaced old qq_official_bot/bridge with modular `partner/qq_bot/` |
 
 ---
 
-## v0.7.0 Highlights
+## Agent Interface — External Agent Architecture
 
-Partner v0.7.0 moves the runtime from project-loop autonomy toward an event-first companion architecture.
+v1.0.0 introduces a **standardized agent interface** for calling external agents from Partner.
 
-- **Event-first selector**: user messages are routed through an LLM selector that sees context, pending follow-ups, project state, mind pool status, and available events.
-- **Action events**: direct tasks, literature review, data analysis, evidence audit, artifact build, PDF report, project thinking, curiosity exploration, habit update, and stop project are explicit event types.
-- **PDF report event**: PDF generation is no longer hidden inside artifact building. It is a first-class `pdf_report` event.
-- **Explicit project stop**: long-running execution should stop through `stop_project`, not accidental silence.
-- **Event-boundary user updates**: after each event, Partner can tell the user what event ran, what changed, what files were created, and what event is planned next.
-- **Conversation continuity**: ordinary chat context and pending parameter questions are tracked separately from project memory.
-- **Growth influences execution**: recent growth events are injected into action-event prompts alongside shared habits.
-- **Less hard-coded conversation logic**: duplicate suppression, missing-parameter handling, and follow-up routing are handled by selector context rather than fixed user-message rules.
-- **QQ inbound safety**: inbound messages are preserved; Partner should ask for missing information instead of inventing defaults.
+### How It Works
+
+```text
+Partner mind event (call_agent_skill)
+    → external_agent_skills.py (two-tier dispatch)
+        ├── General agents (hermes, openclaw, codex)
+        │     └── adapter.chat() — subprocess-based chat
+        └── Specialized agents (cytobridge, bamboo-ai, ...)
+              └── AgentDispatcher._dispatch_cli()
+                    ├── Load manifest from AgentRegistry
+                    ├── Resolve CLI binary (PATH / conda / ~/.local/bin)
+                    ├── Substitute {placeholders} in args
+                    ├── Inject API credentials into subprocess env
+                    └── Parse stdout JSON or plain text result
+```
+
+### Agent Manifest (`partner/agents/manifests/*.json`)
+
+Every external agent describes itself with a manifest JSON file:
+
+```json
+{
+  "name": "cytobridge",
+  "version": "1.0.0",
+  "description": "单细胞转录组轨迹推断专用 Agent",
+  "capabilities": ["trajectory_inference", "cell_dynamics"],
+  "input_formats": ["h5ad", "loom", "csv"],
+  "output_formats": ["html", "md", "pdf", "png", "h5ad"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "cytobridge-wrapper",
+    "args": ["--input", "{input}", "-q", "{question}", "-o", "{output}", "--device", "{device}"],
+    "timeout": 3600
+  },
+  "timeout": 3600,
+  "health_check_cmd": "cytobridge-agent --version"
+}
+```
+
+Supported `endpoint_type` values:
+- **cli**: Invoke via subprocess — command + args with {placeholder} substitution
+- **http**: REST API call with JSON payload
+- **python_api**: Direct Python import and function call
+- **mcp**: MCP protocol (future)
+
+### Agent Discovery
+
+AgentRegistry searches manifests from multiple locations (in priority order):
+1. **Built-in**: `partner/agents/manifests/` (shipped with Partner, e.g. hermes, openclaw, codex, cytobridge)
+2. **Workspace config**: `<workspace>/config/agents/`
+3. **Global config**: `global_config/agents/` at project root
+4. **User-registered**: `~/.partner/agents/`
+
+### Wrapper Pattern for External Agents
+
+External agents like CytoBridge are **not bundled** in Partner's code. Instead:
+
+1. The agent is installed separately (e.g. `pip install cytobridge-agent`)
+2. A **wrapper script** at `~/.local/bin/<agent>-wrapper` provides a stable CLI interface
+3. Partner's manifest describes how to call the wrapper
+
+The wrapper pattern solves version conflicts, multiprocessing issues, and keeps Partner decoupled from the external agent's dependency tree.
+
+### Adding a New External Agent
+
+```bash
+# 1. Create a manifest JSON
+partner/agents/manifests/my-agent.json
+
+# 2. Register it (optional — built-in manifests are auto-discovered)
+partner agent register --manifest my-agent.json
+
+# 3. Call it from a skill or plan
+call_agent_skill(agent="my-agent", task="analyze this data")
+```
 
 ---
 
@@ -93,173 +164,30 @@ partner setup
 ```bash
 partner setup                 # configure workspace, backend, QQ bot, and instances
 partner status                # show runtime and bot status
+partner agent list            # list all registered external agents
+partner agent register path   # register a new agent manifest
 partner bot start qq          # start QQ bot and the mind runtime
 partner bot stop qq           # stop QQ bot
 partner update                # pull latest code and reinstall
 ```
 
-Configure servers used by remote instances, GUI operations, and Ollama tunnel hints:
+Configure servers used by remote instances:
 
 ```bash
-partner server add \
-  --name server-prod-01 \
-  --host 203.0.113.10 \
-  --user ubuntu \
-  --port 22 \
-  --key ~/.ssh/partner_server.pem \
-  --remote-workspace /home/ubuntu/partner_workspace/instances/01 \
-  --print-tunnel
-
+partner server add --name server-prod-01 --host 203.0.113.10 --user ubuntu ...
 partner server list
-partner server tunnel-hint server-prod-01
-partner server remove server-prod-01
 ```
 
-Configure one or more Ollama endpoints:
+Ollama endpoints:
 
 ```bash
 partner ollama setup
-partner ollama add --name local --base-url http://127.0.0.1:11434 --models qwen2.5:7b --mode lite --location local
-partner ollama add --name server-gpu --base-url http://127.0.0.1:11434 --models qwen2.5:14b,qwen2.5:7b --mode project --location server --server server-prod-01
-partner ollama list
-partner ollama test
-partner ollama mode lite
-partner ollama disable
-```
-
-Ollama mode controls where Partner may use local models:
-
-| Mode | Behavior |
-| --- | --- |
-| `off` | Never use Ollama. |
-| `lite` | Use Ollama only for lightweight classification, short replies, and short status text. Project execution still uses the main backend. |
-| `project` | Project execution may try Ollama first. Lightweight replies still use the main backend. |
-| `all` | Lightweight routing, replies, reports, and project execution may try Ollama first. |
-
-If an endpoint or model is unavailable, Partner falls back to the main backend.
-
-Expose your local computer's Ollama to a server instance with an SSH reverse tunnel:
-
-```bash
-# Run on your local Windows PowerShell, Linux shell, or WSL shell.
-ssh -N -R 11434:127.0.0.1:11434 -i ~/.ssh/partner_server.pem -p 22 ubuntu@203.0.113.10
-
-# Run in the Partner workspace that the server instance uses.
-partner ollama add --name local-pc --base-url http://127.0.0.1:11434 --models qwen2.5:7b --mode lite --location tunnel --server server-prod-01
-partner ollama test
-```
-
-This only requires the server instance to reach `http://127.0.0.1:11434` on itself. The model actually runs on your local computer.
-
-Run one instance directly:
-
-```bash
-python3 -m partner --instance-id 01 --workspace /path/to/partner_workspace/instances/01
-```
-
-Manage multiple instances:
-
-```bash
-partner-manager list
-partner-manager start --id 01
-partner-manager stop --id 01
-partner-manager restart --id 01
-partner-manager logs --id 01 --tail 80
-partner-manager start --all
-partner-manager stop --all
-```
-
----
-
-## Architecture
-
-Partner has two connected lines.
-
-### 1. Interaction Line
-
-User messages from QQ, CLI, or GUI enter the interaction orchestrator first.
-The orchestrator builds selector context from:
-
-- recent conversation
-- pending missing-parameter questions
-- active project status
-- current progress
-- mind pool statistics
-- shared habits
-- available events
-
-The selector returns a structured route:
-
-```json
-{
-  "route": "direct_reply|mind_event|pause_project|none",
-  "event_type": "direct_task|literature_review|evidence_audit|pdf_report|project|...",
-  "event_kind": "make_excel",
-  "objective": "A concrete objective for the next event",
-  "reply_to_user": "A natural user-facing reply if needed",
-  "stop_after_completion": true,
-  "priority": 1
-}
-```
-
-Code then persists the decision, queues events, sends replies, or updates memory.
-
-### 2. Mind Event Line
-
-The mind runtime consumes persistent events from `state/mind_pool.json`.
-
-| Event | Purpose |
-| --- | --- |
-| `direct_reply` | Reply without backend execution. |
-| `direct_task` | Complete a one-shot user deliverable. |
-| `literature_review` | Gather and summarize sources. |
-| `data_analysis` | Analyze data, metrics, or experiment output. |
-| `evidence_audit` | Check claims, files, sources, and result trustworthiness. |
-| `artifact_build` | Build a visible artifact. |
-| `pdf_report` | Generate a real PDF report from available results. |
-| `project_think` | Choose the next minimal project action. |
-| `curiosity_explore` | Explore a meaningful follow-up question. |
-| `habit_update` | Record a reusable behavior change. |
-| `stop_project` | Explicitly stop or pause project execution. |
-| `project` | Continue a long-running project lifecycle. |
-| `reflection` | Re-evaluate progress and strategy. |
-| `cross_project` | Transfer lessons across projects. |
-| `memory_consolidate` | Compact memory into usable context. |
-| `content_digest` | Turn user-shared content into hypotheses. |
-| `wake_up` / `cron_tick` | Recover and pulse the runtime. |
-
-After an action event completes, Partner runs a follow-up selector. The next event may be `pdf_report`, `evidence_audit`, `curiosity_explore`, `artifact_build`, `stop_project`, or another project action.
-
----
-
-## Memory and Growth
-
-Partner separates ordinary conversation from project memory.
-
-| Layer | Role |
-| --- | --- |
-| Conversation context | Recent dialogue and pending follow-ups. |
-| Project state | Goals, constraints, active plan, artifacts, evidence, and logs. |
-| Experience memory | Episodes, user signals, failed methods, useful methods, and risks. |
-| Habits | Stable behavior tendencies injected into execution prompts. |
-| Growth events | User-visible behavior changes learned from feedback or evidence. |
-| Cross-project memory | Transfer candidates and reusable lessons. |
-
-Habits and recent growth events are injected into action-event prompts. They influence execution, but they do not override explicit user requirements.
-
-Example:
-
-```text
-User: "Do not default missing weather location to Guangzhou."
-Partner growth: "When a task lacks required parameters, ask instead of inventing defaults."
-Future event: selector chooses direct_reply to ask for the location.
+partner ollama add --name local --base-url http://127.0.0.1:11434 ...
 ```
 
 ---
 
 ## Workspace Layout
-
-Recommended workspace:
 
 ```text
 partner_workspace/
@@ -270,14 +198,7 @@ partner_workspace/
       10_logs/
       20_records/
         active_project.txt
-        projects/
-          <project>/
-            project_brief.md
-            project_contract.json
-            state.md
-            exploration_log.md
-            trace_detail.md
-            memory_index.json
+        projects/<project>/
       state/
         mind_pool.json
         event_decisions.jsonl
@@ -293,123 +214,141 @@ partner_workspace/
         reports/
 ```
 
-The most important user-facing folder is `user/`.
-Internal runtime state lives under `system/`, `state/`, `logs/`, and `20_records/`.
+---
+
+## Architecture
+
+### 1. Interaction Line
+
+User messages from QQ, CLI, or GUI enter the **interaction orchestrator**. The orchestrator builds selector context from conversation, pending questions, project status, mind pool, habits, and available events. The selector returns a structured route:
+
+```json
+{
+  "route": "direct_reply|mind_event|pause_project|none",
+  "event_type": "direct_task|literature_review|evidence_audit|pdf_report|...",
+  "objective": "A concrete objective for the next event",
+  "reply_to_user": "...",
+  "priority": 1
+}
+```
+
+### 2. Mind Event Line
+
+The mind runtime consumes persistent events from `state/mind_pool.json`.
+
+| Event | Purpose |
+|---|---|
+| `direct_task` | Complete a one-shot user deliverable. |
+| `call_agent_skill` | Forward task to an external agent. |
+| `literature_review` | Gather and summarize sources. |
+| `data_analysis` | Analyze data, metrics, or experiment output. |
+| `evidence_audit` | Check claims, files, sources. |
+| `artifact_build` | Build a visible artifact. |
+| `pdf_report` | Generate a real PDF report. |
+| `project_think` | Choose the next minimal project action. |
+| `curiosity_explore` | Explore a meaningful follow-up question. |
+| `habit_update` | Record a reusable behavior change. |
+| `stop_project` | Explicitly stop or pause project execution. |
+| `project` | Continue a long-running project lifecycle. |
+| `reflection` | Re-evaluate progress and strategy. |
+| `cross_project` | Transfer lessons across projects. |
+| `memory_consolidate` | Compact memory into usable context. |
+| `content_digest` | Turn user-shared content into hypotheses. |
+| `wake_up` / `cron_tick` | Recover and pulse the runtime. |
+
+### 3. External Agent Line
+
+`call_agent_skill` events are dispatched through the **external agent framework**:
+
+```text
+partner/skills/external_agent_skills.py   — two-tier dispatch logic
+partner/agents/manifest.py                 — AgentManifest dataclass + validation
+partner/agents/registry.py                 — AgentRegistry: discover, register, health check
+partner/agents/dispatcher.py               — AgentDispatcher: cli/http/python_api dispatch
+partner/agents/manifests/*.json            — Built-in agent manifests
+```
 
 ---
 
 ## Agent Backends
 
-Partner uses an adapter layer and is not tied to one backend.
-
 | Backend | Notes |
-| --- | --- |
+|---|---|
 | `hermes` | Main backend for tool-using staged execution. |
 | `codex` | Useful for code-heavy tasks and repository edits. |
 | `openclaw` | Optional OpenClaw Gateway backend. |
+| `cytobridge` | Single-cell trajectory inference (installed separately). |
 | `direct` | Minimal built-in fallback. |
 
-Important files:
-
-```text
-partner/interaction_orchestrator.py
-partner/mind/event_types.py
-partner/mind/pool.py
-partner/mind/executor.py
-partner/research_memory.py
-partner/project_state.py
-partner/outbound_policy.py
-```
+Each backend is described by an `AgentManifest` and dispatched through the unified interface.
 
 ---
 
-## QQ Official Bot
+## External Code Integration
 
-Partner can connect to QQ official bots. Each instance can use its own QQ bot account and workspace.
+### CytoBridge Agent
 
-```bash
-partner bot start qq
-partner bot stop qq
-```
+Partner v1.0.0 supports **CytoBridge Agent** (https://github.com/JackkWangzh/CytoBridge-agent) — a specialized agent for single-cell trajectory inference, cell dynamics analysis, and differentiation studies.
 
-The QQ bridge should:
+- **Integration pattern**: Partner ships:
+  1. A **manifest** (`partner/agents/manifests/cytobridge.json`) describing how to call CytoBridge
+  2. A **wrapper** (`partner/agents/wrappers/cytobridge_wrapper.py`) — Partner-owned code that sets multiprocessing start_method='spawn' and runs the cytobridge-agent pipeline
+  3. A **console_scripts entry point** (`cytobridge-wrapper`) installed via `pip install -e .`
+- **The actual CytoBridge source code** lives in its own repository. Partner only ships the integration layer.
+- **Installation**: `pip install partner-research[cytobridge]` — installs both the wrapper entry point and `cytobridge-agent`.
+- **Wrapper ownership**: The wrapper is **Partner's code**, stored in `partner/agents/wrappers/` and registered as a `console_scripts` entry point in `pyproject.toml`. This means `pip install -e .` or `pip install partner-research` automatically makes `cytobridge-wrapper` available on PATH.
+- **How Partner calls it**: `call_agent_skill(agent="cytobridge", task="...")` → AgentDispatcher reads the manifest → runs `cytobridge-wrapper --input {file} -q "{task}" -o {output_dir}`.
 
-- send a short thinking message when a user message enters processing
-- preserve inbound user text
-- avoid default parameter supplementation
-- avoid duplicate local and LLM replies
-- hide raw backend exceptions
-- push files when an event creates user-visible artifacts
-- show event labels in user-facing replies
+### Adding Other External Agents
 
----
+The same pattern applies to any CLI agent:
 
-## External Content Acquisition
+1. Create a manifest JSON in `partner/agents/manifests/`
+2. Ensure the CLI is installed and on PATH
+3. Call it via `call_agent_skill(agent="<name>", task="...")`
 
-Partner includes a bounded content acquisition layer for `web_search` and `content_digest` events. It is designed to read real accessible content, save evidence files, and report access limits instead of pretending a blocked page was read.
-
-```bash
-python -m partner.content_tools status
-python -m partner.content_tools acquire "https://www.bilibili.com/video/BV..." --dest ./deliverables/content --json
-```
-
-Supported paths:
-
-- Public web/blog/article pages: direct HTTP reader and optional Jina Reader.
-- Bilibili: public video metadata, owner profile, cover image, top public comments, and media files exposed by public APIs.
-- WeChat official accounts, Zhihu, Xiaohongshu, and dynamic social pages: use public readers when possible; for full text behind login/app rendering, configure a login browser profile or a platform-specific external CLI/MCP.
-- Images: downloadable media URLs are saved as real files; screenshots can be OCRed or passed to a vision-capable backend.
-- Videos: public links can be downloaded with `yt-dlp` when explicitly enabled, then keyframes can be extracted with `ffmpeg`.
-- Literature and databases: use public APIs/download pages or register a dedicated CLI/MCP wrapper for sources that need credentials.
-
-Useful environment variables:
-
-```bash
-PARTNER_CONTENT_TOOL_COMMANDS='[
-  {"name":"xhs-reader","platforms":["xiaohongshu"],"cmd":"xhs-reader read {url}"},
-  {"name":"wechat-reader","platforms":["wechat"],"cmd":"wechat-reader read {url}"},
-  {"name":"zhihu-reader","platforms":["zhihu"],"cmd":"zhihu-reader read {url}"}
-]'
-PARTNER_ENABLE_BROWSER_LOGIN=1
-PARTNER_BROWSER_PROFILE=/path/to/chrome-profile
-PARTNER_ENABLE_VIDEO_DOWNLOAD=1
-PARTNER_YTDLP_COOKIES=/path/to/cookies.txt
-PARTNER_ENABLE_OCR=1
-```
-
-Partner does not bypass login, captchas, paywalls, app-only restrictions, or platform permissions. If full text, images, comments, or videos are not accessible with the configured tools, the event records the exact limitation and asks for forwarded text, screenshots, cookies, or an authorized connector.
+You do **not** need to clone the external agent's repository into Partner's workspace. Partner only needs:
+- The CLI command on PATH
+- The manifest describing how to call it
 
 ---
 
 ## Design Principles
 
 - Event first: always decide the next event before execution.
-- LLM selector first: semantic routing belongs to the selector, not hard-coded message rules.
+- LLM selector first: semantic routing belongs to the selector, not hard-coded rules.
 - Code as guardrail: code persists, validates, queues, filters, and sends.
 - One event, one small closure: each backend call should complete one verifiable action.
 - Evidence before claims: files, paths, sources, and metrics must be real before becoming evidence.
-- Growth over patching: user corrections should become reusable habits or growth, not one-off if statements.
-- Projects are containers: they provide context but should not become the default route for every message.
+- Growth over patching: user corrections become reusable habits or growth, not one-off if statements.
+- **External agents by manifest, not by fork**: external agent code lives in its own repo; Partner only ships a manifest.
 - PDF as a real event: final PDF reports should be generated by `pdf_report`.
 - Stop explicitly: project execution should stop through `stop_project`.
-- User can intervene naturally: the user can correct, add parameters, change direction, or stop at any time.
+
+---
+
+## 第三方代码声明 / Third-Party Notices
+
+This project incorporates design patterns and code inspired by the following open-source projects:
+
+- **Hermes Agent** (MIT) — https://github.com/nousresearch/hermes-agent
+- **Hermes Desktop** (MIT) — https://github.com/fathah/hermes-desktop
+- **OpenClaw** (MIT) — https://github.com/openclaw/openclaw
+- **OpenClaw Windows Hub** (MIT) — https://github.com/openclaw/openclaw-windows-node
+- **CytoBridge Agent** (MIT) — https://github.com/JackkWangzh/CytoBridge-agent
+
+See `NOTICE.md` for full license texts and attribution details.
+
+**Important**: The CytoBridge agent is an external dependency. Partner's repo only contains a manifest JSON describing how to call it. The actual CytoBridge source code is maintained at its own repository and installed via `pip install cytobridge-agent`. The MIT license attribution in NOTICE.md covers the manifest integration layer only.
 
 ---
 
 ## Current Limitations
 
-Partner is still an early prototype.
-
-- event selection quality depends on the selector backend
-- long-term memory needs consolidation to stay useful
-- growth events influence execution, but they are not a formal policy engine
-- evidence audit cannot replace human scientific judgment
-- different agent backends behave differently
-- QQ file delivery depends on bot platform constraints
-- content digestion is limited by public access and available parsers
-
----
-
-## One-Sentence Summary
-
-Partner is an event-driven AI companion that works in stages, executes one verifiable action at a time, analyzes the result, updates memory and habits, and uses that growth to choose the next event like a long-term collaborator.
+- Event selection quality depends on the selector backend.
+- Long-term memory needs consolidation to stay useful.
+- Growth events influence execution but are not a formal policy engine.
+- Evidence audit cannot replace human scientific judgment.
+- Different agent backends behave differently.
+- QQ file delivery depends on bot platform constraints.
+- External agents must be installed separately and available on PATH.

@@ -1,0 +1,27 @@
+原始目标：{{root_goal}}
+缺失项：{{missing_items}}
+当前计划步骤列表：{{current_plan_steps}}
+已完成步骤历史：{{history}}
+
+分析缺失项和失败的步骤，生成补丁（insert/modify/delete）使计划能产出缺失的文件。
+
+输出 JSON 数组，每个元素一个补丁操作：
+[
+  {"action": "insert", "target_step_id": "step_X", "new_step": {...}},
+  {"action": "modify", "target_step_id": "step_X", "new_step": {...}},
+  {"action": "delete", "target_step_id": "step_X"}
+]
+
+规则：
+1. 原子事件的 parameters 必须使用正确字段名（path/content 等），不要用省略/占位标记
+2. 如果 atomic_write_artifact 步骤的 content 参数被拒绝（含 ... 或 [完整...] 等占位标记），必须修复：
+   - 要么把 content 改成引用前一步骤的输出：{"content": "$step_X.result.content"}
+   - 要么先插入一个 smart_llm_structured_action 步骤生成完整内容，再让 atomic_write_artifact 引用它
+3. 对于报告、脚本等需要生成长内容的文件，不要直接在 atomic_write_artifact 的 content 里写内容，要先有 smart_llm_structured_action 生成
+4. 要写完整代码/报告内容，不允许用 ... 省略或 [完整内容] 等占位
+5. 如果 atomic_write_artifact 使用了 content_ref 参数（{"content_ref": {"step_id": "X", "field": "result"}}），但写入的内容是 diff/调试信息而非干净产出，说明引用的方式不对。应该改用 content="$step_X.parsed.artifact_content" 或确保 smart_llm_structured_action 的 structured 输出中的 artifact_content 字段包含干净内容。
+6. 如果 smart_llm_structured_action 步骤成功但产出内容是 diff/review 而非完整报告，说明生成步骤的 prompt 包含了不合适的上下文。需要在 smart_llm_structured_action 的 prompt 中要求 LLM 只输出完整内容，不要 diff 格式。
+7. 如果用户要求"绘图/图表/可视化"但当前计划缺失绘图步骤，必须插入 smart_llm_structured_action 步骤来生成图片。
+   - 绘图步骤的 prompt 要明确：用什么库(matplotlib)、画什么内容、保存为哪个 .png 文件
+   - 生成报告内容步骤的 prompt 必须要求用 ![](filename.png) 语法引用已生成的图片
+   - 确保 atomic_convert_md_to_pdf 在写入 .md 之后执行，且 .md 文件中的 ![](path) 引用与图片文件路径匹配

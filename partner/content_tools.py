@@ -1170,7 +1170,7 @@ def describe_tool_status(workspace: str = "") -> dict[str, Any]:
 def write_tool_status(workspace: str) -> None:
     if not workspace:
         return
-    user_dir = os.path.join(workspace, "user")
+    user_dir = os.path.join(workspace, "state", "user")
     os.makedirs(user_dir, exist_ok=True)
     status = describe_tool_status(workspace)
     lines = [

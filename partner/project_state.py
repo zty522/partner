@@ -13,6 +13,13 @@ import time as _time
 from datetime import datetime
 from typing import Optional
 
+from .workspace_layout import (
+    ensure_instance_layout,
+    legacy_project_dirs,
+    project_dir as canonical_project_dir,
+    working_files_dir,
+)
+
 logger = logging.getLogger(__name__)
 
 GENERIC_PROJECT_NAMES = {
@@ -282,14 +289,22 @@ def _extract_state_title(text: str) -> str:
 def resolve_project_name(workspace: str, preferred_name: Optional[str] = None) -> Optional[str]:
     """Resolve a stable, user-facing project name from workspace state."""
     preferred = simplify_project_query(preferred_name or "")
-    projects_dir = os.path.join(workspace, "20_records", "projects")
+    project_roots = [
+        os.path.join(workspace, "projects"),
+        os.path.join(workspace, "projects", "projects"),
+    ]
 
     candidates = []
-    if os.path.isdir(projects_dir):
+    seen_paths: set[str] = set()
+    for projects_dir in project_roots:
+        if not os.path.isdir(projects_dir):
+            continue
         for dirname in os.listdir(projects_dir):
             path = os.path.join(projects_dir, dirname)
-            if not os.path.isdir(path):
+            norm_path = os.path.abspath(path)
+            if not os.path.isdir(path) or norm_path in seen_paths:
                 continue
+            seen_paths.add(norm_path)
             state_path = os.path.join(path, "state.md")
             log_path = os.path.join(path, "log.md")
             state_text = _read_text(state_path)
@@ -334,7 +349,7 @@ def copy_external_data_to_workspace(source_path: str, workspace: str = None, tem
     Args:
         source_path: 源文件路径
         workspace: 实例工作目录。为 None 时返回原路径。
-        temp_dir: 实例内临时目录，默认 {workspace}/99_temp/inputs/
+        temp_dir: 实例内工作文件目录，默认 {workspace}/files/working/
 
     Returns:
         副本的路径（如果已在 workspace 内，则返回原路径）。
@@ -345,7 +360,8 @@ def copy_external_data_to_workspace(source_path: str, workspace: str = None, tem
         return source_path
 
     if temp_dir is None:
-        temp_dir = os.path.join(effective_workspace, "99_temp", "inputs")
+        ensure_instance_layout(effective_workspace)
+        temp_dir = working_files_dir(effective_workspace)
 
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -366,11 +382,45 @@ def copy_external_data_to_workspace(source_path: str, workspace: str = None, tem
 def get_project_dir(workspace: str, project_name: str) -> str:
     """获取项目状态目录。"""
     project_name = resolve_project_name(workspace, project_name) or _clean_project_name(project_name) or "未命名项目"
-    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in project_name).strip()
-    d = os.path.join(workspace, "20_records", "projects", safe_name)
-    os.makedirs(d, exist_ok=True)
+    ensure_instance_layout(workspace)
+    d = canonical_project_dir(workspace, project_name)
+    _copy_legacy_project_seed(workspace, project_name, d)
     _ensure_project_workspace_files(d, project_name)
     return d
+
+
+def _copy_legacy_project_seed(workspace: str, project_name: str, target_dir: str):
+    """Seed canonical project folders from legacy records without moving user files."""
+    marker = os.path.join(target_dir, ".legacy_seeded")
+    if os.path.exists(marker):
+        return
+    key_files = {
+        "state.md",
+        "exploration_log.md",
+        "log.md",
+        "project_brief.md",
+        "project_contract.json",
+        "memory_index.json",
+        "trace_detail.md",
+    }
+    copied = False
+    for legacy_dir in legacy_project_dirs(workspace, project_name):
+        if not os.path.isdir(legacy_dir) or os.path.abspath(legacy_dir) == os.path.abspath(target_dir):
+            continue
+        for name in key_files:
+            src = os.path.join(legacy_dir, name)
+            dst = os.path.join(target_dir, name)
+            if os.path.isfile(src) and not os.path.exists(dst):
+                try:
+                    shutil.copy2(src, dst)
+                    copied = True
+                except Exception:
+                    pass
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(datetime.now().isoformat() + ("\nseeded_from_legacy=true\n" if copied else "\n"))
+    except Exception:
+        pass
 
 
 def _ensure_project_workspace_files(project_dir: str, project_name: str):
@@ -441,7 +491,7 @@ def _ensure_project_workspace_files(project_dir: str, project_name: str):
     # changes behavior over time.
     workspace = _workspace_from_project_dir(project_dir)
     if workspace:
-        user_project_dir = os.path.join(workspace, "user", "projects", safe_project_name(project_name))
+        user_project_dir = os.path.join(workspace, "state", "user", "projects", safe_project_name(project_name))
         os.makedirs(user_project_dir, exist_ok=True)
         for filename, title in (
             ("research_journey.md", "Research Journey"),
@@ -463,11 +513,18 @@ def safe_project_name(project_name: str) -> str:
 
 
 def _workspace_from_project_dir(project_dir: str) -> str:
-    marker = os.path.join("20_records", "projects")
-    normalized = os.path.normpath(project_dir)
-    if marker not in normalized:
-        return ""
-    return normalized.split(marker, 1)[0].rstrip(os.sep)
+    parts = os.path.normpath(project_dir).split(os.sep)
+    # New layout: .../shared_projects/<safe_name>/
+    for idx, part in enumerate(parts):
+        if part == "shared_projects":
+            return os.sep.join(parts[:idx]) or os.sep
+    # Legacy: .../projects/<name>_<hash>/ (instance-local, now obsolete)
+    for idx, part in enumerate(parts):
+        if part == "projects":
+            if idx > 0 and parts[idx - 1] == "projects":
+                return os.sep.join(parts[: idx - 1]) or os.sep
+            return os.sep.join(parts[:idx]) or os.sep
+    return ""
 
 
 def get_state_path(workspace: str, project_name: str) -> str:
@@ -859,7 +916,7 @@ def _update_memory_index(workspace: str, project_name: str, parsed: dict):
 
 def get_active_path(workspace: str) -> str:
     """获取当前活跃项目标记文件路径。"""
-    d = os.path.join(workspace, "20_records")
+    d = os.path.join(workspace, "projects")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "active_project.txt")
 
@@ -949,6 +1006,9 @@ def recover_active_from_plan(workspace: str) -> Optional[str]:
                 logger.info(f"[State] 从 active_plan 恢复活跃项目: {resolved}")
             return get_active(workspace) or resolved
     if current and not is_generic_project_name(current):
+        current_status = get_project_status(workspace, current)
+        if current_status in {"waiting", "done", "archived"}:
+            return None
         return current
     return None
 
@@ -1004,7 +1064,26 @@ def _read_active_plan(workspace: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        # Auto-cleanup: stale plans with no phases and old heartbeat
+        status = data.get("status", "")
+        phases = data.get("phases", [])
+        if status in ("planning", "active") and not phases:
+            hb = data.get("last_heartbeat", "")
+            age = 9999
+            if hb:
+                try:
+                    hb_dt = datetime.fromisoformat(hb)
+                    now = datetime.now(hb_dt.tzinfo) if hb_dt.tzinfo else datetime.now()
+                    age = (now - hb_dt).total_seconds()
+                except Exception:
+                    pass
+            if age > 120:
+                data["status"] = "idle"
+                data["phases"] = []
+                _write_active_plan(workspace, data)
+        return data
     except Exception:
         return {}
 

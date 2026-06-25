@@ -91,7 +91,7 @@ def _project_dir(workspace: str, project: str) -> str:
 
 
 def _user_dir(workspace: str) -> str:
-    path = os.path.join(workspace, "user")
+    path = os.path.join(workspace, "state", "user")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -1319,7 +1319,7 @@ def _count_project_files(workspace: str, project: str) -> int:
 
 
 def _recent_runtime_tokens(workspace: str, limit: int = 120) -> int:
-    rows = _load_recent_jsonl(os.path.join(workspace, "logs", "agent_runs.jsonl"), limit=limit)
+    rows = _load_recent_jsonl(os.path.join(workspace, "state", "logs", "agent_runs.jsonl"), limit=limit)
     total = 0
     for row in rows:
         try:
@@ -1330,7 +1330,7 @@ def _recent_runtime_tokens(workspace: str, limit: int = 120) -> int:
 
 
 def _has_user_stage_report(workspace: str, project: str) -> bool:
-    report_dir = os.path.join(workspace, "user", "reports", _safe_name(project))
+    report_dir = os.path.join(workspace, "state", "user", "reports", _safe_name(project))
     if not os.path.isdir(report_dir):
         return False
     try:
@@ -1341,7 +1341,7 @@ def _has_user_stage_report(workspace: str, project: str) -> bool:
 
 
 def _has_showcase(workspace: str, project: str) -> bool:
-    show_dir = os.path.join(workspace, "user", "showcase", _safe_name(project))
+    show_dir = os.path.join(workspace, "state", "user", "showcase", _safe_name(project))
     return os.path.exists(os.path.join(show_dir, "README.md"))
 
 

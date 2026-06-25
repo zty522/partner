@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-research"
-version = "0.7.0"
+version = "1.0.0"
 description = "Partner - an event-driven AI companion for staged execution, memory, growth, and long-running work."
 readme = "README.md"
-license = "Apache-2.0"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.9"
 authors = [
     {name = "Partner Team"},
@@ -49,14 +49,16 @@ tts-cosyvoice = ["torchaudio>=2.0"]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
 desktop = ["PySide6>=6.7"]
 content = ["playwright>=1.40", "yt-dlp>=2024.12.0", "pillow>=10.0", "pytesseract>=0.3"]
+cytobridge = ["cytobridge-agent>=1.0.0"]
 # All optional dependencies
 all = [
-    "partner-research[wechat,qq,voice,content]",
+    "partner-research[wechat,qq,voice,content,cytobridge]",
 ]
 
 [project.scripts]
 partner = "partner.cli:main"
 partner-manager = "partner.manager:main"
+cytobridge-wrapper = "partner.agents.wrappers.cytobridge_wrapper:main"
 
 [project.urls]
 Homepage = "https://github.com/zty522/partner"
@@ -68,4 +70,4 @@ Issues = "https://github.com/zty522/partner/issues"
 include = ["partner*"]
 
 [tool.setuptools.package-data]
-partner = ["assets/*", "assets/icons/*"]
+partner = ["assets/*", "assets/icons/*", "agents/manifests/*.json"]

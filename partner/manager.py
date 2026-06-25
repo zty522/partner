@@ -38,6 +38,7 @@ from .instance_root import (
     resolve_instances_dir,
     resolve_partner_root,
 )
+from .workspace_layout import ensure_instance_layout
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ PARTNER_ROOT = resolve_partner_root()
 INSTANCES_DIR = resolve_instances_dir()
 GLOBAL_CONFIG_PATH = resolve_global_config_path()
 
-INSTANCE_SUBDIRS = ["00_config", "10_logs", "20_records", "99_temp"]
+INSTANCE_SUBDIRS = ["state/record", "projects", "99_temp"]
 PID_FILENAME = "instance.pid"
 LOG_FILENAME = "instance.log"
 
@@ -131,12 +132,12 @@ def pid_path(instance_id: str) -> Path:
 
 def log_path(instance_id: str) -> Path:
     """Return path to the log file for an instance."""
-    return instance_subdir(instance_id, "10_logs") / LOG_FILENAME
+    return instance_subdir(instance_id, "state/record") / LOG_FILENAME
 
 
 def qq_config_path(instance_id: str) -> Path:
-    """Return path to the QQ config file for an instance."""
-    return instance_subdir(instance_id, "00_config") / "qq_config.json"
+    """Return path to the QQ config file — unified at workspace_root/config/."""
+    return PARTNER_ROOT / "config" / "qq_config.json"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -336,6 +337,7 @@ def create_instance(instance_id: str, qq_config_src: Optional[str] = None) -> bo
     for sub in INSTANCE_SUBDIRS:
         (inst / sub).mkdir(parents=True, exist_ok=True)
         print(f"  Created  {sub}/")
+    ensure_instance_layout(str(inst))
 
     # QQ config: copy or prompt
     if qq_config_src:
@@ -454,7 +456,7 @@ def start_instance(instance_id: str) -> bool:
         print(f"  Cleaned stale PID for '{instance_id}'.")
 
     # Ensure log directory exists
-    log_dir = instance_subdir(instance_id, "10_logs")
+    log_dir = instance_subdir(instance_id, "state/record")
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Build command
@@ -861,16 +863,16 @@ def _get_idle_since(instance_id: str) -> Optional[float]:
     """读 idle_heartbeat.txt，返回空闲开始时间戳（秒）。
 
     检查多个可能的位置：
-    1. {workspace}/20_records/idle_heartbeat.txt
-    2. {workspace}/10_logs/idle_heartbeat.txt
+    1. {workspace}/projects/idle_heartbeat.txt
+    2. {workspace}/state/record/idle_heartbeat.txt
 
     Returns:
         float 时间戳，或 None（无 idle 标记）。
     """
     hb_paths = [
-        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "projects" / "idle_heartbeat.txt",
         instance_dir(instance_id) / "idle_heartbeat.txt",
-        instance_dir(instance_id) / "10_logs" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "state/record" / "idle_heartbeat.txt",
     ]
     for hb in hb_paths:
         if hb.exists():
@@ -909,7 +911,7 @@ def _check_idle_timeout(instance_id: str, max_idle_minutes: int = 60) -> bool:
 def _write_idle_marker(instance_id: str):
     """写入空闲标记，保持进程存活标记。"""
     paths = [
-        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "projects" / "idle_heartbeat.txt",
         instance_dir(instance_id) / "idle_heartbeat.txt",
     ]
     content = f"idle_since={time.time():.0f}"
@@ -924,7 +926,7 @@ def _write_idle_marker(instance_id: str):
 def _clear_idle_marker(instance_id: str):
     """清除空闲标记。"""
     paths = [
-        instance_dir(instance_id) / "20_records" / "idle_heartbeat.txt",
+        instance_dir(instance_id) / "projects" / "idle_heartbeat.txt",
         instance_dir(instance_id) / "idle_heartbeat.txt",
     ]
     for p in paths:
@@ -991,9 +993,9 @@ def status_watch(interval: float = 5.0):
                     # Read idle heartbeat
                     if status == STATUS_RUNNING:
                         hb_paths = [
-                            instance_dir(inst_id) / "20_records" / "idle_heartbeat.txt",
+                            instance_dir(inst_id) / "projects" / "idle_heartbeat.txt",
                             instance_dir(inst_id) / "idle_heartbeat.txt",
-                            instance_dir(inst_id) / "10_logs" / "idle_heartbeat.txt",
+                            instance_dir(inst_id) / "state/record" / "idle_heartbeat.txt",
                         ]
                         for hb in hb_paths:
                             if hb.exists():
@@ -1260,29 +1262,30 @@ def migrate_existing(workspace: Optional[str] = None) -> bool:
     dst.mkdir(parents=True, exist_ok=True)
     for sub in INSTANCE_SUBDIRS:
         (dst / sub).mkdir(parents=True, exist_ok=True)
+    ensure_instance_layout(str(dst))
 
     # Copy config files
-    config_src = src / "00_config"
+    config_src = src / "config"
     if config_src.exists() and config_src.is_dir():
-        shutil.copytree(str(config_src), str(dst / "00_config"), dirs_exist_ok=True)
+        shutil.copytree(str(config_src), str(dst / "config"), dirs_exist_ok=True)
         print(f"  Copied  00_config/")
 
     # Copy logs
     logs_src = src / "logs"
     if logs_src.exists() and logs_src.is_dir():
-        shutil.copytree(str(logs_src), str(dst / "10_logs"), dirs_exist_ok=True)
+        shutil.copytree(str(logs_src), str(dst / "state/record"), dirs_exist_ok=True)
         print(f"  Copied  logs/ → 10_logs/")
 
     # Copy records / state
     state_src = src / "state"
     if state_src.exists() and state_src.is_dir():
-        shutil.copytree(str(state_src), str(dst / "20_records"), dirs_exist_ok=True)
+        shutil.copytree(str(state_src), str(dst / "projects"), dirs_exist_ok=True)
         print(f"  Copied  state/ → 20_records/")
 
     # Also check for qq_config.json at workspace root
     qq_cfg_src = src / "qq_config.json"
     if qq_cfg_src.exists():
-        shutil.copy2(str(qq_cfg_src), str(dst / "00_config" / "qq_config.json"))
+        shutil.copy2(str(qq_cfg_src), str(dst / "config" / "qq_config.json"))
         print(f"  Copied  qq_config.json")
 
     print(f"{C_GREEN}Migration complete.{C_RESET}")

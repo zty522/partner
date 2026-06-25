@@ -1,0 +1,14 @@
+{
+  "name": "codex",
+  "version": "1.0.0",
+  "description": "OpenAI Codex CLI Agent，专注于代码生成和编辑",
+  "capabilities": ["coding", "code_review", "refactoring"],
+  "input_formats": ["text", "file"],
+  "output_formats": ["text", "file"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "codex"
+  },
+  "timeout": 600,
+  "health_check_cmd": "codex --version"
+}

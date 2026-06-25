@@ -18,7 +18,7 @@ class Recorder:
 
     def __init__(self, workspace: str):
         self._workspace = workspace
-        self._records_dir = os.path.join(workspace, "20_records")
+        self._records_dir = os.path.join(workspace, "projects")
         self._projects_dir = os.path.join(self._records_dir, "projects")
         self._archives_dir = os.path.join(self._records_dir, "archived_plans")
         self._metrics_dir = os.path.join(self._records_dir, "metrics")

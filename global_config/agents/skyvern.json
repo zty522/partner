@@ -1,0 +1,22 @@
+{
+  "name": "skyvern",
+  "version": "1.0.0",
+  "description": "Skyvern — enterprise workflow automation agent for web automation, browser automation, workflow automation, and data extraction",
+  "capabilities": [
+    "web_automation",
+    "workflow_automation",
+    "browser_automation",
+    "data_extraction"
+  ],
+  "input_formats": ["json", "yaml", "txt", "html", "csv"],
+  "output_formats": ["json", "csv", "txt", "html", "pdf"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "skyvern",
+    "args": ["--input", "{input}", "--output", "{output}"],
+    "category": "specialized"
+  },
+  "timeout": 1800,
+  "health_check_cmd": "which skyvern",
+  "notes": "Enterprise tool. May need API key for full usage."
+}

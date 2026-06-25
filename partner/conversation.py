@@ -15,6 +15,7 @@ from .router import ConversationRouter, ParsedQuery
 from .dialog import DialogHistory, ContextManager
 from .autocheck import ProactiveNotifier
 from .user_prefs import UserPreferenceStore
+from .workspace_layout import dialog_history_path, ensure_instance_layout
 
 
 class ConversationEngine:
@@ -35,7 +36,9 @@ class ConversationEngine:
         state_dir = os.path.join(workspace, "state") if workspace else None
         if state_dir:
             os.makedirs(state_dir, exist_ok=True)
-        history_path = os.path.join(state_dir, "dialog_history.jsonl") if state_dir else None
+        if workspace:
+            ensure_instance_layout(workspace)
+        history_path = dialog_history_path(workspace) if workspace else None
         self.dialog_history = DialogHistory(history_path)
         self.context = ContextManager(history_path)
 

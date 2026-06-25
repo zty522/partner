@@ -1,0 +1,35 @@
+原始目标：{root_goal}
+缺失项：{missing_items}
+当前计划步骤列表（JSON 格式）：{current_plan_steps}
+已完成步骤历史：{history}
+当前已尝试执行次数：{attempt_count}
+
+## 规则
+
+根据缺失项和历史执行结果，选择以下三种输出类型之一：
+
+### 输出类型 1: insert/delete/modify 补丁（replan）
+当问题可以通过调整步骤解决时，输出 JSON 数组，每个元素包含：
+- "action": "insert" | "delete" | "modify"
+- "target_step_id": 要操作的目标步骤ID（对 insert 可为 null）
+- "position": "before" | "after" | "replace"
+- "new_step": 新步骤的完整定义（包含 id, event_type, parameters, depends_on）
+
+示例：
+[
+  {"action": "insert", "position": "after", "target_step_id": "step_2", "new_step": {"id": "step_2_1", "event_type": "call_agent_skill", "parameters": {"skill": "hermes_search_papers", "inputs": {"query": "..."}}, "depends_on": []}}
+]
+
+### 输出类型 2: ask_user（询问用户）—— 当所有步骤失败且需要用户介入时
+当所有执行都失败了，且原因是环境/配置问题（如 API key 无效、CLI 未安装、文件路径错误）时，
+输出 {"action": "ask_user", "question": "用中文向用户清晰描述问题和可行的解决方向", "suggestions": ["方案1", "方案2"], "requires_input": "用户需要提供的信息描述"}
+
+### 输出类型 3: report_failure（报告失败）—— 当所有路径都尝试过且无法解决时
+输出 {"action": "report_failure", "summary": "用中文向用户总结已完成的工作和失败原因", "root_causes": ["根因列表"], "suggestions": ["用户可以尝试的解决方向"]}
+
+### 重试次数规则
+- 如果 attempt_count >= 2（已经尝试了 2 次或更多），且每次都全部失败，禁止再输出补丁
+- 必须选择 ask_user 或 report_failure
+
+只输出 JSON，不要其他解释。
+如果没有需要补充的步骤且所有步骤都已成功，输出空数组 []。

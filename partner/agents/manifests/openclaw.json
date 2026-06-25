@@ -1,0 +1,14 @@
+{
+  "name": "openclaw",
+  "version": "1.0.0",
+  "description": "开源命令行 Agent",
+  "capabilities": ["general_purpose", "coding"],
+  "input_formats": ["text"],
+  "output_formats": ["text"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "openclaw"
+  },
+  "timeout": 300,
+  "health_check_cmd": "openclaw --version"
+}

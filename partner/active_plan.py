@@ -108,7 +108,25 @@ class ActivePlanManager:
         try:
             with open(self.path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            return ActivePlan.from_dict(data)
+            plan = ActivePlan.from_dict(data)
+            # Auto-cleanup: if plan is "active"/"planning" but has no phases
+            # and the heartbeat is >120s old, reset to idle (stale/zombie plan)
+            if plan.status in ("planning", "active") and not plan.phases:
+                hb = plan.last_heartbeat
+                if hb:
+                    try:
+                        hb_dt = datetime.fromisoformat(hb)
+                        now = datetime.now(hb_dt.tzinfo) if hb_dt.tzinfo else datetime.now()
+                        age = (now - hb_dt).total_seconds()
+                    except Exception:
+                        age = 9999
+                else:
+                    age = 9999
+                if age > 120:
+                    plan.status = "idle"
+                    plan.phases = []
+                    self.save()
+            return plan
         except (FileNotFoundError, json.JSONDecodeError):
             return ActivePlan()
 

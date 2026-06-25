@@ -1,0 +1,14 @@
+用户原始目标：{root_goal}
+
+验收标准：
+{acceptance_criteria}
+
+当前产物摘要：
+- 文件列表及大小：{file_list}
+- 关键内容样本：{content_sample}
+
+请判断当前产物是否满足所有验收标准。
+如果满足，输出 JSON：{"satisfied": true, "reason": "..."}
+如果不满足，输出 JSON：{"satisfied": false, "missing": ["具体缺失项1", "缺失项2"], "reason": "为什么不满足的简要说明"}
+
+只输出 JSON，不要额外解释。

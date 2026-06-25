@@ -1,0 +1,33 @@
+{
+  "name": "cytobridge",
+  "version": "1.0.0",
+  "description": "单细胞转录组轨迹推断与细胞动力学建模专用 Agent，支持 h5ad 数据的完整分析管线 (https://github.com/JackkWangzh/CytoBridge-agent)",
+  "capabilities": [
+    "trajectory_inference",
+    "cell_dynamics",
+    "differentiation_analysis",
+    "single_cell_rna",
+    "velocity_estimation",
+    "fate_mapping",
+    "driver_gene_identification"
+  ],
+  "input_formats": ["h5ad", "loom", "csv", "mtx"],
+  "output_formats": ["html", "md", "pdf", "png", "h5ad", "json"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "cytobridge-wrapper",
+    "subcommand": "",
+    "category": "specialized",
+    "args": [
+      "--input", "{input}",
+      "-q", "{question}",
+      "-o", "{output}",
+      "--device", "{device}"
+    ],
+    "timeout": 3600,
+    "description_for_planner": "【专用 Agent】单细胞数据分析专用。输入 h5ad 文件，自动做轨迹推断、细胞动力学建模、分化分析、驱动基因鉴定。参数：input=h5ad文件路径, output=输出目录, question=科学问题描述, device=cuda/cpu"
+  },
+  "timeout": 3600,
+  "health_check_cmd": "cytobridge-wrapper --help",
+  "notes": "Wrapper living in partner/agents/wrappers/cytobridge_wrapper.py. Installed via 'pip install partner-research[cytobridge]' or 'pip install cytobridge-agent'."
+}

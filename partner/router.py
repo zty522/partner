@@ -1,145 +1,164 @@
-"""Conversation Router - legacy direct-chat router.
+"""Entry router — classifies tasks as direct_llm or batch_plan.
 
-The QQ runtime does not use this module for event selection. It is kept for
-GUI/core compatibility and returns a neutral ParsedQuery so higher-level LLM
-selectors own intent decisions.
+Only two routing decisions:
+  - direct_llm: simple Q&A, greetings, trivial tasks — answered directly without planning
+  - batch_plan: everything else — goes through full batch planning pipeline
+
+Ollama is NOT a routing type. It is an execution-layer option used inside
+both paths when appropriate.
 """
 
-from dataclasses import dataclass
-from typing import Optional, Dict, Callable
-from enum import Enum
+from __future__ import annotations
+import logging
+import os
+import re
+import yaml
+from typing import Any
 
-from .outbound_policy import UNAVAILABLE_NOTICE
+logger = logging.getLogger(__name__)
 
-
-class Intent(Enum):
-    """User intent classification."""
-    GREETING = "greeting"
-    STATUS = "status"
-    PROGRESS = "progress"
-    KNOWLEDGE = "knowledge"
-    DIRECTION = "direction"
-    DETAIL = "detail"
-    TASK_ADD = "task_add"
-    TASK_CANCEL = "task_cancel"
-    WORKSPACE = "workspace"
-    HELP = "help"
-    GENERAL = "general"
-
-
-@dataclass
-class ParsedQuery:
-    """Result of intent parsing."""
-    intent: Intent
-    confidence: float
-    query: str
-    topic: Optional[str] = None
-    params: Optional[Dict] = None
-
+# ── Backward-compatible ConversationRouter stub ─────────────────────
+# The new routing logic is in task_router.py.
+# This stub keeps conversation.py working without refactoring.
 
 class ConversationRouter:
-    """Routes legacy direct-chat messages through an optional LLM callable."""
+    """Backward-compatible stub.
 
-    def __init__(self, journal, knowledge, task_queue, state):
-        self.journal = journal
-        self.knowledge = knowledge
-        self.task_queue = task_queue
-        self.state = state
-        # LLM callable: fn(prompt: str) -> str | None
-        # If None, _minimal_fallback() is used instead
-        self.llm_fn: Optional[Callable[[str], Optional[str]]] = None
+    The original ConversationRouter has been replaced by task_router.py.
+    This class preserves the old interface for conversation.py.
+    """
+    def __init__(self, *args, **kwargs):
+        logger.debug("ConversationRouter stub used")
 
-    def route(self, query: str) -> str:
-        """Classify intent, build an LLM prompt from it, call LLM for response.
+    def parse_intent(self, message: str) -> "ParsedQuery":
+        return ParsedQuery(text=message, intent="")
 
-        If LLM is unavailable, returns a minimal 1-line fallback.
-        """
-        parsed = self.parse_intent(query)
+    def route(self, message: str, *args, **kwargs) -> str:
+        from .task_router import route as task_route
+        return task_route(message)
 
-        # Try LLM response first
-        if self.llm_fn:
-            prompt = self._build_prompt(parsed)
+
+class ParsedQuery:
+    """Minimal ParsedQuery stub for backward compatibility."""
+    def __init__(self, text: str = "", intent: str = ""):
+        self.text = text
+        self.intent = intent
+
+from .llm.ollama_probe import is_task_suitable_for_ollama, is_ollama_available
+
+logger = logging.getLogger(__name__)
+
+# ── Config loading ────────────────────────────────────────────────────────
+
+
+def load_routing_config() -> dict:
+    """Load routing rules from config, with fallback defaults."""
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "..", "configs", "routing_rules.yaml"),
+        os.path.expanduser("~/.partner/routing_rules.yaml"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
             try:
-                reply = self.llm_fn(prompt)
-                if reply:
-                    return reply
-            except Exception:
-                pass
+                with open(path, "r", encoding="utf-8") as f:
+                    return yaml.safe_load(f) or {}
+            except Exception as exc:
+                logger.debug("[ROUTER] failed to load %s: %s", path, exc)
+    return {
+        "direct_llm": {"patterns": [], "max_input_length": 100, "allow_ollama_fallback": True},
+        "batch_plan": {"default": True},
+    }
 
-        # Minimal fallback (1 line, not a template)
-        return self._minimal_fallback(parsed)
 
-    def _build_prompt(self, parsed: ParsedQuery) -> str:
-        """Build an LLM prompt from the parsed intent + available state data.
+# ── Routing ────────────────────────────────────────────────────────────────
 
-        The prompt is structured: role → context → state → query → instructions.
-        No hardcoded response templates — the LLM generates naturally.
-        """
-        lines = ["你是 Partner，一个自主研究的 AI 伙伴。用中文简短自然地回复。\n"]
 
-        # Context: recent activity
-        if self.journal:
-            recent = self.journal.get_recent(3)
-            if recent:
-                lines.append("最近活动:")
-                for e in recent:
-                    lines.append(f"- {e.timestamp[:16]}: {e.task_title}")
-                lines.append("")
+def route(user_message: str) -> str:
+    """Route a user message to direct_llm or batch_plan.
 
-        # Context: stats
-        if self.state:
-            stats = self.state.load_stats()
-            cycles = stats.get("total_cycles", 0)
-            completed = stats.get("total_tasks_completed", 0)
-            if cycles or completed:
-                lines.append(f"已完成 {cycles} 个研究周期，{completed} 个任务。")
+    Returns:
+        "direct_llm" — simple task, reply directly without planning
+        "batch_plan" — complex task, needs multi-step planning
+    """
+    config = load_routing_config()
+    msg = (user_message or "").strip()
+    if not msg:
+        return "batch_plan"
 
-        # Context: knowledge count
-        if self.knowledge:
-            kb_stats = self.knowledge.stats()
-            if kb_stats.get("total", 0) > 0:
-                lines.append(f"知识库 {kb_stats['total']} 条。")
-            lines.append("")
+    # Check direct_llm patterns first (simple/greeting tasks)
+    direct_cfg = config.get("direct_llm", {})
+    patterns = direct_cfg.get("patterns", [])
+    if isinstance(patterns, list):
+        for pattern in patterns:
+            try:
+                if re.search(pattern, msg, re.I):
+                    max_len = int(direct_cfg.get("max_input_length", 200))
+                    if len(msg) <= max_len:
+                        logger.info("[ROUTER] direct_llm: matched pattern=%s", pattern)
+                        return "direct_llm"
+            except re.error:
+                continue
 
-        # Intent + user message
-        intent_labels = {
-            Intent.GREETING: "问候",
-            Intent.STATUS: "询问进展",
-            Intent.KNOWLEDGE: "询问知识",
-            Intent.DIRECTION: "改变方向",
-            Intent.DETAIL: "请求详情",
-            Intent.TASK_ADD: "添加任务",
-            Intent.TASK_CANCEL: "取消任务",
-            Intent.HELP: "寻求帮助",
-            Intent.GENERAL: "日常对话",
-        }
-        intent_label = intent_labels.get(parsed.intent, "日常对话")
-        lines.append(f"[用户意图: {intent_label}]")
-        lines.append(f"[用户消息] {parsed.query}")
-        if parsed.topic:
-            lines.append(f"[话题] {parsed.topic}")
-        lines.append("")
+    # Check batch_plan patterns (complex/multi-step tasks)
+    batch_cfg = config.get("batch_plan", {})
+    patterns = batch_cfg.get("patterns", [])
+    if isinstance(patterns, list):
+        for pattern in patterns:
+            try:
+                if re.search(pattern, msg, re.I):
+                    logger.info("[ROUTER] batch_plan: matched pattern=%s", pattern)
+                    return "batch_plan"
+            except re.error:
+                continue
 
-        # Instructions
-        lines.append("请直接回复用户。不要用markdown，不要用**加粗**。自然简短即可。")
-        if parsed.intent == Intent.STATUS:
-            lines.append("给出简短的进展总结，提及最近完成的任务和知识库变化。")
-        elif parsed.intent == Intent.KNOWLEDGE:
-            lines.append(f"如果知识库中有关于「{parsed.topic or parsed.query}」的信息，简要回答；没有就说还没研究过这个方向。")
-        elif parsed.intent == Intent.HELP:
-            lines.append("说明你可以帮用户做什么：推进研究、查看进展、探索新方向等。")
-        elif parsed.intent == Intent.GREETING:
-            lines.append("简短打招呼，询问需要什么帮助。")
-        elif parsed.intent == Intent.DETAIL:
-            lines.append("如果知识库有相关详情，简要介绍关键点。")
+    # Default
+    if batch_cfg.get("default", True):
+        return "batch_plan"
+    return "direct_llm"
 
-        return "\n".join(lines)
 
-    def _minimal_fallback(self, parsed: ParsedQuery) -> str:
-        """Only fallback when the LLM is unavailable."""
-        return UNAVAILABLE_NOTICE
+# ── Task classification ───────────────────────────────────────────────────
 
-    def parse_intent(self, query: str) -> ParsedQuery:
-        """Return a neutral intent; runtime selection belongs to LLM selectors."""
-        query_stripped = query.strip()
-        return ParsedQuery(intent=Intent.GENERAL, confidence=0.5, query=query_stripped)
+
+def classify(message: str) -> dict:
+    """Full classification: routing + metadata for execution.
+
+    Returns dict with:
+      - routing: "direct_llm" | "batch_plan"
+      - use_ollama: bool (whether Ollama should be used if available)
+      - task_type: str (general category hint)
+    """
+    routing = route(message)
+    use_ollama = False
+
+    if routing == "direct_llm":
+        config = load_routing_config()
+        allow_fallback = config.get("direct_llm", {}).get("allow_ollama_fallback", True)
+        if allow_fallback and is_ollama_available() and is_task_suitable_for_ollama(message):
+            use_ollama = True
+
+    # Simple task type hints
+    msg_lower = message.lower()
+    task_type = "general"
+    if re.search(r"(RNA|rna|基因|转录|差异表达|富集|代谢)", msg_lower):
+        task_type = "bioinfo"
+    elif re.search(r"(天气|weather|气温|降水)", msg_lower):
+        task_type = "weather"
+    elif re.search(r"(股票|stock|股价|tsla)", msg_lower):
+        task_type = "finance"
+    elif re.search(r"(翻译|translate)", msg_lower):
+        task_type = "translation"
+    elif re.search(r"(你好|hello|hi|hey|谢谢|thanks)", msg_lower):
+        task_type = "greeting"
+    elif re.search(r"(解释|什么是|说明|定义)", msg_lower):
+        task_type = "explanation"
+    elif re.search(r"(推荐|餐厅|景点|地方)", msg_lower):
+        task_type = "recommendation"
+    elif re.search(r"(报告|report|分析|research|研究|整理)", msg_lower):
+        task_type = "research"
+
+    return {
+        "routing": routing,
+        "use_ollama": use_ollama,
+        "task_type": task_type,
+    }

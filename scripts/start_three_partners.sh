@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT="/mnt/e/work/partner"
 WORK_ROOT="/mnt/e/work/partner_workspace/instances"
 PYTHON_BIN="/home/os/miniconda3/bin/python3"
-INSTANCE_IDS=("01" "03" "04")
-LAUNCH_LOG="/mnt/e/work/partner_workspace/start_three_partners.log"
+# Only instance 03 — instances 01 and 04 were removed
+INSTANCE_IDS=("03")
+LAUNCH_LOG="/mnt/e/work/partner_workspace/start_partner.log"
 
 log() {
   local ts
@@ -16,11 +17,11 @@ log() {
 start_instance() {
   local instance_id="$1"
   local workspace="$WORK_ROOT/$instance_id"
-  local log_file="$workspace/10_logs/instance.log"
+  local log_file="$workspace/state/record/instance.log"
   local lock_file="$workspace/state/qq_bridge.lock"
   local pid_file="$workspace/instance.pid"
 
-  mkdir -p "$workspace/10_logs" "$workspace/state"
+  mkdir -p "$workspace/state/record" "$workspace/state"
 
   if pgrep -af "python3? -m partner --instance-id ${instance_id} --workspace ${workspace}" >/dev/null 2>&1; then
     log "[skip] Partner ${instance_id} already running"
@@ -47,7 +48,7 @@ start_instance() {
 
 cd "$ROOT"
 mkdir -p "$(dirname "$LAUNCH_LOG")"
-log "===== start_three_partners begin ====="
+log "===== start_partner begin ====="
 
 for instance_id in "${INSTANCE_IDS[@]}"; do
   start_instance "$instance_id"

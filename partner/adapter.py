@@ -150,7 +150,7 @@ def _env_or_config(name: str, config: dict, key: str, default: str) -> str:
     return str(raw)
 
 
-def _project_timeout_sec(workspace: str, default: int = 1200) -> Optional[int]:
+def _project_timeout_sec(workspace: str, default: int = 240) -> Optional[int]:
     """Soft cap for a single agent project turn.
 
     Partner should keep working indefinitely across turns, but one stuck
@@ -181,6 +181,68 @@ def _env_int(name: str, default: int) -> int:
         return int(float(os.getenv(name, "").strip()))
     except Exception:
         return default
+
+
+def _env_optional_timeout(name: str, default: int | None) -> int | None:
+    value = os.getenv(name)
+    if value is None or str(value).strip() == "":
+        return default
+    text = str(value).strip().lower()
+    if text in {"0", "none", "no", "off", "false", "disabled", "unlimited"}:
+        return None
+    try:
+        parsed = int(float(text))
+    except Exception:
+        return default
+    return None if parsed <= 0 else parsed
+
+
+def _agent_optional_timeout(workspace: str, env_name: str, config_key: str, default: int | None) -> int | None:
+    value = os.getenv(env_name)
+    if value is None or str(value).strip() == "":
+        value = _load_agent_config(workspace).get(config_key, default)
+    text = str(value).strip().lower()
+    if text in {"0", "none", "no", "off", "false", "disabled", "unlimited"}:
+        return None
+    try:
+        parsed = int(float(text))
+    except Exception:
+        return default
+    return None if parsed <= 0 else parsed
+
+
+def _agent_failover_config(workspace: str) -> dict:
+    config = _load_agent_config(workspace).get("failover", {})
+    return config if isinstance(config, dict) else {}
+
+
+def _agent_failed(reply: str) -> bool:
+    if not reply:
+        return True
+    text = str(reply).strip()
+    if text == USER_FRIENDLY_PROGRESS_REPLY:
+        return True
+    failure_markers = (
+        "backend_not_available",
+        "executable not found",
+        "returned no usable output",
+        "timeout waiting",
+    )
+    return any(marker in text for marker in failure_markers)
+
+
+def _env_optional_float_timeout(name: str, default: float | None) -> float | None:
+    value = os.getenv(name)
+    if value is None or str(value).strip() == "":
+        return default
+    text = str(value).strip().lower()
+    if text in {"0", "none", "no", "off", "false", "disabled", "unlimited"}:
+        return None
+    try:
+        parsed = float(text)
+    except Exception:
+        return default
+    return None if parsed <= 0 else parsed
 
 
 @dataclass
@@ -242,7 +304,22 @@ class AgentAdapter(ABC):
 
 class HermesAdapter(AgentAdapter):
     """Adapter for Hermes Agent via cronjob/subprocess."""
-    
+
+    def _resolve_model(self) -> str:
+        """Resolve the model name, preferring explicit config then partner config."""
+        if self.model:
+            return self.model
+        try:
+            from .config import load_partner_config_data
+            data = load_partner_config_data(self.workspace)
+            agent = data.get("agent", {}) if isinstance(data.get("agent"), dict) else {}
+            m = str(agent.get("model") or "").strip()
+            if m:
+                return m
+        except Exception:
+            pass
+        return ""
+
     def __init__(self, workspace_path: str, model: Optional[str] = None,
                  provider: Optional[str] = None):
         self.workspace = workspace_path
@@ -252,7 +329,7 @@ class HermesAdapter(AgentAdapter):
     def _log_chat_attempt(self, payload: dict):
         """Persist Hermes chat attempt metadata for timeout debugging."""
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "hermes_chat.jsonl")
             with open(log_path, "a", encoding="utf-8") as f:
@@ -265,7 +342,7 @@ class HermesAdapter(AgentAdapter):
     def _log_agent_run(self, payload: dict):
         """Persist normalized per-call runtime metrics."""
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "agent_runs.jsonl")
             row = {
@@ -369,7 +446,19 @@ class HermesAdapter(AgentAdapter):
         # makes Hermes heavier over multi-day runs.
         configured = os.getenv("PARTNER_HERMES_RESUME_PURPOSES", "")
         purposes = {p.strip() for p in configured.split(",") if p.strip()}
-        return purpose in purposes or "*" in purposes
+        if purpose not in purposes and "*" not in purposes:
+            return False
+        # Check staleness: don't resume sessions older than 1 hour
+        session_path = self._session_path(purpose)
+        try:
+            age = time.time() - os.path.getmtime(session_path)
+            if age > 3600:  # 1 hour
+                logger.info(f"[SESSION] stale session for {purpose}, age={age:.0f}s > 1h, clearing")
+                self._clear_session_id(purpose)
+                return False
+        except OSError:
+            return False
+        return True
 
     @staticmethod
     def _extract_session_id(text: str) -> str:
@@ -410,6 +499,9 @@ class HermesAdapter(AgentAdapter):
                 continue
             if re.match(r"(?i)^Context:\s*\d+\s+msgs,\s*~?[\d,]+\s+tokens", stripped):
                 continue
+            # Suppress Hermes internal model normalization warning
+            if re.match(r"(?i)^.*⚠️?\s*Normalized model\s+.*to\s+.*for\s+.*", stripped):
+                continue
             lines.append(line)
         return "\n".join(lines).strip()
 
@@ -429,6 +521,12 @@ class HermesAdapter(AgentAdapter):
 
     def _lean_mode_enabled(self) -> bool:
         return _env_flag("PARTNER_HERMES_LEAN_MODE", True)
+
+    def _native_home_enabled(self) -> bool:
+        # Hermes is already a configured local CLI agent. By default Partner
+        # should call that exact installation/config instead of creating a
+        # shadow HOME with stale model settings.
+        return _env_flag("PARTNER_HERMES_USE_NATIVE_HOME", True)
 
     def _prune_hermes_runtime(self, hermes_home: str) -> None:
         """Keep Hermes as a lean execution engine.
@@ -503,12 +601,9 @@ class HermesAdapter(AgentAdapter):
             pass
 
     def _build_hermes_env(self) -> dict:
-        """Give Hermes a writable per-instance home under the workspace."""
+        """Build a clean subprocess environment for Hermes CLI."""
         env = os.environ.copy()
         executable = self._hermes_executable()
-        hermes_home = os.path.join(self.workspace, "system", "hermes_home")
-        hermes_logs = os.path.join(hermes_home, "logs")
-        os.makedirs(hermes_logs, exist_ok=True)
 
         # A frozen Windows build can inherit Python/PyInstaller variables from
         # Partner.exe. Hermes owns its own Python venv; leaking Python 3.14
@@ -544,6 +639,27 @@ class HermesAdapter(AgentAdapter):
                 ]
             )
         env["PATH"] = os.pathsep.join([p for p in hermes_path_prefix + cleaned_path if p])
+        if self._native_home_enabled():
+            try:
+                from .agent_config_sync import apply_workspace_hermes_config
+
+                ok, msg = apply_workspace_hermes_config(self.workspace)
+                if not ok:
+                    logger.warning("[HermesAdapter] failed to apply workspace Hermes config: %s", msg)
+            except Exception as exc:
+                logger.debug("[HermesAdapter] workspace Hermes config sync skipped: %s", exc)
+            env.pop("HERMES_HOME", None)
+            env.pop("XDG_STATE_HOME", None)
+            env.pop("XDG_CACHE_HOME", None)
+            env.pop("XDG_CONFIG_HOME", None)
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+            logger.debug("[HermesAdapter] using native Hermes HOME/config for workspace=%s", self.workspace)
+            return env
+
+        hermes_home = os.path.join(self.workspace, "system", "hermes_home")
+        hermes_logs = os.path.join(hermes_home, "logs")
+        os.makedirs(hermes_logs, exist_ok=True)
         env["HOME"] = hermes_home
         env["HERMES_HOME"] = hermes_home
         env["XDG_STATE_HOME"] = os.path.join(hermes_home, ".local", "state")
@@ -675,11 +791,80 @@ class HermesAdapter(AgentAdapter):
         
         # For MVP, return a placeholder - in production this would invoke hermes
         return "Task queued for execution by Hermes agent."
-    
+
+    def _resolve_tools_for_purpose(self, purpose: str) -> str:
+        """Resolve the toolset string for a given chat purpose.
+
+        Uses environment variable overrides:
+          PARTNER_HERMES_{PURPOSE}_TOOLS (e.g. PARTNER_HERMES_ACTION_TOOLS)
+        Falls back to the default: "terminal,file,web"
+        """
+        import os
+        env_key = f"PARTNER_HERMES_{purpose.upper()}_TOOLS"
+        override = os.environ.get(env_key, "")
+        if override:
+            logger.debug("[HermesAdapter] using env override %s=%s for purpose=%s", env_key, override, purpose)
+            return override
+        return "terminal,file,web"
+
+    def _add_purpose_flags(self, cmd: list[str], purpose: str) -> None:
+        """Add purpose-specific CLI flags to cmd (used for Ollama fallback rebuild)."""
+        if purpose == "classify":
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "interaction":
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "batch_plan":
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "project":
+            cmd.extend(["-t", self._resolve_tools_for_purpose("project"), "--ignore-rules"])
+        elif purpose == "action":
+            cmd.extend(["-t", self._resolve_tools_for_purpose("action"), "--ignore-rules"])
+        elif purpose == "action_think":
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "report":
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "direct_reply":
+            cmd.extend(["-t", "terminal,file,web", "--ignore-rules", "--max-turns", "2"])
+            self._clear_session_id(purpose)
+            import os as _os
+            _os.environ.setdefault("PARTNER_HERMES_USE_NATIVE_HOME", "true")
+            del _os
+
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         """Chat via hermes subprocess."""
         import subprocess
         import time
+
+        # Load timeout from external_calls.yaml config
+        def _load_per_event_timeout(purpose: str) -> int | None:
+            try:
+                from .harness_core.robust_executor import load_harness_config
+
+                config = load_harness_config(self.workspace)
+                external = config.get("external_calls", {})
+                per_event = external.get("per_event", {})
+                event_map = {
+                    "action": "agent_call",
+                    "classify": "classify",
+                    "interaction": "interaction",
+                    "batch_plan": "batch_planner",
+                    "project": "agent_call",
+                    "action_think": "classify",
+                    "direct_reply": "direct_reply",
+                    "report": "report",
+                }
+                config_key = event_map.get(purpose)
+                if config_key and config_key in per_event:
+                    raw = per_event[config_key].get("timeout")
+                    if raw is not None:
+                        return int(raw)
+                # Fallback to global default
+                global_timeout = external.get("timeout")
+                if global_timeout is not None:
+                    return int(global_timeout)
+            except Exception:
+                pass
+            return None
 
         cmd = [self._hermes_executable(), "chat", "-q", message, "-Q"]
         session_id = self._read_session_id(purpose)
@@ -689,54 +874,96 @@ class HermesAdapter(AgentAdapter):
             cmd.extend(["-m", self.model])
         if self.provider:
             cmd.extend(["--provider", self.provider])
+        # Ollama routing for lightweight tasks — use configured model but with no agent tools
+        _ollama_env = {}
+        if purpose in ("classify", "action_think", "report"):
+            _ollama_env["OPENAI_BASE_URL"] = "http://localhost:11434/v1"
+            _ollama_env["OPENAI_API_KEY"] = "ollama"
+            # Remove any purpose-specific model override — use the adapter's configured model
+            # (set by self.model / self.provider above), just with restricted tools.
+            # The old hardcoded -m qwen2.5:7b --provider ollama caused "context window
+            # too small (32K vs 64K minimum)" errors. Let Hermes choose the right model.
         if purpose == "classify":
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
         elif purpose == "interaction":
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "batch_plan":
+            # Batch planner needs lightweight single-turn, no tools
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
         elif purpose == "project":
             # project 需要 terminal/file/web 工具来实际执行代码和操作文件
-            cmd.extend(["-t", "terminal,file,web", "--ignore-rules"])
+            cmd.extend(["-t", self._resolve_tools_for_purpose("project"), "--ignore-rules"])
         elif purpose == "action":
             # action event 也需要真实工具，但不能继承长期 project 的超长超时。
-            cmd.extend(["-t", "terminal,file,web", "--ignore-rules"])
+            cmd.extend(["-t", self._resolve_tools_for_purpose("action"), "--ignore-rules"])
         elif purpose == "action_think":
             # Thinking-only events should not start terminal/file/web tool chains.
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
         elif purpose == "report":
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose == "direct_reply":
+            # Fast path: two turns for: propose tool call -> execute -> respond
+            cmd.extend(["-t", "terminal,file,web", "--ignore-rules", "--max-turns", "2"])
+            # Clear any stale session to avoid resumption overhead
+            self._clear_session_id(purpose)
+            # Force native Hermes home for web search capabilities
+            import os as _os
+            _os.environ.setdefault("PARTNER_HERMES_USE_NATIVE_HOME", "true")
+            del _os
 
-        timeout_sec = 120
+        # Always pass model flag explicitly to avoid default model confusion
+        model = self._resolve_model()
+        if model:
+            has_model = any(cmd[i] == "-m" for i in range(len(cmd) - 1))
+            if not has_model:
+                cmd.extend(["-m", model])
+
+        timeout_sec = _load_per_event_timeout(purpose)
         max_retries = 2
-        if purpose == "classify":
-            timeout_sec = 45
+        if timeout_sec is None:
+            # Fallback to env vars (preserving backward compatibility)
+            if purpose == "classify":
+                timeout_sec = _env_optional_timeout("PARTNER_CLASSIFY_TIMEOUT_SEC", None)
+                max_retries = 0
+            elif purpose == "interaction":
+                timeout_sec = _env_optional_timeout("PARTNER_INTERACTION_TIMEOUT_SEC", None)
+                max_retries = 0
+            elif purpose == "project":
+                timeout_sec = _project_timeout_sec(self.workspace)
+                max_retries = 0
+            elif purpose == "action":
+                timeout_sec = _env_optional_timeout("PARTNER_ACTION_AGENT_TIMEOUT_SEC", None)
+                max_retries = 0
+            elif purpose == "action_think":
+                timeout_sec = _env_optional_timeout("PARTNER_ACTION_THINK_TIMEOUT_SEC", None)
+                max_retries = 0
+            elif purpose == "report":
+                timeout_sec = _env_optional_timeout("PARTNER_REPORT_TIMEOUT_SEC", None)
+                max_retries = 0
+        else:
+            # When config provides the timeout, no retries
             max_retries = 0
-        elif purpose == "interaction":
-            timeout_sec = 90
-            max_retries = 0
-        elif purpose == "project":
-            timeout_sec = _project_timeout_sec(self.workspace)
-            max_retries = 0
-        elif purpose == "action":
-            timeout_sec = _env_int("PARTNER_ACTION_AGENT_TIMEOUT_SEC", 120)
-            max_retries = 0
-        elif purpose == "action_think":
-            timeout_sec = _env_int("PARTNER_ACTION_THINK_TIMEOUT_SEC", 60)
-            max_retries = 0
-        elif purpose == "report":
-            timeout_sec = 90
-            max_retries = 0
+
+        logger.info("[HermesAdapter] chat purpose=%s timeout_sec=%s max_retries=%s", purpose, timeout_sec, max_retries)
 
         for attempt in range(max_retries + 1):
             started_at = time.time()
             try:
+                _env = self._build_hermes_env()
+                if _ollama_env:
+                    _env.update(_ollama_env)
+                    # Also update PATH for ollama binary
+                    _ollama_bin = os.path.dirname(self._hermes_executable())
+                    _env["PATH"] = _ollama_bin + os.pathsep + _env.get("PATH", "")
                 run_kwargs = {
                     "args": cmd,
-                    "capture_output": True,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
                     "text": True,
                     "encoding": "utf-8",
                     "errors": "replace",
-                    "cwd": self.workspace,
-                    "env": self._build_hermes_env(),
+                    "cwd": os.path.join(self.workspace, "system", "hermes_work"),
+                    "env": _env,
                     "creationflags": _NTFLAGS,
                 }
                 if timeout_sec is not None:
@@ -744,8 +971,46 @@ class HermesAdapter(AgentAdapter):
                 result = _run_subprocess_tree(run_kwargs)
                 out = result.stdout.strip()
                 err = (result.stderr or "").strip()
+                # Filter Hermes CLI internal timeout/denial messages from stdout
+                if out:
+                    out = re.sub(
+                        r"(?im)^.*⏳?\s*Timeout\s*[—–-]\s*denying command.*$\n?",
+                        "", out
+                    ).strip()
+                    out = re.sub(
+                        r"(?im)^.*⚠️?\s*Normalized model\s+.*to\s+.*for\s+.*$\n?",
+                        "", out
+                    ).strip()
+                    out = re.sub(
+                        r"(?im)^.*Reached maximum iterations.*$\n?",
+                        "", out
+                    ).strip()
                 elapsed_ms = int((time.time() - started_at) * 1000)
-                combined = f"{out}\n{err}"
+                combined = out  # no longer merge stderr
+
+                # DEBUG: capture stderr when subprocess fails
+                if result.returncode != 0 or not out:
+                    import os as _debug_os
+                    _debug_path = _debug_os.path.join(self.workspace, "system", "hermes_work", ".last_crash_stderr.txt")
+                    try:
+                        with open(_debug_path, "w", encoding="utf-8") as _debug_f:
+                            _debug_f.write(f"returncode={result.returncode}\nout_len={len(out)}\nerr_len={len(err)}\n")
+                            _debug_f.write(f"cmd={' '.join(cmd)[:2000]}\n")
+                            _debug_f.write(f"--- STDOUT ---\n{out[:2000]}\n--- STDERR ---\n{err[:2000]}\n")
+                    except Exception:
+                        pass
+                    del _debug_os, _debug_path
+
+                # Handle stderr separately — log filtered warnings, don't mix into combined
+                if err:
+                    filtered_err = re.sub(
+                        r"(?im)^.*⚠️?\s*Normalized model\s+.*to\s+.*for\s+.*$\n?", "", err
+                    ).strip()
+                    if filtered_err:
+                        logger.warning(
+                            "[HermesAdapter] stderr from hermes subprocess: %s",
+                            filtered_err[:500],
+                        )
                 new_session_id = self._extract_session_id(combined) or session_id
                 context_tokens_reported = self._extract_context_tokens(combined)
                 if result.returncode == 0 and new_session_id:
@@ -792,6 +1057,28 @@ class HermesAdapter(AgentAdapter):
                 # Success
                 if result.returncode == 0 and out:
                     return self._strip_session_noise(out) or out
+
+                # Ollama fallback: if Ollama-routed call failed, retry without Ollama (using default API)
+                if _ollama_env and result.returncode != 0 and not (out and self._strip_session_noise(out)):
+                    logger.warning("[HermesAdapter] Ollama call failed (rc=%s), falling back to default API for purpose=%s",
+                                   result.returncode, purpose)
+                    # Rebuild cmd without Ollama routing
+                    fallback_cmd = [self._hermes_executable(), "chat", "-q", message, "-Q"]
+                    if self.model:
+                        fallback_cmd.extend(["-m", self.model])
+                    if self.provider:
+                        fallback_cmd.extend(["--provider", self.provider])
+                    # Re-apply purpose-specific flags
+                    _add_purpose_flags(fallback_cmd, purpose)
+                    fallback_env = self._build_hermes_env()
+                    run_kwargs["args"] = fallback_cmd
+                    run_kwargs["env"] = fallback_env
+                    result = _run_subprocess_tree(run_kwargs)
+                    out = result.stdout.strip()
+                    err = (result.stderr or "").strip()
+                    if result.returncode == 0 and out:
+                        return self._strip_session_noise(out) or out
+                    logger.warning("[HermesAdapter] API fallback also failed for purpose=%s", purpose)
 
                 # Check for 429 rate limit in stdout OR stderr
                 if "429" in combined or "Too many requests" in combined:
@@ -920,20 +1207,22 @@ class HermesAdapter(AgentAdapter):
             if self.provider:
                 cmd.extend(["--provider", self.provider])
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
-            timeout_sec = 120
+            timeout_sec = None
             started_at = time.time()
             try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=self.workspace,
-                    env=self._build_hermes_env(),
-                    timeout=timeout_sec,
-                    creationflags=_NTFLAGS,
-                )
+                run_kwargs = {
+                    "args": cmd,
+                    "capture_output": True,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "cwd": os.path.join(self.workspace, "system", "hermes_work"),
+                    "env": self._build_hermes_env(),
+                    "creationflags": _NTFLAGS,
+                }
+                if timeout_sec is not None:
+                    run_kwargs["timeout"] = timeout_sec
+                result = subprocess.run(**run_kwargs)
                 out = self._strip_session_noise((result.stdout or "").strip())
                 out = re.sub(r"(?im)^\s*⚠️?\s*Reached maximum iterations.*(?:\n|$)", "", out).strip()
                 err = (result.stderr or "").strip()
@@ -1127,7 +1416,7 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
                 "PARTNER_DYNAMIC_OLLAMA_MODELS",
                 config,
                 "models",
-                "qwen2.5:14b,qwen2.5:7b",
+                "qwen3:1.7b,qwen3:4b,qwen2.5:14b,qwen2.5:7b",
             ).split(",")
             if m.strip()
         ]
@@ -1307,13 +1596,6 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
             "web_capture",
             "project",
             "content_digest",
-        }
-        lite_events = {
-            "project_think",
-            "objective_review",
-            "curiosity_explore",
-            "habit_update",
-            "evidence_audit",
             "literature_review",
         }
         input_chars = len(text)
@@ -1325,25 +1607,34 @@ class DynamicOllamaProjectAdapter(AgentAdapter):
                 "reason": "event_or_large_context",
                 "input_chars": input_chars,
             }
-        if event_type in lite_events or input_chars <= 4500:
+        if event_type:
             return {
-                "try_ollama": True,
+                "try_ollama": False,
                 "event_type": event_type,
-                "difficulty": "lite",
-                "reason": "short_reasoning_event",
+                "difficulty": "event",
+                "reason": "event_execution_requires_primary",
                 "input_chars": input_chars,
             }
         return {
-            "try_ollama": False,
+            "try_ollama": input_chars <= 1200,
             "event_type": event_type,
-            "difficulty": "medium",
-            "reason": "uncertain_project_execution",
+            "difficulty": "simple" if input_chars <= 1200 else "non_event_long",
+            "reason": "simple_direct_reply" if input_chars <= 1200 else "long_reply_requires_primary",
             "input_chars": input_chars,
         }
 
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         profile = self._event_execution_profile(message)
-        if purpose != "project" and purpose not in {"classify", "interaction", "report", "chat"}:
+        if purpose not in {"chat", "interaction"}:
+            self._write_status({
+                "selected": "",
+                "fallback": "primary_agent",
+                "reason": "ollama_only_simple_direct_reply",
+                "purpose": purpose,
+                "event_type": profile.get("event_type", ""),
+                "difficulty": profile.get("difficulty", ""),
+                "input_chars": profile.get("input_chars", 0),
+            })
             return self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
         if not profile.get("try_ollama"):
             self._write_status({
@@ -1393,7 +1684,7 @@ class CodexAdapter(AgentAdapter):
 
     def _log_chat_attempt(self, payload: dict):
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "codex_chat.jsonl")
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1401,7 +1692,7 @@ class CodexAdapter(AgentAdapter):
         except Exception as exc:
             logger.warning(f"failed to write Codex chat log: {exc}")
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "agent_runs.jsonl")
             row = {
@@ -1437,6 +1728,50 @@ class CodexAdapter(AgentAdapter):
     def name(self) -> str:
         return "codex"
 
+    @staticmethod
+    def detect_installation() -> dict:
+        executable = shutil.which("codex")
+        candidates = []
+        home = os.path.expanduser("~")
+        appdata = os.environ.get("APPDATA", "")
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        candidates.extend(
+            [
+                os.path.join(appdata, "npm", "codex.cmd"),
+                os.path.join(appdata, "npm", "codex.ps1"),
+                os.path.join(appdata, "npm", "codex"),
+                os.path.join(localappdata, "Programs", "Codex", "codex.exe"),
+                os.path.join(home, ".local", "bin", "codex"),
+                os.path.join(home, ".npm-global", "bin", "codex"),
+                "/usr/local/bin/codex",
+                "/usr/bin/codex",
+            ]
+        )
+        if not executable:
+            executable = next((p for p in candidates if p and os.path.exists(os.path.expandvars(p))), "")
+        info = {"available": bool(executable), "path": executable or "", "version": "", "issues": []}
+        if executable:
+            try:
+                result = subprocess.run(
+                    [executable, "--version"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                    creationflags=_NTFLAGS,
+                )
+                info["version"] = (result.stdout or result.stderr or "").strip().splitlines()[0].strip()
+                if result.returncode != 0:
+                    info["issues"].append(f"version check exited {result.returncode}")
+            except Exception as exc:
+                info["issues"].append(str(exc))
+        return info
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return bool(cls.detect_installation().get("available"))
+
     def search_web(self, query: str) -> List[SearchResult]:
         prompt = (
             f"Search the web for: {query}\n"
@@ -1464,23 +1799,24 @@ class CodexAdapter(AgentAdapter):
         import tempfile
         import time
 
-        timeout_sec = 180
+        timeout_sec = None
         if purpose == "classify":
-            timeout_sec = 45
+            timeout_sec = _agent_optional_timeout(self.workspace, "PARTNER_CLASSIFY_TIMEOUT_SEC", "classify_timeout_sec", 90)
         elif purpose == "interaction":
-            timeout_sec = 60
+            timeout_sec = _env_optional_timeout("PARTNER_INTERACTION_TIMEOUT_SEC", None)
         elif purpose == "project":
             timeout_sec = _project_timeout_sec(self.workspace)
         elif purpose == "report":
-            timeout_sec = 90
+            timeout_sec = _env_optional_timeout("PARTNER_REPORT_TIMEOUT_SEC", None)
 
         out_dir = os.path.join(self.workspace, "99_temp")
         os.makedirs(out_dir, exist_ok=True)
         with tempfile.NamedTemporaryFile(prefix="codex_last_", suffix=".txt", dir=out_dir, delete=False) as tf:
             output_path = tf.name
 
+        executable = str(self.detect_installation().get("path") or "codex")
         cmd = [
-            "codex", "exec",
+            executable, "exec",
             "--skip-git-repo-check",
             "--color", "never",
             "--sandbox", "workspace-write",
@@ -1507,6 +1843,7 @@ class CodexAdapter(AgentAdapter):
                 "errors": "replace",
                 "cwd": self.workspace,
                 "creationflags": _NTFLAGS,
+                "stdin": subprocess.DEVNULL,
             }
             if timeout_sec is not None:
                 run_kwargs["timeout"] = timeout_sec
@@ -1622,13 +1959,13 @@ class OllamaLiteAdapter(AgentAdapter):
     def __init__(self, workspace_path: str, model: Optional[str] = None,
                  provider: Optional[str] = None):
         self.workspace = workspace_path
-        self.model = model or os.getenv("PARTNER_OLLAMA_MODEL", "qwen2.5:0.5b")
+        self.model = model or os.getenv("PARTNER_OLLAMA_MODEL", "qwen3:1.7b")
         self.base_url = (
             provider if provider and provider.startswith(("http://", "https://"))
             else os.getenv("PARTNER_OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
         ).rstrip("/")
-        self.timeout_sec = int(os.getenv("PARTNER_OLLAMA_TIMEOUT_SEC", "90"))
-        self.probe_timeout_sec = float(os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", "1.5"))
+        self.timeout_sec = _env_optional_timeout("PARTNER_OLLAMA_TIMEOUT_SEC", None)
+        self.probe_timeout_sec = _env_optional_float_timeout("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", None)
         self.unavailable_cooldown_sec = int(os.getenv("PARTNER_OLLAMA_UNAVAILABLE_COOLDOWN_SEC", "300"))
         self.max_input_chars = int(os.getenv("PARTNER_OLLAMA_MAX_INPUT_CHARS", "4000"))
         self._unavailable_until = 0.0
@@ -1660,7 +1997,7 @@ class OllamaLiteAdapter(AgentAdapter):
 
     def _log_chat_attempt(self, payload: dict):
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "ollama_lite_chat.jsonl")
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1668,7 +2005,7 @@ class OllamaLiteAdapter(AgentAdapter):
         except Exception as exc:
             logger.warning(f"failed to write OllamaLite chat log: {exc}")
         try:
-            log_dir = os.path.join(self.workspace, "logs")
+            log_dir = os.path.join(self.workspace, "state", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "agent_runs.jsonl")
             row = {
@@ -1706,13 +2043,27 @@ class OllamaLiteAdapter(AgentAdapter):
     @classmethod
     def is_available(cls) -> bool:
         import urllib.request
+        from urllib.parse import urlparse
 
         base_url = os.getenv("PARTNER_OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1").rstrip("/")
         version_url = cls._ollama_api_root(base_url) + "/api/version"
         try:
-            timeout = float(os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", "1.5"))
-            with urllib.request.urlopen(version_url, timeout=timeout) as resp:
-                return resp.status == 200
+            timeout = _env_optional_float_timeout("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC", None)
+            req = urllib.request.Request(version_url)
+            # Bypass proxy for localhost
+            parsed = urlparse(version_url)
+            if parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+                orig = os.environ.pop("http_proxy", None)
+                os.environ.pop("https_proxy", None)
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        return resp.status == 200
+                finally:
+                    if orig is not None:
+                        os.environ["http_proxy"] = orig
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.status == 200
         except Exception:
             return False
 
@@ -1734,6 +2085,32 @@ class OllamaLiteAdapter(AgentAdapter):
 
         now = time.time()
         if now < self._unavailable_until:
+            return False
+
+        # Fallback: probe Ollama API directly
+        try:
+            version_url = self._ollama_api_root(self.base_url) + "/api/version"
+            req = urllib.request.Request(version_url)
+            # Bypass proxy for localhost
+            from urllib.parse import urlparse as _urlparse
+            parsed = _urlparse(version_url)
+            if parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+                orig = os.environ.pop("http_proxy", None)
+                os.environ.pop("https_proxy", None)
+                try:
+                    with urllib.request.urlopen(req, timeout=self.probe_timeout_sec) as resp:
+                        ok = resp.status == 200
+                finally:
+                    if orig is not None:
+                        os.environ["http_proxy"] = orig
+            else:
+                with urllib.request.urlopen(req, timeout=self.probe_timeout_sec) as resp:
+                    ok = resp.status == 200
+            self._write_status(ok, "" if ok else f"HTTP status {resp.status}")
+            return ok
+        except Exception as exc:
+            self._unavailable_until = now + self.unavailable_cooldown_sec
+            self._write_status(False, str(exc)[:200])
             return False
 
     @staticmethod
@@ -1758,28 +2135,6 @@ class OllamaLiteAdapter(AgentAdapter):
         return 999.0
 
     def _choose_lite_model(self, fallback: str) -> str:
-        try:
-            from .ollama_pool import load_ollama_pool_config
-
-            cfg = load_ollama_pool_config(self.workspace)
-            models: list[str] = []
-            for endpoint in cfg.get("endpoints") or []:
-                if not isinstance(endpoint, dict) or endpoint.get("enabled") is False:
-                    continue
-                base_url = str(endpoint.get("base_url") or "").strip().rstrip("/")
-                if base_url and self._ollama_api_root(self.base_url).rstrip("/") not in {
-                    base_url,
-                    base_url.rstrip("/") + "/v1",
-                }:
-                    continue
-                for model in endpoint.get("models") or []:
-                    text = str(model or "").strip()
-                    if text:
-                        models.append(text)
-            if models:
-                return sorted(dict.fromkeys(models), key=self._model_size_rank)[0]
-        except Exception:
-            pass
         return fallback
         version_url = self._ollama_api_root(self.base_url) + "/api/version"
         try:
@@ -1827,29 +2182,35 @@ class OllamaLiteAdapter(AgentAdapter):
         if requested:
             return requested
         if purpose == "classify":
-            return 160
+            return 512 if "qwen3" in (self.model or "").lower() else 160
         if purpose == "interaction":
-            return 220
+            return 420 if "qwen3" in (self.model or "").lower() else 220
         if purpose == "report":
-            return 360
-        return 240
+            return 520 if "qwen3" in (self.model or "").lower() else 360
+        return 420 if "qwen3" in (self.model or "").lower() else 240
 
-    def _timeout_for_purpose(self, purpose: str) -> int:
+    def _timeout_for_purpose(self, purpose: str) -> int | None:
         defaults = {
-            "classify": 45,
-            "interaction": 20,
-            "report": 25,
-            "chat": 25,
+            "classify": None,
+            "interaction": None,
+            "report": None,
+            "chat": None,
         }
         env_name = f"PARTNER_OLLAMA_{str(purpose or 'CHAT').upper()}_TIMEOUT_SEC"
         raw = os.getenv(env_name)
         if raw is None:
             raw = os.getenv("PARTNER_OLLAMA_LITE_TIMEOUT_SEC")
+        if raw is not None and str(raw).strip().lower() in {"0", "none", "no", "off", "false", "disabled", "unlimited"}:
+            return None
         try:
             limit = int(float(raw)) if raw else defaults.get(purpose, self.timeout_sec)
         except Exception:
             limit = defaults.get(purpose, self.timeout_sec)
-        return max(3, min(int(self.timeout_sec), int(limit)))
+        if limit is None:
+            return None
+        if self.timeout_sec is None:
+            return max(1, int(limit))
+        return max(1, min(int(self.timeout_sec), int(limit)))
 
     @staticmethod
     def _clean_reply(reply: str, purpose: str) -> str:
@@ -1955,20 +2316,43 @@ class OllamaLiteAdapter(AgentAdapter):
         started_at = time.time()
         timeout_sec = self._timeout_for_purpose(purpose)
         try:
-            req = urllib.request.Request(
-                self.base_url + "/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            reply = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+            if "qwen3" in (self.model or "").lower():
+                native_payload = {
+                    "model": self.model,
+                    "messages": payload["messages"],
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": payload["temperature"],
+                        "num_predict": payload["max_tokens"],
+                    },
+                }
+                if purpose == "classify":
+                    native_payload["format"] = "json"
+                req = urllib.request.Request(
+                    self._ollama_api_root(self.base_url) + "/api/chat",
+                    data=json.dumps(native_payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                reply = data.get("message", {}).get("content", "").strip()
+            else:
+                req = urllib.request.Request(
+                    self.base_url + "/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                reply = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
+                )
             reply = self._clean_reply(reply, purpose)
             elapsed_ms = int((time.time() - started_at) * 1000)
             self._log_chat_attempt({
@@ -1985,7 +2369,7 @@ class OllamaLiteAdapter(AgentAdapter):
                 "total_tokens_est": self._estimate_tokens(clipped) + self._estimate_tokens(reply),
                 "reply_preview": reply[:500],
             })
-            return reply or USER_FRIENDLY_PROGRESS_REPLY
+            return f"[ollama]\n{reply}" if reply else USER_FRIENDLY_PROGRESS_REPLY
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
             self._log_chat_attempt({
                 "ts": datetime.now().isoformat(),
@@ -2171,7 +2555,7 @@ class HybridLiteAdapter(AgentAdapter):
         return self.primary.execute_task(prompt)
 
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
-        if purpose in {"classify", "interaction", "report"}:
+        if purpose in {"chat", "interaction"} and len(message or "") <= 1200:
             reply = self.lite.chat(message, max_tokens=max_tokens, purpose=purpose)
             if reply and reply != USER_FRIENDLY_PROGRESS_REPLY:
                 return reply
@@ -2190,6 +2574,81 @@ class HybridLiteAdapter(AgentAdapter):
         if reply and reply != USER_FRIENDLY_PROGRESS_REPLY:
             return reply
         return self.primary.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+
+
+class FallbackAgentAdapter(AgentAdapter):
+    """Try the primary backend first, then configured backups on unusable output."""
+
+    def __init__(self, primary: AgentAdapter, backups: list[AgentAdapter], workspace: str):
+        self.primary = primary
+        self.backups = backups
+        self.workspace = workspace
+
+    def name(self) -> str:
+        names = [self.primary.name()] + [adapter.name() for adapter in self.backups]
+        return "+failover(".join([names[0], ",".join(names[1:])]) + ")" if self.backups else self.primary.name()
+
+    def search_web(self, query: str) -> List[SearchResult]:
+        try:
+            return self.primary.search_web(query)
+        except Exception:
+            for adapter in self.backups:
+                try:
+                    return adapter.search_web(query)
+                except Exception:
+                    continue
+        return []
+
+    def execute_task(self, prompt: str) -> str:
+        return self.chat(prompt, purpose="project")
+
+    def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
+        reply = self.primary.chat(message, max_tokens=max_tokens, purpose=purpose)
+        if not _agent_failed(reply):
+            return reply
+        self._log_failover(self.primary.name(), "", purpose, reply)
+        for adapter in self.backups:
+            backup_reply = adapter.chat(message, max_tokens=max_tokens, purpose=purpose)
+            if not _agent_failed(backup_reply):
+                self._log_failover(self.primary.name(), adapter.name(), purpose, "switched")
+                # Mark backup replies with [backend_name] prefix
+                backend_tag = adapter.name().replace("_lite", "").replace("_", "")
+                return f"[{backend_tag}]\n{backup_reply}"
+            self._log_failover(adapter.name(), "", purpose, backup_reply)
+        return reply
+
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        reply = self.primary.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+        if not _agent_failed(reply):
+            return reply
+        for adapter in self.backups:
+            backup_reply = adapter.chat_with_images(message, image_paths, max_tokens=max_tokens, purpose=purpose)
+            if not _agent_failed(backup_reply):
+                self._log_failover(self.primary.name(), adapter.name(), purpose, "vision_switched")
+                backend_tag = adapter.name().replace("_lite", "").replace("_", "")
+                return f"[{backend_tag}]\n{backup_reply}"
+            return reply
+
+    def _log_failover(self, from_backend: str, to_backend: str, purpose: str, reason: str) -> None:
+        try:
+            log_dir = os.path.join(self.workspace, "state", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            with open(os.path.join(log_dir, "agent_failover.jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": datetime.now().isoformat(),
+                    "from": from_backend,
+                    "to": to_backend,
+                    "purpose": purpose,
+                    "reason": str(reason or "")[:500],
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
 
 def create_adapter(backend: str, workspace_path: str, model: Optional[str] = None,
@@ -2224,6 +2683,28 @@ def create_adapter(backend: str, workspace_path: str, model: Optional[str] = Non
     except TypeError:
         primary = adapter_class(workspace_path)
 
+    failover_cfg = _agent_failover_config(workspace_path)
+    if bool(failover_cfg.get("enabled", False)):
+        backup_names = [
+            str(x).strip().lower()
+            for x in (failover_cfg.get("fallback_backends") or [])
+            if str(x).strip().lower() and str(x).strip().lower() != str(backend).strip().lower()
+        ]
+        backups: list[AgentAdapter] = []
+        for name in backup_names:
+            cls = adapters.get(name)
+            if not cls:
+                continue
+            try:
+                try:
+                    backups.append(cls(workspace_path))
+                except TypeError:
+                    backups.append(cls(workspace_path, model=None, provider=None))
+            except Exception as exc:
+                logger.debug("failed to initialize failover adapter %s: %s", name, exc)
+        if backups:
+            primary = FallbackAgentAdapter(primary, backups, workspace_path)
+
     agent_config = _load_agent_config(workspace_path)
     pool_config = agent_config.get("ollama_pool", {})
     if not isinstance(pool_config, dict):
@@ -2254,6 +2735,21 @@ def create_adapter(backend: str, workspace_path: str, model: Optional[str] = Non
                 return HybridLiteAdapter(primary, OllamaLiteAdapter(workspace_path))
         except Exception:
             pass
+
+    # Ollama 可用时优先使用 Ollama（非降级，是主动选择）
+    # 用户可感知：回复前缀 [ollama]
+    # 注意：使用 HybridLiteAdapter 包装，确保 batch_plan/action/classify 等
+    # 复杂任务走主适配器（HermesAdapter），只有 chat/interaction 走 Ollama
+    if backend != "ollama_lite":
+        try:
+            from .llm.ollama_probe import is_ollama_available
+            if is_ollama_available():
+                ollama_adapter = OllamaLiteAdapter(workspace_path)
+                logger.info("[ADAPTER] Ollama available, using HybridLiteAdapter (primary=%s, lite=%s)", type(primary).__name__, ollama_adapter.model)
+                return HybridLiteAdapter(primary, ollama_adapter)
+        except Exception as exc:
+            logger.debug("[ADAPTER] Ollama check failed: %s", exc)
+
     return primary
 
 
@@ -2265,6 +2761,7 @@ def list_available_adapters(workspace_path: str) -> list:
     """
     all_adapters = [
         ("hermes", "Hermes Agent", "🔮"),
+        ("codex", "OpenAI Codex", "⌘"),
         ("openclaw", "OpenClaw (小龙虾)", "🦞"),
     ]
     

@@ -1,0 +1,23 @@
+{
+  "name": "cline",
+  "version": "1.0.0",
+  "description": "Cline — autonomous coding agent for code generation, review, refactoring, and debugging",
+  "capabilities": [
+    "coding",
+    "code_generation",
+    "code_review",
+    "refactoring",
+    "debugging"
+  ],
+  "input_formats": ["txt", "py", "js", "ts", "java", "go", "rs", "cpp", "h", "json", "yaml", "toml", "md", "html", "css"],
+  "output_formats": ["txt", "json", "md", "patch", "diff"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "cline",
+    "args": ["--input", "{input}", "--output", "{output}"],
+    "category": "specialized"
+  },
+  "timeout": 1200,
+  "health_check_cmd": "which cline",
+  "notes": null
+}

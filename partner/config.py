@@ -7,16 +7,25 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional
 
 
+def _config_root(workspace: str) -> str:
+    """Resolve the shared config directory — always workspace_root/config/.
+
+    Works when workspace is either an instance dir (instances/03/) or
+    the workspace root itself.
+    """
+    from .workspace_layout import workspace_root_from_instance
+    root = workspace_root_from_instance(workspace)
+    return os.path.join(root, "config")
+
+
 def get_partner_config_paths(workspace: str) -> List[str]:
-    """Return candidate config paths for a workspace in priority order."""
+    """Return config paths — unified under workspace_root/config/."""
     return [
-        os.path.join(workspace, "partner_config.json"),
-        os.path.join(workspace, "00_config", "partner_config.json"),
+        os.path.join(_config_root(workspace), "partner_config.json"),
     ]
 
 
 def resolve_partner_config_path(workspace: str, prefer_existing: bool = True) -> str:
-    """Resolve the best config path for runtime reads/writes."""
     paths = get_partner_config_paths(workspace)
     if prefer_existing:
         for path in paths:
@@ -26,29 +35,20 @@ def resolve_partner_config_path(workspace: str, prefer_existing: bool = True) ->
 
 
 def workspace_has_partner_config(workspace: str) -> bool:
-    """Whether a workspace has config in any supported location."""
     return any(os.path.exists(path) for path in get_partner_config_paths(workspace))
 
 
 def load_partner_config_data(workspace: str) -> dict:
-    """Load workspace config from the best available path."""
     config_path = resolve_partner_config_path(workspace)
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_partner_config_data(workspace: str, data: dict):
-    """Save runtime config to the primary path and mirror into 00_config."""
     primary_path = resolve_partner_config_path(workspace, prefer_existing=False)
     os.makedirs(os.path.dirname(primary_path), exist_ok=True)
     with open(primary_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-
-    mirror_path = os.path.join(workspace, "00_config", "partner_config.json")
-    if mirror_path != primary_path:
-        os.makedirs(os.path.dirname(mirror_path), exist_ok=True)
-        with open(mirror_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def discover_hermes_model_defaults(config_path: Optional[str] = None) -> Dict[str, Optional[str]]:
@@ -149,8 +149,10 @@ class AgentConfig:
     classifier_backend: Optional[str] = None
     classifier_model: Optional[str] = None
     classifier_provider: Optional[str] = None
+    classify_timeout_sec: Optional[int] = None
     dynamic_ollama: Dict = field(default_factory=dict)
     ollama_pool: Dict = field(default_factory=dict)
+    failover: Dict = field(default_factory=dict)
     project_timeout_sec: Optional[int] = 1200
 
 

@@ -1,8 +1,12 @@
 """Shared project registry across Partner instances.
 
-This is intentionally separate from Hermes memory/skills.  It is a small
-Partner-owned index that lets instances know whether a project is local,
-owned by another bot, or released to a shared pool for later pickup.
+ALL projects live in a single shared_projects/ directory under the workspace root.
+Instances claim/release projects via lock files. No per-instance project dirs.
+
+Key design:
+- shared_projects/<safe_name>/  — project files
+- shared_projects/registry.json — metadata index
+- <project_dir>/.lock  — lock file when an instance is actively using it
 """
 
 from __future__ import annotations
@@ -37,11 +41,85 @@ def instance_id_from_workspace(workspace: str) -> str:
     return os.environ.get("PARTNER_INSTANCE_ID", "") or "default"
 
 
-def registry_path(workspace: str) -> Path:
+def shared_projects_base(workspace: str) -> Path:
+    """Return the single shared_projects directory path."""
     root = _workspace_root(workspace)
-    path = root / "shared_projects" / "registry.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    return root / "shared_projects"
+
+
+def registry_path(workspace: str) -> Path:
+    """Registry lives in shared_projects/ (not common/ which was removed)."""
+    base = shared_projects_base(workspace)
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "registry.json"
+
+
+def project_dir(workspace: str, project: str) -> Path:
+    """Return the project directory under shared_projects/.
+
+    Creates the directory if it doesn't exist. The directory name is
+    a filesystem-safe version of the project name.
+    """
+    safe = _safe_project_name(project)
+    base = shared_projects_base(workspace)
+    path = base / safe
+    path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _lock_file(project_dir_path: Path) -> Path:
+    return project_dir_path / ".lock"
+
+
+def write_lock(workspace: str, project: str) -> None:
+    """Write a lock file claiming this project for the current instance."""
+    pdir = project_dir(workspace, project)
+    lock = _lock_file(pdir)
+    instance_id = instance_id_from_workspace(workspace)
+    lock.write_text(json.dumps({
+        "instance_id": instance_id,
+        "workspace": str(Path(workspace).expanduser().resolve()),
+        "claimed_at": _now(),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def remove_lock(workspace: str, project: str) -> None:
+    """Remove the lock file, releasing the project back to the pool."""
+    pdir = project_dir(workspace, project)
+    lock = _lock_file(pdir)
+    if lock.exists():
+        lock.unlink()
+
+
+def check_project_availability(workspace: str, project: str) -> dict[str, Any]:
+    """Check if a project is available for the current instance.
+
+    Returns:
+        {"available": True} — project is free or owned by this instance
+        {"available": False, "locked_by": "03", "message": "实例 03 正在使用该项目"} — locked by other
+        {"available": False, "message": "项目文件夹创建冲突"} — edge case
+    """
+    pdir = project_dir(workspace, project)
+    lock = _lock_file(pdir)
+    if not lock.exists():
+        return {"available": True}
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+    except Exception:
+        return {"available": True}
+    instance_id = instance_id_from_workspace(workspace)
+    locked_by = str(data.get("instance_id") or "")
+    if locked_by == instance_id:
+        # Locked by us — check if the lock workspace still matches
+        lock_ws = str(data.get("workspace") or "")
+        current_ws = str(Path(workspace).expanduser().resolve())
+        if lock_ws == current_ws:
+            return {"available": True}
+    return {
+        "available": False,
+        "locked_by": locked_by,
+        "message": f"实例 {locked_by} 正在使用该项目",
+    }
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -67,15 +145,21 @@ def normalize_project_name(name: str) -> str:
     return text or "project"
 
 
+def _safe_project_name(project: str) -> str:
+    """Filesystem-safe project folder name."""
+    return re.sub(r"[^\w\u4e00-\u9fff-]+", "_", project or "project").strip("_") or "project"
+
+
 def _summarize_project(workspace: str, project: str, max_chars: int = 360) -> str:
-    safe = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", project or "project").strip("_") or "project"
+    safe = _safe_project_name(project)
+    pdir = project_dir(workspace, project)
     for rel in (
-        f"20_records/projects/{safe}/project_brief.md",
-        f"20_records/projects/{safe}/state.md",
-        f"user/projects/{safe}/mind_status.md",
-        f"user/projects/{safe}/research_journey.md",
+        "project_brief.md",
+        "state.md",
+        "mind_status.md",
+        "research_journey.md",
     ):
-        path = Path(workspace) / rel
+        path = pdir / rel
         try:
             text = path.read_text(encoding="utf-8").strip()
         except Exception:
@@ -130,16 +214,15 @@ def register_project(
 
 
 def release_project(workspace: str, project: str, *, reason: str = "") -> dict[str, Any]:
+    remove_lock(workspace, project)
     return register_project(workspace, project, status="waiting", reason=reason, make_public=True)
 
 
 def keep_project_private(workspace: str, project: str, *, reason: str = "") -> dict[str, Any]:
-    """Mark a project as instance-owned, even if its lifecycle status is waiting."""
     return register_project(workspace, project, status="waiting", reason=reason, make_public=False)
 
 
 def maybe_release_inactive_active_project(workspace: str, project: str, *, inactive_hours: int = 24) -> bool:
-    """Release an active project to the public pool if it has been untouched long enough."""
     if not project or inactive_hours <= 0:
         return False
     plan_path = Path(workspace) / "state" / "active_plan.json"
@@ -167,8 +250,14 @@ def maybe_release_inactive_active_project(workspace: str, project: str, *, inact
 
 
 def claim_project(workspace: str, project: str, *, reason: str = "") -> dict[str, Any]:
+    """Claim a project: register it as active AND write a .lock file."""
+    # Check availability first
+    avail = check_project_availability(workspace, project)
+    if not avail.get("available"):
+        raise RuntimeError(avail.get("message", "项目已被其他实例占用"))
     row = register_project(workspace, project, status="active", reason=reason, make_public=False)
     if row:
+        write_lock(workspace, project)
         path = registry_path(workspace)
         data = _load(path)
         key = normalize_project_name(project)
@@ -213,10 +302,6 @@ def project_location_hint(workspace: str, project: str) -> str:
     return ""
 
 
-def _safe_project_name(project: str) -> str:
-    return re.sub(r"[^\w\u4e00-\u9fff-]+", "_", project or "project").strip("_") or "project"
-
-
 def _copytree_missing(src: Path, dst: Path) -> bool:
     if not src.exists() or not src.is_dir():
         return False
@@ -235,7 +320,11 @@ def _copytree_missing(src: Path, dst: Path) -> bool:
 
 
 def import_public_project_context(workspace: str, project: str) -> bool:
-    """Import a released/shared project into this instance without overwriting local work."""
+    """Import context from another instance's project files into shared_projects/.
+
+    Now that all projects live in shared_projects/, this copies missing files
+    from the source instance's project dir into the shared project dir.
+    """
     row = find_project(workspace, project)
     if not row or not row.get("public"):
         return False
@@ -244,10 +333,17 @@ def import_public_project_context(workspace: str, project: str) -> bool:
     if not source_ws.exists() or source_ws.resolve() == target_ws:
         return False
     safe = _safe_project_name(str(row.get("project_name") or project))
+    # Source instance may have old-style project dirs — try to find them
+    source_dirs = [
+        source_ws / "projects" / safe,
+        source_ws / "projects" / (safe + "_" + source_ws.name.replace("instance_", "")),
+        source_ws / "user" / "projects" / safe,
+        source_ws / "user" / "reports" / safe,
+    ]
+    target = project_dir(workspace, project)
     copied = False
-    copied = _copytree_missing(source_ws / "20_records" / "projects" / safe, target_ws / "20_records" / "projects" / safe) or copied
-    copied = _copytree_missing(source_ws / "user" / "projects" / safe, target_ws / "user" / "projects" / safe) or copied
-    copied = _copytree_missing(source_ws / "user" / "reports" / safe, target_ws / "user" / "reports" / safe) or copied
+    for src in source_dirs:
+        copied = _copytree_missing(src, target) or copied
     if copied:
         claim_project(workspace, str(row.get("project_name") or project), reason="imported public project context")
     return copied

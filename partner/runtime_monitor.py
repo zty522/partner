@@ -35,7 +35,7 @@ def _read_json(path: str) -> dict[str, Any]:
 
 
 def summarize_agent_runs(workspace: str, limit: int = 80) -> dict[str, Any]:
-    rows = _read_jsonl(os.path.join(workspace, "logs", "agent_runs.jsonl"), limit=limit)
+    rows = _read_jsonl(os.path.join(workspace, "state", "logs", "agent_runs.jsonl"), limit=limit)
     if not rows:
         return {
             "calls": 0,
@@ -100,7 +100,7 @@ def _format_duration(ms: int) -> str:
 
 def publish_runtime_cost_summary(workspace: str) -> dict[str, Any]:
     summary = summarize_agent_runs(workspace)
-    user_dir = os.path.join(workspace, "user")
+    user_dir = os.path.join(workspace, "state", "user")
     os.makedirs(user_dir, exist_ok=True)
     backend_text = ", ".join(
         f"{k}={v}" for k, v in sorted((summary.get("backend_counts") or {}).items())

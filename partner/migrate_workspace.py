@@ -383,7 +383,7 @@ def migrate_workspace(old_workspace: Optional[str] = None,
     if old_workspace is None:
         # Try to find partner_config.json in common locations
         candidates = [
-            os.path.expanduser("~/.partner/00_config/partner_config.json"),
+            os.path.expanduser("~/.partner/config/partner_config.json"),
             "/mnt/e/work/partner_workspace/partner_config.json",
             "/mnt/e/work/partner/config.json",
         ]
@@ -409,9 +409,9 @@ def migrate_workspace(old_workspace: Optional[str] = None,
     new_base = _expand_home(new_base)
 
     # --- Build directory structure ---
-    config_dir = _ensure_dirs(new_base, "00_config")
-    logs_dir = _ensure_dirs(new_base, "10_logs")
-    records_dir = _ensure_dirs(new_base, "20_records")
+    config_dir = _ensure_dirs(new_base, "config")
+    logs_dir = _ensure_dirs(new_base, "state/record")
+    records_dir = _ensure_dirs(new_base, "projects")
     projects_base = _ensure_dirs(records_dir, "projects")
     temp_dir = _ensure_dirs(new_base, "99_temp")
 
@@ -474,7 +474,7 @@ def migrate_workspace(old_workspace: Optional[str] = None,
     print("[5/5] Migrating uncategorized files...")
     moved_temp = _migrate_temp_files(
         old_workspace, temp_dir,
-        exclude_dirs={"00_config", "10_logs", "20_records", "99_temp"}
+        exclude_dirs={"config", "state/record", "projects", "99_temp"}
     )
     stats["temp_files"] = len(moved_temp)
 

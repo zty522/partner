@@ -1,0 +1,22 @@
+{
+  "name": "julius-ai",
+  "version": "1.0.0",
+  "description": "Julius AI — commercial data analysis agent for reporting, business intelligence, data analysis, and visualization (API-based)",
+  "capabilities": [
+    "data_analysis",
+    "data_visualization",
+    "reporting",
+    "business_intelligence"
+  ],
+  "input_formats": ["csv", "json", "xlsx", "txt", "html"],
+  "output_formats": ["json", "csv", "html", "png", "pdf", "txt"],
+  "endpoint_type": "local",
+  "endpoint_config": {
+    "command": "julius-ai",
+    "args": ["--input", "{input}", "--output", "{output}"],
+    "category": "specialized"
+  },
+  "timeout": 1200,
+  "health_check_cmd": null,
+  "notes": "TRIAL — Requires subscription. Free-tier available for trial. Not installed locally. Health check returns unavailable."
+}

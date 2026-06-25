@@ -1,10 +1,10 @@
-"""Core — Partner 编排器（集成 Mind 系统版）。
+"""Core — Partner 编排器（Harness 驱动版）。
 
-Mind 系统接管了原来的 cron 驱动架构：
-- 念头池 asyncio.PriorityQueue 作为执行引擎
-- mind_loop() 永久运行，不断处理念头
+Harness 系统接管了事件执行：
+- Harness (task_queue) 作为执行引擎
+- Mind 系统只提供念头类型定义和执行函数
 - cron 心跳只做"注入唤醒脉冲"
-- 所有自主行为通过念头产生+执行
+- 所有自主行为通过 Harness 直接调度
 """
 
 import os
@@ -29,20 +29,20 @@ from .autocheck import EventBus, SelfChecker, PushEvent
 from .conversation import ConversationEngine
 
 from .mind import (
-    MindPool, mind_loop, init_executor,
+    init_executor,
     report, cron_tick,
 )
 
 
 class Partner:
-    """Partner — 自主研究伙伴 + Mind 系统。
+    """Partner — 自主研究伙伴（Harness 驱动版）。
 
     运行时架构：
     ┌──────────────────────────────────┐
-    │  mind_loop() (asyncio 主循环)    │
-    │  ├─ 从池取念头 → 创建 Task 执行  │
-    │  ├─ 休眠 0.1s（池空时）          │
-    │  └─ 捕获异常不崩溃              │
+    │  Harness (task_queue 驱动)       │
+    │  ├─ 从队列取 Task → 执行         │
+    │  ├─ 休眠 0.1s（队列空时）        │
+    │  └─ 捕获异常不崩溃               │
     ├──────────────────────────────────┤
     │  QQ Bridge (独立线程/进程)        │
     │  ├─ 收到消息 → 直接回复          │
@@ -59,8 +59,6 @@ class Partner:
 
         state_dir = os.path.join(self.workspace, "state")
         os.makedirs(state_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.workspace, "knowledge"), exist_ok=True)
-        os.makedirs(os.path.join(self.workspace, "logs"), exist_ok=True)
 
         # 核心状态组件
         self.task_queue = TaskQueue(os.path.join(state_dir, "task_queue.json"))
@@ -78,13 +76,6 @@ class Partner:
             workspace=self.workspace,
         )
 
-        # Mind 系统
-        self._pool: Optional[MindPool] = None
-        self._mind_thread: Optional[threading.Thread] = None
-        self._mind_loop: Optional[asyncio.AbstractEventLoop] = None
-
-        self._cycle_count = 0
-
     # ── 通知管理 ───────────────────────────────────────────────
 
     def _notify_admin(self, msg: str):
@@ -92,7 +83,7 @@ class Partner:
         try:
             log_dir = os.path.join(
                 getattr(self, '_workspace', self.workspace),
-                "10_logs" if os.path.isdir(os.path.join(self.workspace, "10_logs"))
+                "state/record" if os.path.isdir(os.path.join(self.workspace, "state/record"))
                 else "logs"
             )
             os.makedirs(log_dir, exist_ok=True)
@@ -105,9 +96,14 @@ class Partner:
 
     # ── Mind 系统控制 ──────────────────────────────────────────
 
-    async def _init_mind(self):
-        """初始化 Mind 系统（异步）。"""
-        self._pool = await MindPool.get_instance()
+    def start_mind(self):
+        """兼容旧接口 — 直接调用 init_executor。"""
+        self.run_mind_startup()
+
+    def run_mind_startup(self):
+        """初始化 executor 上下文（非阻塞）。移除 MindPool 后简化为同步初始化。"""
+        from .restart_tracker import RestartTracker
+        tracker = RestartTracker(self.workspace)
 
         # 从 adapter 获取后端
         from .adapter import create_adapter
@@ -124,123 +120,30 @@ class Partner:
             adapter=adapter,
             knowledge=self.knowledge,
             journal=self.journal,
+            task_queue=self.task_queue,
             state=self.state,
             round_interval_sec=max(60, int(self.config.scheduler.interval_minutes) * 60),
         )
-
-    def start_mind(self):
-        """启动 Mind 循环，带异常捕获、空闲检测和自动重启限频。"""
-        if self._mind_thread and self._mind_thread.is_alive():
-            logger.warning("Mind loop 已在运行")
-            return
-
-        from .restart_tracker import RestartTracker
-        tracker = RestartTracker(self.workspace)
-
-        def _run():
-            retry_count = 0
-            max_retries_per_hour = 3
-            cool_off = 120  # 冷却2分钟
-            last_retry_time = 0
-            consecutive_errors = 0
-            last_idle_log = 0.0  # 空闲日志时间戳
-
-            while True:
-                try:
-                    self._mind_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(self._mind_loop)
-                    # 初始化
-                    self._mind_loop.run_until_complete(self._init_mind())
-                    # 启动 mind_loop（永久运行）
-                    pulse_interval_sec = max(
-                        60,
-                        int(self.config.scheduler.interval_minutes) * 60,
-                    )
-                    self._mind_loop.run_until_complete(
-                        mind_loop(
-                            workspace=self.workspace,
-                            save_path=os.path.join(self.workspace, "state", "mind_pool.json"),
-                            pulse_interval_sec=pulse_interval_sec,
-                        )
-                    )
-                except asyncio.CancelledError:
-                    logger.info("[Core] Mind loop cancelled, exiting")
-                    break
-                except Exception as e:
-                    now = time.time()
-                    consecutive_errors += 1
-
-                    # 重置计数器：如果距离上次重试超过1小时
-                    if now - last_retry_time > 3600:
-                        retry_count = 0
-                    retry_count += 1
-                    last_retry_time = now
-
-                    # 记录崩溃到 RestartTracker + crash.log
-                    log_dir = os.path.join(
-                        getattr(self, '_workspace', self.workspace),
-                        "10_logs" if os.path.isdir(os.path.join(self.workspace, "10_logs"))
-                        else "logs"
-                    )
-                    os.makedirs(log_dir, exist_ok=True)
-                    crash_log = os.path.join(log_dir, "crash.log")
-                    try:
-                        with open(crash_log, "a", encoding="utf-8") as f:
-                            f.write(f"[{datetime.now().isoformat()}] Mind loop crashed: {e}\n")
-                            traceback.print_exc(file=f)
-                            f.write("\n")
-                    except Exception:
-                        pass
-
-                    # 记录崩溃到重启计数器
-                    try:
-                        tracker.record_restart()
-                    except Exception:
-                        pass
-
-                    if retry_count > max_retries_per_hour or tracker.should_stop():
-                        logger.critical(
-                            f"[Core] Mind loop crashed {retry_count}x in 1h, stopping"
-                        )
-                        self._notify_admin(
-                            f"⚠️ Partner 崩溃超过{max_retries_per_hour}次/小时，已停止自动恢复"
-                        )
-                        break
-
-                    wait = min(cool_off * retry_count, 300)  # 退避最长5分钟
-                    logger.warning(
-                        f"[Core] Mind loop crashed ({e}), "
-                        f"restarting in {wait}s "
-                        f"(attempt {retry_count}/{max_retries_per_hour})"
-                    )
-                    time.sleep(wait)
-                    # 重新创建事件循环
-                    if self._mind_loop and not self._mind_loop.is_closed():
-                        try:
-                            self._mind_loop.close()
-                        except Exception:
-                            pass
-                    self._mind_loop = None
-                    continue
-
-        self._mind_thread = threading.Thread(target=_run, daemon=True, name="mind-loop")
-        self._mind_thread.start()
-        logger.info("🧠 Mind loop 已启动（后台线程，带异常保护 + 空闲检测）")
+        from .mind.executor import start_event_loop
+        start_event_loop()
+        logger.info("🧠 Mind executor 初始化完成")
 
     def stop_mind(self):
-        """停止 mind_loop。"""
-        if self._mind_loop and self._mind_loop.is_running():
-            self._mind_loop.stop()
-            logger.info("🧠 Mind loop 已停止")
+        """保留兼容 — MindPool 已移除，无需停止。"""
+        logger.debug("stop_mind no-op (MindPool removed)")
 
     async def feed_cron_tick(self):
-        """放入 cron_tick 念头（由 cron handler 调用）。"""
-        pool = await MindPool.get_instance()
-        await pool.put(cron_tick(source="hermes_cron"))
+        """已废弃 — cron 心跳通过 cron 模块直接交付。"""
+        import warnings
+        warnings.warn("feed_cron_tick is deprecated — cron ticks go through the event queue", DeprecationWarning, stacklevel=2)
+        logger.debug("feed_cron_tick no-op (Harness handles cron)")
+        pass
 
     async def feed_user_message(self, text: str, sender_id: str = "",
                                  sender_name: str = ""):
-        """已废弃 - 用户消息改由 QQ bridge 直接注入 PROJECT 事件。"""
+        """已废弃 — 用户消息改由 bridge 通过 enqueue_user_message 直接注入事件。"""
+        import warnings
+        warnings.warn("feed_user_message is deprecated — use enqueue_user_message() instead", DeprecationWarning, stacklevel=2)
         logger.debug(f"[核心] feed_user_message 已废弃，忽略: {text[:50]}")
 
     # ── 原有接口（保留兼容） ────────────────────────────────────

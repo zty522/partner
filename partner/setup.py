@@ -22,6 +22,7 @@ from .config import (
     workspace_has_partner_config,
 )
 from .instance_root import resolve_global_config_path, resolve_instance_workspace, resolve_partner_root
+from .workspace_layout import ensure_instance_layout
 
 # Windows: suppress console windows for subprocess calls
 _NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -418,7 +419,85 @@ def detect_openclaw() -> AgentInfo:
     return AgentInfo("openclaw", "OpenClaw", "🦞", False)
 
 
-SUPPORTED_SETUP_AGENTS = ("hermes", "openclaw")
+def detect_codex() -> AgentInfo:
+    """Detect OpenAI Codex CLI installation."""
+    import os as _os
+    import shutil
+
+    home = Path.home()
+    appdata = Path(_os.environ.get("APPDATA", ""))
+    localappdata = Path(_os.environ.get("LOCALAPPDATA", ""))
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        candidates = [
+            appdata / "npm" / "codex.cmd",
+            appdata / "npm" / "codex.ps1",
+            appdata / "npm" / "codex",
+            localappdata / "Programs" / "Codex" / "codex.exe",
+            home / ".local" / "bin" / "codex",
+            home / ".npm-global" / "bin" / "codex",
+            Path("/usr/local/bin/codex"),
+            Path("/usr/bin/codex"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                codex_bin = str(candidate)
+                break
+
+    if not codex_bin:
+        for cmd in ["which", "where"]:
+            try:
+                result = subprocess.run(
+                    [cmd, "codex"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=_NTFLAGS,
+                )
+                if result.returncode == 0:
+                    codex_bin = result.stdout.strip().split("\n")[0].strip()
+                    break
+            except Exception:
+                pass
+
+    if not codex_bin:
+        return AgentInfo("codex", "OpenAI Codex", "⌘", False)
+
+    version = None
+    try:
+        result = subprocess.run(
+            [codex_bin, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NTFLAGS,
+        )
+        version = (result.stdout or result.stderr or "").strip().splitlines()[0].strip() or None
+    except Exception:
+        version = None
+
+    config_candidates = [
+        home / ".codex" / "config.toml",
+        Path(_os.environ.get("USERPROFILE", "")) / ".codex" / "config.toml",
+        localappdata / "codex" / "config.toml",
+    ]
+    config_path = next((str(p) for p in config_candidates if p.exists()), None)
+    return AgentInfo(
+        name="codex",
+        display_name="OpenAI Codex",
+        emoji="⌘",
+        available=True,
+        path=codex_bin,
+        version=version,
+        config_path=config_path,
+    )
+
+
+SUPPORTED_SETUP_AGENTS = ("hermes", "codex", "openclaw")
 
 
 def _install_command_for_agent(agent_name: str) -> list[str] | None:
@@ -429,11 +508,16 @@ def _install_command_for_agent(agent_name: str) -> list[str] | None:
         if not npm:
             return None
         return [npm, "install", "-g", "openclaw"]
+    if agent_name == "codex":
+        npm = shutil.which("npm")
+        if not npm:
+            return None
+        return [npm, "install", "-g", "@openai/codex"]
     return None
 
 
 def _detect_supported_setup_agents() -> list[AgentInfo]:
-    return [detect_hermes(), detect_openclaw()]
+    return [detect_hermes(), detect_codex(), detect_openclaw()]
 
 
 def _detect_supported_setup_agent(agent_name: str) -> AgentInfo:
@@ -441,6 +525,8 @@ def _detect_supported_setup_agent(agent_name: str) -> AgentInfo:
         return detect_hermes()
     if agent_name == "openclaw":
         return detect_openclaw()
+    if agent_name == "codex":
+        return detect_codex()
     return AgentInfo(agent_name, agent_name, "?", False)
 
 
@@ -1185,11 +1271,11 @@ def _discover_existing_setup_context() -> dict:
         ctx["instance_workspace"] = inst_ws
         ctx["instance_config"] = _load_json_if_exists(resolve_partner_config_path(inst_ws))
         ctx["qq_config"] = (
-            _load_json_if_exists(os.path.join(inst_ws, "00_config", "qq_config.json"))
+            _load_json_if_exists(os.path.join(inst_ws, "config", "qq_config.json"))
             or _load_json_if_exists(os.path.join(inst_ws, "qq_config.json"))
         )
         ctx["wechat_config"] = (
-            _load_json_if_exists(os.path.join(inst_ws, "00_config", "wechat_config.json"))
+            _load_json_if_exists(os.path.join(inst_ws, "config", "wechat_config.json"))
             or _load_json_if_exists(os.path.join(inst_ws, "wechat_config.json"))
         )
 
@@ -1199,7 +1285,7 @@ def _discover_existing_setup_context() -> dict:
             for instance_id in instances:
                 inst_ws = str(resolve_instance_workspace(instance_id))
                 qq_cfg = (
-                    _load_json_if_exists(os.path.join(inst_ws, "00_config", "qq_config.json"))
+                    _load_json_if_exists(os.path.join(inst_ws, "config", "qq_config.json"))
                     or _load_json_if_exists(os.path.join(inst_ws, "qq_config.json"))
                 )
                 if qq_cfg:
@@ -1328,7 +1414,7 @@ def _configure_ollama_pool_for_workspace(workspace: str, existing_agent: dict | 
     pool["enabled"] = mode != "off"
     pool["mode"] = mode
     pool.setdefault("probe_timeout_sec", 2)
-    pool.setdefault("chat_timeout_sec", 90)
+    pool.setdefault("chat_timeout_sec", 30)
     pool.setdefault("max_input_chars", 4000)
     endpoints = pool.get("endpoints") if isinstance(pool.get("endpoints"), list) else []
     location_keys = ["local", "server", "tunnel", "custom"]
@@ -1375,7 +1461,7 @@ def _configure_ollama_pool_for_workspace(workspace: str, existing_agent: dict | 
         base_url = prompt_input(_txt("Ollama 地址", "Ollama URL"), default_url).rstrip("/")
         models = prompt_input(
             _txt("模型优先级，逗号分隔", "Model priority, comma-separated"),
-            "qwen2.5:7b",
+            "qwen3:1.7b,qwen3:4b,qwen2.5:7b",
         )
         if not base_url:
             status_warn(_txt("Ollama 地址为空，跳过", "Ollama URL is empty; skipped"))
@@ -1384,7 +1470,7 @@ def _configure_ollama_pool_for_workspace(workspace: str, existing_agent: dict | 
             endpoint = {
                 "name": name or f"ollama{len(endpoints)+1}",
                 "base_url": base_url,
-                "models": _split_csv(models, "qwen2.5:7b"),
+                "models": _split_csv(models, "qwen3:1.7b,qwen3:4b,qwen2.5:7b"),
                 "enabled": True,
                 "location": location_key,
             }
@@ -1515,6 +1601,7 @@ def _write_instance_qq_config(instance_id: str, qq_config: dict):
 
 def _register_instance_meta(instance_id: str):
     from . import manager
+    ensure_instance_layout(str(resolve_instance_workspace(instance_id)))
     cfg = manager.load_global_config()
     cfg.setdefault("instances", {})
     cfg["instances"][instance_id] = {
@@ -1640,7 +1727,7 @@ def _tail_lines(path: str, max_lines: int = 5) -> list[str]:
 def _find_recent_log_summary(workspace: str) -> dict:
     log_dirs = [
         os.path.join(workspace, "logs"),
-        os.path.join(workspace, "10_logs"),
+        os.path.join(workspace, "state/record"),
     ]
     candidates = []
     for log_dir in log_dirs:
@@ -1680,7 +1767,7 @@ def _print_instance_list_localized():
     for instance_id, status in sorted(instances.items()):
         running_text = _txt("在运行", "Running") if status == manager.STATUS_RUNNING else _txt("未运行", "Not running")
         qq_paths = [
-            os.path.join(str(resolve_instance_workspace(instance_id)), "00_config", "qq_config.json"),
+            os.path.join(str(resolve_instance_workspace(instance_id)), "config", "qq_config.json"),
             os.path.join(str(resolve_instance_workspace(instance_id)), "qq_config.json"),
         ]
         qq_text = _txt("已配置", "Configured") if any(os.path.exists(p) for p in qq_paths) else _txt("未配置", "Not configured")
@@ -1786,7 +1873,8 @@ def interactive_setup(quick: bool = False):
     
     # Create workspace structure
     os.makedirs(workspace, exist_ok=True)
-    for d in ["state", "knowledge", "ideas", "logs"]:
+    ensure_instance_layout(workspace)
+    for d in ["state", "logs"]:
         os.makedirs(os.path.join(workspace, d), exist_ok=True)
     
     readonly_dirs = []
@@ -1872,7 +1960,10 @@ def interactive_setup(quick: bool = False):
                         print(f"    {i}. {d}")
                     print(f"    {C.DIM}· 全部选择请输入 'all'，跳过直接回车{C.RESET}")
                     
-                    choice = input(f"  {C.DIM}选择: {C.RESET}").strip()
+                    try:
+                        choice = input(f"  {C.DIM}选择: {C.RESET}").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        choice = ""
                     selected_dirs = []
                     if choice.lower() == 'all':
                         selected_dirs = list(user["dirs"].values())
@@ -2064,7 +2155,7 @@ def interactive_setup(quick: bool = False):
     # ── 保存 QQ 机器人独立配置 ──
     qq_cfg = messaging_config.get("qq", {})
     if qq_cfg.get("type") == "official":
-        qq_cfg_path = os.path.join(workspace, "00_config", "qq_config.json")
+        qq_cfg_path = os.path.join(workspace, "config", "qq_config.json")
         os.makedirs(os.path.dirname(qq_cfg_path), exist_ok=True)
         with open(qq_cfg_path, "w", encoding="utf-8") as f:
             json.dump({
@@ -2137,7 +2228,7 @@ def interactive_setup(quick: bool = False):
                     pass
                 status_ok(f"QQ 机器人已后台启动 (PID: {proc.pid})")
     elif qq_cfg.get("type") == "official":
-        status_info("快速模式保留 QQ 配置，但不自动启动。需要时运行 partner start")
+        status_info("快速模式保留 QQ 配置；打开 Partner GUI 后会自动确保实例可用。")
     else:
         status_info("未配置 QQ 机器人，跳过自动启动")
     
@@ -2165,6 +2256,12 @@ def interactive_setup(quick: bool = False):
     print()
     line("━", 50, C.GREEN)
     print(f"\n  {C.BOLD}{C.GREEN}🎉 Partner {'Quick Setup' if quick else 'Setup'} Complete!{C.RESET}\n")
+    print(f"  {C.BOLD}✅ 配置完成 / Setup Complete{C.RESET}\n")
+    print(f"  {C.BOLD}下一步 / Next Steps:{C.RESET}")
+    print(f"    {C.CYAN}partner gateway start{C.RESET}  {C.DIM}— 启动后台服务 (start background service){C.RESET}")
+    print(f"    {C.CYAN}partner tui{C.RESET}             {C.DIM}— 进入交互终端 (enter interactive TUI){C.RESET}")
+    print(f"    {C.CYAN}partner status{C.RESET}          {C.DIM}— 查看实例状态 (check instance status){C.RESET}")
+    print()
     print(f"  {C.BOLD}Usage:{C.RESET}")
     print(f"    1. Open {selected.emoji} {selected.display_name}")
     print(f"    2. Say: {C.CYAN}'partner, what have you been doing?'{C.RESET}")
@@ -2174,9 +2271,6 @@ def interactive_setup(quick: bool = False):
     print(f"    {C.DIM}partner{C.RESET}")
     print(f"    {C.DIM}partner setup{C.RESET}")
     print(f"    {C.DIM}partner status{C.RESET}")
-    print(f"    {C.DIM}partner start{C.RESET}")
-    print(f"    {C.DIM}partner stop{C.RESET}")
-    print(f"    {C.DIM}partner restart{C.RESET}")
     print(f"    {C.DIM}partner bot start qq{C.RESET}")
     print(f"    {C.DIM}partner bot stop qq{C.RESET}")
     print(f"    {C.DIM}partner update{C.RESET}")
@@ -2203,7 +2297,7 @@ def show_status(workspace=None):
                 os.path.join(workspace, "instance.pid"),
             ]
             qq_paths = [
-                os.path.join(workspace, "00_config", "qq_config.json"),
+                os.path.join(workspace, "config", "qq_config.json"),
                 os.path.join(workspace, "qq_config.json"),
             ]
             qq_configured = any(os.path.exists(path) for path in qq_paths)
@@ -2267,7 +2361,7 @@ def show_status(workspace=None):
         heartbeat_path = os.path.join(state_dir, "heartbeat.json")
         stats_path = os.path.join(state_dir, "stats.json")
         qq_paths = [
-            os.path.join(instance_ws, "00_config", "qq_config.json"),
+            os.path.join(instance_ws, "config", "qq_config.json"),
             os.path.join(instance_ws, "qq_config.json"),
         ]
         qq_configured = any(os.path.exists(path) for path in qq_paths)
@@ -2320,9 +2414,6 @@ def show_status(workspace=None):
     print(f"    {C.DIM}partner{C.RESET}")
     print(f"    {C.DIM}partner setup{C.RESET}")
     print(f"    {C.DIM}partner status{C.RESET}")
-    print(f"    {C.DIM}partner start{C.RESET}")
-    print(f"    {C.DIM}partner stop{C.RESET}")
-    print(f"    {C.DIM}partner restart{C.RESET}")
     print(f"    {C.DIM}partner bot start qq{C.RESET}")
     print(f"    {C.DIM}partner bot stop qq{C.RESET}")
     print(f"    {C.DIM}partner update{C.RESET}")

@@ -85,7 +85,7 @@ def load_ollama_pool_config(workspace: str) -> dict:
             "endpoints": [{
                 "name": "legacy_dynamic",
                 "base_url": legacy_dynamic.get("base_url", ""),
-                "models": legacy_dynamic.get("models") or ["qwen2.5:14b", "qwen2.5:7b"],
+                "models": legacy_dynamic.get("models") or ["qwen3:1.7b", "qwen3:4b", "qwen2.5:14b", "llama3.3:7b", "qwen2.5:7b"],
                 "enabled": True,
             }],
         }
@@ -99,7 +99,7 @@ def load_ollama_pool_config(workspace: str) -> dict:
             "endpoints": [{
                 "name": "env",
                 "base_url": env_base,
-                "models": _split_models(os.getenv("PARTNER_OLLAMA_POOL_MODELS") or os.getenv("PARTNER_OLLAMA_MODEL") or "qwen2.5:7b"),
+                "models": _split_models(os.getenv("PARTNER_OLLAMA_POOL_MODELS") or os.getenv("PARTNER_OLLAMA_MODEL") or "qwen3:1.7b,qwen3:4b,qwen2.5:14b,llama3.3:7b,qwen2.5:7b"),
                 "enabled": True,
             }],
         }
@@ -121,7 +121,7 @@ def load_ollama_pool_config(workspace: str) -> dict:
             os.getenv("PARTNER_OLLAMA_AUTO_MODELS")
             or os.getenv("PARTNER_OLLAMA_POOL_MODELS")
             or os.getenv("PARTNER_OLLAMA_MODEL")
-            or "qwen2.5:7b,qwen2.5:14b,qwen2.5:0.5b"
+            or "qwen3:1.7b,qwen3:4b,qwen2.5:14b,llama3.3:7b,qwen2.5:7b,qwen2.5:0.5b"
         )
         for name, base_url in DEFAULT_LOCAL_ENDPOINTS:
             if base_url not in seen_urls:
@@ -140,7 +140,7 @@ def load_ollama_pool_config(workspace: str) -> dict:
         "mode": mode,
         "probe_timeout_sec": float(pool.get("probe_timeout_sec") or os.getenv("PARTNER_OLLAMA_PROBE_TIMEOUT_SEC") or 2.0),
         "heartbeat_probe_timeout_sec": float(pool.get("heartbeat_probe_timeout_sec") or os.getenv("PARTNER_OLLAMA_HEARTBEAT_PROBE_TIMEOUT_SEC") or 1.5),
-        "chat_timeout_sec": int(float(pool.get("chat_timeout_sec") or os.getenv("PARTNER_OLLAMA_TIMEOUT_SEC") or 90)),
+        "chat_timeout_sec": int(float(pool.get("chat_timeout_sec") or os.getenv("PARTNER_OLLAMA_TIMEOUT_SEC") or 30)),
         "max_input_chars": int(float(pool.get("max_input_chars") or os.getenv("PARTNER_OLLAMA_MAX_INPUT_CHARS") or 4000)),
         "auto_discover": bool(auto_discover),
         "endpoints": endpoints,
@@ -156,7 +156,7 @@ def purpose_allowed(mode: str, purpose: str) -> bool:
     if mode == "project":
         return purpose == "project"
     # lite/default: cheap short LLM work only.
-    return purpose in {"classify", "interaction", "report"}
+    return purpose in {"chat", "interaction", "classify", "short_summary", "report"}
 
 
 def write_status(workspace: str, payload: dict) -> None:
@@ -181,12 +181,35 @@ def _available_models(base_url: str, timeout: float) -> set[str]:
 
 
 def _probe_chat(base_url: str, model: str, timeout: float) -> tuple[bool, str]:
+    if "qwen3" in (model or "").lower():
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "只回复 OK"}],
+            "stream": False,
+            "think": False,
+            "options": {"temperature": 0, "num_predict": 16},
+        }
+        req = urllib.request.Request(
+            _api_root(base_url) + "/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        start = time.time()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            reply = data.get("message", {}).get("content", "")
+            elapsed_ms = int((time.time() - start) * 1000)
+            return bool(reply.strip()), f"probe_ok:{elapsed_ms}ms" if reply.strip() else "empty_probe_reply"
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
+            return False, f"{type(exc).__name__}: {str(exc)[:160]}"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "只回复 OK"}],
         "stream": False,
         "temperature": 0,
-        "max_tokens": 4,
+        "max_tokens": 256 if "qwen3" in (model or "").lower() else 16,
     }
     req = urllib.request.Request(
         _api_base(base_url) + "/chat/completions",
@@ -225,7 +248,7 @@ def select_ollama(workspace: str, purpose: str) -> OllamaSelection | None:
             continue
         name = str(endpoint.get("name") or endpoint.get("base_url") or "ollama").strip()
         base_url = str(endpoint.get("base_url") or "").strip().rstrip("/")
-        models = _split_models(endpoint.get("models") or endpoint.get("model") or cfg.get("models") or "qwen2.5:7b")
+        models = _split_models(endpoint.get("models") or endpoint.get("model") or cfg.get("models") or "qwen3:1.7b,qwen3:4b,qwen2.5:14b,llama3.3:7b,qwen2.5:7b")
         if not base_url or not models:
             probe_results.append({"endpoint": name, "ok": False, "reason": "missing_base_url_or_models"})
             continue
@@ -315,7 +338,7 @@ def heartbeat_probe(workspace: str, purpose: str = "report") -> dict:
                 "auto_discovered": bool(endpoint.get("auto_discovered")),
             })
             continue
-        models = _split_models(endpoint.get("models") or endpoint.get("model") or "qwen2.5:7b")
+        models = _split_models(endpoint.get("models") or endpoint.get("model") or "qwen3:1.7b,qwen3:4b,qwen2.5:14b,llama3.3:7b,qwen2.5:7b")
         usable = [model for model in models if model in available]
         row = {
             "endpoint": name,

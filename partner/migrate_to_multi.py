@@ -25,7 +25,7 @@ GLOBAL_CONFIG = CONTROL_DIR / "global_config.json"
 CURRENT_WORKSPACE = Path("/mnt/e/work/partner_workspace")
 DEFAULT_INSTANCE_DIR = CONTROL_DIR / "instances" / "default"
 
-INSTANCE_SUBDIRS = ["00_config", "10_logs", "20_records", "99_temp"]
+INSTANCE_SUBDIRS = ["state/record", "projects", "99_temp"]
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -74,7 +74,7 @@ def needs_migration() -> bool:
         return False
 
     # Already migrated if default instance dir exists and has content
-    config_dir = DEFAULT_INSTANCE_DIR / "00_config"
+    config_dir = DEFAULT_INSTANCE_DIR / "config"
     if config_dir.is_dir() and any(config_dir.iterdir()):
         print(green("  Default instance already appears to be migrated."))
         return False
@@ -115,22 +115,22 @@ def migrate_workspace() -> bool:
 
     # 2. Copy 00_config from old workspace
     copy_tree(
-        CURRENT_WORKSPACE / "00_config",
-        DEFAULT_INSTANCE_DIR / "00_config",
-        "00_config",
+        CURRENT_WORKSPACE / "config",
+        DEFAULT_INSTANCE_DIR / "config",
+        "config",
     )
 
     # 3. Copy state/ directory into 20_records
     copy_tree(
         CURRENT_WORKSPACE / "state",
-        DEFAULT_INSTANCE_DIR / "20_records",
+        DEFAULT_INSTANCE_DIR / "projects",
         "20_records (from state/)",
     )
 
     # 4. Copy any logs into 10_logs
     copy_tree(
         CURRENT_WORKSPACE / "logs",
-        DEFAULT_INSTANCE_DIR / "10_logs",
+        DEFAULT_INSTANCE_DIR / "state/record",
         "10_logs (from logs/)",
     )
 

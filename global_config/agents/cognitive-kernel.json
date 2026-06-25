@@ -1,0 +1,23 @@
+{
+  "name": "cognitive-kernel",
+  "version": "1.0.0",
+  "description": "Cognitive Kernel-Pro — a general-purpose AI agent for web research, file processing, code generation, reasoning, and data analysis",
+  "capabilities": [
+    "web_research",
+    "file_processing",
+    "code_generation",
+    "reasoning",
+    "data_analysis"
+  ],
+  "input_formats": ["txt", "csv", "json", "md", "py", "js", "html", "pdf"],
+  "output_formats": ["txt", "json", "md", "py", "html"],
+  "endpoint_type": "local",
+  "endpoint_config": {
+    "command": "python -m cognitive_kernel.run",
+    "args": ["--input", "{input}", "--output", "{output}"],
+    "category": "specialized"
+  },
+  "timeout": 1800,
+  "health_check_cmd": null,
+  "notes": "STUB — Cognitive Kernel-Pro is not installed. This manifest is a placeholder for future registration. Health check returns unavailable."
+}

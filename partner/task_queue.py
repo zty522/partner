@@ -54,8 +54,16 @@ class TaskQueue:
     
     def _load(self):
         try:
-            with open(self.path) as f:
-                data = json.load(f)
+            with open(self.path, "rb") as f:
+                raw = f.read()
+            for enc in ("utf-8", "utf-8-sig", "gbk"):
+                try:
+                    data = json.loads(raw.decode(enc))
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                data = json.loads(raw.decode("utf-8", errors="replace"))
             valid_fields = {f.name for f in Task.__dataclass_fields__.values()}
             self.tasks = []
             for t in data:
@@ -68,7 +76,7 @@ class TaskQueue:
             self.tasks = []
     
     def save(self):
-        with open(self.path, 'w') as f:
+        with open(self.path, 'w', encoding="utf-8") as f:
             json.dump([asdict(t) for t in self.tasks], f, indent=2, ensure_ascii=False)
     
     def add_task(self, task: Task) -> str:
@@ -104,6 +112,24 @@ class TaskQueue:
                 t.completed_at = datetime.now().isoformat()
                 break
         self.save()
+
+    def complete_matching_title(self, title: str, result_summary: str = "") -> int:
+        normalized = " ".join((title or "").split())
+        if not normalized:
+            return 0
+        changed = 0
+        for t in self.tasks:
+            if t.status not in (TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value):
+                continue
+            if " ".join((t.title or "").split()) != normalized:
+                continue
+            t.status = TaskStatus.COMPLETED.value
+            t.result_summary = result_summary
+            t.completed_at = datetime.now().isoformat()
+            changed += 1
+        if changed:
+            self.save()
+        return changed
     
     def fail(self, task_id: str, reason: str = ""):
         for t in self.tasks:

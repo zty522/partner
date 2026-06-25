@@ -97,7 +97,7 @@ def _project_report_dir(workspace: str, project: str) -> str:
 
 
 def _user_report_dir(workspace: str, project: str) -> str:
-    report_dir = os.path.join(workspace, "user", "reports", _safe_name(project))
+    report_dir = os.path.join(workspace, "state", "user", "reports", _safe_name(project))
     os.makedirs(report_dir, exist_ok=True)
     return report_dir
 
@@ -570,6 +570,9 @@ def _generate_pptx(markdown_path: str, project: str, output_path: str) -> None:
 
 
 def _generate_pdf_from_report(report: StageReport, output_path: str) -> None:
+    import os as _pdf_os
+    _pdf_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    _pdf_os.environ.setdefault("OMP_NUM_THREADS", "1")
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet

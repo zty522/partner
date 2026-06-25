@@ -89,7 +89,7 @@ class StateManager:
         """检测崩溃并记录到重启计数器。
 
         调用 detect_crash()，如果检测到崩溃则：
-        - 记录到 RestartTracker（{workspace}/10_logs/restart_tracker.json）
+        - 记录到 RestartTracker（{workspace}/state/record/restart_tracker.json）
         - 更新 heartbeat 中的 crash_count
         - 记录崩溃日志到 crash.log
 
@@ -118,7 +118,7 @@ class StateManager:
             # 记录 crash.log
             try:
                 workspace = os.path.dirname(os.path.dirname(self.state_dir))
-                log_dir = os.path.join(workspace, "10_logs")
+                log_dir = os.path.join(workspace, "state/record")
                 os.makedirs(log_dir, exist_ok=True)
                 crash_log = os.path.join(log_dir, "crash.log")
                 from datetime import datetime

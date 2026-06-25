@@ -31,7 +31,7 @@ def get_path(workspace: str) -> str:
     Returns:
         文件路径
     """
-    return os.path.join(workspace, "20_records", "active_project.json")
+    return os.path.join(workspace, "projects", "active_project.json")
 
 
 def load(workspace: str) -> Optional[Dict]:

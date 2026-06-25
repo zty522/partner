@@ -16,6 +16,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
+from .workspace_layout import dialog_history_path, ensure_instance_layout
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,9 +35,8 @@ class ContextBroker:
         self.workspace = workspace
         self.knowledge = knowledge_base
         self.journal = journal
-        self.dialog_history_path = os.path.join(
-            workspace, "state", "dialog_history.jsonl"
-        )
+        ensure_instance_layout(workspace)
+        self.dialog_history_path = dialog_history_path(workspace)
         # 如果 knowledge.json 路径有自定义格式，在此记录
         self.knowledge_custom_path = os.path.join(
             workspace, "state", "knowledge_context.json"

@@ -11,7 +11,7 @@ class RestartTracker:
 
     def __init__(self, workspace: str):
         self.workspace = workspace
-        self.log_path = os.path.join(workspace, "10_logs", "restart_tracker.json")
+        self.log_path = os.path.join(workspace, "state/record", "restart_tracker.json")
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
 
     def record_restart(self) -> bool:

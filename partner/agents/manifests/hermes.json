@@ -1,0 +1,16 @@
+{
+  "name": "hermes",
+  "version": "2.0.0",
+  "description": "通用 AI Agent，支持多种工具和任务",
+  "capabilities": ["general_purpose", "research", "coding", "data_analysis"],
+  "input_formats": ["text", "file"],
+  "output_formats": ["text", "file"],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "command": "hermes",
+    "args": ["-t", "terminal,file,web"],
+    "max_turns": 10
+  },
+  "timeout": 600,
+  "health_check_cmd": "hermes --version"
+}

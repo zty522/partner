@@ -10,7 +10,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def apply_limits(nice_value: int = 10, mem_limit_mb: int = 2048):
+def apply_limits(nice_value: int = 10, mem_limit_mb: int = 8192):
     """设置当前进程的资源限制。
 
     Args:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 
@@ -20,8 +21,9 @@ def resolve_partner_root() -> Path:
     1. PARTNER_HOME env var
     2. ~/.partner_workspace pointer target
     3. /mnt/e/work/partner_workspace when present
-    4. ~/partner_workspace when present
-    5. ~/.partner fallback
+    4. \\\\wsl$\\<distro>\\e\\work\\partner_workspace when on Windows
+    5. ~/partner_workspace when present
+    6. ~/.partner fallback
     """
     env_home = os.environ.get("PARTNER_HOME", "").strip()
     if env_home:
@@ -38,6 +40,20 @@ def resolve_partner_root() -> Path:
         Path.home() / "partner_workspace",
         Path.home() / ".partner_workspace",
     ]
+    # On Windows, also probe WSL UNC paths
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-l", "-q"], capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            for distro in result.stdout.strip().splitlines():
+                distro = distro.strip()
+                if distro:
+                    candidates.insert(0, Path(f"\\\\wsl$\\{distro}\\e\\work\\partner_workspace"))
+        except Exception:
+            pass
+
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -50,7 +66,7 @@ def resolve_instances_dir() -> Path:
 
 
 def resolve_global_config_path() -> Path:
-    return resolve_partner_root() / "global_config.json"
+    return resolve_partner_root() / "config" / "global_config.json"
 
 
 def resolve_instance_workspace(instance_id: str) -> Path:

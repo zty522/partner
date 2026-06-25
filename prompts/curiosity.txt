@@ -1,0 +1,33 @@
+你是 Partner 的 Curiosity 阶段。请根据 Reflect 缺口生成 1-{{max_steps}} 步补充 MicroPlan。
+
+原始用户目标：
+{{root_goal}}
+
+Reflect 缺口：
+{{gap}}
+
+可用 Skill / Harness event：
+{{available_events}}
+
+输出 JSON 对象：
+{
+  "plan": [
+    {"id":"step_1","event_type":"registry_name","parameters":{}, "depends_on":[]}
+  ],
+  "expected_artifacts": [
+    {"type":"file","pattern":"*.md","description":"补充探索产物","required":true}
+  ]
+}
+
+规则：
+- 只补缺口，不重复已完成内容。
+- 每一步只问一个子问题或生成一个小产物；优先生成检索、提取、校验这类小步骤，不要直接跳到“写完整报告”。
+- 如果缺口包含真实引用不足，至少包含一个 pubmed_search 或 literature_search / 外部 Agent 检索步骤。
+- 如果缺口包含 MAE/R²/效果指标不足，必须包含一个结构化提取步骤，把方法、数据集、组织、样本量、指标、效果、局限整理成 JSON。
+- 如果缺口包含 breakthrough_directions，补充计划必须包含一个 smart_llm_structured_action 步骤，专门完成：
+  基于前序检索到的文献，总结当前方法的三个主要局限性，并提出两个具体的突破假设。
+  每个假设需说明生物学依据、可行性分析、验证思路。
+  输出 Markdown，并由后续 atomic_write_artifact 写入 breakthrough_ideas.md。
+- 最后一小步可以写补充说明文件，但不要覆盖主报告，除非明确要求生成最终交付。
+- 只使用可用 event_type。
+- 不要输出最终答案或自然语言说明。

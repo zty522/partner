@@ -11,15 +11,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, Optional
+
+import yaml
 
 from .journal import Journal, JournalEntry
 from .knowledge import KnowledgeBase, KnowledgeEntry
 from .project_state import (
     append_log,
+    clear_active,
     get_active,
     record_project_guardrail,
     set_active,
@@ -38,13 +43,226 @@ from .project_registry import (
 from .state import StateManager
 from .user_text_safety import has_internal_diff, strip_internal_diff
 from .task_queue import TaskQueue, Task
-from .outbound_policy import UNAVAILABLE_NOTICE, prefix_event_notice
+from .outbound_policy import THINKING_NOTICE, UNAVAILABLE_NOTICE, prefix_event_notice
+from .mind import MindEvent, EventType
 
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_ROUTING_RULES = {
+    "routing": {
+        "force_event_type": "batch_plan",
+        "prefer_project_think": [],
+        "allow_direct_delivery_if": [],
+    }
+}
+
+
+# ── LLM-based direct reply routing (replaces hardcoded regex patterns) ──
+
+_DRECT_REPLY_CLASSIFICATION_PROMPT = """你是一个消息分类器。判断用户消息：
+
+1. 如果消息是简单的问候、感谢、再见、简单定义查询、天气/时间/汇率查询等，不需要多步执行就能回答，则输出 {"type": "direct_reply", "reply": "你的直接回复"}
+
+2. 如果消息是需要多步执行的任务（数据分析、代码生成、文件操作、研究分析、项目推进、文件路径操作、调用特定工具/agent等），则输出 {"type": "complex_task"}
+
+重要规则：
+- 包含文件路径（如 /data/xxx.h5ad、/mnt/xxx 等）的消息一定是 complex_task
+- 包含工具/agent/模型名称（如 cytobridge、pancreas.h5ad、单细胞、轨迹推断等专业术语）的消息一定是 complex_task
+- 包含具体数据分析操作（如轨迹推断、差异分析、聚类、降维等）的消息一定是 complex_task
+- 只有纯粹的问候（你好、嗨、在吗）、感谢（谢谢）、告别（再见）才可能是 direct_reply
+- 不确定时优先分类为 complex_task
+
+仅输出 JSON，不要多余内容。用户消息："""
+
+def _classify_for_direct_reply(adapter, text: str) -> dict | None:
+    """Use LLM to classify whether a message should get a direct reply or complex task execution.
+
+    Returns None if classification fails (caller falls through to batch_plan).
+    """
+    if not adapter or not (text or "").strip():
+        return None
+    try:
+        prompt = _DRECT_REPLY_CLASSIFICATION_PROMPT + text
+        reply = adapter.chat(prompt, purpose="direct_reply_classify")
+        if not reply or not reply.strip():
+            return None
+        # Clean up common LLM wrapping
+        cleaned = reply.strip()
+        if cleaned.startswith("```"):
+            # Remove code fences
+            cleaned = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        cleaned = cleaned.strip()
+        result = json.loads(cleaned)
+        if isinstance(result, dict):
+            return result
+        return None
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.debug("[DIRECT_REPLY_CLASSIFY] LLM classification failed: %s", exc)
+        return None
+
+
+def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision]:
+    """LLM-based direct reply routing: classify then possibly generate reply.
+
+    Replaces the old _try_direct_reply_fast_path that used hardcoded regex patterns.
+    Returns InteractionDecision if message is a direct_reply candidate, None for complex_task.
+    """
+    if not (text or "").strip():
+        return None
+
+    adapter = self.get_adapter()
+    if not adapter:
+        return None
+
+    # Step 1: Classify via LLM
+    classification = _classify_for_direct_reply(adapter, text)
+    if not classification:
+        logger.debug("[ROUTING] direct_reply classification failed or returned empty")
+        return None
+
+    if classification.get("type") != "direct_reply":
+        logger.debug("[ROUTING] LLM classified as complex_task, routing to batch_plan")
+        return None
+
+    # Step 2: Use pre-generated reply from classification
+    reply_text = classification.get("reply", "")
+    if not reply_text or not reply_text.strip():
+        logger.debug("[ROUTING] direct_reply classification had no reply, falling through")
+        return None
+
+    sanitized = self._sanitize_reply_to_user(reply_text)
+    if not sanitized:
+        return None
+
+    # NOTE: The USER_MESSAGE handler in executor.py creates the DIRECT_REPLY event
+    # from this InteractionDecision, so we do NOT enqueue a separate event here.
+
+    return InteractionDecision(
+        reply_to_user=sanitized,
+        need_lifeline_update=False,
+        event_type="interaction_reply",
+        event_kind="direct_reply",
+        stop_after_completion=True,
+    )
+
+
+EVENT_CAPABILITIES = {
+    "batch_plan": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "direct_task": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "artifact_build": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "pdf_report": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "visualization": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "web_capture": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "file_inspection": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "email_delivery": {"can_deliver_artifacts": False, "can_execute_atomic_plan": True, "planning_only": False},
+    "data_fetch": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "data_analysis": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "web_search": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "literature_review": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "evidence_audit": {"can_deliver_artifacts": True, "can_execute_atomic_plan": True, "planning_only": False},
+    "ollama_status": {"can_deliver_artifacts": False, "can_execute_atomic_plan": True, "planning_only": False},
+    "project_think": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "objective_review": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "curiosity_explore": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "habit_update": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "project": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "content_digest": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": False},
+    "reflection": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+    "memory_consolidate": {"can_deliver_artifacts": False, "can_execute_atomic_plan": False, "planning_only": True},
+}
+
+
+def _is_generic_event_title(title: str) -> bool:
+    raw = str(title or "").strip()
+    if not raw:
+        return True
+    normalized = raw.lower()
+    generic = {
+        "用户任务",
+        "当前项目",
+        "任务",
+        "新任务",
+        "task",
+        "project",
+        "report",
+    }
+    return normalized in EVENT_CAPABILITIES or raw in EVENT_CAPABILITIES or normalized in generic or raw in generic
+
+
+def _title_from_objective(*values: str) -> str:
+    for value in values:
+        title = _clip_title(value)
+        if title and not _is_generic_event_title(title):
+            return title
+    return "用户任务"
+
+
+def _event_capability(event_type: str) -> dict:
+    return EVENT_CAPABILITIES.get(str(event_type or "").strip(), {})
+
+
+def _normalize_expected_artifacts(raw: object) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "file").strip().lower()
+        pattern = str(item.get("pattern") or item.get("name") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if kind == "file" and not pattern:
+            continue
+        out.append({
+            "type": kind,
+            "pattern": pattern,
+            "description": description,
+            "required": bool(item.get("required", True)),
+        })
+    return out[:8]
+
+
+def _normalize_artifact_freshness_policy(raw: object) -> str:
+    value = str(raw or "new").strip().lower()
+    if value in {"new", "reuse_allowed", "continue_task"}:
+        return value
+    return "new"
+
+
+def _deep_merge_dict(base: dict, patch: dict) -> dict:
+    out = dict(base or {})
+    for key, value in (patch or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge_dict(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
 def _clip_title(text: str, suffix: str = "") -> str:
-    return ""
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return suffix.strip()[:80]
+    raw = re.sub(r"^(请|帮我|麻烦|能不能|可以帮我|你可以|我要|我想)\s*", "", raw, flags=re.I)
+    raw = re.sub(r"[。！？!?；;，,]+", " ", raw).strip()
+    parts = [p for p in raw.split(" ") if p]
+    title = " ".join(parts[:2]) if parts else raw
+    title = re.sub(r"[^\w\u4e00-\u9fff ._+-]+", "_", title).strip(" _.-")
+    if len(title) > 48:
+        title = title[:48].rstrip(" _.-")
+    if suffix:
+        title = f"{title}_{suffix.strip()}" if title else suffix.strip()
+    return title[:80] or "用户任务"
 
 
 @dataclass
@@ -71,6 +289,16 @@ class InteractionDecision:
     priority: int = 6
     pending_action: str = "none"
     pending_followup: dict = None
+    task_instance_id: str = ""
+    task_working_dir: str = ""
+    continue_from_project: str = ""
+    delivery_required: bool = False
+    expected_artifacts: list[dict] = None
+    artifact_freshness_policy: str = "new"
+    reuse_existing_artifact: bool = False
+    reuse_reason: str = ""
+
+
 
 
 class InteractionOrchestrator:
@@ -100,35 +328,187 @@ class InteractionOrchestrator:
             "state",
             "conversation_state.json",
         )
+        self._routing_rules_cache: dict | None = None
+
+    def _load_routing_rules(self) -> dict:
+        if self._routing_rules_cache is not None:
+            return self._routing_rules_cache
+        candidates = [
+            os.path.join(self.workspace, "config", "routing_rules.yaml"),
+            os.path.join(self.workspace, "routing_rules.yaml"),
+            # Also try workspace root config (one level up from instances/XX/)
+            os.path.join(os.path.dirname(os.path.dirname(self.workspace)), "config", "routing_rules.yaml"),
+            os.path.join(os.path.dirname(self.workspace), "config", "routing_rules.yaml"),
+        ]
+        config = dict(DEFAULT_ROUTING_RULES)
+        for path in candidates:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = yaml.safe_load(f) or {}
+                if isinstance(loaded, dict):
+                    config = _deep_merge_dict(config, loaded)
+                    config["_config_path"] = path
+                    break
+            except Exception as exc:
+                logger.debug(f"failed to load routing rules from {path}: {exc}")
+        self._routing_rules_cache = config
+        return config
+
+    def _try_direct_reply_fast_path(self, text: str) -> Optional[InteractionDecision]:
+        """Direct reply routing: only matched by configured routing rules (routing_rules.yaml).
+        All other messages go directly to batch_plan — the planner handles both
+        simple queries and complex tasks.
+        """
+        # Check routing_rules.yaml for direct_reply patterns (if any)
+        config = self._load_routing_rules()
+        routing = config.get("routing") if isinstance(config.get("routing"), dict) else {}
+        direct_reply_cfg = routing.get("direct_reply") if isinstance(routing.get("direct_reply"), dict) else {}
+        if not direct_reply_cfg.get("enabled", True):
+            return None
+        patterns = direct_reply_cfg.get("patterns")
+        if not isinstance(patterns, list) or not patterns:
+            return None
+        use_regex = bool(direct_reply_cfg.get("use_regex", False))
+        matched = False
+        for pattern in patterns:
+            pattern = str(pattern).strip()
+            if not pattern:
+                continue
+            try:
+                if use_regex:
+                    if re.search(pattern, text, re.I | re.S):
+                        matched = True
+                        break
+                else:
+                    if pattern.lower() in text.lower():
+                        matched = True
+                        break
+            except re.error:
+                continue
+        if not matched:
+            return None
+        logger.info("[ROUTING] direct_reply pattern matched for: %s", text[:80])
+        # If matched by rule, call LLM once for the direct reply
+        adapter = self.get_adapter()
+        if not adapter:
+            return InteractionDecision(
+                reply_to_user="抱歉，我暂时无法回复",
+                need_lifeline_update=False,
+                event_type="interaction_reply",
+                event_kind="direct_reply",
+                stop_after_completion=True,
+            )
+        try:
+            reply = adapter.chat(text, purpose="direct_reply")
+            if reply and reply.strip() and "PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE" not in reply:
+                sanitized = self._sanitize_reply_to_user(reply)
+                if sanitized:
+                    return InteractionDecision(
+                        reply_to_user=sanitized,
+                        need_lifeline_update=False,
+                        event_type="interaction_reply",
+                        event_kind="direct_reply",
+                        stop_after_completion=True,
+                    )
+        except Exception as exc:
+            logger.warning("[ROUTING] direct_reply LLM failed: %s", exc)
+        return None
+
+    @staticmethod
+    def _first_matching_rule(text: str, rules: object) -> str:
+        if not isinstance(rules, list):
+            return ""
+        for item in rules:
+            pattern = ""
+            if isinstance(item, dict):
+                pattern = str(item.get("pattern") or "").strip()
+            else:
+                pattern = str(item or "").strip()
+            if not pattern:
+                continue
+            try:
+                if re.search(pattern, text or "", flags=re.I | re.S):
+                    return pattern
+            except re.error as exc:
+                logger.debug(f"invalid routing pattern {pattern!r}: {exc}")
+        return ""
+
+    def _apply_routing_rules(self, decision: InteractionDecision, user_text: str, task: object | None = None) -> InteractionDecision:
+        config = self._load_routing_rules()
+        routing = config.get("routing") if isinstance(config.get("routing"), dict) else {}
+        prefer_pattern = self._first_matching_rule(user_text, routing.get("prefer_project_think"))
+        allow_pattern = self._first_matching_rule(user_text, routing.get("allow_direct_delivery_if"))
+        if not prefer_pattern or allow_pattern:
+            if _is_generic_event_title(decision.target_project or decision.task_title):
+                target = _title_from_objective(user_text, decision.task_description, decision.target_project, decision.task_title)
+                decision.target_project = target
+                decision.task_title = target
+            return decision
+        forced_event = str(routing.get("force_event_type") or "batch_plan").strip() or "batch_plan"
+        if forced_event not in self._action_event_types():
+            forced_event = "batch_plan" if "batch_plan" in self._action_event_types() else "project_think"
+        logger.info("[ROUTING] matched pattern %s -> force %s", prefer_pattern, forced_event)
+        if task and hasattr(task, "append_log"):
+            try:
+                task.append_log("routing_decision", {
+                    "message": f"[ROUTING] matched pattern {prefer_pattern} -> force {forced_event}",
+                    "matched_pattern": prefer_pattern,
+                    "allow_pattern": allow_pattern,
+                    "forced_event_type": forced_event,
+                    "previous_event_type": decision.event_type,
+                    "previous_event_kind": decision.event_kind,
+                    "config_path": config.get("_config_path") or "",
+                })
+            except Exception:
+                pass
+        target = decision.target_project or decision.task_title or _clip_title(user_text) or "用户任务"
+        if _is_generic_event_title(target):
+            target = _title_from_objective(user_text, decision.task_description, target)
+        if decision.event_type == forced_event:
+            decision.need_lifeline_update = True
+            decision.lifeline_action = "add_task"
+            decision.target_project = target
+            decision.task_title = target
+            if not decision.event_kind or str(decision.event_kind).startswith("routing_prefer_"):
+                decision.event_kind = target or "direct"
+            decision.stop_after_completion = False
+            decision.priority = min(decision.priority or 3, 2)
+            return decision
+        objective = (
+            "按路由规则进入复杂任务批量规划；一次生成可执行 Harness MicroPlan，"
+            "再由 Harness 执行依赖和并行步骤。"
+            f"\n原始用户目标：{user_text[:1600]}"
+            + (f"\n原 selector 目标：{str(decision.task_description or '')[:1200]}" if decision.task_description else "")
+        )
+        return InteractionDecision(
+            reply_to_user=decision.reply_to_user or THINKING_NOTICE,
+            need_lifeline_update=True,
+            lifeline_action="add_task",
+            target_project=target,
+            task_title=target,
+            task_description=objective,
+            delivery_mode=decision.delivery_mode,
+            event_type=forced_event,
+            event_kind=target or "direct",
+            stop_after_completion=False,
+            priority=min(decision.priority or 3, 2),
+            pending_action=decision.pending_action,
+            pending_followup=decision.pending_followup,
+            task_instance_id=decision.task_instance_id,
+            task_working_dir=decision.task_working_dir,
+            continue_from_project=decision.continue_from_project,
+            delivery_required=decision.delivery_required,
+            expected_artifacts=decision.expected_artifacts,
+            artifact_freshness_policy=decision.artifact_freshness_policy,
+            reuse_existing_artifact=decision.reuse_existing_artifact,
+            reuse_reason=decision.reuse_reason,
+        )
 
     def _notify_growth_write(self, project: str, learned: str):
-        try:
-            from .mind.event_types import EventType, MindEvent
-            from .mind.pool import MindPool
-
-            pool = MindPool.get_sync_instance()
-            if not pool:
-                return
-            content = prefix_event_notice(
-                f"已写入一条可复用经验：{str(learned or '后续会按这次经验调整判断和推进方式。')[:120]}",
-                EventType.HABIT_UPDATE.value,
-                event_kind=project or "当前项目",
-                workspace=self.workspace,
-            )
-            pool.put_threadsafe(MindEvent(
-                type=EventType.REPORT,
-                priority=3,
-                payload={
-                    "content": content,
-                    "force_send": True,
-                    "bypass_rate_limit": True,
-                    "visible_event_type": EventType.HABIT_UPDATE.value,
-                    "visible_event_kind": project or "当前项目",
-                },
-                source="interaction:growth_notice",
-            ))
-        except Exception as exc:
-            logger.debug(f"failed to enqueue growth notice: {exc}")
+        """保留兼容 — Harness 接管了事件分发。"""
+        logger.debug("_notify_growth_write no-op (Harness handles REPORT events)")
 
     def _load_conversation_state(self) -> dict:
         try:
@@ -161,7 +541,6 @@ class InteractionOrchestrator:
         skip_prefixes = (
             "state/",
             "logs/",
-            "10_logs/",
             "system/hermes_home/",
             "system/checks/",
         )
@@ -171,7 +550,7 @@ class InteractionOrchestrator:
             rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
             if rel_dir == ".":
                 rel_dir = ""
-            if rel_dir.startswith(("system/hermes_home", "logs", "10_logs", "state")):
+            if rel_dir.startswith(("system/hermes_home", "logs", "state/record", "state")):
                 dirnames[:] = []
                 continue
             for name in filenames:
@@ -251,6 +630,11 @@ class InteractionOrchestrator:
         text = (reply or "").strip()
         if not text:
             return ""
+        lowered = text.strip().lower()
+        if lowered in {"true", "false", "null", "none", "undefined", "{}", "[]", '""', "''"}:
+            return ""
+        if re.fullmatch(r"""["']?(?:true|false|null|none|undefined)["']?""", lowered):
+            return ""
         text = re.sub(r"(?im)^\s*⚠️?\s*Reached maximum iterations.*(?:\n|$)", "", text).strip()
         if not text:
             return ""
@@ -287,20 +671,58 @@ class InteractionOrchestrator:
             return True
         return bool(re.search(r"(给用户的自然回复|自由短标签|none\|set\|keep\|clear|direct_reply\|mind_event)", reply or ""))
 
+    @staticmethod
+    def _looks_actionable_without_selector(text: str) -> bool:
+        """Conservative fallback when the selector is unavailable.
+
+        Fallback path for selector outages. Do not classify intent by keywords
+        here; non-empty user text is passed to objective_review.
+        """
+        raw = str(text or "").strip()
+        return bool(raw)
+
+    @staticmethod
+    def _delivery_mode_for_request(text: str, event_type: str = "") -> tuple[str, bool]:
+        """Default execution scope without parsing user intent keywords."""
+        _ = text, event_type
+        return "research_project", False
+
+    @staticmethod
+    def _fallback_event_for_actionable_request(text: str) -> tuple[str, str]:
+        _ = text
+        return "direct_task", "selector_unavailable_direct_task"
+
+    @staticmethod
+    def _sanitize_selector_event_kind(event_kind: str, event_type: str = "") -> str:
+        cleaned = re.sub(
+            r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+",
+            "_",
+            str(event_kind or ""),
+        ).strip("_")[:80]
+        if cleaned in {"自由短标签", "短标签", "event_kind"}:
+            return ""
+        if (
+            cleaned in {"reference_brief", "requested_artifact", "requested_visualization", "requested_report_after_visualization"}
+            or cleaned.endswith("_data_fetch")
+            or cleaned.endswith("_research_replan")
+            or cleaned.endswith("selector_unavailable_replan")
+        ):
+            return f"selector_{event_type or 'event'}"
+        return cleaned
+
     def _objective_review_for_selector_gap(self, *, text: str, snapshot: dict, context_resolution: dict,
                                            selector_data: dict, reply: str, pending_action: str,
                                            pending: dict, priority: int) -> InteractionDecision:
         resolved = str(context_resolution.get("resolved_objective") or selector_data.get("objective") or text).strip()
         target = str(selector_data.get("target_project") or "").strip()
-        event_kind = re.sub(
-            r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+",
-            "_",
+        event_kind = self._sanitize_selector_event_kind(
             str(selector_data.get("event_kind") or ""),
-        ).strip("_")[:80]
+            str(selector_data.get("event_type") or ""),
+        )
         if event_kind in {"自由短标签", "短标签", "event_kind"}:
             event_kind = "selector_repair"
-        if not target:
-            target = event_kind or "用户任务"
+        if not target or _is_generic_event_title(target):
+            target = _title_from_objective(resolved, text, event_kind)
         current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
         objective = (
             "selector 输出可解析但不是一个可执行决策。先对齐用户根目标、context_resolution 已知信息、"
@@ -312,7 +734,7 @@ class InteractionOrchestrator:
             f"\n根目标：{resolved[:1200]}"
         )
         return InteractionDecision(
-            reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            reply_to_user=reply or THINKING_NOTICE,
             need_lifeline_update=True,
             lifeline_action="add_task",
             target_project=target,
@@ -321,7 +743,7 @@ class InteractionOrchestrator:
             note=f"SELECTOR_REPAIR_OBJECTIVE_REVIEW: {text[:1200]}",
             event_type="objective_review",
             event_kind=event_kind or "selector_repair",
-            stop_after_completion=True,
+            stop_after_completion=False,
             priority=max(1, min(priority, 3)),
             pending_action=pending_action,
             pending_followup=pending,
@@ -346,11 +768,12 @@ class InteractionOrchestrator:
             or context_resolution.get("related_project")
             or ""
         ).strip() or _clip_title(resolved or text) or "用户任务"
-        event_kind = re.sub(
-            r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+",
-            "_",
+        if _is_generic_event_title(target):
+            target = _title_from_objective(resolved, text, target)
+        event_kind = self._sanitize_selector_event_kind(
             str(route_review.get("event_kind") or selector_data.get("event_kind") or "route_review").strip(),
-        ).strip("_")[:80] or "route_review"
+            str(selector_data.get("event_type") or ""),
+        ) or "route_review"
         current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
         objective = (
             "route_review 判断入口路由存在矛盾或不确定。请只做目标/上下文对齐：核对用户消息、"
@@ -365,7 +788,7 @@ class InteractionOrchestrator:
             f"\n根目标：{resolved[:1200]}"
         )
         return InteractionDecision(
-            reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+            reply_to_user=reply or THINKING_NOTICE,
             need_lifeline_update=True,
             lifeline_action="add_task",
             target_project=target,
@@ -374,7 +797,7 @@ class InteractionOrchestrator:
             note=f"ROUTE_REVIEW_OBJECTIVE_REVIEW: {text[:1200]}",
             event_type="objective_review",
             event_kind=event_kind,
-            stop_after_completion=True,
+            stop_after_completion=False,
             priority=max(1, min(priority, 3)),
             pending_action=pending_action if pending_action in {"none", "set", "keep", "clear"} else "none",
             pending_followup=pending,
@@ -384,6 +807,7 @@ class InteractionOrchestrator:
     def _action_event_types() -> set[str]:
         return {
             "direct_task",
+            "batch_plan",
             "literature_review",
             "data_fetch",
             "data_analysis",
@@ -394,36 +818,28 @@ class InteractionOrchestrator:
             "email_delivery",
             "web_search",
             "web_capture",
+            "file_inspection",
             "project_think",
             "objective_review",
             "curiosity_explore",
             "habit_update",
+            "ollama_status",
             "project",
         }
 
     def _objective_review_for_unavailable_selector(self, *, text: str, snapshot: dict,
                                                    reason: str = "selector_unavailable") -> InteractionDecision:
-        current = (snapshot.get("current", "") or snapshot.get("active_plan", "") or snapshot.get("summary", "") or "")[:700]
-        objective = (
-            "入口 selector 没有在时限内产出可执行决策。不要停止，也不要要求用户重复原话。"
-            "先用当前上下文对齐用户消息、已有项目、待续参数、可交付物和缺口，再选择下一个最小可验证 event。"
-            f"\n失败原因：{reason}"
-            f"\n用户消息：{text[:1200]}"
-            f"\n当前推进摘要：{current}"
-        )
-        target = _clip_title(text) or "用户任务"
+        """Selector failed — report error to user, do not add task."""
+        _ = text, snapshot  # unused in this simplified version
+        event_kind = reason
         return InteractionDecision(
-            reply_to_user="__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
-            need_lifeline_update=True,
-            lifeline_action="add_task",
-            target_project=target,
-            task_title=target,
-            task_description=objective,
-            note=f"SELECTOR_UNAVAILABLE_OBJECTIVE_REVIEW: {text[:1200]}",
-            event_type="objective_review",
-            event_kind=reason,
+            reply_to_user=UNAVAILABLE_NOTICE,
+            need_lifeline_update=False,
+            lifeline_action="none",
+            event_type="interaction_reply",
+            event_kind=event_kind,
             stop_after_completion=True,
-            priority=2,
+            priority=1,
             pending_action="none",
         )
 
@@ -503,20 +919,60 @@ selector/direct route：
 
     def _quick_classify_chat(self, adapter: object, prompt: str, *, max_tokens: int = 180) -> str:
         """Use the fastest available classifier path without waiting on large fallbacks."""
+        timeout_sec = _env_int("PARTNER_ENTRY_SELECTOR_TIMEOUT_SEC", 0)
         lite = getattr(adapter, "lite", None)
         if lite is not None:
             try:
-                raw = lite.chat(prompt, max_tokens=max_tokens, purpose="classify") or ""
-                if raw and raw != "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__":
+                raw = self._call_llm_with_deadline(
+                    lambda: lite.chat(prompt, max_tokens=max_tokens, purpose="classify") or "",
+                    timeout_sec=timeout_sec,
+                    label="quick_lite_classify",
+                )
+                if raw and "PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE" not in raw:
                     return raw
             except Exception as exc:
                 logger.debug(f"quick lite classify failed: {exc}")
-            return ""
         try:
-            return adapter.chat(prompt, max_tokens=max_tokens, purpose="classify") or ""
+            return self._call_llm_with_deadline(
+                lambda: adapter.chat(prompt, max_tokens=max_tokens, purpose="classify") or "",
+                timeout_sec=timeout_sec,
+                label="quick_classify",
+            )
         except Exception as exc:
             logger.debug(f"quick classify failed: {exc}")
             return ""
+
+    @staticmethod
+    def _call_llm_with_deadline(call: Callable[[], str], *, timeout_sec: int, label: str) -> str:
+        """Call entrance LLM; timeout_sec <= 0 disables the outer deadline."""
+        if int(timeout_sec or 0) <= 0:
+            try:
+                return call() or ""
+            except Exception as exc:
+                logger.debug("%s failed: %s", label, exc)
+                return ""
+        result_q: queue.Queue[tuple[bool, str]] = queue.Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result_q.put((True, call() or ""), block=False)
+            except Exception as exc:
+                result_q.put((False, repr(exc)), block=False)
+
+        worker = threading.Thread(target=runner, name=f"partner-entry-{label}", daemon=True)
+        worker.start()
+        worker.join(max(1, int(timeout_sec or 1)))
+        if worker.is_alive():
+            logger.warning("%s timed out after %ss; falling back to queued mind event", label, timeout_sec)
+            return ""
+        try:
+            ok, value = result_q.get_nowait()
+        except queue.Empty:
+            return ""
+        if not ok:
+            logger.debug("%s failed: %s", label, value)
+            return ""
+        return value
 
     def _lean_decide_with_llm(self, adapter: object, *, sender_id: str, text: str, snapshot: dict,
                               ctx_lines: list[str], pending_followup: dict,
@@ -524,15 +980,42 @@ selector/direct route：
         """Small selector for short inbound messages so long context cannot block the entrance."""
         if not adapter or len(text or "") > 120:
             return None
+        capability_table = json.dumps(EVENT_CAPABILITIES, ensure_ascii=False)
         prompt = f"""你是 Partner 的 lean event selector。只根据最少上下文选择下一步，不回答任务本身。
 
 可选 route：
-- direct_reply：只适合无需当前信息、无需外部访问、无需文件/产物、无需继续项目的普通对话或澄清。
-- mind_event：需要执行、搜索、读取当前信息、生成文件、继续项目、整理产物或写记忆。
-- none：只有同一消息已在执行时才用。
+- direct_reply：直接基于已知信息或逻辑分析回答用户问题。即使需要实时数据，如果不需要交付文件、不需要执行外部操作，也可以用 direct_reply 给出一般性分析或建议。
+- mind_event：需要执行代码、操作文件、写文件、发邮件等需要工具的实际操作。
+
+路由优先级规则（重要）：
+- 纯信息查询（问天气、新闻、股价、名词解释）→ direct_reply
+- 研究整理类任务（整理/综述/调研/梳理/归纳某领域的方法/进展/现状/技术）→ mind_event + literature_review
+  - 注意：「整理看看」「梳理一下」「调研一下」「归纳总结」「综述」等动词是研究整理信号
+  - 这类任务需要工具配合（搜索文献、组织信息），不是简单直接回复能完成的
+- 其他情况：direct_reply > mind_event
+
+输出形式判断原则（重要）：
+- 如果用户只是询问信息、建议、查询实时数据（天气/新闻/股价），默认走 direct_reply：
+  - 给出基于已知信息的一般性分析、建议或查询途径
+  - delivery_required=false, expected_artifacts=[]
+- 研究整理类任务的 delivery_required 根据用户是否要求输出文件决定：
+  - 用户说「整理看看」→ delivery_required=false（先出文本回复），但走 mind_event
+  - 用户说「整理成表格/报告/文件」→ delivery_required=true
+- 只有用户明确要求表格、文件、报告、保存、导出等具体产出物时：
+  - 才走 mind_event + 设置 delivery_required=true
+  - 并在 expected_artifacts 中列出具体产出物
+- 不要默认要求文件输出
 
 可选 event_type：
-direct_task, literature_review, data_fetch, data_analysis, visualization, evidence_audit, artifact_build, pdf_report, email_delivery, web_search, web_capture, project_think, objective_review, curiosity_explore, habit_update, project, content_digest, reflection, memory_consolidate
+batch_plan, direct_task, literature_review, data_fetch, data_analysis, visualization, evidence_audit, artifact_build, pdf_report, email_delivery, web_search, web_capture, file_inspection, project_think, objective_review, curiosity_explore, habit_update, ollama_status, project, content_digest, reflection, memory_consolidate
+
+event_type 选择说明：
+- literature_review: 资料/文献/方法依据整理。当用户要求整理/综述/调研/梳理某领域的方法、技术、进展时优先选择。这是研究性任务，走 mind_event 路线。
+- web_search: 需要获取实时数据或搜索当前信息
+- data_analysis: 已有数据的统计分析
+
+Event capability metadata：
+{capability_table}
 
 当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
 状态摘要：{(snapshot.get('summary', '') or '')[:180]}
@@ -546,7 +1029,13 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
 {text}
 
 只输出 JSON：
-{{"route":"","event_type":"","event_kind":"","target_project":"","objective":"","reply_to_user":"","pending_action":"none","stop_after_completion":true,"priority":1,"confidence":0.0,"reason":""}}
+{{"route":"","event_type":"","event_kind":"","target_project":"","objective":"","reply_to_user":"","delivery_required":false,"expected_artifacts":[],"artifact_freshness_policy":"new","reuse_existing_artifact":false,"reuse_reason":"","pending_action":"none","stop_after_completion":true,"priority":1,"confidence":0.0,"reason":""}}
+
+规则：
+- 如果当前请求需要最终给用户交付文件/结构化产物，把 delivery_required 设为 true，并在 expected_artifacts 写出类型、pattern、description。
+- 如果 delivery_required=true 且 expected_artifacts 含 file，不要选择 planning_only event，也不要选择 can_deliver_artifacts=false 的 event。
+- artifact_freshness_policy 默认 new：每条新用户消息创建新 TaskInstance，必须在本轮工作目录生成新交付物。
+- 只有用户明确要求继续/重发/复用已有产物，才可设 artifact_freshness_policy=reuse_allowed 或 continue_task，并说明 reuse_reason。
 """
         raw = self._quick_classify_chat(adapter, prompt, max_tokens=180)
         if not raw:
@@ -566,9 +1055,7 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
             return None
         route = str(data.get("route") or "none").strip()
         event_type = str(data.get("event_type") or "").strip()
-        event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or "")).strip("_")[:80]
-        if event_kind in {"自由短标签", "短标签", "event_kind"}:
-            event_kind = "lean_selector"
+        event_kind = self._sanitize_selector_event_kind(str(data.get("event_kind") or ""), event_type)
         reply = self._sanitize_reply_to_user(str(data.get("reply_to_user") or ""))
         pending_action = str(data.get("pending_action") or "none").strip()
         if pending_action not in {"none", "set", "keep", "clear"}:
@@ -585,8 +1072,13 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
         if route in action_event_types:
             event_type = route
             route = "mind_event"
+            reply = ""  # mind_event 由执行结果回复，不要 selector 的回复
         if route not in {"direct_reply", "mind_event", "none"} and event_type in action_event_types:
             route = "mind_event"
+            reply = ""  # mind_event 由执行结果回复，不要 selector 的回复
+        # mind_event 不需要 selector 的回复——实际执行结果会通过 Harness 发送
+        if route == "mind_event" and event_type in action_event_types:
+            reply = ""
         try:
             confidence = float(data.get("confidence") if data.get("confidence") is not None else 0.7)
         except Exception:
@@ -599,6 +1091,11 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
             priority = 3
         objective = str(data.get("objective") or "").strip()
         target = str(data.get("target_project") or "").strip()
+        expected_artifacts = _normalize_expected_artifacts(data.get("expected_artifacts"))
+        delivery_required = bool(data.get("delivery_required") or expected_artifacts)
+        artifact_freshness_policy = _normalize_artifact_freshness_policy(data.get("artifact_freshness_policy"))
+        reuse_existing_artifact = bool(data.get("reuse_existing_artifact")) and artifact_freshness_policy != "new"
+        reuse_reason = str(data.get("reuse_reason") or "").strip()
         route, event_type, event_kind, objective = self._normalize_to_small_event_with_llm(
             adapter,
             route=route,
@@ -606,31 +1103,32 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
             event_kind=event_kind,
             objective=objective,
             user_text=text,
+            delivery_required=delivery_required,
+            expected_artifacts=expected_artifacts,
             context_resolution={},
         )
-        if route == "direct_reply":
-            local_reply = self._direct_reply_from_selector_draft(
-                adapter,
-                text=text,
-                draft=reply,
-                snapshot=snapshot,
-                ctx_lines=ctx_lines,
-            )
+        if delivery_required and not reuse_existing_artifact:
+            objective = self._enforce_new_artifact_objective(objective or text)
+        if route == "direct_reply" and not delivery_required:
+            if not reply:
+                logger.debug("lean selector chose direct_reply but reply_to_user is empty — falling through to full selector")
+                return None
             return InteractionDecision(
-                reply_to_user=local_reply or reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply,
                 need_lifeline_update=False,
                 lifeline_action="none",
-                event_type="direct_reply",
+                event_type="interaction_reply",
                 event_kind=event_kind or "lean_direct_reply",
                 stop_after_completion=True,
                 priority=priority,
                 pending_action=pending_action,
             )
         if route == "mind_event" and event_type in action_event_types:
-            if not target:
-                target = event_kind or _clip_title(objective or text) or "用户任务"
+            if not target or _is_generic_event_title(target):
+                target = _title_from_objective(objective, text, event_kind)
+            delivery_mode, inferred_stop = self._delivery_mode_for_request(text, event_type=event_type)
             return InteractionDecision(
-                reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply or THINKING_NOTICE,
                 need_lifeline_update=True,
                 lifeline_action="add_task",
                 target_project=target,
@@ -638,9 +1136,15 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
                 task_description=objective or text,
                 event_type=event_type,
                 event_kind=event_kind or "lean_selector",
-                stop_after_completion=bool(data.get("stop_after_completion", True)),
+                stop_after_completion=bool(data.get("stop_after_completion")) or inferred_stop,
+                delivery_mode=delivery_mode,
                 priority=priority,
                 pending_action=pending_action,
+                delivery_required=delivery_required,
+                expected_artifacts=expected_artifacts,
+                artifact_freshness_policy=artifact_freshness_policy,
+                reuse_existing_artifact=reuse_existing_artifact,
+                reuse_reason=reuse_reason,
             )
         return None
 
@@ -653,6 +1157,8 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
         event_kind: str,
         objective: str,
         user_text: str,
+        delivery_required: bool = False,
+        expected_artifacts: list[dict] | None = None,
         context_resolution: dict | None = None,
     ) -> tuple[str, str, str, str]:
         """Ask a small judge whether an execution event is too large."""
@@ -661,6 +1167,9 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
         context_resolution = context_resolution or {}
         if context_resolution.get("relation") in {"existing_artifact", "pending_followup"}:
             return route, event_type, event_kind, objective
+        expected_artifacts = expected_artifacts or []
+        if delivery_required and expected_artifacts and not _event_capability(event_type).get("can_deliver_artifacts"):
+            return route, "direct_task", event_kind or "deliver_artifact", objective
         action_types = {
             "direct_task",
             "data_fetch",
@@ -669,6 +1178,7 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
             "artifact_build",
             "web_search",
             "web_capture",
+            "file_inspection",
             "literature_review",
             "evidence_audit",
             "pdf_report",
@@ -681,9 +1191,10 @@ Mind pool：{json.dumps(pool_stats, ensure_ascii=False)[:220]}
 
 原则：
 - 一个执行 event 只能做一个可验证动作，并有一个清楚验收标准。
-- 如果它把多个依赖阶段合在一起，例如取数+分析+绘图+报告+发送，应判 too_large。
+- Partner Harness 可以在一个 direct_task 内先规划、再执行多个 AtomicEvent；例如“获取 JSON 数据并生成一个 CSV/Markdown 表格文件”仍然是一个可验证交付，应判 ok。
+- 如果 selector 已声明 delivery_required=true 且 expected_artifacts 非空，不能降级到不具备交付能力的 planning_only event。
+- 只有当目标包含多个独立交付物、长期研究链、安装/训练/多轮实验、或无法在一次可验证交付中完成时，才判 too_large。
 - 如果它只是澄清、拆解、审计一个结论、生成一个文件、读取一个数据源、画一张图等单步动作，应判 ok。
-- 不要按关键词硬匹配；根据 objective 是否能被一次 event 稳定完成判断。
 
 用户原始消息：
 {user_text[:1000]}
@@ -694,6 +1205,10 @@ selector objective：
 
 context_resolution：
 {json.dumps(context_resolution, ensure_ascii=False)[:900]}
+
+delivery_required：{json.dumps(bool(delivery_required), ensure_ascii=False)}
+expected_artifacts：
+{json.dumps(expected_artifacts, ensure_ascii=False)[:900]}
 
 只输出 JSON：
 {{"verdict":"ok|too_large","reason":"","first_step_objective":""}}
@@ -727,13 +1242,124 @@ context_resolution：
             )
         return route, event_type, event_kind, objective
 
+    def _enforce_new_artifact_objective(self, objective: str) -> str:
+        marker = "本 TaskInstance 必须在当前 working_dir 生成本轮新的期望交付物；不要把历史项目文件、最近文件或旧 task 目录中的产物作为本轮完成证据。"
+        objective = str(objective or "").strip()
+        if marker in objective:
+            return objective
+        return f"{objective}\n{marker}" if objective else marker
+
+    def _handle_direct_llm(self, text: str, use_ollama: bool = False) -> str:
+        try:
+            adapter = self.get_adapter()
+            if use_ollama:
+                try:
+                    from .llm.ollama_probe import ollama_chat
+                    reply = ollama_chat(text)
+                    if reply and len(reply.strip()) > 3:
+                        logger.info("[DIRECT_LLM] responded via Ollama")
+                        return reply.strip()
+                except Exception as ollama_exc:
+                    logger.debug("[DIRECT_LLM] Ollama fallback failed: %s", ollama_exc)
+            if adapter:
+                reply = adapter.chat(text, purpose="direct_reply")
+                if reply:
+                    return reply.strip()
+        except Exception as exc:
+            logger.warning("[DIRECT_LLM] failed: %s", exc)
+        return "收到"
+
     def handle_message(self, sender_id: str, sender_name: str, text: str) -> InteractionDecision:
-        decision = self._decide(sender_id, text)
-        self._record_event_decision(sender_id, text, decision)
+        task = None
+        cleaned_text = text
+        try:
+            from .harness_core import TaskInstance, parse_continue_project_marker
+
+            cleaned_text, continue_from_project = parse_continue_project_marker(text)
+            task = TaskInstance.create(
+                self.workspace,
+                text,
+                continue_from_project=continue_from_project,
+                metadata={"sender_id": sender_id, "sender_name": sender_name, "entry": "interaction_orchestrator"},
+            )
+        except Exception as exc:
+            logger.debug(f"failed to create task instance: {exc}")
+            continue_from_project = ""
+            cleaned_text = text
+
+        # ── Direct-reply LLM-based routing ──
+        # Use LLM to decide if this message is a simple query (direct reply) or complex task (batch plan)
+        try:
+            direct_reply_result = _try_direct_reply_llm_based(self, cleaned_text)
+            if direct_reply_result is not None:
+                if task:
+                    direct_reply_result.task_instance_id = task.task_id
+                    direct_reply_result.task_working_dir = task.working_dir
+                    direct_reply_result.continue_from_project = task.continue_from_project
+                self._record_event_decision(sender_id, cleaned_text, direct_reply_result)
+                self._update_sender_dialog_state(sender_id, direct_reply_result, cleaned_text)
+                return direct_reply_result
+        except Exception as exc:
+            logger.debug("[ROUTING] direct_reply fast path failed: %s", exc)
+
+        decision = self._batch_plan_for_message(cleaned_text, sender_id)
+        if decision and not decision.need_lifeline_update:
+            # Try Ollama first if suitable
+            if decision.reply_to_user:
+                try:
+                    from .task_router import classify
+                    cls = classify(cleaned_text)
+                    if cls.get("use_ollama", False):
+                        from .llm.ollama_probe import ollama_chat
+                        ollama_reply = ollama_chat(cleaned_text)
+                        if ollama_reply and len(ollama_reply.strip()) > 3:
+                            decision.reply_to_user = ollama_reply.strip()
+                except Exception:
+                    pass
+            if task:
+                decision.task_instance_id = task.task_id
+                decision.task_working_dir = task.working_dir
+                decision.continue_from_project = task.continue_from_project
+            self._record_event_decision(sender_id, cleaned_text, decision)
+            self._update_sender_dialog_state(sender_id, decision, cleaned_text)
+            return decision
+
+        if task:
+            decision.task_instance_id = task.task_id
+            decision.task_working_dir = task.working_dir
+            decision.continue_from_project = task.continue_from_project
+            if task.continue_from_project and decision.artifact_freshness_policy == "new":
+                decision.artifact_freshness_policy = "continue_task"
+                decision.reuse_existing_artifact = True
+                decision.reuse_reason = f"explicit continue_from_project={task.continue_from_project}"
+        else:
+            decision.continue_from_project = continue_from_project
+        decision = self._apply_routing_rules(decision, cleaned_text, task=task)
+        if task:
+            decision.task_instance_id = task.task_id
+            decision.task_working_dir = task.working_dir
+            decision.continue_from_project = task.continue_from_project
+        self._record_event_decision(sender_id, cleaned_text, decision)
         if decision.need_lifeline_update:
-            self._apply_lifeline_update(decision, sender_id=sender_id, sender_name=sender_name, raw_text=text)
-        self._update_sender_dialog_state(sender_id, decision, text)
+            self._apply_lifeline_update(decision, sender_id=sender_id, sender_name=sender_name, raw_text=cleaned_text)
+        self._update_sender_dialog_state(sender_id, decision, cleaned_text)
         return decision
+
+    def _batch_plan_for_message(self, text: str, sender_id: str) -> InteractionDecision:
+        """Simplified routing: after fast path check, route directly to batch_plan."""
+        from .outbound_policy import THINKING_NOTICE
+        title = _clip_title(text)
+        return InteractionDecision(
+            reply_to_user=THINKING_NOTICE,
+            need_lifeline_update=True,
+            lifeline_action="add_task",
+            target_project=title,
+            task_title=title,
+            event_type="batch_plan",
+            event_kind="direct",
+            stop_after_completion=False,
+            priority=6,
+        )
 
     def _record_event_decision(self, sender_id: str, text: str, decision: InteractionDecision):
         """Local audit trail: user message -> lifeline action/event mode."""
@@ -757,6 +1383,14 @@ context_resolution：
                 "priority": decision.priority,
                 "pending_action": decision.pending_action,
                 "pending_followup": decision.pending_followup or {},
+                "task_instance_id": decision.task_instance_id,
+                "task_working_dir": decision.task_working_dir,
+                "continue_from_project": decision.continue_from_project,
+                "delivery_required": bool(decision.delivery_required),
+                "expected_artifacts": decision.expected_artifacts or [],
+                "artifact_freshness_policy": decision.artifact_freshness_policy,
+                "reuse_existing_artifact": bool(decision.reuse_existing_artifact),
+                "reuse_reason": decision.reuse_reason,
                 "source": "interaction_orchestrator",
             }
             with open(path, "a", encoding="utf-8") as f:
@@ -806,6 +1440,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:400]}
   "known_slots": {{}},
   "missing_slots": [],
   "resolved_objective": "把用户消息和相关上下文合并后的目标；不要编造",
+  "reply_to_user": "如果 should_direct_reply=true，在本字段直接给出用户可见回复；否则写空",
   "user_visible_boundary": "需要向用户说明的边界或缺失信息；没有写空",
   "reason": ""
 }}
@@ -814,12 +1449,17 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:400]}
 - 如果用户说“今天生成的/刚才那个/之前的/近期的表格/报告/文件”，优先检查最近可交付文件；如果有明显匹配，relation=existing_artifact，related_files 写相对路径或文件名，不要再要求用户重复说明已能从文件名看出的主题/城市。
 - 如果用户是在补 SMTP 授权码、发件邮箱、地点、文件路径等缺失信息，relation=pending_followup。
 - 如果只是普通闲聊或知识问答且无需工具/文件/项目，should_direct_reply=true。
+- 如果 should_direct_reply=true，必须在 reply_to_user 里直接写可发送给用户的自然回复；不要留给后续 direct_reply event。
 - 如果需要搜索、生成文件、发邮件、改文件、读附件、继续项目，should_enter_mind=true。
 - 如果上下文不足但必须澄清，missing_slots 写具体缺什么，user_visible_boundary 写清楚该问什么。
 - 不要输出自然语言解释，只输出 JSON。
 """
         try:
-            raw = adapter.chat(prompt, purpose="classify") or ""
+            raw = self._call_llm_with_deadline(
+                lambda: adapter.chat(prompt, purpose="classify") or "",
+                timeout_sec=_env_int("PARTNER_ENTRY_SELECTOR_TIMEOUT_SEC", 0),
+                label="context_resolution",
+            )
         except Exception as exc:
             logger.debug(f"context resolution LLM failed: {exc}")
             return {}
@@ -857,69 +1497,10 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:400]}
             "known_slots": data.get("known_slots") if isinstance(data.get("known_slots"), dict) else {},
             "missing_slots": [str(x).strip() for x in (data.get("missing_slots") or []) if str(x).strip()][:8],
             "resolved_objective": str(data.get("resolved_objective") or "").strip()[:1800],
+            "reply_to_user": self._sanitize_reply_to_user(str(data.get("reply_to_user") or ""))[:1200],
             "user_visible_boundary": str(data.get("user_visible_boundary") or "").strip()[:800],
             "reason": str(data.get("reason") or "").strip()[:500],
         }
-
-    def _direct_reply_from_context_resolution(self, adapter: object, *, text: str, snapshot: dict,
-                                              ctx_lines: list[str], context_resolution: dict) -> str:
-        if not adapter:
-            return ""
-        prompt = f"""你是 Partner 的轻量直接回复模块。用户消息不需要进入任务队列或工具执行。
-
-要求：
-- 只自然回复用户当前消息，不创建任务、不承诺后台执行。
-- 可以参考最近对话和 context_resolution，但不要机械复述项目状态。
-- 如果 context_resolution.user_visible_boundary 有内容，简短说明边界并询问必要补充。
-- 不暴露 event、queue、workspace、backend。
-- 输出纯文本，不要 JSON。
-
-当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-状态摘要：{(snapshot.get('summary', '') or '')[:220]}
-最近对话：
-{chr(10).join(ctx_lines[-3:]) if ctx_lines else '（无）'}
-context_resolution：
-{json.dumps(context_resolution, ensure_ascii=False)[:900]}
-
-用户消息：
-{text}
-"""
-        try:
-            return self._sanitize_reply_to_user(adapter.chat(prompt, purpose="interaction") or "")
-        except Exception as exc:
-            logger.debug(f"direct reply generation failed: {exc}")
-            return ""
-
-    def _direct_reply_from_selector_draft(self, adapter: object, *, text: str, draft: str,
-                                          snapshot: dict, ctx_lines: list[str]) -> str:
-        if not adapter or not (draft or "").strip():
-            return ""
-        prompt = f"""你是 Partner 的轻量直接回复模块。上游 selector 已判断这条消息只需要直接回复，不需要进入任务队列。
-
-请基于用户消息和上游草稿，生成一句自然、简短、不过度展开的中文回复。
-
-约束：
-- 保持草稿的核心意思，但可以去掉多余项目状态或机械套话。
-- 不创建任务，不承诺后台执行。
-- 不暴露 event、queue、workspace、backend。
-- 输出纯文本，不要 JSON。
-
-当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
-状态摘要：{(snapshot.get('summary', '') or '')[:180]}
-最近对话：
-{chr(10).join(ctx_lines[-3:]) if ctx_lines else '（无）'}
-
-用户消息：
-{text}
-
-上游草稿：
-{draft[:800]}
-"""
-        try:
-            return self._sanitize_reply_to_user(adapter.chat(prompt, purpose="interaction") or "")
-        except Exception as exc:
-            logger.debug(f"direct reply draft generation failed: {exc}")
-            return ""
 
     def _decide_event_with_llm(self, adapter: object, sender_id: str, text: str, snapshot: dict) -> Optional[InteractionDecision]:
         """Let the LLM choose the next event from the current mind context.
@@ -942,10 +1523,7 @@ context_resolution：
             role = "用户" if item.get("role") == "user" else "Partner"
             ctx_lines.append(f"{role}: {item.get('text', '')[:120]}")
         try:
-            from .mind.pool import MindPool
-
-            pool = MindPool.get_sync_instance()
-            pool_stats = pool.stats() if pool else {}
+            pool_stats = {}
         except Exception:
             pool_stats = {}
         recent_files = self._recent_deliverable_context(limit=12, query=text)
@@ -970,37 +1548,6 @@ context_resolution：
             recent_files=recent_files,
             pool_stats=pool_stats,
         )
-        consistency = self._route_review_with_llm(
-            adapter,
-            text=text,
-            snapshot=snapshot,
-            context_resolution=context_resolution,
-            selector_data={
-                "route": "direct_reply",
-                "event_type": "direct_reply",
-                "event_kind": "context_direct_reply",
-            },
-            trigger="context_resolution_direct_reply",
-            pool_stats=pool_stats,
-        ) if context_resolution and context_resolution.get("should_direct_reply") and not context_resolution.get("should_enter_mind") else {}
-        if (
-            context_resolution
-            and context_resolution.get("should_direct_reply")
-            and not context_resolution.get("should_enter_mind")
-            and consistency
-            and consistency.get("action") == "objective_review"
-        ):
-            return self._objective_review_from_route_review(
-                text=text,
-                snapshot=snapshot,
-                context_resolution={
-                    **context_resolution,
-                    "route_review": consistency,
-                },
-                selector_data={"route": "direct_reply", "event_type": "direct_reply"},
-                route_review=consistency,
-                priority=2,
-            )
         if (
             context_resolution
             and context_resolution.get("should_direct_reply")
@@ -1008,13 +1555,7 @@ context_resolution：
         ):
             boundary = str(context_resolution.get("user_visible_boundary") or "").strip()
             missing = context_resolution.get("missing_slots") or []
-            reply = self._direct_reply_from_context_resolution(
-                adapter,
-                text=text,
-                snapshot=snapshot,
-                ctx_lines=ctx_lines,
-                context_resolution=context_resolution,
-            )
+            reply = self._sanitize_reply_to_user(str(context_resolution.get("reply_to_user") or ""))
             pending_action = "set" if missing else "clear"
             pending = {
                 "original_user_request": text[:1200],
@@ -1023,22 +1564,27 @@ context_resolution：
                 "known_slots": context_resolution.get("known_slots") if isinstance(context_resolution.get("known_slots"), dict) else {},
                 "last_question": boundary[:800] if boundary else "",
             } if missing else {}
+            if not reply and not boundary:
+                logger.debug("context resolution chose direct_reply but both reply and boundary are empty — falling through")
+                return None
             return InteractionDecision(
-                reply_to_user=reply or boundary or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply or boundary,
                 need_lifeline_update=False,
                 lifeline_action="none",
-                event_type="direct_reply",
+                event_type="interaction_reply",
                 event_kind="context_direct_reply",
                 stop_after_completion=True,
                 priority=1,
                 pending_action=pending_action,
                 pending_followup=pending,
             )
+        capability_table = json.dumps(EVENT_CAPABILITIES, ensure_ascii=False)
         prompt = f"""你是 Partner 的 event selector。只选择下一步 route/event，不执行任务，不写详细执行方案。
 
 可用 route：direct_reply, mind_event, pause_project, none。
 可用 event：
 - direct_task: 单步直接交付或具体操作
+- batch_plan: 复杂任务的顶层批量规划；一次生成 Harness MicroPlan 并执行多个可并行步骤
 - literature_review: 资料/文献/方法依据整理
 - data_fetch: 只获取/下载/保存一个真实数据源
 - data_analysis: 只读取已有数据并做统计、质量检查或最小分析
@@ -1049,11 +1595,16 @@ context_resolution：
 - email_delivery: 发送已有或本轮文件到邮箱
 - web_search: 搜索公开网页、平台、论文库、数据库并整理来源
 - web_capture: 下载公开图片/文件或网页截图
+- file_inspection: 对未知附件/二进制/音频先做魔数识别和前 64 字节 hex dump
 - project_think: 拆解目标、选择路线、定义验收和第一个小 event
 - objective_review: 对齐用户目标、上下文、已完成内容、缺口和下一 event
 - curiosity_explore: 好奇探索与新假设
 - habit_update: 写入习惯/经验/成长
+- ollama_status: 探测已配置/自动发现的 Ollama 是否可用，并汇报当前会不会用于轻量问题
 - project, content_digest, reflection, memory_consolidate: 兼容长期项目、内容消化、反思、记忆压缩
+
+Event capability metadata：
+{capability_table}
 
 当前项目：{snapshot.get('display_project', '') or snapshot.get('focus_project', '')}
 状态摘要：{(snapshot.get('summary', '') or '')[:260]}
@@ -1074,11 +1625,18 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 严格只输出 JSON：
 {{
   "route": "direct_reply|mind_event|pause_project|none",
-  "event_type": "direct_task|literature_review|data_fetch|data_analysis|visualization|evidence_audit|artifact_build|pdf_report|email_delivery|web_search|web_capture|project_think|objective_review|curiosity_explore|habit_update|project|content_digest|reflection|memory_consolidate|report",
+  "event_type": "direct_task|literature_review|data_fetch|data_analysis|visualization|evidence_audit|artifact_build|pdf_report|email_delivery|web_search|web_capture|file_inspection|project_think|objective_review|curiosity_explore|habit_update|ollama_status|project|content_digest|reflection|memory_consolidate|report",
   "event_kind": "自由短标签",
   "target_project": "",
   "objective": "给 agent 的具体目标；如果 direct_reply 可空",
   "reply_to_user": "给用户的自然回复",
+  "delivery_required": false,
+  "expected_artifacts": [
+    {{"type": "file|message", "pattern": "*.csv", "description": "交付物说明", "required": true}}
+  ],
+  "artifact_freshness_policy": "new|reuse_allowed|continue_task",
+  "reuse_existing_artifact": false,
+  "reuse_reason": "",
   "pending_action": "none|set|keep|clear",
   "pending_followup": {{
     "original_user_request": "",
@@ -1095,14 +1653,31 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 
 选择原则：
 - 先服从 context_resolution；如果它和你的选择矛盾，写明 reason。
-- direct_reply 只用于即时回答或缺参澄清；需要执行/文件/搜索/发送/继续项目时选 mind_event。
+- 纯信息查询（问天气、新闻、股价、名词解释）→ direct_reply
+- 研究整理类任务（整理/综述/调研/梳理/归纳某领域的方法/进展/现状/技术）→ mind_event + literature_review
+  - 「整理看看」「梳理一下」「调研一下」「归纳总结」「综述」等动词是研究整理信号
+  - 这类任务需要工具配合（搜索文献、组织信息），不是简单直接回复能完成的
+- mind_event：需要执行代码、操作文件、写文件、发邮件等需要真实工具的操作。
 - route=none 只用于确实同一任务正在处理且无需吸收新信息。
+- **输出形式判断**：如果用户只是询问信息、建议、查询实时数据（天气/新闻/股价），默认走 direct_reply，delivery_required=false, expected_artifacts=[]
+- 研究整理类任务的 delivery_required 根据用户是否要求输出文件决定：
+  - 用户说「整理看看」→ delivery_required=false，走 mind_event + literature_review
+  - 用户说「整理成表格/报告/文件」→ delivery_required=true
+- 只有用户明确要求"表格"、"文件"、"报告"、"保存"、"导出"时才 delivery_required=true
 - mind_event 的 objective 只写一个最小可验证目标；多阶段目标选 project_think。
+- 如果用户当前目标需要最终交付文件或结构化产物，delivery_required=true，并声明 expected_artifacts。
+- 如果 delivery_required=true 且 expected_artifacts 含 file，event_type 必须具备 can_deliver_artifacts=true；不要选择 planning_only event。
+- 每条新用户消息默认 artifact_freshness_policy=new：历史项目/最近文件只能作知识参考，不能作为本轮完成证据。
+- 只有用户明确要求继续历史任务、重发已有文件、复用旧产物，才可设 artifact_freshness_policy=reuse_allowed 或 continue_task，并把 reuse_existing_artifact 设为 true 且写明 reuse_reason。
 - 需要追问时 pending_action=set，并记录 pending_followup；补齐参数时合并上下文进入 mind_event。
 - 输出必须是合法 JSON，不暴露 queue/workspace/backend。
 """
         try:
-            raw = adapter.chat(prompt, purpose="classify") or ""
+            raw = self._call_llm_with_deadline(
+                lambda: adapter.chat(prompt, purpose="classify") or "",
+                timeout_sec=_env_int("PARTNER_ENTRY_SELECTOR_TIMEOUT_SEC", 0),
+                label="event_selector",
+            )
         except Exception as exc:
             logger.debug(f"event selector LLM failed: {exc}")
             return None
@@ -1121,12 +1696,20 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             return None
         route = str(data.get("route") or "none").strip()
         event_type = str(data.get("event_type") or "").strip()
-        event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", str(data.get("event_kind") or "")).strip("_")[:80]
+        event_kind = self._sanitize_selector_event_kind(str(data.get("event_kind") or ""), event_type)
         if event_kind in {"自由短标签", "短标签", "event_kind"}:
             event_kind = ""
         target = str(data.get("target_project") or "").strip()
         objective = str(data.get("objective") or "").strip()
         reply = self._sanitize_reply_to_user(str(data.get("reply_to_user") or ""))
+        # mind_event 不需要 selector 的回复——实际执行结果会通过 Harness 发送
+        if route == "mind_event":
+            reply = ""
+        expected_artifacts = _normalize_expected_artifacts(data.get("expected_artifacts"))
+        delivery_required = bool(data.get("delivery_required") or expected_artifacts)
+        artifact_freshness_policy = _normalize_artifact_freshness_policy(data.get("artifact_freshness_policy"))
+        reuse_existing_artifact = bool(data.get("reuse_existing_artifact")) and artifact_freshness_policy != "new"
+        reuse_reason = str(data.get("reuse_reason") or "").strip()
         action_event_types = self._action_event_types()
         if route in action_event_types:
             if not event_type or event_type not in action_event_types:
@@ -1168,8 +1751,12 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             event_kind=event_kind,
             objective=objective,
             user_text=text,
+            delivery_required=delivery_required,
+            expected_artifacts=expected_artifacts,
             context_resolution=context_resolution,
         )
+        if delivery_required and not reuse_existing_artifact:
+            objective = self._enforce_new_artifact_objective(objective or text)
         content_event_types = {"content_digest", "reflection", "memory_consolidate"}
         selector_placeholder = self._selector_has_placeholder_values(
             route=route,
@@ -1214,19 +1801,19 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 priority=priority,
             )
 
-        if route == "direct_reply":
-            local_reply = self._direct_reply_from_selector_draft(
-                adapter,
-                text=text,
-                draft=reply,
-                snapshot=snapshot,
-                ctx_lines=ctx_lines,
-            )
+        if route == "direct_reply" and not delivery_required:
+            if not reply:
+                logger.debug("full selector chose direct_reply but reply_to_user is empty — falling through to objective_review")
+                return self._objective_review_for_unavailable_selector(
+                    text=text,
+                    snapshot=snapshot,
+                    reason="selector_direct_reply_empty",
+                )
             return InteractionDecision(
-                reply_to_user=local_reply or reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply,
                 need_lifeline_update=False,
                 lifeline_action="none",
-                event_type="direct_reply",
+                event_type="interaction_reply",
                 event_kind=event_kind or "direct_reply",
                 stop_after_completion=True,
                 priority=priority,
@@ -1267,7 +1854,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 reply_to_user="",
                 need_lifeline_update=False,
                 lifeline_action="none",
-                event_type=event_type or "direct_reply",
+                event_type=event_type or "interaction_reply",
                 event_kind=event_kind or "duplicate_or_noop",
                 stop_after_completion=True,
                 priority=priority,
@@ -1275,11 +1862,14 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 pending_followup=pending,
             )
         if route == "pause_project":
+            pause_target = target or get_active(self.workspace) or ""
+            if _is_generic_event_title(pause_target):
+                pause_target = _title_from_objective(text, objective, pause_target)
             return InteractionDecision(
                 reply_to_user=reply,
                 need_lifeline_update=True,
                 lifeline_action="pause_project",
-                target_project=target or get_active(self.workspace) or "",
+                target_project=pause_target,
                 note=text,
                 event_type="project_think",
                 event_kind=event_kind or "pause_project",
@@ -1291,10 +1881,11 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             current_project = (snapshot.get("display_project", "") or snapshot.get("focus_project", "") or "").strip()
             if context_resolution.get("relation") == "new_task" and target and current_project and target == current_project:
                 target = ""
-            if not target:
-                target = event_kind or _clip_title(objective or text) or "用户任务"
+            if not target or _is_generic_event_title(target):
+                target = _title_from_objective(objective, text, event_kind)
+            delivery_mode, inferred_stop = self._delivery_mode_for_request(text, event_type=event_type)
             return InteractionDecision(
-                reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply or THINKING_NOTICE,
                 need_lifeline_update=True,
                 lifeline_action="add_task",
                 target_project=target,
@@ -1302,13 +1893,19 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 task_description=objective or text,
                 event_type=event_type,
                 event_kind=event_kind or "project_step",
-                stop_after_completion=stop_after,
+                stop_after_completion=stop_after or inferred_stop,
+                delivery_mode=delivery_mode,
                 priority=priority,
                 pending_action="clear",
+                delivery_required=delivery_required,
+                expected_artifacts=expected_artifacts,
+                artifact_freshness_policy=artifact_freshness_policy,
+                reuse_existing_artifact=reuse_existing_artifact,
+                reuse_reason=reuse_reason,
             )
         if route == "mind_event" and event_type in {"content_digest", "reflection", "memory_consolidate"}:
             return InteractionDecision(
-                reply_to_user=reply or "__PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE__",
+                reply_to_user=reply or THINKING_NOTICE,
                 need_lifeline_update=True,
                 lifeline_action="add_task" if event_type == "content_digest" else "add_note",
                 target_project=target or get_active(self.workspace) or "",
@@ -1317,7 +1914,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 note=objective or text,
                 event_type=event_type,
                 event_kind=event_kind or event_type,
-                stop_after_completion=stop_after,
+                stop_after_completion=False,
                 priority=priority,
                 pending_action="clear" if event_type != "memory_consolidate" else pending_action,
                 pending_followup=pending,
@@ -1335,12 +1932,12 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
         reply = self._sanitize_reply_to_user(self._extract_selector_string_field(raw, "reply_to_user"))
         if route == "direct_reply" and reply:
             event_kind = self._extract_selector_string_field(raw, "event_kind") or "direct_reply"
-            event_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", event_kind).strip("_")[:80]
+            event_kind = self._sanitize_selector_event_kind(event_kind, "direct_reply")
             return InteractionDecision(
                 reply_to_user=reply,
                 need_lifeline_update=False,
                 lifeline_action="none",
-                event_type="direct_reply",
+                event_type="interaction_reply",
                 event_kind=event_kind or "direct_reply",
                 stop_after_completion=True,
                 priority=5,
@@ -1377,7 +1974,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             reply_to_user=UNAVAILABLE_NOTICE,
             need_lifeline_update=False,
             lifeline_action="none",
-            event_type="direct_reply",
+            event_type="interaction_reply",
             event_kind="selector_unavailable",
             stop_after_completion=True,
             priority=9,
@@ -1434,6 +2031,11 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 
         if action == "switch_project":
             target = decision.target_project or decision.task_title or raw_text[:30]
+            if _is_generic_event_title(target):
+                target = _title_from_objective(raw_text, decision.task_description, target)
+            previous = get_active(self.workspace) or ""
+            if previous and previous != target:
+                clear_active(self.workspace, previous)
             set_active(self.workspace, target)
             self._drop_stale_project_events(target)
             if decision.note:
@@ -1446,9 +2048,18 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 source="interaction:switch_project",
                 delivery_mode=decision.delivery_mode,
                 user_request=raw_text,
+                root_user_request=raw_text,
                 event_type=decision.event_type,
                 event_kind=decision.event_kind,
                 stop_after_completion=decision.stop_after_completion,
+                task_instance_id=decision.task_instance_id,
+                task_working_dir=decision.task_working_dir,
+                continue_from_project=decision.continue_from_project,
+                delivery_required=decision.delivery_required,
+                expected_artifacts=decision.expected_artifacts or [],
+                artifact_freshness_policy=decision.artifact_freshness_policy,
+                reuse_existing_artifact=decision.reuse_existing_artifact,
+                reuse_reason=decision.reuse_reason,
             )
             return
 
@@ -1474,6 +2085,8 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 
         if action == "add_task":
             target = decision.target_project or get_active(self.workspace) or ""
+            if _is_generic_event_title(target):
+                target = _title_from_objective(raw_text, decision.task_description, target)
             previous = get_active(self.workspace) or ""
             if target and previous and target != previous and target not in previous and previous not in target:
                 try:
@@ -1485,6 +2098,8 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 except Exception as exc:
                     logger.debug(f"failed to release previous project before switching: {exc}")
             if target:
+                if previous and previous != target:
+                    clear_active(self.workspace, previous)
                 set_active(self.workspace, target)
                 try:
                     from .project_state import set_project_status
@@ -1549,12 +2164,48 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                     logger.debug(f"failed to record user risk signal: {exc}")
             existing = self.task_queue.find_similar_pending(description, sender_id=sender_id)
             if existing:
+                # Stale pending task (>30s old with no step files) — skip merge, create new
+                created_at = getattr(existing, 'created_at', '')
+                try:
+                    from datetime import datetime
+                    created_dt = datetime.fromisoformat(created_at) if created_at else None
+                    if created_dt and (datetime.now() - created_dt).total_seconds() > 30:
+                        logger.warning("[LIFELINE] stale pending task %s (%ds old), skipping merge", existing.id, (datetime.now() - created_dt).total_seconds())
+                        existing = None
+                except Exception:
+                    pass
+            if existing:
                 self._touch_active_plan(target or existing.title, f"用户再次推动：{existing.title}")
                 self._log_mutation("merge_task", existing.title, description)
+                # 已有 pending task 但可能前次执行已结束（task 从未被标记 completed）
+                # 仍然触发 _nudge_project 确保本次有实际执行
+                # 不重复创建 Task，直接用已存在的
+                self._nudge_project(
+                    target or existing.title,
+                    priority=2,
+                    source="interaction:retry",
+                    delivery_mode=decision.delivery_mode,
+                    user_request=description,
+                    root_user_request=raw_text,
+                    event_type=decision.event_type,
+                    event_kind=decision.event_kind,
+                    stop_after_completion=decision.stop_after_completion,
+                    task_instance_id=decision.task_instance_id,
+                    task_working_dir=decision.task_working_dir,
+                    continue_from_project=decision.continue_from_project,
+                    delivery_required=decision.delivery_required,
+                    expected_artifacts=decision.expected_artifacts or [],
+                    artifact_freshness_policy=decision.artifact_freshness_policy,
+                    reuse_existing_artifact=decision.reuse_existing_artifact,
+                    reuse_reason=decision.reuse_reason,
+                )
                 return
+            task_title = (decision.task_title or raw_text[:60]).strip()
+            if _is_generic_event_title(task_title):
+                task_title = _title_from_objective(raw_text, description, task_title)
             task = Task(
                 type="deep_dive",
-                title=(decision.task_title or raw_text[:60]).strip(),
+                title=task_title,
                 description=description,
                 priority=decision.priority,
                 tags=["qq_task", "lifeline"],
@@ -1573,9 +2224,18 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 source="interaction:add_task",
                 delivery_mode=decision.delivery_mode,
                 user_request=description,
+                root_user_request=raw_text,
                 event_type=decision.event_type,
                 event_kind=decision.event_kind,
                 stop_after_completion=decision.stop_after_completion,
+                task_instance_id=decision.task_instance_id,
+                task_working_dir=decision.task_working_dir,
+                continue_from_project=decision.continue_from_project,
+                delivery_required=decision.delivery_required,
+                expected_artifacts=decision.expected_artifacts or [],
+                artifact_freshness_policy=decision.artifact_freshness_policy,
+                reuse_existing_artifact=decision.reuse_existing_artifact,
+                reuse_reason=decision.reuse_reason,
             )
             return
 
@@ -1637,9 +2297,18 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 source="interaction:correct_direction",
                 delivery_mode=decision.delivery_mode,
                 user_request=raw_text,
+                root_user_request=raw_text,
                 event_type=decision.event_type,
                 event_kind=decision.event_kind,
                 stop_after_completion=decision.stop_after_completion,
+                task_instance_id=decision.task_instance_id,
+                task_working_dir=decision.task_working_dir,
+                continue_from_project=decision.continue_from_project,
+                delivery_required=decision.delivery_required,
+                expected_artifacts=decision.expected_artifacts or [],
+                artifact_freshness_policy=decision.artifact_freshness_policy,
+                reuse_existing_artifact=decision.reuse_existing_artifact,
+                reuse_reason=decision.reuse_reason,
             )
             return
 
@@ -1662,8 +2331,17 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
 
     def _nudge_project(self, title: str, priority: int = 2, source: str = "interaction",
                        delivery_mode: str = "research_project", user_request: str = "",
+                       root_user_request: str = "",
                        event_type: str = "project", event_kind: str = "",
-                       stop_after_completion: bool = False):
+                       stop_after_completion: bool = False,
+                       task_instance_id: str = "",
+                       task_working_dir: str = "",
+                       continue_from_project: str = "",
+                       delivery_required: bool = False,
+                       expected_artifacts: list[dict] | None = None,
+                       artifact_freshness_policy: str = "new",
+                       reuse_existing_artifact: bool = False,
+                       reuse_reason: str = ""):
         """Wake the mind loop after a user-driven lifeline mutation.
 
         This is best-effort: if the process is not running, persisted
@@ -1671,32 +2349,41 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
         """
         if not title:
             return
+        if _is_generic_event_title(title):
+            title = _title_from_objective(root_user_request, user_request, title)
         try:
-            from .mind.event_types import EventType, MindEvent
-            from .mind.pool import MindPool
-
-            pool = MindPool.get_sync_instance()
-            if not pool:
-                return
             event_type_value = str(event_type or "project").strip().lower()
-            try:
-                resolved_event_type = EventType(event_type_value)
-            except Exception:
-                resolved_event_type = EventType.PROJECT
-            pool.put_threadsafe(MindEvent(
-                type=resolved_event_type,
+            # 直接通过 Harness executor 执行事件（MindPool 已移除）
+            from .mind.event_types import MindEvent, EventType
+            from .mind.executor import execute_event
+            import asyncio
+
+            ev = MindEvent(
+                type=EventType(event_type_value) if event_type_value in {t.value for t in EventType} else EventType.PROJECT,
                 priority=priority,
                 payload={
                     "title": title,
                     "step": 0,
                     "delivery_mode": delivery_mode if delivery_mode in {"research_project", "reference_brief", "direct_deliverable", "audit_only"} else "research_project",
-                    "user_request": user_request[:2000] if user_request else "",
+                    "user_request": (user_request or "")[:2000],
+                    "root_user_request": (root_user_request or user_request or "")[:2000],
                     "event_type": event_type_value,
-                    "event_kind": event_kind[:120] if event_kind else "",
+                    "event_kind": (event_kind or "")[:120],
                     "stop_after_completion": bool(stop_after_completion),
                 },
                 source=source,
-            ))
+            )
+            try:
+                # In a running event loop: _handle_user_message will queue
+                # the BATCH_PLAN event separately. Only execute directly
+                # when called from a sync context (CLI, core.chat).
+                loop = asyncio.get_running_loop()
+                logger.debug("[NUDGE] in running loop, skipping direct execute (queue will handle)")
+            except RuntimeError:
+                # No running loop — execute synchronously
+                asyncio.run(execute_event(ev))
+            except Exception as exc:
+                logger.warning(f"[NUDGE] direct execute_event failed (non-fatal): {exc}")
             self._record_enqueued_event(title, priority, source, delivery_mode, user_request, event_kind, stop_after_completion, event_type_value)
         except Exception as exc:
             logger.debug(f"failed to nudge project event: {exc}")
@@ -1727,14 +2414,8 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             logger.debug(f"failed to record enqueued event: {exc}")
 
     def _drop_stale_project_events(self, keep_title: str):
-        try:
-            from .mind.pool import MindPool
-
-            pool = MindPool.get_sync_instance()
-            if pool:
-                pool.drop_project_events_except(keep_title)
-        except Exception as exc:
-            logger.debug(f"failed to drop stale project events: {exc}")
+        """保留兼容 — MindPool 已移除，无需清理。"""
+        pass
 
     @staticmethod
     def _extract_paths(text: str) -> list[str]:
@@ -1785,8 +2466,13 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
             try:
                 with open(plan_path, "r", encoding="utf-8") as f:
                     existing = json.load(f)
-                if isinstance(existing, dict):
+                existing_title = str((existing or {}).get("title") or (existing or {}).get("project") or "").strip() if isinstance(existing, dict) else ""
+                if isinstance(existing, dict) and existing_title == title:
                     plan.update(existing)
+                    # Reset phases — old stale phases from a previous run must not
+                    # carry over into the new planning cycle.
+                    plan["phases"] = []
+                    plan["current_phase_index"] = 0
                     plan["status"] = "planning" if existing.get("status") in ("idle", "completed", "planning") else existing.get("status", "planning")
                     plan["title"] = title or existing.get("title", "")
                     plan["goal"] = heartbeat_summary

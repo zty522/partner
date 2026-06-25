@@ -48,6 +48,9 @@ scripts/*.bak
 scripts/__pycache__/
 config/
 
+# Runtime project data
+partner/projects/
+
 # Old test & event template files (kept for reference locally)
 tests/
 templates/
@@ -62,6 +65,12 @@ partner/wechatpad_bridge.py
 partner/strategy_map.py
 partner/messaging.py
 partner/voice.py
+
+# Runtime output (user data, not code)
+output/
+report/
+cytobridge_output/
+partner_workspace/
 
 # Build artifacts
 releases/

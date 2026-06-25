@@ -21,7 +21,7 @@ class TokenTracker:
 
     def get_metrics_dir(self) -> str:
         if self._workspace:
-            return os.path.join(self._workspace, "20_records", "metrics")
+            return os.path.join(self._workspace, "projects", "metrics")
         return "./token_metrics"
 
     def record(self, prompt_tokens: int, completion_tokens: int, model: str = "",

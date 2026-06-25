@@ -59,7 +59,7 @@ def _first_existing(paths: Iterable[Path]) -> Path | None:
 
 def _active_project(workspace: Path) -> str:
     candidates = [
-        workspace / "20_records" / "active_project.txt",
+        workspace / "projects" / "active_project.txt",
         workspace / "state" / "active_project.txt",
     ]
     path = _first_existing(candidates)
@@ -81,8 +81,8 @@ def _active_project(workspace: Path) -> str:
 def _project_dirs(workspace: Path, project: str) -> list[Path]:
     slug = _safe_name(project)
     candidates = [
-        workspace / "20_records" / "projects" / project,
-        workspace / "20_records" / "projects" / slug,
+        workspace / "projects" / "projects" / project,
+        workspace / "projects" / "projects" / slug,
         workspace / "projects" / project,
         workspace / "projects" / slug,
         workspace / "user" / "projects" / project,

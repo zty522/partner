@@ -11,11 +11,11 @@
   10 = 最低（心跳）
 
 保留的事件类型：PROJECT, REPORT, CRON_TICK, WAKE_UP, REFLECTION,
-CROSS_PROJECT, MEMORY_CONSOLIDATE, CONTENT_DIGEST, CONTENT_PATROL。
+CROSS_PROJECT, MEMORY_CONSOLIDATE, CONTENT_DIGEST, CONTENT_PATROL, DIRECT_REPLY。
 
-动作级事件：DIRECT_TASK, LITERATURE_REVIEW, DATA_FETCH, DATA_ANALYSIS, VISUALIZATION,
+动作级事件：BATCH_PLAN, DIRECT_TASK, LITERATURE_REVIEW, DATA_FETCH, DATA_ANALYSIS, VISUALIZATION,
 EVIDENCE_AUDIT, ARTIFACT_BUILD, PDF_REPORT, EMAIL_DELIVERY, WEB_SEARCH, WEB_CAPTURE, PROJECT_THINK,
-OBJECTIVE_REVIEW, CURIOSITY_EXPLORE, HABIT_UPDATE。项目只是容器，具体动作由这些
+OBJECTIVE_REVIEW, CURIOSITY_EXPLORE, HABIT_UPDATE, OLLAMA_STATUS。项目只是容器，具体动作由这些
 小事件承载，避免所有用户请求都进入重型 PROJECT 管道。
 """
 
@@ -28,7 +28,10 @@ from enum import Enum
 
 class EventType(str, Enum):
     """所有念头类型（精简版）。"""
+    USER_MESSAGE = "user_message"      # 外部入口收到用户消息：先交给 InteractionOrchestrator/selector 决定路由
+    DIRECT_REPLY = "direct_reply"      # 直接 LLM 回复：不需要多步执行，直接生成回复
     PROJECT = "project"                # 长期项目：多步推进的研究意图
+    BATCH_PLAN = "batch_plan"          # 顶层批量规划：一次生成 Harness MicroPlan 并执行
     DIRECT_TASK = "direct_task"        # 一次性直接交付：改文件、生成文件等
     LITERATURE_REVIEW = "literature_review"  # 查资料/找文献/整理方法，不自动进入实验
     DATA_FETCH = "data_fetch"          # 数据获取：只获取/下载/保存一个真实数据源
@@ -40,10 +43,16 @@ class EventType(str, Enum):
     EMAIL_DELIVERY = "email_delivery"  # 邮件交付：把已有/本轮生成文件通过 SMTP 发送
     WEB_SEARCH = "web_search"          # 公开网页/平台搜索：网页、小红书、B站等
     WEB_CAPTURE = "web_capture"        # 网页/图片捕获：下载公开图片或对公开网页截图
+    FILE_INSPECTION = "file_inspection"  # 附件识别：魔数、hex dump、格式边界说明
     PROJECT_THINK = "project_think"    # 项目拆解、难点识别、下一步选择
     OBJECTIVE_REVIEW = "objective_review"  # 目标/交付物对齐：回看根目标、已完成、缺口和下一 event
+    CHECK = "check"                    # Harness 迭代检查：本地规则检查产物是否满足
+    REFLECT = "reflect"                # Harness 迭代反思：LLM 分析缺口和补充方向
+    CURIOSITY = "curiosity"            # Harness 迭代好奇补充：根据缺口生成小计划
     CURIOSITY_EXPLORE = "curiosity_explore"  # 好奇探索：从可执行下一步中选择最小探索动作
     HABIT_UPDATE = "habit_update"      # 经验/习惯/成长记录和抽象化
+    OLLAMA_STATUS = "ollama_status"    # Ollama 状态探测：检查轻量模型是否可用
+    TASK_FAILED = "task_failed"           # 任务失败总结：通知用户并提供诊断信息
     STOP_PROJECT = "stop_project"      # 显式停止当前执行链：由 LLM selector 选择后才等待/清 active
     REPORT = "report"                  # 汇报：向用户推送进展或结果
     CRON_TICK = "cron_tick"            # 由外部 cron 注入的周期性触发
@@ -71,7 +80,11 @@ class MindEvent:
         """PriorityQueue 使用 < 比较确定顺序。数值越低优先级越高。"""
         if not isinstance(other, MindEvent):
             return NotImplemented
-        return self.priority < other.priority
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        if self.created_at != other.created_at:
+            return self.created_at < other.created_at
+        return self.id < other.id
 
     def __le__(self, other: 'MindEvent') -> bool:
         if not isinstance(other, MindEvent):
@@ -120,6 +133,16 @@ def wake_up(source: str = "startup") -> MindEvent:
         type=EventType.WAKE_UP,
         priority=1,  # 最高优先级
         payload={},
+        source=source,
+    )
+
+
+def direct_reply(text: str, reply: str = "", source: str = "desktop") -> MindEvent:
+    """创建一个直接回复念头。"""
+    return MindEvent(
+        type=EventType.DIRECT_REPLY,
+        priority=1,
+        payload={"text": text, "reply": reply, "source": source},
         source=source,
     )
 

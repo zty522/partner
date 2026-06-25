@@ -453,18 +453,28 @@ def scan_workspace_changes(workspace: str, project: str = "", max_files: int = 8
         manifest = {}
 
     roots = []
-    projects_root = os.path.join(workspace, "20_records", "projects")
+    project_roots = [
+        os.path.join(workspace, "projects"),
+        os.path.join(workspace, "projects", "projects"),
+    ]
     if project:
         try:
             from .project_state import get_project_dir
             roots.append((project, get_project_dir(workspace, project)))
         except Exception:
-            roots.append((project, os.path.join(projects_root, project)))
-    elif os.path.isdir(projects_root):
-        for name in os.listdir(projects_root):
-            path = os.path.join(projects_root, name)
-            if os.path.isdir(path):
-                roots.append((name, path))
+            for projects_root in project_roots:
+                roots.append((project, os.path.join(projects_root, project)))
+    else:
+        seen = set()
+        for projects_root in project_roots:
+            if not os.path.isdir(projects_root):
+                continue
+            for name in os.listdir(projects_root):
+                path = os.path.join(projects_root, name)
+                norm = os.path.abspath(path)
+                if os.path.isdir(path) and norm not in seen:
+                    seen.add(norm)
+                    roots.append((name, path))
 
     changed: list[dict[str, Any]] = []
     suffixes = (".md", ".json", ".jsonl", ".csv", ".tsv", ".txt", ".log")
@@ -598,6 +608,7 @@ def ensure_habits(workspace: str) -> dict[str, Any]:
             "重复动作先去重再换突破口",
             "每个 event 结束后先对齐根目标：逐项核对用户要求的交付物、已完成内容、缺口和阻塞；不能把子步骤完成当成根目标完成",
             "科研相关分析完成后，如果已有可整理内容且用户没有反对，倾向继续调用 pdf_report，把阶段结果整理成 PDF 再结束",
+            "用户要求生成报告/综述/总结文件时，默认最终交付 PDF；Markdown 只作为中间草稿或用户明确要求 Markdown 时才作为最终交付",
             "生成图表/绘图时，PDF/报告正文按用户语言书写；只有嵌入图片内部的标题、节点、坐标轴、图例和注释默认使用英文，避免图片中文字因字体缺失不可见",
             "报告/演示/说明如果基于前序图片、图表、架构图或可视化产物，PDF 必须嵌入真实图片文件，不能只写文件名、路径或文字说明",
             "pdf_report event 已负责生成真实 PDF；除非 PDF 生成失败，不要再把 Markdown 转 PDF 当成下一步 artifact_build",
@@ -882,7 +893,7 @@ def _idea_source(kind: str) -> str:
 
 
 def _write_user_summary(workspace: str, memory: dict[str, Any]):
-    user_dir = os.path.join(workspace, "user")
+    user_dir = os.path.join(workspace, "state", "user")
     os.makedirs(user_dir, exist_ok=True)
     path = os.path.join(user_dir, "research_memory_summary.md")
     lines = ["# Partner 长期研究记忆", ""]
@@ -923,7 +934,7 @@ def _write_user_summary(workspace: str, memory: dict[str, Any]):
 
 
 def _write_growth_summary(workspace: str, memory: dict[str, Any]):
-    user_dir = os.path.join(workspace, "user")
+    user_dir = os.path.join(workspace, "state", "user")
     os.makedirs(user_dir, exist_ok=True)
     path = os.path.join(user_dir, "partner_growth.md")
     rows = memory.get("growth_events") or []

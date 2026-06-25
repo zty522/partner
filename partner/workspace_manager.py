@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ── Project structure ────────────────────────────────────────────────
 
 PROJECT_SUBDIRS = ["code", "ideas", "notes", "dialogue", "data", "figures"]
-ROOT_SHARED_DIRS = ["code", "ideas", "knowledge", "logs", "state", "dialogue"]
+ROOT_SHARED_DIRS = ["dialogue"]
 
 # Optional project alias registry. Keep empty by default; users/config can add
 # aliases without baking historical local projects into the codebase.
@@ -249,14 +249,13 @@ def get_dialogue_path(workspace: str, project: str = "", date: Optional[datetime
     if date is None:
         date = datetime.now()
     base = os.path.join(workspace, "projects", project, "dialogue") if project else os.path.join(workspace, "dialogue")
-    year_dir = os.path.join(base, str(date.year))
-    os.makedirs(year_dir, exist_ok=True)
-    return os.path.join(year_dir, f"{date.strftime('%Y-%m-%d')}.log")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, f"{date.strftime('%Y-%m-%d')}.log")
 
 
 def append_dialogue(workspace: str, sender: str, message: str, reply: str,
                     platform: str = "qq", project: str = ""):
-    """Append a dialogue turn to today's .log file."""
+    """Prepend a dialogue turn to today's .log file (newest at top)."""
     fpath = get_dialogue_path(workspace, project)
     timestamp = datetime.now().strftime("%H:%M:%S")
     entry = (
@@ -265,8 +264,16 @@ def append_dialogue(workspace: str, sender: str, message: str, reply: str,
         f"  A: {reply}\n\n"
     )
     os.makedirs(os.path.dirname(fpath), exist_ok=True)
-    with open(fpath, "a", encoding="utf-8") as f:
-        f.write(entry)
+    # Prepend: read old content, write new + old
+    old_content = b""
+    try:
+        with open(fpath, "rb") as f:
+            old_content = f.read()
+    except FileNotFoundError:
+        pass
+    with open(fpath, "wb") as f:
+        f.write(entry.encode("utf-8"))
+        f.write(old_content)
 
 
 # ── Daily journal ────────────────────────────────────────────────────

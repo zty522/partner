@@ -13,6 +13,8 @@ import logging
 import json
 import os
 import re
+import urllib.parse
+import urllib.request
 from typing import List, Dict, Optional
 from datetime import datetime
 
@@ -27,6 +29,10 @@ CROSSREF_URL = "https://api.crossref.org/works"
 
 # ArXiv API
 ARXIV_URL = "http://export.arxiv.org/api/query"
+
+# PubMed E-utilities API
+PUBMED_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+PUBMED_ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 
 SEARCH_TIMEOUT = 30  # seconds
 
@@ -85,10 +91,11 @@ def _extract_keywords_from_knowledge(topic: str, workspace: str) -> List[str]:
     if not workspace:
         return []
 
-    # 查找匹配的项目目录: 20_records/projects/<project>/
-    projects_dir = os.path.join(workspace, "20_records", "projects")
-    if not os.path.isdir(projects_dir):
-        return []
+    # 查找匹配的项目目录；新布局使用 projects/，旧布局仍兼容读取。
+    project_roots = [
+        os.path.join(workspace, "projects"),
+        os.path.join(workspace, "projects", "projects"),
+    ]
 
     keywords = []
     topic_lower = topic.lower()
@@ -96,34 +103,37 @@ def _extract_keywords_from_knowledge(topic: str, workspace: str) -> List[str]:
     topic_tokens = topic_lower.replace('（', ' ').replace('）', ' ') \
                                .replace('(', ' ').replace(')', ' ').split()
 
-    for d in os.listdir(projects_dir):
-        d_lower = d.lower()
-        # 检查目录名是否与 topic 相关
-        if any(kw in d_lower for kw in topic_tokens if len(kw) > 1):
-            kb_path = os.path.join(projects_dir, d, "knowledge.json")
-            if os.path.exists(kb_path):
-                try:
-                    with open(kb_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    entries = data if isinstance(data, list) else data.get("entries", [])
-                    for entry in entries:
-                        if isinstance(entry, dict):
-                            title = entry.get("title", entry.get("content", ""))
-                            content = entry.get("content", "")
-                            # 提取可复用英文术语，不预设具体领域。
-                            eng = re.findall(
-                                r'[A-Z][a-z]+(?:_[A-Z][a-z]+)*|'
-                                r'MAE|MSE|RMSE|AUC|F1|Transformer|CNN|LSTM|GNN|GAN|'
-                                r'BERT|GPT|Diffusion|ResNet|UNet|Autoencoder|Attention',
-                                str(title) + " " + str(content)
-                            )
-                            keywords.extend(eng[:5])
-                            # 提取作者引用
-                            authors = re.findall(r'[A-Z][a-z]+ et al\.', str(content))
-                            keywords.extend(authors[:3])
-                except Exception:
-                    pass
-            break  # 只处理第一个匹配的项目
+    for projects_dir in project_roots:
+        if not os.path.isdir(projects_dir):
+            continue
+        for d in os.listdir(projects_dir):
+            d_lower = d.lower()
+            # 检查目录名是否与 topic 相关
+            if any(kw in d_lower for kw in topic_tokens if len(kw) > 1):
+                kb_path = os.path.join(projects_dir, d, "knowledge.json")
+                if os.path.exists(kb_path):
+                    try:
+                        with open(kb_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        entries = data if isinstance(data, list) else data.get("entries", [])
+                        for entry in entries:
+                            if isinstance(entry, dict):
+                                title = entry.get("title", entry.get("content", ""))
+                                content = entry.get("content", "")
+                                # 提取可复用英文术语，不预设具体领域。
+                                eng = re.findall(
+                                    r'[A-Z][a-z]+(?:_[A-Z][a-z]+)*|'
+                                    r'MAE|MSE|RMSE|AUC|F1|Transformer|CNN|LSTM|GNN|GAN|'
+                                    r'BERT|GPT|Diffusion|ResNet|UNet|Autoencoder|Attention',
+                                    str(title) + " " + str(content),
+                                )
+                                keywords.extend(eng[:5])
+                                # 提取作者引用
+                                authors = re.findall(r'[A-Z][a-z]+ et al\.', str(content))
+                                keywords.extend(authors[:3])
+                    except Exception:
+                        pass
+                break  # 只处理第一个匹配的项目
 
     return list(set(keywords))[:10]
 
@@ -133,7 +143,7 @@ def _get_domain_terms(topic: str) -> List[str]:
     return [topic]
 
 
-def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
+def search(topic: str, max_results: int = 5, workspace: str = "", allow_dialog_context: bool = True) -> List[Dict]:
     """搜索学术文献，使用多 query 策略扩大召回。
 
     在尝试学术 API 之前，先从 dialog 上下文检查是否有用户已提供的信息。
@@ -149,7 +159,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
         List[Dict]，每个 dict 包含 title, authors, year, url, abstract, source
     """
     # 0. 优先从 dialog 上下文获取用户已提供的信息
-    if workspace:
+    if workspace and allow_dialog_context:
         try:
             from .context_broker import ContextBroker
             broker = ContextBroker(workspace)
@@ -195,6 +205,17 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
 
         # 2. Crossref
         try:
+            results = _search_pubmed(query, query_limit)
+            for r in results:
+                title = r.get("title", "").strip().lower()
+                if title and title not in seen_titles:
+                    seen_titles.add(title)
+                    all_results.append(r)
+        except Exception as e:
+            logger.warning(f"[Searcher] PubMed failed for '{query}': {e}")
+
+        # 3. Crossref
+        try:
             results = _search_crossref(query, query_limit)
             for r in results:
                 title = r.get("title", "").strip().lower()
@@ -204,7 +225,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
         except Exception as e:
             logger.warning(f"[Searcher] Crossref failed for '{query}': {e}")
 
-        # 3. ArXiv
+        # 4. ArXiv
         try:
             results = _search_arxiv(query, query_limit)
             for r in results:
@@ -225,7 +246,7 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
         if eng_words:
             backup_query = " ".join(eng_words[:5])
 
-        for backend in [_search_semantic_scholar, _search_crossref, _search_arxiv]:
+        for backend in [_search_semantic_scholar, _search_pubmed, _search_crossref, _search_arxiv]:
             try:
                 results = backend(backup_query, max_results)
                 for r in results:
@@ -245,6 +266,67 @@ def search(topic: str, max_results: int = 5, workspace: str = "") -> List[Dict]:
 
     logger.info(f"[Searcher] Total {len(all_results)} unique results for '{topic}'")
     return all_results[:max_results]
+
+
+def _fetch_json_url(url: str, params: Dict[str, object]) -> Dict:
+    query = urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        f"{url}?{query}",
+        headers={"User-Agent": "PartnerResearchBot/0.8 (literature search; contact: partner@research.ai)"},
+    )
+    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
+        text = resp.read(300000).decode("utf-8", "replace")
+    data = json.loads(text)
+    return data if isinstance(data, dict) else {}
+
+
+def _search_pubmed(query: str, limit: int = 5) -> List[Dict]:
+    """PubMed E-utilities 搜索（免认证，基础元数据降级方案）。"""
+    search_data = _fetch_json_url(PUBMED_ESEARCH_URL, {
+        "db": "pubmed",
+        "retmode": "json",
+        "retmax": min(limit, 20),
+        "sort": "relevance",
+        "term": query,
+    })
+    ids = [str(x) for x in (search_data.get("esearchresult") or {}).get("idlist") or [] if str(x).strip()]
+    if not ids:
+        return []
+    summary_data = _fetch_json_url(PUBMED_ESUMMARY_URL, {
+        "db": "pubmed",
+        "retmode": "json",
+        "id": ",".join(ids[: min(limit, 20)]),
+    })
+    result_obj = summary_data.get("result") if isinstance(summary_data.get("result"), dict) else {}
+    results: List[Dict] = []
+    for pmid in ids:
+        item = result_obj.get(pmid)
+        if not isinstance(item, dict):
+            continue
+        authors = []
+        for author in item.get("authors") or []:
+            if isinstance(author, dict) and author.get("name"):
+                authors.append(str(author.get("name")))
+        year = None
+        date_text = str(item.get("pubdate") or item.get("epubdate") or "")
+        match = re.search(r"\b(19|20)\d{2}\b", date_text)
+        if match:
+            try:
+                year = int(match.group(0))
+            except Exception:
+                year = None
+        results.append({
+            "title": item.get("title", ""),
+            "authors": authors[:5],
+            "year": year,
+            "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+            "abstract": "",
+            "source": "pubmed",
+            "pmid": pmid,
+            "journal": item.get("fulljournalname") or item.get("source") or "",
+        })
+    logger.info(f"[Searcher] PubMed: {len(results)} results for '{query}'")
+    return results[:limit]
 
 
 def _search_semantic_scholar(query: str, limit: int = 5) -> List[Dict]:
