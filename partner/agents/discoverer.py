@@ -42,8 +42,18 @@ _DEFAULT_MANIFEST_TEMPLATE = {
 
 
 def _get_workspace_agents_dir(workspace: str) -> str:
-    """Get the workspace agents directory, creating it if needed."""
-    agent_dir = os.path.join(workspace, "config", "agents")
+    """Get the workspace-level agents config directory.
+
+    Resolves from instance workspace to workspace root:
+      .../instances/03/ → .../config/agents/
+    """
+    # If workspace looks like an instance dir (.../instances/XX/), go up to root
+    _parts = workspace.rstrip("/").split("/")
+    if len(_parts) >= 2 and _parts[-2] == "instances":
+        workspace_root = "/".join(_parts[:-2])
+    else:
+        workspace_root = workspace
+    agent_dir = os.path.join(workspace_root, "config", "agents")
     os.makedirs(agent_dir, exist_ok=True)
     return agent_dir
 

@@ -305,7 +305,11 @@ async def _call_agent_direct_api(
 
     params = dict(agent_params or {})
     input_path = str(params.get("input") or params.get("file") or "")
-    output_dir = str(params.get("output") or params.get("output_dir") or "./output")
+    # Route output to task instance's working directory, not cwd
+    _task_output_base = (getattr(task_instance, "working_dir", None) or os.getcwd()) if task_instance else os.getcwd()
+    output_dir = str(params.get("output") or params.get("output_dir") or "")
+    if not output_dir or output_dir in ("./output", "output", ".", ""):
+        output_dir = os.path.join(_task_output_base, "output")
     question = str(params.get("question") or task)
     device = str(params.get("device") or "cpu")
 
