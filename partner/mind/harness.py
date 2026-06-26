@@ -2915,7 +2915,12 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
             md_content = f.read()
         html_content = markdown.markdown(md_content, extensions=["extra", "codehilite", "tables"])
         html_full = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-body {{ font-family: sans-serif; margin: 2cm; line-height: 1.6; }}
+@font-face {{
+    font-family: 'CJK Fallback';
+    src: local('WenQuanYi Zen Hei'), local('SimHei'), local('Noto Sans CJK SC'), local('Noto Sans SC');
+    unicode-range: U+4E00-9FFF, U+3000-303F, U+FF00-FFEF;
+}}
+body {{ font-family: 'CJK Fallback', sans-serif; margin: 2cm; line-height: 1.6; }}
 h1 {{ color: #333; border-bottom: 2px solid #4A90D9; }}
 h2 {{ color: #555; }}
 code {{ background: #f4f4f4; padding: 2px 5px; border-radius: 3px; }}
@@ -4057,9 +4062,9 @@ def default_registry() -> EventRegistry:
 
     # Content Generation
     registry.register(HarnessEventSpec("generate_text", "atomic", "生成任意文本内容（文章、邮件、回复等）。参数: task, prompt, style", _agent_event_handler, external_call=True, execution_method="agent"))
-    registry.register(HarnessEventSpec("generate_code", "atomic", "生成代码。参数: task, language, requirements", _agent_event_handler, external_call=True, execution_method="agent"))
+    registry.register(HarnessEventSpec("generate_code", "atomic", "生成代码。参数: task, language, requirements。如果生成Python绘图代码（matplotlib/seaborn），必须包含中文字体设置：import matplotlib; matplotlib.rcParams['font.sans-serif']=['WenQuanYi Zen Hei','SimHei','DejaVu Sans']; matplotlib.rcParams['axes.unicode_minus']=False", _agent_event_handler, external_call=True, execution_method="agent"))
     registry.register(HarnessEventSpec("write_report", "atomic", "生成结构化报告。参数: task, format, sections", _agent_event_handler, external_call=True, execution_method="agent"))
-    registry.register(HarnessEventSpec("create_diagram", "atomic", "生成图表/流程图/架构图。参数: task, diagram_type, description", _agent_event_handler, external_call=True, execution_method="agent"))
+    registry.register(HarnessEventSpec("create_diagram", "atomic", "生成图表/流程图/架构图。参数: task, diagram_type, description。生成的Python绘图代码必须包含中文字体设置：import matplotlib; matplotlib.rcParams['font.sans-serif']=['WenQuanYi Zen Hei','SimHei','DejaVu Sans']; matplotlib.rcParams['axes.unicode_minus']=False", _agent_event_handler, external_call=True, execution_method="agent"))
 
     # Execution & Operations
     registry.register(HarnessEventSpec("run_command", "atomic", "执行系统命令或脚本。参数: command, timeout, workdir", _local_run_command, execution_method="local"))
