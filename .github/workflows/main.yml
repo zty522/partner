@@ -22,6 +22,10 @@ jobs:
       - name: Build desktop app
         shell: pwsh
         run: |
+          python -c "import PyInstaller; print('PyInstaller OK:', PyInstaller.__version__)"
+          python -c "import PySide6; print('PySide6 OK')"
+          Test-Path scripts/partner_windows.spec
+          Get-ChildItem dist/ -ErrorAction SilentlyContinue
           python -m PyInstaller --clean --noconfirm scripts/partner_windows.spec 2>&1
       - name: Upload EXE to Release
         uses: softprops/action-gh-release@v2
