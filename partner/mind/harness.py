@@ -1270,6 +1270,8 @@ def _step_result_summary(result: JsonDict) -> str:
 
 def _latest_structured_result(results: dict[str, JsonDict]) -> JsonDict:
     for result in reversed(list(results.values())):
+        if not isinstance(result, dict):
+            continue
         parsed = result.get("parsed")
         if isinstance(parsed, dict) and parsed:
             return parsed
@@ -1283,6 +1285,8 @@ def _merge_result_files(parsed: JsonDict, results: dict[str, JsonDict], validati
     if raw_files and raw_files.upper() != "EMPTY":
         files.extend(x.strip() for x in re.split(r"[;\n，,]+", raw_files) if x.strip())
     for result in results.values():
+        if not isinstance(result, dict):
+            result = {}
         value = result.get("files") or []
         if isinstance(value, str):
             value = [value]
@@ -1620,6 +1624,8 @@ def _compose_parsed_from_results(ctx: HarnessContext, results: dict[str, JsonDic
     evidence = []
     artifact = ""
     for step_id, result in results.items():
+        if not isinstance(result, dict):
+            result = {}
         if result.get("findings"):
             values = result["findings"] if isinstance(result["findings"], list) else [result["findings"]]
             findings.extend(str(x) for x in values if str(x).strip())
@@ -1655,6 +1661,8 @@ def _collect_fallback_paths(results: dict[str, JsonDict]) -> list[str]:
 def _collect_failures(results: dict[str, JsonDict]) -> list[JsonDict]:
     failures: list[JsonDict] = []
     for step_id, result in results.items():
+        if not isinstance(result, dict):
+            continue
         if result.get("ok") is False or result.get("error"):
             failures.append({
                 "step_id": step_id,
@@ -1668,6 +1676,8 @@ def _collect_failure_reasons(results: dict[str, JsonDict]) -> str:
     """Extract the first meaningful error from step results.
     Returns specific error like 'file_not_found: /data/pancreas.h5ad' or empty string."""
     for step_id, result in results.items():
+        if not isinstance(result, dict):
+            continue
         error = result.get("error") or ""
         if error and "file_not_found" in str(error).lower():
             return str(error)[:300]
