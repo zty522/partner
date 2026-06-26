@@ -283,8 +283,12 @@ class AgentDispatcher:
         full_cmd.extend(resolved_args)
 
         # Append the task text as final positional arg (skip for "run" subcommand
-        # where the positional is the input path, not free-form task text)
-        if task.task and subcommand != "run":
+        # where the positional is the input path, not free-form task text).
+        # ALSO skip when args already contain {input} — the task is already
+        # fully specified by parameters; appending it as a positional arg
+        # would confuse tools like pandoc that treat positional args as inputs.
+        _has_input_placeholder = any("{input}" in str(a) for a in args)
+        if task.task and subcommand != "run" and not _has_input_placeholder:
             full_cmd.append(task.task)
 
         # Prepare working directory
