@@ -76,7 +76,7 @@ def check_agent_registered(agent_name: str, workspace: str) -> bool:
     return False
 
 
-async def discover_and_register_agent(
+def discover_and_register_agent(
     agent_name: str,
     workspace: str,
     adapter: Any = None,
@@ -99,6 +99,43 @@ async def discover_and_register_agent(
         return None
 
     logger.info("[AGENT_DISCOVERY] Discovering agent: %s", agent_name)
+
+    import shutil as _shutil
+
+    # ── Step 1: Check if the binary exists on PATH ──
+    _binary_path = _shutil.which(agent_name)
+    if _binary_path:
+        logger.info("[AGENT_DISCOVERY] Found '%s' on PATH: %s", agent_name, _binary_path)
+        # Create a simple manifest directly — no Hermes needed
+        manifest = {
+            "name": agent_name,
+            "version": "1.0.0",
+            "description": f"CLI tool: {agent_name} (auto-discovered from PATH)",
+            "capabilities": [],
+            "endpoint_type": "cli",
+            "endpoint_config": {
+                "command": agent_name,
+                "subcommand": "",
+                "preamble_args": [],
+                "args": ["{input}"],
+                "timeout": 3600,
+                "inject_llm_credentials": False,
+            },
+            "health_check_cmd": f"{agent_name} --help",
+        }
+        # Save and return
+        agent_dir = _get_workspace_agents_dir(workspace)
+        manifest_path = os.path.join(agent_dir, f"{agent_name}.json")
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2, ensure_ascii=False)
+            logger.info("[AGENT_DISCOVERY] Created basic manifest: %s", manifest_path)
+            return manifest_path
+        except OSError as exc:
+            logger.error("[AGENT_DISCOVERY] Failed to save manifest: %s", exc)
+            return None
+
+    # ── Step 2: Binary not on PATH — try Hermes to search GitHub ──
 
     if adapter is None:
         from ..adapter import HermesAdapter
