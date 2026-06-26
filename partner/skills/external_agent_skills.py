@@ -161,6 +161,29 @@ async def _call_specialized_agent(
         registry = AgentRegistry(workspace=workspace)
         dispatcher = AgentDispatcher(registry)
 
+        # ── Auto-discovery: if agent not registered, use Hermes to find it ──
+        if not registry.get_agent(agent):
+            logger.info("[CALL_AGENT] Agent '%s' not registered, auto-discovering from GitHub...", agent)
+            if task_instance:
+                task_instance.append_log("call_agent_auto_discover", {
+                    "agent": agent,
+                })
+            try:
+                from ..agents.discoverer import discover_and_register_agent
+                manifest_path = discover_and_register_agent(
+                    agent_name=agent,
+                    workspace=workspace,
+                )
+                if manifest_path:
+                    logger.info("[CALL_AGENT] Auto-discovered and registered '%s': %s", agent, manifest_path)
+                    # Re-create registry to pick up the new manifest
+                    registry = AgentRegistry(workspace=workspace)
+                    dispatcher = AgentDispatcher(registry)
+                else:
+                    logger.warning("[CALL_AGENT] Auto-discovery failed for '%s'", agent)
+            except Exception as _disc_exc:
+                logger.warning("[CALL_AGENT] Auto-discovery error for '%s': %s", agent, _disc_exc)
+
         result = await dispatcher.dispatch(
             AgentTask(
                 agent=agent,
