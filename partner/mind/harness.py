@@ -1951,26 +1951,15 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
         if not os.path.isabs(input_file) and not input_file.startswith("/"):
             input_file = "/" + input_file
         if not os.path.exists(input_file):
-            # Search common locations
-            fname = os.path.basename(input_file)
-            found = []
-            for _root in ("/data", "/mnt/e/work/data", "/mnt/e/work", os.path.expanduser("~")):
-                if os.path.isdir(_root):
-                    for _dir, _, _files in os.walk(_root):
-                        if fname in _files:
-                            found.append(os.path.join(_dir, fname))
-                        if len(found) >= 3:
-                            break
-                    if found:
-                        break
+            # Hermes-style dynamic file search using find/locate/os.walk
+            from ..utils.file_resolver import resolve_file_path
+            resolved, found = resolve_file_path(input_file, search_timeout=15)
             if found:
                 ctx.task_instance.append_log("preflight_file_resolved", {
                     "original": input_file,
-                    "resolved": found[0],
+                    "resolved": resolved,
                 })
-                # Update the input file path to the resolved location so the
-                # agent receives a valid path, not the original non-existent one
-                input_file = found[0]
+                input_file = resolved
                 params["input"] = input_file
             else:
                 ctx.task_instance.append_log("preflight_file_missing", {
@@ -1979,7 +1968,7 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
                 return {
                     "ok": False,
                     "agent": agent,
-                    "error": f"Input file not found: {input_file}. Searched common locations but did not find '{fname}'.",
+                    "error": f"Input file not found: {input_file}. Used Hermes-style dynamic search (find/locate/walk) but did not find '{os.path.basename(input_file)}'.",
                     "_error_type": "file_not_found",
                 }
     # ── End pre-flight check ──
