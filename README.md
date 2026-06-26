@@ -44,7 +44,9 @@ partner setup
 
 ---
 
-## 核心定位
+## Partner 是什么
+
+Partner 的定位不是替代现有 AI 工具，而是让它们能**协同工作**。它底层可以调度 OpenClaw、Hermes 等多种通用 Agent，也可以调度生物信息等领域的小众 Agent；上层提供事件驱动的自主推进能力，让研究任务不再依赖人工反复提示。部署层面支持多实例隔离、QQ 机器人桥接和 Windows 桌面界面——让 Agent 不只是命令行工具，而是一个可交互、可成长的研究伙伴。
 
 传统 AI 系统是**被动响应式**的——用户提问→模型回答→会话结束。Partner 则不同：
 
@@ -55,7 +57,30 @@ Partner: 上下文/记忆/习惯 → 选择器决定下一个事件 → 执行�
          → 分析结果、更新状态、学习、选择下一个事件
 ```
 
-Partner 围绕**分阶段执行**构建：每个阶段包含目标、事件、动作、结果和后续决策。后端 Agent 负责具体工作，而 Partner 在 Agent 调用之外维持连续性。
+每个阶段包含目标、事件、动作、结果和后续决策。后端 Agent 负责具体工作，而 Partner 在 Agent 调用之外维持连续性。
+
+---
+
+## 参与进来
+
+现在 Partner 已经具备基础框架和功能，但与市面上主流 Agent 相比在界面和功能上还比较粗糙。但我更想强调的不是技术本身，而是**什么样的人可以用它、怎么参与进来**。
+
+我想把参与的门打开——
+
+- **普通人**：你对 AI 有什么期望？加入群聊说说你的想法，帮助 Partner 更快地落到真实生活中
+- **在校大学生和业余爱好者**：可以提出改进想法和创新点，把需求转化成可落地的方向
+- **有能力的程序员**：可以接入新 Agent、改进核心代码，让 Partner 的能力持续扩展
+
+这个项目不是"我做的"，是**大家参与改进的**。欢迎提交 PR 或 Issue，贡献代码、文档、建议或测试。群二维码在底部 ⬇️
+
+### 贡献者
+
+| 名字/昵称 | 来自哪里 | 贡献类型 | 备注 |
+|-----------|----------|----------|------|
+| zty | 四川大学 | 代码修改 | 项目创建者 |
+| | | | |
+| | | | |
+| | | | |
 
 ---
 
@@ -78,7 +103,7 @@ Partner 围绕**分阶段执行**构建：每个阶段包含目标、事件、�
 ```bash
 partner setup                  # 配置工作空间、后端、QQ Bot 和实例
 partner status                 # 查看运行时和 Bot 状态
-partner doctor                 # 检查本地环境（Python、Git、配置、Hermes 等）
+partner doctor                 # 检查本地环境（Python、Git、配置等）
 partner agent list             # 列出已注册的外部 Agent
 partner agent register <path>  # 注册新的 Agent manifest
 partner agent call <name> ...  # 调用指定 Agent 执行任务
@@ -95,13 +120,11 @@ partner server add             # 添加远程 SSH 服务器
 
 ## 外部 Agent 架构
 
-Partner v1.0.0 引入了一套标准化的外部 Agent 调用体系：
-
-**每个 Agent 通过 JSON manifest 描述自身**，包含名称、版本、能力、端点类型（cli/http/python_api/mcp）、安装信息、LLM 凭证配置。支持以下特性：
+Partner 提供一套标准化的外部 Agent 调用体系。每个 Agent 通过 JSON manifest 描述自身（名称、版本、能力、端点类型、安装信息、LLM 凭证配置）：
 
 - **参数替换**：manifest 中的 `{input}`、`{output}`、`{question}` 等占位符由计划器填充，`{__llm_*__}` 由 Partner 自动注入凭证
-- **自动发现**：AgentRegistry 按优先级搜索内置 manifest、工作空间配置、全局配置、用户注册目录
-- **自动安装**：如果 manifest 包含 `install_info`，首次使用时自动通过 pip/git/npm/go/cargo/script 安装，安装后自动运行 `--help` 校验参数
+- **自动发现**：按优先级搜索内置 manifest、工作空间配置、全局配置、用户注册目录
+- **自动安装**：首次使用时自动通过 pip/git/npm/go/cargo/script 安装，安装后自动运行 `--help` 校验参数
 - **配置注入**：安装后自动写入 LLM 配置文件，Agent 无需手动设置 API Key
 
 **添加一个外部 Agent 只需要三步：**
@@ -117,9 +140,7 @@ partner agent register --manifest my-agent.json
 call_agent_skill(agent="my-agent", task="分析这份数据")
 ```
 
----
-
-## Agent 后端支持
+### Agent 后端
 
 | 后端 | 说明 |
 |------|------|
@@ -143,16 +164,6 @@ call_agent_skill(agent="my-agent", task="分析这份数据")
 
 ---
 
-## 交流群
-
-欢迎加入交流群获取最新动态和帮助：
-
-| 微信群 | QQ 群 |
-|--------|-------|
-| ![微信群](../data/2/微信群.jpg) | ![QQ群](../data/2/qq群.jpg) |
-
----
-
 ## 第三方代码声明 / Third-Party Notices
 
 本项目借鉴了以下开源项目的设计模式和代码：
@@ -166,14 +177,10 @@ call_agent_skill(agent="my-agent", task="分析这份数据")
 
 ---
 
-## 贡献者
+## 交流群
 
-| 名字/昵称 | 来自哪里 | 贡献类型 | 备注 |
-|-----------|----------|----------|------|
-| zty | 四川大学 | 代码修改 | 项目创建者 |
-| | | | |
-| | | | |
-| | | | |
-| | | | |
+欢迎加入交流群获取最新动态和帮助：
 
-*欢迎提交 PR 或 Issue 贡献代码、文档、建议或测试！*
+| 微信群 | QQ 群 |
+|--------|-------|
+| ![微信群](assets/微信群.jpg) | ![QQ群](assets/qq群.jpg) |
