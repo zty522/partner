@@ -2854,12 +2854,13 @@ def _clean_column_path(path: str) -> str:
 def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     """Convert a Markdown file to PDF using weasyprint."""
     import os
+    import glob as _glob_mod
     # Limit OpenBLAS threads to prevent OOM in WSL/numpy-backed environments
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     source = str(params.get("source") or params.get("path") or "").strip()
+    # Phase 1: explicit source parameter or dependency step search
     if not source:
-        # Fallback: look for .md files from dependency step results
         if ctx and ctx.task_instance:
             _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
             if _work_dir and os.path.isdir(_work_dir):
@@ -2882,7 +2883,6 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
                                 if os.path.exists(_df):
                                     source = _df
                                     break
-                                # Also try resolving relative paths against working dir
                                 _resolved = os.path.join(_work_dir, _df)
                                 if not os.path.isabs(_df) and os.path.exists(_resolved):
                                     source = _resolved
@@ -2890,6 +2890,13 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
                             break
                     except Exception:
                         continue
+    # Phase 2: fallback — scan working dir for any .md files from prior steps
+    if not source and ctx and ctx.task_instance:
+        _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
+        if _work_dir and os.path.isdir(_work_dir):
+            _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "*.md")))
+            if _candidates:
+                source = _candidates[-1]  # newest .md file
     if not source:
         return {"ok": False, "error": "missing source path (pass source or path)"}
     source_path = _safe_project_path(ctx, source)
