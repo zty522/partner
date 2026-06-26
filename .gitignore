@@ -75,6 +75,9 @@ partner_workspace/
 # Runtime report files
 *.report.md
 start_partner*.sh
+# Runtime CSV and weather report files (user data, not code)
+/*.csv
+/成都*.md
 
 # Build artifacts
 releases/
