@@ -23,7 +23,15 @@ jobs:
         run: Test-Path scripts/partner_windows.spec
       - name: Build desktop app
         shell: pwsh
-        run: python -m PyInstaller scripts/partner_windows.spec --clean --noconfirm
+        run: |
+          echo "Current dir: $(pwd)"
+          echo "Files in scripts/:"
+          dir scripts/partner_windows.spec
+          echo "Python version:"
+          python --version
+          echo "PyInstaller location:"
+          python -c "import PyInstaller; print(PyInstaller.__file__)" 2>&1
+          python -m PyInstaller --distpath dist --workpath build --clean --noconfirm scripts/partner_windows.spec 2>&1
       - name: Upload EXE to Release
         uses: softprops/action-gh-release@v2
         with:
