@@ -1,7 +1,7 @@
 {
   "name": "cytobridge",
-  "version": "1.0.0",
-  "description": "单细胞转录组轨迹推断与细胞动力学建模专用 Agent，支持 h5ad 数据的完整分析管线 (https://github.com/JackkWangzh/CytoBridge-agent)",
+  "version": "2.0.0",
+  "description": "单细胞转录组轨迹推断与细胞动力学建模专用 Agent，支持 h5ad 数据的完整分析管线 (https://github.com/JackkWangzh/CytoBridge-agent)，CLI 名为 cellcompass，通过 cytobridge-agent 调用",
   "capabilities": [
     "trajectory_inference",
     "cell_dynamics",
@@ -15,19 +15,49 @@
   "output_formats": ["html", "md", "pdf", "png", "h5ad", "json"],
   "endpoint_type": "cli",
   "endpoint_config": {
-    "command": "cytobridge-wrapper",
-    "subcommand": "",
+    "command": "cytobridge-agent",
+    "subcommand": "run",
+    "preamble_args": [
+      "--llm-base-url", "{__llm_base_url__}",
+      "--llm-model", "{__llm_model__}",
+      "--llm-provider", "{__llm_provider__}"
+    ],
     "category": "specialized",
     "args": [
-      "--input", "{input}",
-      "-q", "{question}",
       "-o", "{output}",
-      "--device", "{device}"
+      "-q", "{question}",
+      "-d", "{device}",
+      "--analyses", "trajectory_fate", "drivers_genes",
+      "--report-format", "md",
+      "--pilot-epochs", "3",
+      "--pilot-max-cells", "500",
+      "{input}"
     ],
-    "timeout": 3600,
-    "description_for_planner": "【专用 Agent】单细胞数据分析专用。输入 h5ad 文件，自动做轨迹推断、细胞动力学建模、分化分析、驱动基因鉴定。参数：input=h5ad文件路径, output=输出目录, question=科学问题描述, device=cuda/cpu"
+    "timeout": 7200,
+    "inject_llm_credentials": true,
+    "description_for_planner": "【专用 Agent】单细胞数据分析专用。输入 h5ad 文件，自动做轨迹推断（PAGA+DPT+RNA velocity）、细胞动力学建模、分化路径分析、驱动基因鉴定。参数：input=h5ad文件路径, output=输出目录, question=科学问题描述, device=cuda/cpu。LLM 密钥由 Partner 自动注入。"
   },
-  "timeout": 3600,
-  "health_check_cmd": "cytobridge-wrapper --help",
-  "notes": "Wrapper living in partner/agents/wrappers/cytobridge_wrapper.py. Installed via 'pip install partner-research[cytobridge]' or 'pip install cytobridge-agent'."
+  "timeout": 7200,
+  "health_check_cmd": "cytobridge-agent --help",
+  "install_info": {
+    "method": "pip",
+    "package": "cytobridge-agent",
+    "source": "/mnt/e/work/CytoBridge/CytoBridge-agent-release-runtime-v2-20260309",
+    "post_install": [
+      "cytobridge-agent --help"
+    ],
+    "llm_config": {
+      "type": "file",
+      "path": "~/.cellcompass/config.json",
+      "template": {
+        "llm": {
+          "provider": "__provider__",
+          "model": "__model__",
+          "api_key": "__api_key__",
+          "base_url": "__base_url__"
+        }
+      }
+    },
+    "description": "真实 CytoBridge-agent（来自 GitHub），支持完整的单细胞轨迹推断、RNA velocity、细胞命运分析。LLM 密钥在安装时自动从 Partner 配置继承。"
+  }
 }

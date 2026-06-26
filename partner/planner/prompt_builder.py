@@ -34,6 +34,8 @@ def load_habits_from_db() -> str:
             items.append("- 用户优先接收 PDF 格式的正式报告")
         if habits.get("preferred_language") == "zh":
             items.append("- 使用中文输出")
+        if habits.get("avoid_web_search"):
+            items.append("- 禁止使用 web_search：经验表明 web_search 对本环境不可靠，会超时。改为用 generate_code + create_file + run_command 三步链完成需要数据获取的任务")
         output_prefs = habits.get("output_preferences", {})
         if output_prefs:
             items.append("")
@@ -79,6 +81,10 @@ def build_available_agents_section() -> str:
 
     Scans AgentRegistry for all registered agents and renders their
     capabilities so the planner can choose specialized agents.
+
+    Only agents that pass health check (status "ok" or "unknown") are
+    included — this prevents the planner from selecting agents that are
+    registered but not actually installed (e.g. bamboo-ai).
     """
     try:
         from ..agents.registry import AgentRegistry
@@ -86,8 +92,27 @@ def build_available_agents_section() -> str:
 
         registry = AgentRegistry(workspace=None)
         agents = registry.list_agents()
-        lines = []
+
+        # Health-check filter: skip agents that are not installed/available
+        healthy_agents = []
         for m in agents:
+            try:
+                hc = registry.health_check(m.name)
+                if hc.get("status") in ("ok", "unknown"):
+                    healthy_agents.append(m)
+                else:
+                    logger.warning(
+                        "[PROMPT_BUILDER] excluding agent '%s' — health check: %s (%s)",
+                        m.name, hc.get("status"), hc.get("details", ""),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[PROMPT_BUILDER] health check failed for agent '%s': %s",
+                    m.name, exc,
+                )
+
+        lines = []
+        for m in healthy_agents:
             cat = m.endpoint_config.get("category", "general")
             cat_str = "【专用 Agent】" if cat == "specialized" else "【通用 Agent】"
             desc = m.endpoint_config.get("description_for_planner") or m.description
@@ -101,7 +126,7 @@ def build_available_agents_section() -> str:
         result = "### 可用 Agent\n" + "\n".join(lines) + "\n"
         # Add instruction: call specialized agents directly, no pre-steps
         has_specialized = any(
-            m.endpoint_config.get("category") == "specialized" for m in agents
+            m.endpoint_config.get("category") == "specialized" for m in healthy_agents
         )
         if has_specialized:
             result += """
@@ -141,12 +166,18 @@ def build_prompt(
     arts = json.dumps(expected_artifacts or [], ensure_ascii=False)
 
     context_blocks = []
+    _debug_ctx = []
     if habits and habits.strip() and "暂无特殊偏好" not in habits:
         context_blocks.append(habits)
+        _debug_ctx.append("habits")
     if experiences and experiences.strip() and "暂无相关经验" not in experiences:
         context_blocks.append(experiences)
+        _debug_ctx.append("experiences")
     if growth and growth.strip():
         context_blocks.append(growth)
+        _debug_ctx.append("growth")
+    if _debug_ctx:
+        logger.info("[PROMPT_BUILDER] injected context: %s", ", ".join(_debug_ctx))
     context_section = "\n\n".join(context_blocks) if context_blocks else ""
     if context_section:
         context_section = f"\n\n## 上下文知识\n\n{context_section}"
@@ -196,7 +227,7 @@ def build_prompt(
             "- 搜索信息 → web_search (agent)\n"
             "- 读取文件 → read_file (local)\n"
             "- 生成文本/文章 → generate_text (agent)\n"
-            "- 生成代码 → generate_code (agent)\n"
+            "- 生成代码 → generate_code (agent)；注意 generate_code 只返回代码文本，不写入文件。要执行代码必须在其后加 create_file(写入.py) 再 run_command(python3 该文件)\n"
             "- 写报告 → write_report (agent)\n"
             "- 画图表/流程图 → create_diagram (agent)\n"
             "- 数据分析 → analyze (agent) 或 extract (llm) 提取结构化字段\n"
@@ -208,6 +239,11 @@ def build_prompt(
             "- 对比 → compare (llm)\n"
             "- 验证 → validate (llm)\n"
             "- 条件分支 → if_condition (llm)\n"
+            "\n"
+            "### 专用 Agent 自动安装\n"
+            "- 当用户要求使用某个专用 Agent（如 cytobridge）时，生成两步：先 atomic_ensure_agent_installed(agent=\"cytobridge\") 检查+安装，再 call_agent_skill(agent=\"cytobridge\", task=..., parameters={{...}}) 真实调用。\n"
+            "- atomic_ensure_agent_installed 会在 Agent 已安装时直接返回成功（不重复安装），仅在首次或 force_reinstall=true 时执行下载和安装。\n"
+            "- 不要合并成一步。安装和调用必须分开成两个步骤，以防安装耗时过长阻塞调用。\n"
             "\n"
             "\n"
             "### 核心规则：规划阶段只出指令，执行阶段才生成内容\n"
@@ -252,6 +288,7 @@ def build_prompt(
 
 重要：如果用户明确要求使用某个专用 Agent（如 cytobridge、docking-agent 等），
 你必须使用 call_agent_skill(agent="agent_name", task=..., parameters={{...}}) 来调用该 Agent。
+如果该专用 Agent 可能尚未安装，先用 atomic_ensure_agent_installed(agent="agent_name") 确保安装完成，再用 call_agent_skill 调用。
 不要用 web_search、smart_llm_structured_action 或 run_command 替代专用 Agent 的功能。
 调用专用 Agent 后，用 smart_llm_structured_action 或 atomic_write_artifact 处理其结果。
 

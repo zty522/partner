@@ -197,14 +197,70 @@ class AgentDispatcher:
         # Use resolved full path for the command, not just the basename
         command = resolved
 
-        # Build full command: [command] + [subcommand] + args
+        # Build full command: [command] + [preamble_args] + [subcommand] + [args]
         full_cmd = [command]
+
+        # Substitute {placeholders} from task.parameters and context
+        all_vars = dict(task.parameters or {})
+        all_vars.update({k: str(v) for k, v in (task.context or {}).items()})
+
+        # Pre-populate LLM credential placeholders from parent env so they
+        # can be substituted into preamble_args and args before the command is built.
+        # These are also injected into the subprocess env later.
+        _llm_env_api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or ""
+        _llm_env_base_url = os.environ.get("OPENAI_BASE_URL") or ""
+        _llm_env_model = os.environ.get("HERMES_MODEL") or os.environ.get("HERMES_DEFAULT_MODEL") or ""
+        _llm_env_provider = os.environ.get("PARTNER_PROVIDER") or os.environ.get("HERMES_PROVIDER") or ""
+        # Derive defaults from API key pattern when env vars are not set.
+        # Supports: DeepSeek (sk-d*), OpenAI (sk-*), Anthropic (sk-ant-*), and custom.
+        if _llm_env_api_key and not _llm_env_base_url:
+            if _llm_env_api_key.startswith("sk-d"):
+                _llm_env_base_url = "https://api.deepseek.com"
+            elif _llm_env_api_key.startswith("sk-ant"):
+                _llm_env_base_url = "https://api.anthropic.com"
+            elif _llm_env_api_key.startswith("sk-"):
+                _llm_env_base_url = "https://api.openai.com"
+        if _llm_env_api_key and not _llm_env_model:
+            if _llm_env_api_key.startswith("sk-d"):
+                _llm_env_model = "deepseek-v4-flash"
+            elif _llm_env_api_key.startswith("sk-ant"):
+                _llm_env_model = "claude-sonnet-4-20250514"
+            elif _llm_env_api_key.startswith("sk-"):
+                _llm_env_model = "gpt-4o"
+        if _llm_env_api_key and not _llm_env_provider:
+            if _llm_env_api_key.startswith("sk-d"):
+                _llm_env_provider = "deepseek"
+            elif _llm_env_api_key.startswith("sk-ant"):
+                _llm_env_provider = "anthropic"
+            elif _llm_env_api_key.startswith("sk-"):
+                _llm_env_provider = "openai"
+        if _llm_env_api_key:
+            all_vars["__llm_api_key__"] = _llm_env_api_key
+        if _llm_env_base_url:
+            all_vars["__llm_base_url__"] = _llm_env_base_url
+        if _llm_env_model:
+            all_vars["__llm_model__"] = _llm_env_model
+        if _llm_env_provider:
+            all_vars["__llm_provider__"] = _llm_env_provider
+        if os.environ.get("DEEPSEEK_API_KEY"):
+            all_vars["__llm_deepseek_key__"] = os.environ["DEEPSEEK_API_KEY"]
+
+        # preamble_args go before the subcommand (e.g., --llm-base-url for cellcompass)
+        preamble_args = list(cmd_config.get("preamble_args", []))
+        resolved_preamble = []
+        for arg in preamble_args:
+            for key, val in all_vars.items():
+                placeholder = "{" + key + "}"
+                if placeholder in arg:
+                    arg = arg.replace(placeholder, str(val))
+                    break
+            resolved_preamble.append(arg)
+        full_cmd.extend(resolved_preamble)
+
         if subcommand:
             full_cmd.append(subcommand)
 
         # Substitute {placeholders} in args from task.parameters and context
-        all_vars = dict(task.parameters or {})
-        all_vars.update({k: str(v) for k, v in (task.context or {}).items()})
         resolved_args = []
         for arg in args:
             for key, val in all_vars.items():
@@ -248,6 +304,7 @@ class AgentDispatcher:
             "ANTHROPIC_API_KEY",
             "PARTNER_PROVIDER",
             "K_CODEX",
+            "HERMES_MODEL", "HERMES_PROVIDER",
         ]
         for key in _INJECTED_ENV_KEYS:
             val = os.environ.get(key) or ""
@@ -262,6 +319,68 @@ class AgentDispatcher:
         # api.openai.com which rejects DeepSeek keys with 401
         if env.get("OPENAI_API_KEY", "").startswith("sk-d") and not env.get("OPENAI_BASE_URL"):
             env["OPENAI_BASE_URL"] = "https://api.deepseek.com"
+
+        # ── no_proxy for LLM endpoint ──
+        # Now that OPENAI_BASE_URL is fully resolved (from env, DeepSeek detection,
+        # or workspace config), add the LLM host to no_proxy so httpx/requests
+        # connects directly to the LLM API, bypassing the http_proxy that may not
+        # support long-lived streaming connections.
+        _proxy_hosts = set()
+        for _url_candidate in [
+            env.get("OPENAI_BASE_URL", ""),
+            env.get("HERMES_BASE_URL", ""),
+        ]:
+            if _url_candidate:
+                try:
+                    from urllib.parse import urlparse
+                    _parsed = urlparse(_url_candidate)
+                    if _parsed.hostname:
+                        _proxy_hosts.add(_parsed.hostname)
+                except Exception:
+                    pass
+        _proxy_hosts.add("localhost")
+        _proxy_hosts.add("127.0.0.1")
+        _existing_no_proxy = os.environ.get("no_proxy", "").strip()
+        if _existing_no_proxy:
+            for _h in _existing_no_proxy.split(","):
+                _proxy_hosts.add(_h.strip())
+        env["no_proxy"] = ",".join(sorted(_proxy_hosts))
+        env["NO_PROXY"] = env["no_proxy"]
+
+        # Auto-populate LLM credential placeholders for {llm_*} substitutions in args.
+        # This lets agent manifests use {llm_api_key}, {llm_base_url}, {llm_model},
+        # {llm_provider} in their endpoint_config.args, and the dispatcher fills them
+        # from Partner's own configuration automatically.
+        # These are prefixed with __ to avoid collision with task.parameters keys.
+        # NOTE: Some of these may already be set from os.environ above.
+        # We only overwrite if the env-injected value is more specific (e.g. OPENAI_BASE_URL
+        # was resolved after env prep).
+        if "OPENAI_API_KEY" in env and "__llm_api_key__" not in all_vars:
+            all_vars["__llm_api_key__"] = env["OPENAI_API_KEY"]
+        if "OPENAI_BASE_URL" in env:
+            all_vars["__llm_base_url__"] = env["OPENAI_BASE_URL"]
+        if "HERMES_MODEL" in env and "__llm_model__" not in all_vars:
+            all_vars["__llm_model__"] = env["HERMES_MODEL"]
+        if "PARTNER_PROVIDER" in env and "__llm_provider__" not in all_vars:
+            all_vars["__llm_provider__"] = env["PARTNER_PROVIDER"]
+        if "DEEPSEEK_API_KEY" in env and "__llm_deepseek_key__" not in all_vars:
+            all_vars["__llm_deepseek_key__"] = env["DEEPSEEK_API_KEY"]
+
+        # Also try to resolve model config from Partner's workspace config
+        _model_from_config = None
+        _provider_from_config = None
+        _base_url_from_config = None
+        try:
+            from ..agent_config_sync import desired_hermes_model_config
+            config = desired_hermes_model_config(cwd)
+            if config.get("model") and "__llm_model__" not in all_vars:
+                all_vars["__llm_model__"] = config["model"]
+            if config.get("provider") and "__llm_provider__" not in all_vars:
+                all_vars["__llm_provider__"] = config["provider"]
+            if config.get("base_url") and "__llm_base_url__" not in all_vars:
+                all_vars["__llm_base_url__"] = config["base_url"]
+        except Exception:
+            pass
 
         # Also try reading from Partner's agent API config
         try:

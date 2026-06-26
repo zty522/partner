@@ -72,6 +72,10 @@ report/
 cytobridge_output/
 partner_workspace/
 
+# Runtime report files
+*.report.md
+start_partner*.sh
+
 # Build artifacts
 releases/
 installer/output/

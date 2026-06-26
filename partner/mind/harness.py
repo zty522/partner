@@ -1010,6 +1010,39 @@ class PlanExecutor:
                                     break
                             if params.get("source"):
                                 break
+                if not params.get("source"):
+                    # Fallback: scan _step_*.result.json files on disk
+                    _work_dir = getattr(ctx.task_instance, "working_dir", "") if ctx.task_instance else ""
+                    if _work_dir and os.path.isdir(_work_dir):
+                        _step_files = sorted([f for f in os.listdir(_work_dir) if f.startswith("_step_") and f.endswith(".result.json")], reverse=True)
+                        for _sf in _step_files:
+                            try:
+                                with open(os.path.join(_work_dir, _sf), "r") as _sf_f:
+                                    _sf_data = json.load(_sf_f)
+                                _result = _sf_data.get("result") or {}
+                                _dep_files = _result.get("files") or []
+                                if isinstance(_dep_files, str):
+                                    _dep_files = [_dep_files]
+                                _dep_path = _result.get("path") or []
+                                if isinstance(_dep_path, str):
+                                    _dep_path = [_dep_path]
+                                _all_files = list(_dep_files) + [p for p in _dep_path if p not in _dep_files]
+                                for _df in _all_files:
+                                    if isinstance(_df, str) and _df.lower().endswith(".md") and os.path.exists(_df):
+                                        params = dict(params)
+                                        params["path"] = _df
+                                        params["source"] = _df
+                                        if ctx.task_instance:
+                                            ctx.task_instance.append_log("pdf_source_filled_from_disk", {
+                                                "step_id": step.id,
+                                                "source": _df,
+                                                "found_in": _sf,
+                                            })
+                                        break
+                                if params.get("source"):
+                                    break
+                            except Exception:
+                                continue
             else:
                 content = str(params.get("content") or params.get("message") or params.get("artifact_content") or "").strip()
                 if not content or content.upper() == "EMPTY":
@@ -1163,26 +1196,42 @@ def _write_step_result_json(
 def _step_description(step: HarnessStep) -> str:
     params = step.parameters if isinstance(step.parameters, dict) else {}
     skill = str(params.get("skill") or params.get("skill_name") or "").strip()
+    agent_name = str(params.get("agent") or "").strip()
     inputs = params.get("inputs") if isinstance(params.get("inputs"), dict) else {}
-    if step.event_type in {"atomic_execute_skill", "call_agent_skill"} and skill:
-        query = str(inputs.get("query") or inputs.get("keywords") or inputs.get("topic") or "").strip()
-        if query:
-            return f"调用 {skill} 检索/执行：{_clip(query, 80)}"
-        return f"调用 {skill}"
-    if step.event_type == "smart_llm_structured_action":
+    if step.event_type == "atomic_ensure_agent_installed":
+        desc = f"检查 Agent: {agent_name}" if agent_name else "检查 Agent"
+    elif step.event_type in {"atomic_execute_skill", "call_agent_skill"}:
+        if step.event_type == "call_agent_skill" and agent_name:
+            desc = f"调用 Agent: {agent_name}"
+        elif skill:
+            query = str(inputs.get("query") or inputs.get("keywords") or inputs.get("topic") or "").strip()
+            if query:
+                desc = f"调用 {skill} 检索/执行：{_clip(query, 80)}"
+            else:
+                desc = f"调用 {skill}"
+        else:
+            desc = step.event_type
+    elif step.event_type == "smart_llm_structured_action":
         instruction = str(params.get("prompt") or params.get("instruction") or params.get("task") or params.get("objective") or "").strip()
-        return _clip(instruction, 90) if instruction else "执行 LLM 任务步骤"
-    if step.event_type == "atomic_write_artifact":
+        desc = _clip(instruction, 90) if instruction else "执行 LLM 任务步骤"
+    elif step.event_type == "atomic_write_artifact":
         filename = str(params.get("filename") or params.get("path") or params.get("output_file") or "").strip()
-        return f"写入文件 {filename or 'artifact'}"
-    if step.event_type == "atomic_json_table_artifact":
+        desc = f"写入文件 {filename or 'artifact'}"
+    elif step.event_type == "atomic_json_table_artifact":
         filename = str(params.get("filename") or params.get("output_file") or "").strip()
-        return f"生成表格文件 {filename or 'table artifact'}"
-    if step.event_type == "atomic_read_state":
-        return "读取当前任务状态"
-    if step.event_type == "atomic_list_project_files":
-        return "列出当前任务文件"
-    return step.event_type
+        desc = f"生成表格文件 {filename or 'table artifact'}"
+    elif step.event_type == "atomic_read_state":
+        desc = "读取当前任务状态"
+    elif step.event_type == "atomic_list_project_files":
+        desc = "列出当前任务文件"
+    else:
+        if agent_name and "agent" in step.event_type:
+            desc = f"{step.event_type} (Agent: {agent_name})"
+        else:
+            desc = step.event_type
+    if os.environ.get("PARTNER_PROVIDER", "").lower().find("ollama") != -1:
+        desc += " [本地模型]"
+    return desc
 
 
 def _step_result_summary(result: JsonDict) -> str:
@@ -1959,11 +2008,11 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
                 if k not in agent_params:
                     agent_params[k] = v
 
-        # ── Direct cytobridge dispatch via wrapper script ──
-        # The wrapper bypasses the CLI argument parsing issues in the dispatcher
-        # by calling cytobridge-agent exec with an enhanced pipeline prompt.
-        # This ensures the agent runs the complete analysis in one session.
-        if agent == "cytobridge":
+        # ── Direct cytobridge dispatch via wrapper script (DISABLED) ──
+        # The old hardcoded bypass that tried to call the deleted cytobridge-wrapper.
+        # Now all agents including cytobridge go through execute_agent_task()
+        # at the end of this function via the standard AgentDispatcher path.
+        if False and agent == "cytobridge":
             import logging as _cytolog
             _cytolog.warning("[CYTO_DEBUG] entering cytobridge bypass agent_params_keys=%s input=%s output=%s question=%s device=%s",
                 list(agent_params.keys()),
@@ -2157,10 +2206,13 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
     output = result.output or {}
     content = output.get("content") or ""
     # Detect agent-internal errors: even with exit code 0, the agent might
-    # have failed internally (e.g., LLM call returned 401, file not found)
+    # have failed internally (e.g., LLM call returned 401, file not found).
+    # Strategy: check stderr (result.error) for ALL agents, but only check
+    # stdout (content) for GENERAL agents (hermes, openclaw, codex).
+    _GENERAL_AGENT_SET = {"hermes", "openclaw", "codex"}
+    _HTTP_STATUS_SIGNALS = ["401", "402", "403", "429", "500", "502", "503"]  # Used only for general agents
     _AGENT_ERROR_SIGNALS = [
         "error code:", "error occurred", "incorrect api key",
-        "401", "402", "403", "429", "500", "502", "503",
         "authentication failed", "api key not found",
         "command not found", "no module named",
         "connection refused", "connection timed out",
@@ -2170,12 +2222,25 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
     _FILE_NOT_FOUND_SIGNALS = ["no such file", "file not found", "cannot open",
                                "No such file or directory", "does not exist",
                                "failed to open", "not found:"]
-    _API_KEY_SIGNALS = ["401", "incorrect api key", "authentication failed",
+    _API_KEY_SIGNALS = ["incorrect api key", "authentication failed",
                         "invalid api key", "api key not found"]
+    # Check stderr (result.error) for ALL agent types
+    err_text = (result.error or "").lower()
+    has_agent_error_stderr = any(signal in err_text for signal in _AGENT_ERROR_SIGNALS)
+    has_file_error_stderr = any(signal in err_text for signal in _FILE_NOT_FOUND_SIGNALS)
+    has_api_key_error_stderr = any(signal in err_text for signal in _API_KEY_SIGNALS)
+    has_http_error_stderr = any(signal in err_text for signal in _HTTP_STATUS_SIGNALS)
+    # Check stdout (content) only for GENERAL agents
     content_lower = content.lower()
-    has_agent_error = any(signal in content_lower for signal in _AGENT_ERROR_SIGNALS)
-    has_file_error = any(signal in content_lower for signal in _FILE_NOT_FOUND_SIGNALS)
-    has_api_key_error = any(signal in content_lower for signal in _API_KEY_SIGNALS)
+    is_general = agent in _GENERAL_AGENT_SET
+    has_agent_error_stdout = any(signal in content_lower for signal in _AGENT_ERROR_SIGNALS) if is_general else False
+    has_file_error_stdout = any(signal in content_lower for signal in _FILE_NOT_FOUND_SIGNALS) if is_general else False
+    has_api_key_error_stdout = any(signal in content_lower for signal in _API_KEY_SIGNALS) if is_general else False
+    has_http_error_stdout = any(signal in content_lower for signal in _HTTP_STATUS_SIGNALS) if is_general else False
+    # Merge stderr and stdout checks
+    has_agent_error = has_agent_error_stderr or has_agent_error_stdout
+    has_file_error = has_file_error_stderr or has_file_error_stdout
+    has_api_key_error = has_api_key_error_stderr or has_api_key_error_stdout
     # Determine error type for downstream classification
     error_type = "unknown"
     if has_api_key_error:
@@ -2195,9 +2260,97 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
     return {
         "ok": True,
         "agent": agent,
-        "content": content[:50000],
+        "content": content[:200000] if agent not in {"hermes", "openclaw", "codex"} else content[:50000],
         "json": output,
     }
+
+
+def _atomic_ensure_agent_installed(ctx: HarnessContext, params: JsonDict) -> JsonDict:
+    """Ensure a specialized agent is installed and available.
+
+    Checks via registry.health_check(). If the agent is unavailable and
+    its manifest has install_info, auto-installs it (pip/git/script).
+    Pre-pends conda bin dirs to PATH so shutil.which() can find agents
+    installed in ~/miniconda3/bin/ or ~/.local/bin/.
+    """
+    agent = str(params.get("agent") or "").strip().lower()
+    if not agent:
+        return {"ok": False, "error": "missing agent name"}
+
+    # Prepend conda/local bin dirs to PATH so health_check can find agents.
+    # IMPORTANT: conda env bin dirs (e.g. ~/miniconda3/envs/*/bin) must NOT be
+    # added because they may contain agents with different Python versions
+    # that shadow the base miniconda's working agent binaries.
+    _conda_bins = [
+        os.path.expanduser("~/miniconda3/bin"),
+        os.path.expanduser("~/.local/bin"),
+    ]
+    _existing_path = os.environ.get("PATH", "")
+    _new_path_parts = [b for b in _conda_bins if os.path.isdir(b) and b not in _existing_path]
+    if _new_path_parts:
+        os.environ["PATH"] = ":".join(_new_path_parts + [_existing_path])
+
+    from ..agents.registry import AgentRegistry
+    registry = AgentRegistry(workspace=ctx.workspace if hasattr(ctx, "workspace") else None)
+    health = registry.health_check(agent)
+    status = health.get("status", "error")
+
+    if status == "ok":
+        return {"ok": True, "agent": agent, "status": "already_installed"}
+
+    # Agent is not available — try to auto-install if manifest has install_info
+    manifest = registry.get_agent(agent)
+    if not manifest or not manifest.install_info:
+        return {
+            "ok": False,
+            "agent": agent,
+            "error": f"Agent '{agent}' not found and no install_info available: {health.get('details', '')}",
+            "health": health,
+        }
+
+    # Attempt installation
+    import subprocess as _sp
+    _info = manifest.install_info
+    _method = _info.get("method", "")
+    _desc = _info.get("description", f"Installing {agent}...")
+    import logging as _log
+    _log.warning("[HARNESS] %s", _desc)
+
+    try:
+        if _method == "pip":
+            _package = _info.get("package", agent)
+            _r = _sp.run(["pip", "install", _package], capture_output=True, text=True, timeout=300)
+            if _r.returncode != 0:
+                return {"ok": False, "agent": agent, "error": f"pip install failed: {_r.stderr[:500]}", "health": health}
+        elif _method == "git":
+            _source = _info.get("source", "")
+            _target = os.path.expanduser(_info.get("target", "~/.partner/agents"))
+            os.makedirs(_target, exist_ok=True)
+            _r = _sp.run(["git", "clone", _source, os.path.join(_target, agent)], capture_output=True, text=True, timeout=300)
+            if _r.returncode != 0:
+                return {"ok": False, "agent": agent, "error": f"git clone failed: {_r.stderr[:500]}", "health": health}
+            _install_cmd = _info.get("post_install")
+            if _install_cmd:
+                _r = _sp.run(_install_cmd, shell=True, capture_output=True, text=True, timeout=300, cwd=os.path.join(_target, agent))
+                if _r.returncode != 0:
+                    return {"ok": False, "agent": agent, "error": f"post-install failed: {_r.stderr[:500]}", "health": health}
+        elif _method == "script":
+            _script = _info.get("script", "")
+            _r = _sp.run(_script, shell=True, capture_output=True, text=True, timeout=600)
+            if _r.returncode != 0:
+                return {"ok": False, "agent": agent, "error": f"install script failed: {_r.stderr[:500]}", "health": health}
+        else:
+            return {"ok": False, "agent": agent, "error": f"unsupported install method: {_method}", "health": health}
+    except _sp.TimeoutExpired:
+        return {"ok": False, "agent": agent, "error": f"installation timed out for method={_method}", "health": health}
+    except Exception as _exc:
+        return {"ok": False, "agent": agent, "error": f"installation exception: {_exc}", "health": health}
+
+    # Re-check health after installation
+    _post_health = registry.health_check(agent)
+    if _post_health.get("status") == "ok":
+        return {"ok": True, "agent": agent, "status": "installed", "health": _post_health}
+    return {"ok": False, "agent": agent, "error": f"Agent '{agent}' still unavailable after install: {_post_health.get('details', '')}", "health": _post_health}
 
 
 def _clean_script_content(content: str) -> str:
@@ -2720,10 +2873,19 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
                         _dep_files = _result.get("files") or []
                         if isinstance(_dep_files, str):
                             _dep_files = [_dep_files]
+                        _dep_path = _result.get("path") or []
+                        if isinstance(_dep_path, str):
+                            _dep_path = [_dep_path]
+                        _dep_files = list(_dep_files) + [p for p in _dep_path if p not in _dep_files]
                         for _df in _dep_files:
-                            if isinstance(_df, str) and _df.endswith(".md") and os.path.exists(_df):
-                                source = _df
-                                break
+                            if isinstance(_df, str) and _df.endswith(".md"):
+                                if os.path.exists(_df):
+                                    source = _df
+                                    break
+                                # Also try resolving relative paths against working dir
+                                _resolved = os.path.join(_work_dir, _df)
+                                if not os.path.isabs(_df) and os.path.exists(_resolved):
+                                    source = _resolved
                         if source:
                             break
                     except Exception:
@@ -3364,10 +3526,96 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
         )
 
         if not result.ok:
-            return {"ok": False, "skill": agent_name, "error": result.error or "agent returned no result"}
+            # ── web_search failure: record habit + auto-fallback to generate_code ──
+            if event_name == "web_search":
+                # Record learning habit so future planner prompts avoid web_search
+                try:
+                    from ..meta.learning import update_habits
+                    update_habits({"avoid_web_search": True})
+                    logger.info("[HARNESS] recorded avoid_web_search habit after web_search failure")
+                except Exception as _hl:
+                    logger.debug("[HARNESS] failed to update habit: %s", _hl)
+                # Scheme C: auto-fallback to generate_code
+                logger.info("[HARNESS] web_search failed, falling back to generate_code for: %s", task[:80])
+                event_name = "generate_code"
+                task = "写一个 Python 脚本完成以下任务（不要搜索，直接编程）：\n" + task
+                agent_params["prompt"] = task
+                try:
+                    from ..skills.external_agent_skills import execute_agent_task
+                    result = await execute_agent_task(
+                        workspace=ctx.workspace,
+                        agent=agent_name,
+                        task=task,
+                        task_instance=ctx.task_instance,
+                        allow_web=False,
+                        agent_params=agent_params,
+                    )
+                except Exception as _fe:
+                    logger.warning("[HARNESS] generate_code fallback also failed: %s", _fe)
+                    return {"ok": False, "skill": agent_name,
+                            "error": f"web_search failed, generate_code fallback also failed: {_fe}"}
+                if not result.ok:
+                    return {"ok": False, "skill": agent_name,
+                            "error": f"web_search failed, generate_code fallback: {result.error}"}
+                # Fall through to generate_code handling below
+            else:
+                return {"ok": False, "skill": agent_name, "error": result.error or "agent returned no result"}
         output = result.output or {}
         content = output.get("content") or ""
-        return {"ok": True, "agent": agent_name, "content": str(content)[:8000], "json": output}
+
+        # ── generate_code: auto-write returned code to a file ──
+        # The planner may generate a plan like: generate_code → run_command(path/to/file.py)
+        # But generate_code only returns code as text — nobody writes it to disk.
+        # We extract the code (+ strip diff/prefix markers) and write a .py file
+        # so run_command can actually execute it.
+        _written_files = []
+        if event_name == "generate_code" and content:
+            _task_dir = getattr(ctx.task_instance, "working_dir", None) if ctx.task_instance else None
+            if _task_dir and os.path.isdir(_task_dir):
+                # Try to extract filename from diff header like "a/name.py → b/name.py"
+                _fname_match = re.search(r"→\s*b/([\w.-]+\.py)", content)
+                _fname = _fname_match.group(1) if _fname_match else "generated_code.py"
+                _fpath = os.path.join(_task_dir, _fname)
+                # Strip [agent] header and diff markers, keep actual code lines
+                _code_lines = []
+                _in_code = False
+                for _line in content.split("\n"):
+                    # Skip [hermes] header
+                    if _line.startswith("[") and "]" in _line[:20]:
+                        continue
+                    # Skip diff review header lines
+                    if _line.startswith("┊") or _line.startswith("diff ") or _line.startswith("---") or _line.startswith("+++"):
+                        continue
+                    if _line.startswith("@@"):
+                        _in_code = True
+                        continue
+                    if _in_code:
+                        # Strip leading '+' or leave as-is for context lines
+                        if _line.startswith("+"):
+                            _code_lines.append(_line[1:])
+                        elif _line.startswith(" "):
+                            _code_lines.append(_line[1:])  # context line
+                        # Skip lines starting with '-' (removed lines)
+                if _code_lines:
+                    _code_text = "\n".join(_code_lines)
+                    if _code_text.strip():
+                        try:
+                            with open(_fpath, "w", encoding="utf-8") as _f:
+                                _f.write(_code_text)
+                            logger.info("[HARNESS] wrote generated code to %s (%d bytes)", _fpath, len(_code_text))
+                            ctx.task_instance.append_log("code_written", {
+                                "path": _fpath,
+                                "size": len(_code_text),
+                            })
+                            _written_files.append(_fpath)
+                        except Exception as _exc:
+                            logger.warning("[HARNESS] failed to write generated code: %s", _exc)
+
+        result_json = {"content": str(content)[:8000], "json": output}
+        if _written_files:
+            result_json["files"] = _written_files
+            result_json["path"] = _written_files[0]
+        return result_json
     except Exception as exc:
         logger.warning("[HARNESS] agent_event_handler failed event=%s agent=%s error=%s", event_name, agent_name, exc)
         return {"ok": False, "error": str(exc)}
@@ -3592,6 +3840,11 @@ def _local_create_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     # If no path specified, derive from format/context
     if not path:
         path = os.path.join(ctx.working_dir or ctx.project_dir or ".", "output.txt")
+    # Resolve relative paths against task working directory
+    if not os.path.isabs(path) and ctx.task_instance:
+        _work_dir = getattr(ctx.task_instance, "working_dir", None) or getattr(ctx, "working_dir", None)
+        if _work_dir:
+            path = os.path.join(_work_dir, path)
 
     # Resolve content template variables
     if isinstance(content, str) and "$step_" in content and ctx.task_instance:
@@ -3646,6 +3899,44 @@ def _local_create_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     if content is None:
         content = ""
     content_str = str(content)
+
+    # ── Python file: extract clean code from Markdown-wrapped output ──
+    # LLMs often return Python code embedded in Markdown (with Chinese comments,
+    # bullet lists, code fences). `create_file` writes this as-is, causing
+    # SyntaxError when `run_command` tries to execute it.
+    _ext = os.path.splitext(path)[1].lower()
+    if _ext == ".py" and content_str.strip():
+        # 1) Try to extract from Markdown code fence ```python ... ```
+        _fence_match = re.search(
+            r"```(?:python)?\s*\n(.*?)```",
+            content_str, re.DOTALL
+        )
+        if _fence_match:
+            _extracted = _fence_match.group(1).strip()
+            if _extracted:
+                content_str = _extracted
+        # 2) Validate with ast.parse; if it fails, try heuristic cleanup
+        try:
+            import ast as _ast_mod
+            _ast_mod.parse(content_str)
+        except SyntaxError:
+            # Heuristic: strip leading non-code lines (start with '- ', '# ', or are markdown headers)
+            _lines = content_str.split("\n")
+            _code_start = 0
+            for _i, _l in enumerate(_lines):
+                _stripped = _l.strip()
+                # Skip blank lines, markdown bullets, headers, and non-code descriptions
+                if _stripped and not _stripped.startswith(("#!", "import", "from", "def ", "class ", "@", "if ", "for ", "while ", "try:", "with ", "print", "return", "pass", "break", "continue", "raise", "yield", "assert", "del ", "global", "nonlocal", '"', "'", "self.", "self ", "result", "output", "data", "url", "response", "species", "taxon", "occurrence")):
+                    continue
+                _code_start = _i
+                break
+            if _code_start > 0:
+                content_str = "\n".join(_lines[_code_start:])
+            # Try to validate again; if still fails, log warning but keep content
+            try:
+                _ast_mod.parse(content_str)
+            except SyntaxError as _se:
+                logger.warning("[HARNESS] Python file %s has syntax error after cleanup: %s", path, _se)
 
     # Create file
     try:
@@ -3730,6 +4021,7 @@ def default_registry() -> EventRegistry:
     registry.register(HarnessEventSpec("atomic_ollama_status", "atomic", "探测 Ollama 池状态。", _atomic_ollama_status, execution_method="local"))
     registry.register(HarnessEventSpec("atomic_http_get", "atomic", "HTTP GET 请求获取外部数据（天气、汇率、股价等）。", _atomic_http_get, external_call=True, execution_method="local"))
     registry.register(HarnessEventSpec("call_agent_skill", "atomic", "Forward task to an external Agent. Default: hermes.", _atomic_execute_skill, external_call=True, execution_method="agent"))
+    registry.register(HarnessEventSpec("atomic_ensure_agent_installed", "atomic", "检查并安装专用 Agent。参数: agent (必需), force_reinstall (可选, 默认 false)。在 call_agent_skill 之前使用。", _atomic_ensure_agent_installed, external_call=True, execution_method="local"))
     registry.register(HarnessEventSpec("atomic_write_artifact", "atomic", "写入工作区内的 artifact 文件。（保留旧名，建议使用 create_file）", _atomic_write_artifact, produces_artifact=True, execution_method="local"))
     registry.register(HarnessEventSpec("atomic_compose_structured_result", "atomic", "把确定性结果拼成 Partner 结构化结果。", _atomic_compose_structured_result, execution_method="local"))
     registry.register(HarnessEventSpec("atomic_convert_md_to_pdf", "atomic", "将 Markdown 文件转换为 PDF。", _atomic_convert_md_to_pdf, produces_artifact=True, execution_method="local"))

@@ -173,6 +173,72 @@ async def _call_specialized_agent(
     # Extract output
     output_text = result.output.get("text", "") if isinstance(result.output, dict) else str(result.output)
 
+    # ── Enrich content with structured data from agent's output directory ──
+    # The agent's stdout is a CLI execution log (tool calls, file reads, LLM
+    # conversation). Downstream steps need structured analysis data (DPT values,
+    # gene lists, clustering results) which the agent wrote to files in its
+    # output directory. We scan that directory and append any structured data
+    # files to the content so downstream report generation has real numbers.
+    _enrich_blocks = []
+    _output_dir = str(dict(agent_params or {}).get("output") or "")
+    if not _output_dir or not os.path.isdir(_output_dir):
+        # Fallback: try to extract output path from the CLI command metadata
+        _cmd = str(result.metadata.get("command", ""))
+        _parts = _cmd.split()
+        for _i, _p in enumerate(_parts):
+            if _p in ("-o", "--output") and _i + 1 < len(_parts):
+                _candidate = _parts[_i + 1]
+                if os.path.isdir(_candidate):
+                    _output_dir = _candidate
+                    break
+    if _output_dir and os.path.isdir(_output_dir):
+        _structured_files = [
+            "summary.json", "result.json",
+            "data/summary.json", "data/result.json",
+            "report/summary.json", "report/result.json",
+        ]
+        for _rel in _structured_files:
+            _fpath = os.path.join(_output_dir, _rel)
+            if os.path.isfile(_fpath):
+                try:
+                    with open(_fpath, "r", encoding="utf-8") as _f:
+                        _raw = _f.read()
+                    if len(_raw) > 100:
+                        _enrich_blocks.append(
+                            f"【Cytobridge 结构化分析结果——请基于以下真实数据撰写报告】\n"
+                            f"以下是从 cytobridge 输出的结构化分析数据，包含伪时间分布、细胞类型、轨迹参数等关键指标。\n"
+                            f"请基于这些真实数值用中文撰写完整的分析报告，不要编造数据。\n"
+                            f"{_raw[:30000]}"
+                        )
+                        break
+                except Exception:
+                    pass
+        # Also enrich with trajectory correlated genes CSV
+        _genes_csv = os.path.join(_output_dir, "data", "trajectory_correlated_genes.csv")
+        if os.path.isfile(_genes_csv):
+            try:
+                with open(_genes_csv, "r", encoding="utf-8") as _f:
+                    _csv_content = _f.read()
+                if len(_csv_content) > 50:
+                    _enrich_blocks.append(
+                        f"【轨迹相关基因 Top 20】\n{_csv_content[:10000]}"
+                    )
+            except Exception:
+                pass
+        # Figure listing
+        _fig_dir = os.path.join(_output_dir, "figures")
+        if os.path.isdir(_fig_dir):
+            _figs = [os.path.join(_fig_dir, f) for f in sorted(os.listdir(_fig_dir))
+                     if f.endswith((".png", ".svg", ".pdf"))]
+            if _figs:
+                _enrich_blocks.append("【可视化图表】\n" + "\n".join(_figs))
+
+    if _enrich_blocks:
+        # Append structured data AFTER the execution log, separated by a marker
+        output_text = output_text[:100000] + "\n\n---\n\n" + "\n\n".join(_enrich_blocks)
+        logger.info("[CALL_AGENT] enriched %s output with %d data blocks (output_dir=%s)",
+                     agent, len(_enrich_blocks), _output_dir)
+
     if task_instance:
         task_instance.append_log("call_agent_specialized_completed", {
             "agent": agent,

@@ -27,6 +27,7 @@ class AgentManifest:
     endpoint_config: dict  # Depends on type
     timeout: int = 300  # Default timeout in seconds
     health_check_cmd: str = ""  # Command to check if agent is available
+    install_info: dict = field(default_factory=dict)  # Auto-install instructions
 
     @classmethod
     def from_dict(cls, data: dict) -> 'AgentManifest':
@@ -42,6 +43,7 @@ class AgentManifest:
             endpoint_config=dict(data.get("endpoint_config", {})),
             timeout=int(data.get("timeout", 300)),
             health_check_cmd=str(data.get("health_check_cmd", "")),
+            install_info=dict(data.get("install_info", {})),
         )
 
     @classmethod
@@ -73,7 +75,7 @@ class AgentManifest:
 
     def to_dict(self) -> dict:
         """Serialize manifest to a dictionary."""
-        return {
+        d = {
             "name": self.name,
             "version": self.version,
             "description": self.description,
@@ -85,6 +87,9 @@ class AgentManifest:
             "timeout": self.timeout,
             "health_check_cmd": self.health_check_cmd,
         }
+        if self.install_info:
+            d["install_info"] = self.install_info
+        return d
 
     def validate(self) -> list[str]:
         """Return list of validation errors, empty if valid."""
@@ -127,5 +132,20 @@ class AgentManifest:
                 errors.append("http endpoint_type requires endpoint_config.url")
         if not isinstance(self.timeout, int) or self.timeout < 1:
             errors.append("timeout must be a positive integer")
+
+        # Validate install_info if present
+        if self.install_info:
+            method = self.install_info.get("method", "")
+            valid_methods = ("pip", "git", "npm", "go", "cargo", "script")
+            if method not in valid_methods:
+                errors.append(
+                    f"install_info.method must be one of {valid_methods}, got '{method}'"
+                )
+            if method == "pip" and not self.install_info.get("package"):
+                errors.append("install_info.method='pip' requires install_info.package")
+            if method == "git" and not self.install_info.get("source"):
+                errors.append("install_info.method='git' requires install_info.source")
+            if method == "script" and not self.install_info.get("script"):
+                errors.append("install_info.method='script' requires install_info.script")
 
         return errors

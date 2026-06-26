@@ -128,7 +128,17 @@ def _run_instance_mode(argv: list[str]):
         print(f"Skill sync skipped: {exc}", flush=True)
 
     cfg = os.path.join(_config_root(workspace), "qq_config.json")
-    if not os.path.exists(cfg):
+    _qq_instance_id = None
+    if os.path.exists(cfg):
+        try:
+            with open(cfg) as _fh:
+                _qq_cfg = json.load(_fh)
+            _qq_instance_id = str(_qq_cfg.get("instance_id", "")).strip() or None
+        except (json.JSONDecodeError, OSError):
+            pass
+    if _qq_instance_id and _qq_instance_id != args.instance_id:
+        cfg = os.path.join(workspace, "qq_config.json")
+    elif not os.path.exists(cfg):
         cfg = os.path.join(workspace, "qq_config.json")
     if os.path.exists(cfg):
         bridge = QQQfficialBridge(workspace)

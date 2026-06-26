@@ -21,7 +21,7 @@ jobs:
       - name: Build Python packages
         run: python -m build
       - name: Build desktop app
-        run: python -m PyInstaller --clean --noconfirm PartnerDesktop.spec
+        run: python -m PyInstaller --clean --noconfirm scripts/partner_windows.spec
       - name: Build installer
         shell: cmd
         run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss'

@@ -58,7 +58,6 @@ all = [
 [project.scripts]
 partner = "partner.cli:main"
 partner-manager = "partner.manager:main"
-cytobridge-wrapper = "partner.agents.wrappers.cytobridge_wrapper:main"
 
 [project.urls]
 Homepage = "https://github.com/zty522/partner"

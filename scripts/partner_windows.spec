@@ -1,20 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Partner Windows GUI."""
+"""PyInstaller spec for Partner Windows GUI — portable (no hardcoded paths)."""
 
 import sys
 from pathlib import Path
 
-# Partner source root
-partner_root = Path(r"E:\work\partner").resolve()
-entry_script = str(partner_root / "scripts" / "partner_gui_entry.py")
+# Resolve Partner source root relative to this spec file's location
+_partner_root = Path(__file__).resolve().parent.parent
+entry_script = str(_partner_root / "scripts" / "partner_gui_entry.py")
 
 a = Analysis(
     [entry_script],
-    pathex=[str(partner_root)],
+    pathex=[str(_partner_root)],
     binaries=[],
     datas=[
-        (str(partner_root / 'partner' / 'locales'), 'partner/locales'),
-        (str(partner_root / 'partner' / 'desktop_gui' / 'assets'), 'partner/desktop_gui/assets'),
+        (str(_partner_root / 'partner' / 'locales'), 'partner/locales'),
+        (str(_partner_root / 'partner' / 'desktop_gui' / 'assets'), 'partner/desktop_gui/assets'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
@@ -53,6 +53,9 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# Icon path — relative to repo root
+_icon_path = str(_partner_root / 'partner' / 'desktop_gui' / 'assets' / 'partner_app_v2.ico')
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -72,5 +75,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=r'E:\work\partner\partner\desktop_gui\assets\partner_app_v2.ico',
+    icon=_icon_path,
 )
