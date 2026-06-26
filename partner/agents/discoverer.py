@@ -117,7 +117,7 @@ def discover_and_register_agent(
                 "command": agent_name,
                 "subcommand": "",
                 "preamble_args": [],
-                "args": ["{input}"],
+                "args": ["{input}", "-o", "{output}"],
                 "timeout": 3600,
                 "inject_llm_credentials": False,
             },
