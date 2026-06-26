@@ -2128,7 +2128,24 @@ def _atomic_ensure_agent_installed(ctx: HarnessContext, params: JsonDict) -> Jso
 
     # Agent is not available — try to auto-install if manifest has install_info
     manifest = registry.get_agent(agent)
-    if not manifest or not manifest.install_info:
+    if not manifest:
+        # ── Auto-discovery: agent not registered but might exist on PATH or GitHub ──
+        # Try to find the binary on PATH first (e.g., pandoc, seqkit, etc.)
+        import shutil as _shutil
+        _binary_path = _shutil.which(agent)
+        if _binary_path:
+            logger.info("[HARNESS] Agent '%s' not registered but found on PATH: %s. Auto-discovering...", agent, _binary_path)
+            try:
+                from ..agents.discoverer import discover_and_register_agent
+                _manifest_path = discover_and_register_agent(
+                    agent_name=agent,
+                    workspace=ctx.workspace if hasattr(ctx, "workspace") else "",
+                )
+                if _manifest_path:
+                    logger.info("[HARNESS] Auto-discovered and registered '%s': %s", agent, _manifest_path)
+                    return {"ok": True, "agent": agent, "status": "auto_discovered", "binary": _binary_path}
+            except Exception as _disc_exc:
+                logger.warning("[HARNESS] Auto-discovery failed for '%s': %s", agent, _disc_exc)
         return {
             "ok": False,
             "agent": agent,
