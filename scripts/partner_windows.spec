@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # Resolve Partner source root relative to this spec file's location
-_partner_root = Path(__file__).resolve().parent.parent
+_partner_root = Path(SPECPATH).resolve().parent
 entry_script = str(_partner_root / "scripts" / "partner_gui_entry.py")
 
 a = Analysis(
