@@ -269,6 +269,17 @@ class AgentDispatcher:
                     arg = arg.replace(placeholder, str(val))
                     break
             resolved_args.append(arg)
+        # Normalize {output} placeholder: if output path is a directory (no filename),
+        # append a default output filename so tools like pandoc don't try to write
+        # to a directory path.
+        for i, _arg in enumerate(resolved_args):
+            if "{output}" in str(args[i]) if i < len(args) else False:
+                _out_val = resolved_args[i]
+                if _out_val and os.path.isdir(_out_val):
+                    resolved_args[i] = os.path.join(_out_val, "output.pdf")
+                elif _out_val and not os.path.splitext(_out_val)[1]:
+                    # No extension — likely a directory path
+                    resolved_args[i] = os.path.join(_out_val, "output.pdf")
         full_cmd.extend(resolved_args)
 
         # Append the task text as final positional arg (skip for "run" subcommand
