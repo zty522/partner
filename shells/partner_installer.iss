@@ -48,26 +48,36 @@ var
   WorkspacePage: TInputDirWizardPage;
   CreateWorkspaceCheck: TCheckBox;
 
+function GetUserProfileDir: string;
+begin
+  Result := GetEnv('USERPROFILE');
+  if Result = '' then
+    Result := ExpandConstant('{userappdata}\..\..');
+end;
+
 procedure InitializeWizard;
 begin
+  { Workspace page appears after app install dir selection (wpSelectDir) }
   WorkspacePage := CreateInputDirPage(
     wpSelectDir,
-    'Select Workspace Directory',
-    'Partner stores instance data, configs and conversation logs here.',
-    'Select or create a directory, then click Next.',
+    'Workspace Directory',
+    'Where should Partner store your instance data and conversation logs?',
+    'Select an existing directory or create a new one.',
     False,
     'New Folder'
   );
 
-  WorkspacePage.Add('Workspace path:');
-  WorkspacePage.Values[0] := ExpandConstant('{userdocs}\..\partner_workspace');
+  { Default: USERPROFILE\partner_workspace }
+  WorkspacePage.Add('');
+  WorkspacePage.Values[0] := GetUserProfileDir() + '\partner_workspace';
 
-  CreateWorkspaceCheck := TCheckBox.Create(WizardForm);
+  { Auto-create checkbox, placed below the input field }
+  CreateWorkspaceCheck := TCheckBox.Create(WorkspacePage);
   CreateWorkspaceCheck.Caption := 'Auto-create config/ and instances/ subdirectories';
   CreateWorkspaceCheck.Checked := True;
-  CreateWorkspaceCheck.Top := WorkspacePage.Surface.Top + 80;
+  CreateWorkspaceCheck.Top := 100;
   CreateWorkspaceCheck.Left := 0;
-  CreateWorkspaceCheck.Width := WorkspacePage.Surface.Width;
+  CreateWorkspaceCheck.Width := WorkspacePage.SurfaceWidth;
   CreateWorkspaceCheck.Parent := WorkspacePage.Surface;
 end;
 
@@ -80,7 +90,7 @@ procedure WriteWorkspacePointer(WorkspacePath: string);
 var
   PointerFile: string;
 begin
-  PointerFile := ExpandConstant('{userprofile}\\.partner_workspace');
+  PointerFile := GetUserProfileDir() + '\.partner_workspace';
   SaveStringToFile(PointerFile, WorkspacePath, False);
   Log('Written pointer file: ' + PointerFile + ' -> ' + WorkspacePath);
 end;
