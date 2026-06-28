@@ -18,7 +18,7 @@ jobs:
       - name: Build desktop app
         shell: pwsh
         run: |
-          python -m PyInstaller scripts/partner_windows.spec --clean --noconfirm
+          python -m PyInstaller shells/partner_windows.spec --clean --noconfirm
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse

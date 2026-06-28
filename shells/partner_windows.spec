@@ -1,47 +1,54 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for Partner Windows GUI — portable (no hardcoded paths)."""
+"""PyInstaller spec for Partner Windows GUI — restructured layout (shells/)."""
 
 import sys
 from pathlib import Path
 
-# Resolve Partner source root relative to this spec file's location
-_partner_root = Path(SPECPATH).resolve().parent
-entry_script = str(_partner_root / "scripts" / "partner_gui_entry.py")
+# Resolve Partner repo root relative to this spec file's location
+_repo_root = Path(SPECPATH).resolve().parent  # shells/.. = repo root
+_shells_dir = _repo_root / "shells"
+
+# Entry script lives in shells/partner_gui_entry.py
+entry_script = str(_shells_dir / "partner_gui_entry.py")
 
 a = Analysis(
     [entry_script],
-    pathex=[str(_partner_root)],
+    pathex=[
+        str(_repo_root),   # for partner package
+        str(_shells_dir),  # for frontend.desktop_gui.*
+    ],
     binaries=[],
     datas=[
-        (str(_partner_root / 'partner' / 'locales'), 'partner/locales'),
-        (str(_partner_root / 'partner' / 'desktop_gui' / 'assets'), 'partner/desktop_gui/assets'),
+        (str(_repo_root / 'partner' / 'locales'), 'partner/locales'),
+        (str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets'), 'frontend/desktop_gui/assets'),
     ],
     hiddenimports=[
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
-        'partner.desktop_gui.modern',
-        'partner.desktop_gui.modern.main_window',
-        'partner.desktop_gui.modern.theme',
-        'partner.desktop_gui.modern.widgets',
-        'partner.desktop_gui.modern.pages.chat',
-        'partner.desktop_gui.modern.pages.settings',
-        'partner.desktop_gui.modern.pages.instances',
-        'partner.desktop_gui.modern.pages.agents',
-        'partner.desktop_gui.modern.utils.path_mapper',
-        'partner.desktop_gui.modern.utils.config_watcher',
-        'partner.desktop_gui.gui_qt',
-        'partner.setup',
-        'partner.config',
+        # Modern GUI (in shells/frontend/desktop_gui/)
+        'frontend.desktop_gui',
+        'frontend.desktop_gui.modern',
+        'frontend.desktop_gui.modern.main_window',
+        'frontend.desktop_gui.modern.theme',
+        'frontend.desktop_gui.modern.widgets',
+        'frontend.desktop_gui.modern.pages.chat',
+        'frontend.desktop_gui.modern.pages.settings',
+        'frontend.desktop_gui.modern.pages.instances',
+        'frontend.desktop_gui.modern.pages.agents',
+        'frontend.desktop_gui.modern.utils.path_mapper',
+        'frontend.desktop_gui.modern.utils.config_watcher',
+        # Legacy GUI (still referenced)
+        'frontend.desktop_gui.gui_qt',
+        # Core Partner modules (referenced by GUI at runtime)
+        'partner.monitoring.instance_root',
+        'partner.state.config',
+        'partner.state.setup',
         'partner.file_tools',
-        'partner.workspace_layout',
-        'partner.workspace_migration',
-        'partner.outbound_policy',
-        'partner.project_registry',
-        'partner.project_state',
+        'partner.workspace.workspace_layout',
+        'partner.cli.common',
         'partner.mind.event_types',
         'partner.mind.harness',
-        'partner.agent_config_sync',
         'partner.stage_report',
     ],
     hookspath=[],
@@ -53,8 +60,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# Icon path — relative to repo root
-_icon_path = str(_partner_root / 'partner' / 'desktop_gui' / 'assets' / 'partner_app_v2.ico')
+# Icon path — under shells/frontend/desktop_gui/assets/
+_icon_path = str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets' / 'partner_app_v2.ico')
 
 exe = EXE(
     pyz,
