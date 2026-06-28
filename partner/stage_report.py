@@ -418,7 +418,7 @@ def _parse_markdown(md: str) -> tuple[str, list[tuple[str, list[str]]]]:
         nonlocal current_title, current_lines
         if current_title or current_lines:
             cleaned = [_plain(x) for x in current_lines if _plain(x)]
-            sections.append((current_title or "摘要", cleaned[:14]))
+            sections.append((current_title or "摘要", cleaned[:60]))  # increased limit
         current_title = ""
         current_lines = []
 
@@ -426,22 +426,31 @@ def _parse_markdown(md: str) -> tuple[str, list[tuple[str, list[str]]]]:
         line = raw.strip()
         if not line:
             continue
-        if line.startswith("# "):
+        # Detect title: # TITLE (only the first one)
+        if line.startswith("# ") and not line.startswith("## "):
             if title == "阶段汇报":
                 title = _plain(line[2:])
             continue
+        # Detect section heading: ## TITLE
         if line.startswith("## "):
             flush()
             current_title = _plain(line[3:])
             continue
+        # Detect sub-heading: ### TITLE
         if line.startswith("### "):
             current_lines.append(_plain(line[4:]))
+            continue
+        # Detect numbered heading: "1. TITLE" or "1、TITLE" at paragraph level
+        # A numbered heading is followed by content on the NEXT line(s), not mixed
+        # Heuristic: if line matches ^\d+[.、] and is followed by content, it's a sub-section
+        if re.match(r"^\d+[.、]\s*\S", line):
+            current_lines.append(line)
             continue
         current_lines.append(line)
     flush()
     if not sections:
-        sections = [("摘要", [_plain(x) for x in lines if _plain(x)][:8])]
-    return title, sections[:12]
+        sections = [("摘要", [_plain(x) for x in lines if _plain(x)][:20])]
+    return title, sections[:20]
 
 
 def _chunks(items: list[str], size: int = 4) -> list[list[str]]:

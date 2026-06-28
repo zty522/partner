@@ -2034,6 +2034,36 @@ class ChatPage(QWidget):
                                     break
                             if not already:
                                 self._add_message("assistant", content, ts, inst_id, source="qq")
+
+                    # Also check .log files for new assistant messages
+                    dialogue_dir = instance_dir / "dialogue"
+                    if dialogue_dir.is_dir():
+                        for log_file in sorted(dialogue_dir.glob("*.log"), reverse=True)[:1]:
+                            log_ts = log_file.stem  # YYYY-MM-DD
+                            parsed = _parse_log_file(str(log_file))
+                            for entry in parsed[:10]:
+                                role = entry.get("role", "assistant")
+                                content = str(entry.get("content", "") or "")
+                                if not content:
+                                    continue
+                                if "思考中" in str(content):
+                                    continue
+                                if content.startswith("已停止「"):
+                                    continue
+                                ts = entry.get("timestamp", log_ts)
+                                if ts <= latest_ts:
+                                    continue
+                                dedup_key = (ts, content[:50])
+                                if dedup_key in self._seen_responses:
+                                    continue
+                                self._seen_responses.add(dedup_key)
+                                already = False
+                                for m in self._messages:
+                                    if m.get("content") == content and m.get("role") in (role, "assistant"):
+                                        already = True
+                                        break
+                                if not already:
+                                    self._add_message(role, content, ts, inst_id, source="qq")
             except Exception:
                 pass
             return
