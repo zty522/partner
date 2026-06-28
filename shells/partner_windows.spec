@@ -23,10 +23,32 @@ a = Analysis(
         (str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets'), 'frontend/desktop_gui/assets'),
     ],
     hiddenimports=[
+        # ── PySide6 ──
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
-        # Modern GUI (in shells/frontend/desktop_gui/)
+
+        # ── Partner core modules (imported by GUI at runtime) ──
+        # state package
+        'partner.state',
+        'partner.state.config',
+        'partner.state.setup',
+        'partner.state.state',
+        'partner.state.state_persistence',
+        # monitoring
+        'partner.monitoring',
+        'partner.monitoring.instance_root',
+        'partner.monitoring.runtime_monitor',
+        # workspace
+        'partner.workspace',
+        'partner.workspace.workspace_layout',
+        # cli (needed by TUI path injection)
+        'partner.cli',
+        'partner.cli.common',
+        # file_tools
+        'partner.file_tools',
+
+        # ── Modern GUI (in shells/frontend/desktop_gui/) ──
         'frontend.desktop_gui',
         'frontend.desktop_gui.modern',
         'frontend.desktop_gui.modern.main_window',
@@ -38,7 +60,8 @@ a = Analysis(
         'frontend.desktop_gui.modern.pages.agents',
         'frontend.desktop_gui.modern.utils.path_mapper',
         'frontend.desktop_gui.modern.utils.config_watcher',
-        # Legacy GUI (still referenced)
+
+        # ── Legacy GUI (still referenced) ──
         'frontend.desktop_gui.gui_qt',
     ],
     hookspath=[],
@@ -47,18 +70,6 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
-
-# --- Collect ALL partner submodules (deep tree) ---
-from PyInstaller.utils.hooks import collect_submodules
-
-# Add every submodule of partner package to ensure nothing is missed
-_partner_mods = collect_submodules('partner')
-for mod in _partner_mods:
-    # Skip world_model submodules for now (requires httpx not in CI)
-    if mod.startswith('partner.world_model'):
-        continue
-    if mod not in a.hiddenimports:
-        a.hiddenimports.append(mod)
 
 pyz = PYZ(a.pure)
 
