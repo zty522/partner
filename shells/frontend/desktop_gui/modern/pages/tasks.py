@@ -31,7 +31,6 @@ from partner.monitoring.instance_root import (
     resolve_instance_workspace,
     resolve_partner_root,
 )
-from partner.state.config import load_partner_config_data
 
 from ..theme import THEME
 from ..widgets import SectionHeader, AccentButton, EventPipelineWidget

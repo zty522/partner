@@ -31,8 +31,6 @@ from partner.monitoring.instance_root import (
     resolve_instances_dir,
     resolve_partner_root,
 )
-from partner.state.config import load_partner_config_data
-from partner.workspace.workspace_layout import workspace_root_from_instance
 
 from ..theme import THEME, get_default_font
 from ..widgets import StatusCard, SectionHeader, EventPipelineWidget, AccentButton

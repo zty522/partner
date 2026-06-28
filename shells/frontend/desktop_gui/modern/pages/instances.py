@@ -37,11 +37,6 @@ from partner.monitoring.instance_root import (
     resolve_instances_dir,
     resolve_partner_root,
 )
-from partner.state.config import (
-    load_partner_config_data,
-    save_partner_config_data,
-)
-from partner.workspace.workspace_layout import ensure_instance_layout
 
 from ..theme import THEME
 from ..widgets import SectionHeader, AccentButton
@@ -504,6 +499,7 @@ class InstancesPage(QWidget):
                 ws_path = os.path.join(self._resolve_instances_dir(), inst_id)
 
             os.makedirs(ws_path, exist_ok=True)
+            from partner.workspace.workspace_layout import ensure_instance_layout
             ensure_instance_layout(ws_path)
 
             config.setdefault("instances", {})[inst_id] = {

@@ -41,9 +41,6 @@ from partner.monitoring.instance_root import (
     resolve_instance_workspace,
     resolve_partner_root,
 )
-from partner.workspace.workspace_layout import (
-    history_paths,
-)
 
 from ..theme import THEME
 from ..widgets import ChatBubble, EventStepWidget
@@ -2103,6 +2100,7 @@ class ChatPage(QWidget):
                             return
 
                 # Also check dialog_history.jsonl
+                from partner.workspace.workspace_layout import history_paths
                 for path in history_paths(str(instance_dir), "dialog_history.jsonl"):
                     if not os.path.exists(path):
                         continue

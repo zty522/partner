@@ -33,10 +33,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from partner.state.config import (
-    load_partner_config_data,
-    save_partner_config_data,
-)
 from partner.monitoring.instance_root import (
     resolve_global_config_path,
     resolve_instance_workspace,
@@ -1201,6 +1197,7 @@ class SettingsPage(QWidget):
         global_cfg["server"] = server_cfg
 
         # Write to disk
+        from partner.state.config import save_partner_config_data
         _save_json(os.path.join(config_dir, "global_config.json"), global_cfg)
         save_partner_config_data(self._workspace, partner_cfg)
 
