@@ -57,21 +57,25 @@ end;
 
 procedure InitializeWizard;
 begin
-  { Workspace page appears after app install dir selection (wpSelectDir) }
+  { Page order:
+      1. Welcome
+      2. Select Destination Location  (where to install Partner.exe)
+      3. Select Tasks                  (shortcut options)
+      4. Workspace Directory           (where to store instance data) ← HERE }
   WorkspacePage := CreateInputDirPage(
-    wpSelectDir,
+    wpSelectTasks,
     'Workspace Directory',
-    'Where should Partner store your instance data and conversation logs?',
-    'Select an existing directory or create a new one.',
+    'Where should Partner store instance data and conversation logs?',
+    'This is NOT the program installation location (that was on the previous page). '
+    + 'Select or create a workspace folder for your instance data.',
     False,
     'New Folder'
   );
 
-  { Default: USERPROFILE\partner_workspace }
   WorkspacePage.Add('');
   WorkspacePage.Values[0] := GetUserProfileDir() + '\partner_workspace';
 
-  { Auto-create checkbox, placed below the input field }
+  { Auto-create checkbox }
   CreateWorkspaceCheck := TCheckBox.Create(WorkspacePage);
   CreateWorkspaceCheck.Caption := 'Auto-create config/ and instances/ subdirectories';
   CreateWorkspaceCheck.Checked := True;

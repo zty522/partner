@@ -93,35 +93,32 @@ MUTEX_NAME = "PartnerApp-SingleInstance-Mutex"
 
 
 def _ensure_single_instance() -> bool:
-    """Ensure only one instance runs. Returns True if we should proceed (first instance)."""
+    """Ensure only one instance runs. Kills old instances if found."""
     if os.name == "nt":
         try:
             kernel32 = ctypes.windll.kernel32
             mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
             err = kernel32.GetLastError()
             if err == 183:  # ERROR_ALREADY_EXISTS
-                # Bring existing window to front
-                user32 = ctypes.windll.user32
-                hwnd = user32.FindWindowW(None, "Partner")
-                if hwnd:
-                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    user32.SetForegroundWindow(hwnd)
-                return False
-            # Store mutex handle so it stays alive
+                # Kill old Partner.exe processes (except ourselves)
+                os.system("taskkill /f /im Partner.exe 2>nul")
+                return True  # Continue — old process is dead
             _ensure_single_instance._mutex = mutex
         except Exception:
             pass
     else:
         # Linux/WSL fallback: file lock
         import fcntl
+        import tempfile
         lock_path = os.path.join(tempfile.gettempdir(), ".partner_gui.lock")
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             _ensure_single_instance._lock_fd = fd
         except (IOError, BlockingIOError):
-            print("⚠ Partner GUI 已在运行")
-            return False
+            # Kill the old process
+            os.system("pkill -f 'Partner' 2>/dev/null || true")
+            return True
     return True
 
 

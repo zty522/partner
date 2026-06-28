@@ -668,6 +668,7 @@ class ModernMainWindow(QMainWindow):
         self._workspace_path = new_workspace
         self._instances_page.set_workspace(new_workspace)
         self._settings_page.set_workspace(new_workspace)
+        self._chat_page.set_workspace(new_workspace)
 
     def _update_status(self):
         """Update the tray icon tooltip with instance status."""

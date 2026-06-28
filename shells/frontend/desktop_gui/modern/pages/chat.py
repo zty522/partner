@@ -1970,6 +1970,11 @@ class ChatPage(QWidget):
             self._load_offset += len(more)
             self._loading_more = False
 
+    def set_workspace(self, ws: str) -> None:
+        """Called when the workspace path changes in settings. Reloads history."""
+        self._workspace_path = ws
+        self._load_history()
+
     # ------------------------------------------------------------------
     # Polling
     # ------------------------------------------------------------------
