@@ -12,6 +12,7 @@ import argparse
 import ctypes
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 # Ensure UTF-8 encoding for subprocess pipes
@@ -88,6 +89,42 @@ def check_dual_installation() -> list[str]:
     return issues
 
 
+MUTEX_NAME = "PartnerApp-SingleInstance-Mutex"
+
+
+def _ensure_single_instance() -> bool:
+    """Ensure only one instance runs. Returns True if we should proceed (first instance)."""
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
+            err = kernel32.GetLastError()
+            if err == 183:  # ERROR_ALREADY_EXISTS
+                # Bring existing window to front
+                user32 = ctypes.windll.user32
+                hwnd = user32.FindWindowW(None, "Partner")
+                if hwnd:
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    user32.SetForegroundWindow(hwnd)
+                return False
+            # Store mutex handle so it stays alive
+            _ensure_single_instance._mutex = mutex
+        except Exception:
+            pass
+    else:
+        # Linux/WSL fallback: file lock
+        import fcntl
+        lock_path = os.path.join(tempfile.gettempdir(), ".partner_gui.lock")
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _ensure_single_instance._lock_fd = fd
+        except (IOError, BlockingIOError):
+            print("⚠ Partner GUI 已在运行")
+            return False
+    return True
+
+
 def launch_gui(workspace_path: str | None = None):
     """Launch the modern Partner GUI.
 
@@ -95,6 +132,10 @@ def launch_gui(workspace_path: str | None = None):
         workspace_path: Optional explicit workspace path.
                         If None, auto-detects from partner.setup.
     """
+    # Single-instance check (before QApplication)
+    if not _ensure_single_instance():
+        return
+
     # Check for issues
     issues = check_dual_installation()
     if issues:
