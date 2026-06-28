@@ -19,12 +19,47 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller shells/partner_windows.spec --clean --noconfirm
-      - name: Rename EXE for release
+          if (-not (Test-Path "dist/Partner.exe")) { throw "PyInstaller build failed - dist/Partner.exe not found" }
+      - name: Install Inno Setup (via Chocolatey)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress --timeout 120 2>&1
+          Write-Host "Chocolatey exit code: $LASTEXITCODE"
+      - name: Build Inno Setup installer
+        id: iscc_build
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
+          # Find ISCC
+          $iscc = ""
+          $paths = @(
+            "ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 5\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 5\ISCC.exe"
+          )
+          foreach ($p in $paths) {
+            $resolved = (Get-Command $p -ErrorAction SilentlyContinue).Source
+            if ($resolved) { $iscc = $resolved; break }
+            if (Test-Path $p) { $iscc = $p; break }
+          }
+          Write-Host "ISCC found at: $iscc"
+          if ($iscc -and (Test-Path $iscc)) {
+            & $iscc shells/partner_installer.iss
+            if ($LASTEXITCODE -eq 0 -and (Test-Path dist/Partner_Setup.exe)) {
+              Move-Item dist/Partner_Setup.exe "dist/Partner-$ver-Setup.exe" -Force
+              Write-Host "✅ Real Inno Setup installer: dist/Partner-$ver-Setup.exe"
+              exit 0
+            } else {
+              Write-Host "⚠ ISCC returned error $LASTEXITCODE, falling back to raw EXE rename"
+            }
+          } else {
+            Write-Host "⚠ ISCC not found, falling back to raw EXE rename"
+          }
+          # Fallback: rename raw EXE (with -Setup name so release upload still works)
           Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
-          Write-Host "✅ EXE ready: Partner-$ver-Setup.exe"
+          Write-Host "⚠ Fallback raw EXE: dist/Partner-$ver-Setup.exe"
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
