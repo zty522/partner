@@ -52,11 +52,30 @@ def _default_workspace_candidates() -> list[Path]:
         ]
 
 
+def _wsl_to_windows(path: str) -> str:
+    """Convert /mnt/e/work -> E:\\work (for cross-platform pointer resolution)."""
+    if not path:
+        return path
+    clean = path.replace("/", "\\").strip("\\")
+    if clean.startswith("mnt\\"):
+        drive = clean[4]
+        rest = clean[5:]  # Include the backslash after drive letter
+        return f"{drive.upper()}:{rest}"
+    return path
+
+
 def _read_pointer(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _normalize_pointer_path(pointed: str) -> str:
+    """Convert WSL-style paths to Windows paths when running on Windows."""
+    if os.name == "nt" and pointed.startswith("/mnt/"):
+        return _wsl_to_windows(pointed)
+    return pointed
 
 
 def resolve_partner_root() -> Path:
@@ -76,7 +95,7 @@ def resolve_partner_root() -> Path:
     if pointer.is_file():
         pointed = _read_pointer(pointer)
         if pointed:
-            return Path(pointed).expanduser()
+            return Path(_normalize_pointer_path(pointed)).expanduser()
 
     candidates = _default_workspace_candidates()
 
