@@ -106,7 +106,7 @@ class Partner:
         tracker = RestartTracker(self.workspace)
 
         # 从 adapter 获取后端
-        from .adapters.adapter import create_adapter
+        from ..adapters.adapter import create_adapter
         adapter = create_adapter(
             self.config.agent.backend,
             self.workspace,
