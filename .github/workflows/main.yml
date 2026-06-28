@@ -19,12 +19,34 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller shells/partner_windows.spec --clean --noconfirm
-      - name: Rename EXE for release
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress --timeout 120
+      - name: Build Inno Setup installer
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
-          Write-Host "✅ EXE ready: Partner-$ver-Setup.exe"
+          # Keep Partner.exe for ISCC (it references this name)
+          Copy-Item dist/Partner.exe "dist/Partner-$ver.exe" -Force
+          # Build Inno Setup installer
+          $iscc = (Get-Command "ISCC.exe" -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not $iscc) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
+          Write-Host "ISCC: $iscc"
+          if (Test-Path $iscc) {
+            & $iscc shells/partner_installer.iss
+            if ($LASTEXITCODE -eq 0 -and (Test-Path dist/Partner_Setup.exe)) {
+              Move-Item dist/Partner_Setup.exe "dist/Partner-$ver-Setup.exe" -Force
+              Write-Host "✅ Inno Setup installer done: Partner-$ver-Setup.exe"
+            } else {
+              Write-Host "⚠ ISCC failed, renaming raw EXE as fallback"
+              Move-Item dist/Partner-$ver.exe "dist/Partner-$ver-Setup.exe" -Force
+            }
+          } else {
+            Write-Host "⚠ ISCC not found, renaming raw EXE as fallback"
+            Move-Item dist/Partner-$ver.exe "dist/Partner-$ver-Setup.exe" -Force
+          }
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
