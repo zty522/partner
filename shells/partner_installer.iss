@@ -80,7 +80,7 @@ procedure WriteWorkspacePointer(WorkspacePath: string);
 var
   PointerFile: string;
 begin
-  PointerFile := ExpandConstant('{userappdata}\..\.partner_workspace');
+  PointerFile := ExpandConstant('{userprofile}\\.partner_workspace');
   SaveStringToFile(PointerFile, WorkspacePath, False);
   Log('Written pointer file: ' + PointerFile + ' -> ' + WorkspacePath);
 end;
