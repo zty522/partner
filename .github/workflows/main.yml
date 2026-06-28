@@ -22,6 +22,7 @@ jobs:
           if (-not (Test-Path "dist/Partner.exe")) { throw "PyInstaller build failed - dist/Partner.exe not found" }
       - name: Install Inno Setup (via Chocolatey)
         shell: pwsh
+        continue-on-error: true
         run: |
           choco install innosetup -y --no-progress --timeout 120 2>&1
           Write-Host "Chocolatey exit code: $LASTEXITCODE"
@@ -45,21 +46,25 @@ jobs:
             if (Test-Path $p) { $iscc = $p; break }
           }
           Write-Host "ISCC found at: $iscc"
+          $iscc_ok = $false
           if ($iscc -and (Test-Path $iscc)) {
-            & $iscc shells/partner_installer.iss
-            if ($LASTEXITCODE -eq 0 -and (Test-Path dist/Partner_Setup.exe)) {
+            & $iscc shells/partner_installer.iss 2>&1
+            $isccExit = $LASTEXITCODE
+            Write-Host "ISCC exit code: $isccExit"
+            if ($isccExit -eq 0 -and (Test-Path dist/Partner_Setup.exe)) {
               Move-Item dist/Partner_Setup.exe "dist/Partner-$ver-Setup.exe" -Force
               Write-Host "✅ Real Inno Setup installer: dist/Partner-$ver-Setup.exe"
-              exit 0
+              $iscc_ok = $true
             } else {
-              Write-Host "⚠ ISCC returned error $LASTEXITCODE, falling back to raw EXE rename"
+              Write-Host "⚠ ISCC failed (exit=$isccExit), falling back to raw EXE rename"
             }
           } else {
             Write-Host "⚠ ISCC not found, falling back to raw EXE rename"
           }
-          # Fallback: rename raw EXE (with -Setup name so release upload still works)
-          Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
-          Write-Host "⚠ Fallback raw EXE: dist/Partner-$ver-Setup.exe"
+          if (-not $iscc_ok) {
+            Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
+            Write-Host "⚠ Fallback raw EXE: dist/Partner-$ver-Setup.exe"
+          }
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse

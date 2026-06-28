@@ -62,7 +62,7 @@ var
   Dir: string;
 begin
   Dir := '';
-  if BrowseForFolder('Select workspace directory:', Dir, False, WsEdit.Text) then
+  if BrowseForFolder('Select workspace directory:', Dir, 'New Folder', WsEdit.Text) then
     WsEdit.Text := Dir;
 end;
 
