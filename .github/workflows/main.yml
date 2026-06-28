@@ -28,24 +28,28 @@ jobs:
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
-      - name: Clean old release assets
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Delete stale assets from previous builds (Partner.exe, Partner-*.exe without Setup)
-          $rel = gh release view v1.1.0 --json assets -q '.assets[] | select(.name | endswith(".exe") and not contains("Setup")) | .id' 2>$null
-          if ($rel) {
-            $rel -split "`n" | ForEach-Object {
-              $id = $_.Trim()
-              if ($id) {
-                gh api -X DELETE "/repos/${{ github.repository }}/releases/assets/$id"
-                Write-Host "Deleted asset $id"
-              }
-            }
-          }
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Partner-*-Setup.exe
           overwrite_files: true
+      - name: Clean old stale assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # After upload, delete stale assets from prior builds
+          try {
+            $ids = gh release view v1.1.0 --json assets -q '.assets[] | select(.name | endswith(".exe") and not contains("Setup")) | .id' 2>$null
+            if ($ids) {
+              $ids -split "`n" | ForEach-Object {
+                $id = $_.Trim()
+                if ($id) {
+                  gh api -X DELETE "/repos/${{ github.repository }}/releases/assets/$id" 2>$null
+                  Write-Host "Deleted stale asset $id"
+                }
+              }
+            }
+          } catch {
+            Write-Host "⚠ No stale assets to clean"
+          }
