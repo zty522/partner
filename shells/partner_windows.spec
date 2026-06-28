@@ -21,10 +21,6 @@ a = Analysis(
     datas=[
         (str(_repo_root / 'partner' / 'locales'), 'partner/locales'),
         (str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets'), 'frontend/desktop_gui/assets'),
-        # Force-include partner/state/ and partner/workspace/ as data files
-        # (PyInstaller refuses to bundle these as modules due to import errors on CI)
-        (str(_repo_root / 'partner' / 'state'), 'partner/state'),
-        (str(_repo_root / 'partner' / 'workspace'), 'partner/workspace'),
     ],
     hiddenimports=[
         # ── PySide6 ──
