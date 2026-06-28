@@ -111,19 +111,3 @@ function HasExistingConfig(WsPath: string): Boolean;
 begin
   Result := FileExists(WsPath + '\config\partner_config.json');
 end;
-
-function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoGroupInfo, MemoTasksInfo: String): String;
-var
-  WsPath: string;
-begin
-  WsPath := GetWorkspacePath();
-  Result :=
-    'Install dir: ' + ExpandConstant('{app}') + NewLine +
-    'Workspace dir: ' + WsPath + NewLine +
-    NewLine +
-    'Partner will start automatically after installation.' + NewLine +
-    'The first-run wizard will help you configure LLM API.';
-  if HasExistingConfig(WsPath) then
-    Result := Result + NewLine + NewLine +
-      'Note: Existing config detected, workspace will retain current settings.';
-end;

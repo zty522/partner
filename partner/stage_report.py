@@ -234,7 +234,7 @@ def _canonical_section(title: str) -> str:
 
 def _extract_evidence_files(text: str) -> list[str]:
     files = []
-    for match in re.findall(r"[\w\u4e00-\u9fff./-]+\.(?:json|csv|md|py|txt|pdf|pptx|xlsx|docx)", text or ""):
+    for match in re.findall(r"[\w\u4e00-\u9fff./-]+\.(?:json|csv|md|py|txt|pdf|pptx|xlsx|docx|png|jpg|jpeg|gif)", text or ""):
         item = match.strip("`，,。；;()（）[]【】")
         if item and item not in files:
             files.append(item)
@@ -580,7 +580,11 @@ def _generate_pdf_from_report(report: StageReport, output_path: str) -> None:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
     from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer
+    from reportlab.lib.utils import ImageReader
+
+    # Resolve source markdown directory for relative image paths
+    _md_dir = os.path.dirname(report.source_markdown) if report.source_markdown else ""
 
     def pick_cjk_font() -> str:
         candidates = [
@@ -618,17 +622,71 @@ def _generate_pdf_from_report(report: StageReport, output_path: str) -> None:
         Paragraph(report.title, styles["CNTitle"]),
         Paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["CNMeta"]),
     ]
-    sections = [
-        (str(section.get("title") or "摘要"), [str(x) for x in (section.get("bullets") or []) if str(x).strip()])
-        for section in report.sections
-    ]
-    for idx, (section_title, lines) in enumerate(sections, start=1):
+
+    # Build sections from report data — include FULL body text, not just bullets
+    for idx, section in enumerate(report.sections, start=1):
+        section_title = str(section.get("title") or "摘要")
+        body = str(section.get("body") or "")
+        bullets = [str(x) for x in (section.get("bullets") or []) if str(x).strip()]
         story.append(Paragraph(f"{idx:02d}. {section_title}", styles["CNHeading"]))
-        for item in lines or ["待补充。"]:
+        # Show body first (the full paragraph text)
+        if body:
+            for para in body.split("\n\n"):
+                para = para.strip()
+                if para and para not in bullets:
+                    story.append(Paragraph(para, styles["CNBody"]))
+                    story.append(Spacer(1, 0.08 * cm))
+        # Then list bullet points
+        for item in bullets or ["待补充。"]:
             story.append(Paragraph("• " + item, styles["CNBody"]))
             story.append(Spacer(1, 0.12 * cm))
         if idx in {3, 6}:
             story.append(PageBreak())
+
+    # Embed images from evidence_files
+    _max_img_w = 14 * cm  # max image width (fit A4 with margins)
+    _max_img_h = 18 * cm
+    for fpath in report.evidence_files:
+        fpath = fpath.strip()
+        if not fpath:
+            continue
+        # Strip markdown image syntax: ![alt](path) -> path
+        md_img = re.match(r"\[.*?\]\((.+?)\)", fpath)
+        if md_img:
+            fpath = md_img.group(1)
+        ext = os.path.splitext(fpath)[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".gif"):
+            continue
+
+        # Resolve image path: try as-is, then relative to markdown dir
+        resolved = None
+        for candidate in [fpath, os.path.join(_md_dir, fpath)]:
+            if os.path.exists(candidate):
+                resolved = candidate
+                break
+        if not resolved or not os.path.isfile(resolved):
+            continue
+        # Skip zero-byte images
+        if os.path.getsize(resolved) < 50:
+            continue
+        try:
+            img = Image(resolved)
+            # Scale to fit page width while preserving aspect ratio
+            iw, ih = img.imageWidth, img.imageHeight
+            if iw > _max_img_w:
+                ratio = _max_img_w / iw
+                img.drawWidth = _max_img_w
+                img.drawHeight = ih * ratio
+            if img.drawHeight > _max_img_h:
+                ratio = _max_img_h / img.drawHeight
+                img.drawHeight = _max_img_h
+                img.drawWidth = img.drawWidth * ratio
+            story.append(Spacer(1, 0.3 * cm))
+            story.append(img)
+            story.append(Spacer(1, 0.3 * cm))
+        except Exception:
+            continue
+
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     SimpleDocTemplate(output_path, pagesize=A4, rightMargin=1.5 * cm, leftMargin=1.5 * cm, topMargin=1.3 * cm, bottomMargin=1.3 * cm).build(story)
     _assert_nonempty_artifact(output_path, "pdf", min_size=8000)
