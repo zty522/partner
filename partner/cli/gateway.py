@@ -14,9 +14,9 @@ import subprocess
 import sys
 import time
 
-from ..config import resolve_partner_config_path, workspace_has_partner_config
-from ..instance_root import resolve_instance_workspace, resolve_partner_root, resolve_global_config_path
-from ..workspace_layout import ensure_instance_layout
+from ..state.config import resolve_partner_config_path, workspace_has_partner_config
+from ..monitoring.instance_root import resolve_instance_workspace, resolve_partner_root, resolve_global_config_path
+from ..workspace.workspace_layout import ensure_instance_layout
 from .common import (
     C_RESET, C_BOLD, C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_RED,
     _cli_txt, _print_commands, _bot_start, _bot_stop,

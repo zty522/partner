@@ -25,12 +25,12 @@ from typing import Any, Optional
 import yaml
 
 from .event_types import MindEvent, EventType, report
-from ..delivery_queue import deliver, init as delivery_init, register_channel
-from ..adapter import USER_FRIENDLY_PROGRESS_REPLY
-from ..outbound_policy import UNAVAILABLE_NOTICE, prefix_event_notice, send_template
+from ..core.delivery_queue import deliver, init as delivery_init, register_channel
+from ..adapters.adapter import USER_FRIENDLY_PROGRESS_REPLY
+from ..dialogue.outbound_policy import UNAVAILABLE_NOTICE, prefix_event_notice, send_template
 from ..goal.acceptance_criteria import AcceptanceCriteriaGenerator
 from ..skills.summarize_search import summarize_search_results
-from ..research_memory import (
+from ..knowledge.research_memory import (
     append_strategy_memory,
     build_cross_project_context,
     build_reflection_context,
@@ -50,7 +50,7 @@ from ..research_memory import (
     should_run_periodic,
     write_reflection_artifacts,
 )
-from ..research_guardrails import (
+from ..knowledge.research_guardrails import (
     apply_round_guardrails,
     build_mind_context,
     ensure_baseline_and_metric_contracts,
@@ -61,9 +61,9 @@ from ..research_guardrails import (
     maybe_pause_project_for_quality_gate,
     should_send_user_report,
 )
-from ..user_text_safety import has_internal_diff, strip_internal_diff
+from ..dialogue.user_text_safety import has_internal_diff, strip_internal_diff
 from ..utils.text_cleaner import clean_user_facing_text
-from ..content_feed import (
+from ..knowledge.content_feed import (
     build_content_feed_context,
     build_patrol_prompt_context,
     content_patrol_enabled,
@@ -589,7 +589,7 @@ def _extract_actionable_project_next(title: str) -> str:
     if not title:
         return ""
     try:
-        from ..project_state import read_project_brief, read_state_md
+        from ..projects.project_state import read_project_brief, read_state_md
 
         texts = [
             read_state_md(_workspace, title),
@@ -668,7 +668,7 @@ async def _maybe_recover_empty_active_chain(pool=None, active_name: str = "", st
     heartbeat = str(plan.get("heartbeat_summary") or "").strip()
     plan_active = _active_plan_matches_project(plan, active_name) and plan_status in {"active", "running", "in_progress"}
     try:
-        from ..project_state import get_active
+        from ..projects.project_state import get_active
 
         marker_active = (get_active(_workspace) or "").strip()
     except Exception:
@@ -688,7 +688,7 @@ async def _maybe_recover_empty_active_chain(pool=None, active_name: str = "", st
         logger.info(f"[RECOVERY] skip repeated empty-chain recovery: {active_name}")
         return False
     try:
-        from ..project_state import append_log, set_project_status
+        from ..projects.project_state import append_log, set_project_status
 
         set_project_status(_workspace, active_name, "active", f"{source}: empty mind pool recovery")
         append_log(
@@ -825,7 +825,7 @@ def _delivery_policy(mode: str, user_request: str) -> str:
 def _delivery_objective_override(workspace: str, title: str, mode: str, user_request: str) -> tuple[str, str] | None:
     if mode == "research_project":
         return None
-    from ..project_state import get_project_dir
+    from ..projects.project_state import get_project_dir
 
     project_dir = get_project_dir(workspace, title)
     request = _clip(user_request or f"围绕「{title}」完成用户点名交付", 900)
@@ -857,7 +857,7 @@ def _selector_objective_override(workspace: str, title: str, payload: dict | Non
         return None
     event_kind = str(payload.get("event_kind") or "one_shot_event").strip() or "one_shot_event"
     user_request = str(payload.get("user_request") or "").strip()
-    from ..project_state import get_project_dir
+    from ..projects.project_state import get_project_dir
 
     project_dir = get_project_dir(workspace, title)
     safe_kind = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", event_kind).strip("_") or "one_shot_event"
@@ -964,7 +964,7 @@ def _compact_state_snapshot(state_md: str) -> str:
 
 
 def _project_file_hints(workspace: str, title: str) -> str:
-    from ..project_state import get_project_dir
+    from ..projects.project_state import get_project_dir
 
     project_dir = get_project_dir(workspace, title)
     if not os.path.isdir(project_dir):
@@ -980,7 +980,7 @@ def _project_file_hints(workspace: str, title: str) -> str:
 
 
 def _breakthrough_queue_path(workspace: str, title: str) -> str:
-    from ..project_state import get_project_dir
+    from ..projects.project_state import get_project_dir
 
     return os.path.join(get_project_dir(workspace, title), "breakthrough_queue.md")
 
@@ -1043,7 +1043,7 @@ def _append_breakthrough_queue(workspace: str, title: str, *, reason: str,
 
 def _choose_micro_objective(workspace: str, title: str, state_md: str, step: int) -> tuple[str, str]:
     """Return a single-step objective and preferred output artifact."""
-    from ..project_state import get_project_dir, load_project_guardrail, read_project_brief
+    from ..projects.project_state import get_project_dir, load_project_guardrail, read_project_brief
     from ..stage_report import maybe_stage_report_objective
 
     project_dir = get_project_dir(workspace, title)
@@ -1145,7 +1145,7 @@ def _detect_plan_only_response(parsed: dict, hermes_response: str) -> bool:
 
 def _build_project_prompt(workspace: str, title: str, state_md: str, step: int,
                           event_payload: dict | None = None) -> tuple[str, str]:
-    from ..project_state import format_project_guardrail_for_prompt, load_project_guardrail, read_project_brief
+    from ..projects.project_state import format_project_guardrail_for_prompt, load_project_guardrail, read_project_brief
 
     event_payload = event_payload or {}
     mode = _delivery_mode(event_payload)
@@ -1789,7 +1789,7 @@ def _known_done_risk_text(workspace: str, title: str, state_md: str, hot_text: s
     """Scan configured source/evidence files for stale false-completion signals."""
     texts = [state_md or "", hot_text or ""]
     try:
-        from ..project_state import read_project_contract
+        from ..projects.project_state import read_project_contract
         contract = read_project_contract(workspace, title)
         candidates = []
         for root in contract.get("source_roots") or []:
@@ -1852,7 +1852,7 @@ def _sanitize_project_log_for_report(text: str, max_chars: int = 900) -> str:
 
 
 def _collect_report_context(workspace: str, title: str, project_outcome: str, step: int = 0) -> dict:
-    from ..project_state import get_project_dir, read_state_md
+    from ..projects.project_state import get_project_dir, read_state_md
 
     project_dir = get_project_dir(workspace, title)
     state_md = read_state_md(workspace, title)
@@ -1881,7 +1881,7 @@ def _collect_report_context(workspace: str, title: str, project_outcome: str, st
 def _build_round_report_prompt(title: str, ctx: dict) -> str:
     runtime_context = ""
     try:
-        from ..runtime_monitor import compact_runtime_context
+        from ..monitoring.runtime_monitor import compact_runtime_context
 
         runtime_context = compact_runtime_context(_workspace)
     except Exception:
@@ -2897,15 +2897,24 @@ def _push_one_shot_output_files(project_dir: str, parsed: dict | None,
         return False, files
     sent = False
     for path in files:
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            label = os.path.basename(path)
-            ok = _file_push_callback(data, os.path.basename(path), label)
-            logger.info("[REPORT] one-shot file push result: %s ok=%s", os.path.basename(path), ok)
-            sent = bool(ok) or sent
-        except Exception as exc:
-            logger.warning(f"[REPORT] one-shot file push failed for {path}: {exc}")
+        for _retry in range(3):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                label = os.path.basename(path)
+                ok = _file_push_callback(data, os.path.basename(path), label)
+                logger.info("[REPORT] one-shot file push result: %s ok=%s (attempt %d/3)", os.path.basename(path), ok, _retry + 1)
+                if ok:
+                    sent = True
+                    break
+                if _retry < 2:
+                    import time as _t
+                    _t.sleep(2)
+            except Exception as exc:
+                logger.warning(f"[REPORT] one-shot file push failed for {path}: {exc}")
+                if _retry < 2:
+                    import time as _t
+                    _t.sleep(2)
     return sent, files
 
 
@@ -3629,7 +3638,7 @@ def _append_assistant_dialog_history(content: str, *, sender_id: str = "", sende
     if text in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
         return
     try:
-        from ..workspace_layout import append_history
+        from ..workspace.workspace_layout import append_history
 
         row = {
             "role": "assistant",
@@ -3689,7 +3698,7 @@ async def _handle_user_message(event: MindEvent):
 
     # Call orchestrator to decide routing
     try:
-        from ..interaction_orchestrator import InteractionOrchestrator
+        from ..core.interaction_orchestrator import InteractionOrchestrator
 
         orchestrator = InteractionOrchestrator(
             workspace=_workspace,
@@ -3867,7 +3876,7 @@ def _sanitize_reply(reply: str) -> str:
 def _get_context_for_message(sender_id: str) -> list[dict]:
     """Get recent conversation context for a user."""
     try:
-        from ..workspace_layout import history_paths
+        from ..workspace.workspace_layout import history_paths
         rows: list[dict] = []
         seen: set[str] = set()
         paths: list[str] = []
@@ -3906,7 +3915,7 @@ def _get_context_for_message(sender_id: str) -> list[dict]:
 
 def _snapshot_state() -> dict:
     try:
-        from ..project_state import get_active
+        from ..projects.project_state import get_active
         active = get_active(_workspace) or ""
     except Exception:
         active = ""
@@ -4772,7 +4781,7 @@ NEXT: {next_action[:700]}
 
 async def _maybe_enqueue_followup_event(event: MindEvent, title: str, parsed: dict, payload: dict) -> dict:
     try:
-        from ..project_state import get_project_status
+        from ..projects.project_state import get_project_status
         status = get_project_status(_workspace, title)
         if status in {"waiting", "done"}:
             return {"queued": False, "event_type": "", "event_kind": "", "reason": f"project_status_{status}"}
@@ -4945,7 +4954,7 @@ async def _maybe_enqueue_followup_event(event: MindEvent, title: str, parsed: di
     ))
     if selected_type != EventType.STOP_PROJECT:
         try:
-            from ..project_state import set_project_status
+            from ..projects.project_state import set_project_status
             set_project_status(_workspace, followup_title, "active", f"selector follow-up：{selected_type.value}/{decision['event_kind']}")
         except Exception as exc:
             logger.debug(f"[FOLLOWUP] failed to mark active: {exc}")
@@ -5002,7 +5011,7 @@ async def _enqueue_minimal_research_event_after_planning_failure(
         parent_id=event.id,
     ))
     try:
-        from ..project_state import set_project_status
+        from ..projects.project_state import set_project_status
         set_project_status(_workspace, title, "active", "planning failure fallback：literature_review/planning_failure_min_research_slice")
     except Exception as exc:
         logger.debug(f"[FOLLOWUP] failed to mark minimal research fallback active: {exc}")
@@ -5485,7 +5494,7 @@ async def _handle_email_delivery(event: MindEvent):
     title = str(payload.get("title") or payload.get("project") or "email_delivery").strip() or "email_delivery"
     request = str(payload.get("user_request") or payload.get("objective") or title).strip()
     event_kind = str(payload.get("event_kind") or "email_delivery")
-    from ..project_state import get_project_dir, get_project_status, read_state_md, write_state_md
+    from ..projects.project_state import get_project_dir, get_project_status, read_state_md, write_state_md
 
     event_source = str(getattr(event, "source", "") or "")
     if event.type != EventType.STOP_PROJECT and not event_source.startswith("interaction:"):
@@ -5710,7 +5719,7 @@ async def _handle_batch_plan_event(event: MindEvent):
 
     from ..harness_core import ArtifactValidator, TaskInstance, load_harness_config
     from ..planner import BatchPlanner
-    from ..project_state import get_project_dir, read_state_md, _write_active_plan
+    from ..projects.project_state import get_project_dir, read_state_md, _write_active_plan
     from .harness import default_registry, run_harness_plan
 
     project_dir = get_project_dir(_workspace, title)
@@ -6220,7 +6229,7 @@ async def _handle_batch_plan_event(event: MindEvent):
     except asyncio.CancelledError:
         logger.info("[BATCH_PLANNER] batch_plan %s cancelled (interrupted by new user message)", title[:60])
         try:
-            from ..project_state import clear_active, set_project_status
+            from ..projects.project_state import clear_active, set_project_status
             set_project_status(_workspace, title, "interrupted", "new user message arrived")
             clear_active(_workspace, title)
         except Exception:
@@ -6801,7 +6810,7 @@ async def _handle_action_event(event: MindEvent):
         title = event.type.value
     logger.info(f"[ACTION] Executing {event.type.value}: '{title[:60]}'")
 
-    from ..project_state import get_project_dir, read_state_md, write_state_md
+    from ..projects.project_state import get_project_dir, read_state_md, write_state_md
 
     project_dir = get_project_dir(_workspace, title)
     os.makedirs(project_dir, exist_ok=True)
@@ -7617,7 +7626,7 @@ async def _handle_action_event(event: MindEvent):
 
 def _append_log_summary(workspace: str, title: str, ts: str, parsed: dict, step: int = 0):
     """追加摘要到 exploration_log.md（精简版），完整内容写入 trace_detail.md。"""
-    from ..project_state import get_project_dir
+    from ..projects.project_state import get_project_dir
 
     project_dir = get_project_dir(workspace, title)
 
@@ -7702,7 +7711,7 @@ async def _handle_project(event: MindEvent):
     _running_projects.add(title)
 
     # 0. 确保活跃项目标记
-    from ..project_state import (
+    from ..projects.project_state import (
         append_log,
         audit_project_context,
         audit_project_round,
@@ -7736,7 +7745,7 @@ async def _handle_project(event: MindEvent):
     # 1. 读取项目状态
     state_md = read_state_md(_workspace, title)
     try:
-        from ..project_state import read_project_brief
+        from ..projects.project_state import read_project_brief
         hot_text = f"{state_md}\n{read_project_brief(_workspace, title, max_chars=2200)}"
     except Exception:
         hot_text = state_md
@@ -7821,7 +7830,7 @@ async def _handle_project(event: MindEvent):
         parsed = _parse_structured_project_response(parse_response)
         repaired_stalled_result = False
         try:
-            from ..project_state import load_project_guardrail
+            from ..projects.project_state import load_project_guardrail
 
             guardrail_for_pause = load_project_guardrail(_workspace, title)
             allow_contract_pause = bool(guardrail_for_pause.get("completion_criteria"))
@@ -8092,7 +8101,7 @@ async def _handle_project(event: MindEvent):
             except Exception as exc:
                 logger.debug(f"[PROJECT] research memory update failed: {exc}")
             try:
-                from ..project_state import update_project_brief_from_round
+                from ..projects.project_state import update_project_brief_from_round
                 update_project_brief_from_round(_workspace, title, parsed)
             except Exception as exc:
                 logger.debug(f"[PROJECT] project brief update failed: {exc}")
@@ -8302,7 +8311,7 @@ async def _handle_stop_project(event: MindEvent):
     reason = str(payload.get("reason") or "selector chose to stop project execution").strip()
     if not title:
         try:
-            from ..project_state import get_active
+            from ..projects.project_state import get_active
             title = get_active(_workspace) or ""
         except Exception:
             title = ""
@@ -8311,13 +8320,13 @@ async def _handle_stop_project(event: MindEvent):
         logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
         return
     try:
-        from ..project_state import append_log, clear_active, set_project_status
+        from ..projects.project_state import append_log, clear_active, set_project_status
 
         set_project_status(_workspace, title, "waiting", reason)
         append_log(_workspace, title, f"STOP_PROJECT: {reason}")
         clear_active(_workspace, title)
         try:
-            from ..task_queue import TaskQueue
+            from ..tasks.task_queue import TaskQueue
 
             queue_path = os.path.join(_workspace, "state", "task_queue.json")
             completed = TaskQueue(queue_path).complete_matching_title(
@@ -8636,7 +8645,7 @@ def _is_new_idea_for_waiting_literature_project(project: str, idea: dict | None)
     if not idea:
         return False
     try:
-        from ..project_state import get_project_status
+        from ..projects.project_state import get_project_status
 
         status = get_project_status(_workspace, project)
     except Exception:
@@ -8657,7 +8666,7 @@ def _should_wake_waiting_literature_project(project: str, item: dict | None = No
     if not project:
         return True
     try:
-        from ..project_state import get_project_status
+        from ..projects.project_state import get_project_status
 
         status = get_project_status(_workspace, project)
     except Exception:
@@ -8810,8 +8819,7 @@ def _load_yaml_named_config(filename: str, defaults: dict) -> dict:
 
 
 def _read_repo_prompt(rel_path: str, fallback: str) -> str:
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    for path in (os.path.join(_workspace, rel_path), os.path.join(repo_root, rel_path)):
+    for path in (os.path.join(_workspace, rel_path), os.path.join(os.path.dirname(__file__), "..", rel_path)):
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -9256,16 +9264,13 @@ async def _generate_final_summary(
         (
             "用户原始请求：{user_message}\n\n"
             "任务执行步骤：\n{step_summary}\n\n"
-            "LLM验收结果：\n{check_result}\n\n"
-            "重试/降级历史：\n{retry_history}\n\n"
             "最终交付文件：\n{file_list}\n\n"
-            "请用一段友好、简洁的中文总结任务完成情况。直接输出结果，不要提及内部系统细节（重试、降级、波折、技术问题等）。输出纯文本，不要JSON。"
+            "请用一段友好、简洁的中文总结任务完成情况。输出纯文本，不要JSON。"
         ),
     )
 
     # Build step summary from task log
     step_summary = _build_step_summary(task_instance)
-    retry_history = _build_retry_history(task_instance)
     check_result_str = json.dumps(check_result, ensure_ascii=False, indent=2)
     file_list_str = "\n".join(f"- {os.path.basename(p)}" for p in (file_list or []))
 
@@ -9273,7 +9278,6 @@ async def _generate_final_summary(
         "{{user_message}}": str(user_message or getattr(task_instance, "user_message", "") or "")[:2000],
         "{{step_summary}}": step_summary[:3000],
         "{{check_result}}": check_result_str[:2000],
-        "{{retry_history}}": retry_history[:2000],
         "{{file_list}}": file_list_str[:2000],
     }
     for key, value in replacements.items():
@@ -9959,7 +9963,7 @@ async def _handle_cron_tick(event: MindEvent):
     except Exception as exc:
         logger.debug(f"[CRON] content patrol check failed: {exc}")
 
-    from ..project_state import recover_active_from_plan
+    from ..projects.project_state import recover_active_from_plan
     active_name = recover_active_from_plan(_workspace)
     digests = await _enqueue_open_content_digests(
         pool,
@@ -9970,8 +9974,8 @@ async def _handle_cron_tick(event: MindEvent):
         logger.info(f"[CRON] queued {digests} open content digest event(s)")
     if active_name:
         try:
-            from ..project_state import get_project_status, set_project_status
-            from ..project_registry import maybe_release_inactive_active_project
+            from ..projects.project_state import get_project_status, set_project_status
+            from ..projects.project_registry import maybe_release_inactive_active_project
             status = get_project_status(_workspace, active_name)
             inactive_hours = int(os.getenv("PARTNER_PUBLIC_RELEASE_AFTER_HOURS", "24") or "24")
             if maybe_release_inactive_active_project(_workspace, active_name, inactive_hours=inactive_hours):
@@ -10037,7 +10041,7 @@ async def _handle_cron_tick(event: MindEvent):
 async def _handle_memory_consolidate(event: MindEvent):
     """MemoryConsolidator: compact all project hot files and long-term memory."""
     try:
-        from ..project_state import consolidate_project_files
+        from ..projects.project_state import consolidate_project_files
         seen = set()
         for projects_dir in (
             os.path.join(_workspace, "projects"),
@@ -10174,7 +10178,7 @@ async def _handle_content_digest(event: MindEvent):
             )
         if bool(event.payload.get("stop_after_completion")):
             try:
-                from ..project_state import clear_active
+                from ..projects.project_state import clear_active
 
                 clear_active(_workspace, visible_title or project)
             except Exception as exc:
@@ -10229,7 +10233,7 @@ async def _handle_content_digest(event: MindEvent):
     if media_paths:
         vision_paths = list(media_paths)
         try:
-            from ..content_tools import split_image_for_vision
+            from ..knowledge.content_tools import split_image_for_vision
 
             segment_dir = os.path.join(_workspace, "system", "media", "vision_segments")
             segmented: list[str] = []
@@ -10264,7 +10268,7 @@ async def _handle_content_digest(event: MindEvent):
             content = ""
         if not content or _is_internal_fallback_text(content):
             try:
-                from ..content_tools import ocr_image_path
+                from ..knowledge.content_tools import ocr_image_path
 
                 parts = []
                 for path in vision_paths[:8]:
@@ -10319,7 +10323,7 @@ async def _handle_content_digest(event: MindEvent):
             "4. 下一步最小动作：把它转入项目验证队列，后续提取核心主张、证据类型、可核验来源和可能夸大点。"
         )
     try:
-        from ..research_memory import record_user_signal, record_episode
+        from ..knowledge.research_memory import record_user_signal, record_episode
         signal_kind = "user_idea" if intent in {"project_instruction", "project_reference"} else "external_learning"
         signal_project = project if signal_kind == "user_idea" else ""
         signal_text = content
@@ -10362,7 +10366,7 @@ async def _handle_content_digest(event: MindEvent):
         pool = await ensure_pool()
         should_wake_project = _should_wake_waiting_literature_project(project, item)
         try:
-            from ..project_state import get_project_status, set_project_status
+            from ..projects.project_state import get_project_status, set_project_status
 
             current_status = get_project_status(_workspace, project)
             if current_status in {"waiting", "done", "cooling_down"} and should_wake_project:
@@ -10499,7 +10503,7 @@ def _parse_patrol_items(raw: str) -> list[dict]:
 
 def get_active_project_name() -> str:
     try:
-        from ..project_state import get_active
+        from ..projects.project_state import get_active
         return get_active(_workspace) or ""
     except Exception:
         return ""
@@ -10517,7 +10521,7 @@ async def _handle_wake_up(event: MindEvent):
     logger.info(f"[WAKE_UP] 唤醒脉冲开始执行")
     _heartbeat_probe_ollama("wake_up")
 
-    from ..project_state import recover_active_from_plan
+    from ..projects.project_state import recover_active_from_plan
     active_name = recover_active_from_plan(_workspace)
     digests = await _enqueue_open_content_digests(
         pool,
@@ -10528,7 +10532,7 @@ async def _handle_wake_up(event: MindEvent):
         logger.info(f"[WAKE_UP] queued {digests} open content digest event(s)")
     if active_name:
         try:
-            from ..project_state import get_project_status, set_project_status
+            from ..projects.project_state import get_project_status, set_project_status
             status = get_project_status(_workspace, active_name)
             open_idea = get_open_idea(_workspace, active_name)
             if status in {"waiting", "done"}:

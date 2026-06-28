@@ -14,14 +14,14 @@ import subprocess
 import sys
 
 from .. import i18n
-from ..config import (
+from ..state.config import (
     load_partner_config_data,
     resolve_partner_config_path,
     save_partner_config_data,
     workspace_has_partner_config,
 )
-from ..instance_root import resolve_instance_workspace, resolve_partner_root
-from ..workspace_layout import ensure_instance_layout
+from ..monitoring.instance_root import resolve_instance_workspace, resolve_partner_root
+from ..workspace.workspace_layout import ensure_instance_layout
 from .common import (
     C_RESET, C_BOLD, C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_RED,
     _cli_txt, _print_kv, _fmt_bool, _fmt_optional,
@@ -540,7 +540,7 @@ def step_summary(config: dict):
 
 def cmd_onboard(args):
     """Run the guided setup wizard."""
-    from ..setup import find_workspace
+    from ..state.setup import find_workspace
 
     quick = getattr(args, "quick", False)
     skip_steps_raw = getattr(args, "skip", "") or ""

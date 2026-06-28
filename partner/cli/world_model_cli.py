@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-from ..config import resolve_partner_config_path, workspace_has_partner_config
+from ..state.config import resolve_partner_config_path, workspace_has_partner_config
 from ..world_model.client import WorldModelClient, load_world_model_config
 from .common import (
     C_RESET, C_BOLD, C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_RED,

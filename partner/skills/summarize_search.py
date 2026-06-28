@@ -160,12 +160,10 @@ def _fallback_extract(raw_text: str) -> dict[str, Any]:
 
 def _read_summarize_prompt(workspace: str, config: dict[str, Any]) -> str:
     """Read the summarize prompt template."""
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     rel_path = str(config.get("prompt_template", "prompts/summarize_search.txt"))
     for path in (
         os.path.join(workspace, rel_path),
-        os.path.join(repo_root, rel_path),
-        os.path.join(repo_root, "prompts", rel_path),
+        os.path.join(os.path.dirname(__file__), "..", rel_path),
     ):
         if os.path.exists(path):
             try:

@@ -68,7 +68,7 @@ def load_harness_config(workspace: str) -> JsonDict:
     ]
     # Also check workspace_root/config/ for the shared config
     try:
-        from partner.workspace_layout import workspace_root_from_instance
+        from partner.workspace.workspace_layout import workspace_root_from_instance
         root = workspace_root_from_instance(workspace)
         root_candidate = os.path.join(root, "config", "external_calls.yaml")
         if os.path.exists(root_candidate) and root_candidate not in candidates:

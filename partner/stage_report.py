@@ -89,7 +89,7 @@ def _save_state(workspace: str, state: dict[str, Any]) -> None:
 
 
 def _project_report_dir(workspace: str, project: str) -> str:
-    from .project_state import get_project_dir
+    from .projects.project_state import get_project_dir
 
     report_dir = os.path.join(get_project_dir(workspace, project), "reports")
     os.makedirs(report_dir, exist_ok=True)
@@ -131,7 +131,7 @@ def maybe_stage_report_objective(workspace: str, project: str, step: int) -> tup
     ts = _now().strftime("%Y%m%d_%H%M")
     path = os.path.join(_project_report_dir(workspace, project), f"stage_report_{ts}.md")
     try:
-        from .project_state import load_project_guardrail
+        from .projects.project_state import load_project_guardrail
 
         guardrail = load_project_guardrail(workspace, project)
     except Exception:
@@ -358,7 +358,7 @@ def _resolve_full_markdown_path(workspace: str, project: str, markdown_path: str
     if current and not _is_placeholder_report(current) and _section_count(current) >= 5:
         return markdown_path
 
-    from .project_state import get_project_dir
+    from .projects.project_state import get_project_dir
 
     candidates: list[tuple[int, str]] = []
     project_dir = get_project_dir(workspace, project)

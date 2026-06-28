@@ -216,6 +216,23 @@ async def _call_specialized_agent(
                     _output_dir = _candidate
                     break
     if _output_dir and os.path.isdir(_output_dir):
+        # First, list all output files for diagnostic visibility
+        _all_files = []
+        for _root, _dirs, _files in os.walk(_output_dir):
+            for _f in _files:
+                _fp = os.path.join(_root, _f)
+                try:
+                    _sz = os.path.getsize(_fp)
+                    _rel = os.path.relpath(_fp, _output_dir)
+                    _all_files.append(f"{_rel} ({_sz:,} bytes)")
+                except Exception:
+                    pass
+        if _all_files:
+            _enrich_blocks.append(
+                "【完整输出文件清单】\n" + "\n".join(sorted(_all_files)[:50])
+            )
+
+        # Specific structured data files (JSON)
         _structured_files = [
             "summary.json", "result.json",
             "data/summary.json", "data/result.json",
@@ -249,6 +266,33 @@ async def _call_specialized_agent(
                     )
             except Exception:
                 pass
+        # Also scan for markdown reports (cytobridge-agent produces report.md,
+        # pancreas_trajectory_report_v2.md, etc.)
+        # NOTE: Only include the HEADERS/structure of each report (~500 chars),
+        # NOT the full content. Including the full report confuses downstream
+        # LLM steps (they try to diff/review the existing report instead of
+        # generating a new one from the analysis data).
+        for _root, _dirs, _files in os.walk(_output_dir):
+            for _f in sorted(_files):
+                if not _f.endswith(".md"):
+                    continue
+                _fpath = os.path.join(_root, _f)
+                try:
+                    with open(_fpath, "r", encoding="utf-8", errors="replace") as _fh:
+                        _md_content = _fh.read(500)
+                    if len(_md_content) > 50:
+                        # Extract just the title/headers structure
+                        _title_lines = []
+                        for _line in _md_content.split("\n"):
+                            if _line.startswith("#") and _line.strip():
+                                _title_lines.append(_line.strip())
+                            if len(_title_lines) >= 10:
+                                break
+                        _enrich_blocks.append(
+                            f"【Agent 已有报告——{_f}】报告标题结构：\n" + "\n".join(_title_lines) if _title_lines else f"【Agent 已有报告——{_f}】（{os.path.getsize(_fpath)} bytes）"
+                        )
+                except Exception:
+                    pass
         # Figure listing
         _fig_dir = os.path.join(_output_dir, "figures")
         if os.path.isdir(_fig_dir):
@@ -297,12 +341,12 @@ def _build_task_prompt(task: str, *, allow_web: bool = False) -> str:
 def _make_adapter(agent: str, workspace: str):
     """Return the appropriate adapter for a general agent."""
     if agent == "hermes":
-        from ..adapter import HermesAdapter
+        from ..adapters.adapter import HermesAdapter
         return HermesAdapter(workspace)
     if agent == "openclaw":
-        from ..openclaw_adapter import OpenClawAdapter
+        from ..agents.openclaw_adapter import OpenClawAdapter
         return OpenClawAdapter(workspace)
     if agent == "codex":
-        from ..adapter import CodexAdapter
+        from ..adapters.adapter import CodexAdapter
         return CodexAdapter(workspace)
     raise RuntimeError(f"unsupported general agent backend: {agent}")

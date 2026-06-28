@@ -13,13 +13,13 @@ import sys
 from pathlib import Path
 
 from .. import i18n
-from ..config import (
+from ..state.config import (
     load_partner_config_data,
     resolve_partner_config_path,
     save_partner_config_data,
     workspace_has_partner_config,
 )
-from ..instance_root import resolve_instance_workspace, resolve_partner_root
+from ..monitoring.instance_root import resolve_instance_workspace, resolve_partner_root
 from .common import (
     C_RESET, C_BOLD, C_DIM, C_CYAN, C_GREEN, C_YELLOW, C_RED,
     _cli_txt, _fmt_bool, _fmt_optional, _print_kv, _print_commands, _print_help_menu,
@@ -40,13 +40,13 @@ from .common import (
 
 def cmd_setup(args):
     """Run first-time setup."""
-    from ..setup import interactive_setup
+    from ..state.setup import interactive_setup
     interactive_setup(quick=bool(getattr(args, "quick", False)))
 
 
 def cmd_status(args):
     """Check Partner status with full detail."""
-    from ..setup import show_status, find_workspace
+    from ..state.setup import show_status, find_workspace
     workspace = _resolve_runtime_workspace(args.workspace) or find_workspace()
     show_status(workspace)
 
@@ -65,7 +65,7 @@ def cmd_doctor(args):
     qq_ok = bool(workspace and os.path.exists(_resolve_qq_config(workspace)))
     hermes_ok = shutil.which("hermes") is not None
     try:
-        from ..setup import detect_openclaw
+        from ..state.setup import detect_openclaw
         openclaw_info = detect_openclaw()
         openclaw_ok = bool(openclaw_info.available)
     except Exception:
@@ -320,7 +320,7 @@ def cmd_update(args):
     print(f"{C_YELLOW}➜ Checking QQ bot...{C_RESET}")
     workspace = None
     try:
-        from ..setup import find_workspace as _fw
+        from ..state.setup import find_workspace as _fw
         workspace = _resolve_runtime_workspace(_fw())
     except Exception:
         pass
@@ -459,7 +459,7 @@ def cmd_update(args):
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
-                    from ..setup import interactive_setup
+                    from ..state.setup import interactive_setup
                     interactive_setup()
             except (EOFError, OSError):
                 pass
@@ -484,7 +484,7 @@ def cmd_update(args):
                 answer = _tty.readline().strip().lower()
                 if answer in ("", "y", "yes"):
                     print()
-                    from ..setup import interactive_setup
+                    from ..state.setup import interactive_setup
                     interactive_setup()
             except (EOFError, OSError):
                 print()
@@ -878,8 +878,11 @@ def build_parser() -> argparse.ArgumentParser:
     from .world_model_cli import register_subparser as register_world_model
     register_world_model(sub)
 
-    # tui
-    from .tui import register_subparser as register_tui
+    # tui — moved to shells/frontend/tui/
+    _shells_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'shells')
+    if _shells_dir not in sys.path:
+        sys.path.insert(0, _shells_dir)
+    from frontend.tui import register_subparser as register_tui
     register_tui(sub)
 
     # agent management

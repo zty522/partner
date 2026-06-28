@@ -44,12 +44,7 @@ class AgentRegistry:
         if os.path.isdir(builtin):
             dirs.append(builtin)
 
-        # 2. Global config agents directory (global_config/agents/ at project root)
-        global_agents = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "global_config", "agents")
-        if os.path.isdir(global_agents):
-            dirs.append(global_agents)
-
-        # 3. Workspace agents directory (instance level or root)
+        # 2. Workspace agents directory (instance level or root)
         if self._workspace:
             ws_agents = os.path.join(self._workspace, "config", "agents")
             if os.path.isdir(ws_agents):
@@ -62,7 +57,7 @@ class AgentRegistry:
                 if os.path.isdir(_root_agents) and _root_agents not in dirs:
                     dirs.append(_root_agents)
 
-        # 4. User-registered agents (~/.partner/agents/)
+        # 3. User-registered agents (~/.partner/agents/)
         user_dir = _get_user_manifest_dir()
         if os.path.isdir(user_dir):
             dirs.append(user_dir)

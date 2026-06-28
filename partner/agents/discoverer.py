@@ -117,10 +117,11 @@ def discover_and_register_agent(
                 "command": agent_name,
                 "subcommand": "",
                 "preamble_args": [],
-                "args": ["{input}", "-o", "{output}"],
+                "args": ["{input}", "-o", "{output}", "-q", "{question}"],
                 "timeout": 3600,
                 "inject_llm_credentials": False,
             },
+            "timeout": 3600,
             "health_check_cmd": f"{agent_name} --help",
         }
         # Save and return
@@ -138,7 +139,7 @@ def discover_and_register_agent(
     # ── Step 2: Binary not on PATH — try Hermes to search GitHub ──
 
     if adapter is None:
-        from ..adapter import HermesAdapter
+        from ..adapters.adapter import HermesAdapter
         adapter = HermesAdapter(workspace)
 
     # ── Prompt Hermes to search GitHub and analyze the agent ──
@@ -197,6 +198,7 @@ def discover_and_register_agent(
         manifest["endpoint_config"] = {}
     manifest["endpoint_config"].setdefault("command", agent_name)
     manifest["endpoint_config"].setdefault("timeout", 3600)
+    manifest.setdefault("timeout", manifest["endpoint_config"]["timeout"])
     manifest["endpoint_config"].setdefault("inject_llm_credentials", False)
     if "install_info" not in manifest:
         manifest["install_info"] = {"method": "pip", "package": agent_name}

@@ -130,11 +130,10 @@ class AcceptanceCriteriaGenerator:
 
     def _read_prompt(self, rel_path: str, fallback: str) -> str:
         """Read a prompt template from repo configs or workspaces."""
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         for path in (
             os.path.join(self.workspace, rel_path),
             os.path.join(self.workspace, "config", rel_path),
-            os.path.join(repo_root, "prompts", rel_path),
+            os.path.join(os.path.dirname(__file__), "..", "prompts", rel_path),
         ):
             if os.path.exists(path):
                 try:

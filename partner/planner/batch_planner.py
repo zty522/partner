@@ -58,10 +58,9 @@ def _load_yaml_config(workspace: str, filename: str, defaults: dict[str, Any]) -
 
 
 def _read_prompt_template(workspace: str, rel_path: str) -> str:
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     candidates = [
         os.path.join(workspace, rel_path),
-        os.path.join(repo_root, rel_path),
+        os.path.join(os.path.dirname(__file__), "..", rel_path),
     ]
     for path in candidates:
         if os.path.exists(path):

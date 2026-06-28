@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .workspace_layout import incoming_dir, uploads_dir
+from .workspace.workspace_layout import incoming_dir, uploads_dir
 
 
 KNOWN_EXTENSIONS = {

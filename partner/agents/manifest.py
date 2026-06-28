@@ -32,6 +32,12 @@ class AgentManifest:
     @classmethod
     def from_dict(cls, data: dict) -> 'AgentManifest':
         """Create manifest from a dictionary."""
+        # Resolve timeout: prefer top-level, fallback to endpoint_config.timeout,
+        # then to default 300. This handles manifests where auto-discovery
+        # stored timeout inside endpoint_config instead of at the top level.
+        _timeout = data.get("timeout")
+        if _timeout is None:
+            _timeout = dict(data.get("endpoint_config", {})).get("timeout", 300)
         return cls(
             name=data.get("name", ""),
             version=data.get("version", ""),
@@ -41,7 +47,7 @@ class AgentManifest:
             output_formats=list(data.get("output_formats", [])),
             endpoint_type=data.get("endpoint_type", "cli"),
             endpoint_config=dict(data.get("endpoint_config", {})),
-            timeout=int(data.get("timeout", 300)),
+            timeout=int(_timeout),
             health_check_cmd=str(data.get("health_check_cmd", "")),
             install_info=dict(data.get("install_info", {})),
         )

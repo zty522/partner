@@ -8,13 +8,13 @@ import sys
 from pathlib import Path
 
 from .. import i18n
-from ..config import (
+from ..state.config import (
     load_partner_config_data,
     resolve_partner_config_path,
     save_partner_config_data,
     workspace_has_partner_config,
 )
-from ..instance_root import resolve_instance_workspace, resolve_partner_root
+from ..monitoring.instance_root import resolve_instance_workspace, resolve_partner_root
 
 # ── Windows ──
 CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -287,7 +287,7 @@ def _save_global_cfg(cfg: dict):
 
 
 def _resolve_config_workspace(args) -> str | None:
-    from ..setup import find_workspace
+    from ..state.setup import find_workspace
     return getattr(args, "workspace", None) or _resolve_runtime_workspace(None) or find_workspace()
 
 
@@ -671,7 +671,7 @@ def _bot_start(workspace, platform, quiet=False):
 
 def _cmd_queue_clear(args):
     """Clear the task queue."""
-    from ..setup import find_workspace
+    from ..state.setup import find_workspace
     workspace = find_workspace()
     if not workspace:
         print("❌ Partner 未配置")
@@ -712,7 +712,7 @@ def _cmd_queue_clear(args):
 
 def _cmd_config_set(args):
     """Modify runtime configuration."""
-    from ..setup import find_workspace
+    from ..state.setup import find_workspace
     workspace = find_workspace()
     if not workspace:
         print("❌ Partner 未配置")

@@ -2769,7 +2769,7 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
         with open(source_path, "r", encoding="utf-8") as f:
             md_content = f.read()
         html_content = markdown.markdown(md_content, extensions=["extra", "codehilite", "tables"])
-        html_full = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        html_full = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><base href="{os.path.dirname(os.path.abspath(source_path))}/"><style>
 @font-face {{
     font-family: 'CJK Fallback';
     src: local('WenQuanYi Zen Hei'), local('SimHei'), local('Noto Sans CJK SC'), local('Noto Sans SC');
@@ -3214,7 +3214,7 @@ def _load_event_execution_config() -> dict[str, str]:
 
     config: dict[str, str] = {}
     candidates = [
-        os.path.join(os.path.dirname(__file__), "..", "..", "global_config", "event_execution.yaml"),
+        os.path.join(os.path.dirname(__file__), "..", "data", "event_execution.yaml"),
         os.path.join(os.path.expanduser("~"), ".partner", "event_execution.yaml"),
         os.path.join(os.path.expanduser("~"), ".partner", "config", "event_execution.yaml"),
     ]

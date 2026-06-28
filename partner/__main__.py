@@ -8,8 +8,8 @@ import sys
 import time
 from datetime import datetime
 
-from partner.instance_root import resolve_instance_workspace
-from partner.workspace_layout import append_history, ensure_instance_layout
+from partner.monitoring.instance_root import resolve_instance_workspace
+from partner.workspace.workspace_layout import append_history, ensure_instance_layout
 
 # Set UTF-8 encoding for cross-platform compatibility
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -67,18 +67,18 @@ def _run_instance_mode(argv: list[str]):
             except Exception:
                 pass
     try:
-        from partner.instance_lock import InstanceAlreadyRunning, acquire_instance_lock
+        from partner.monitoring.instance_lock import InstanceAlreadyRunning, acquire_instance_lock
 
         _instance_lock = acquire_instance_lock(workspace, args.instance_id)
     except InstanceAlreadyRunning as exc:
         print(f"Partner instance '{args.instance_id}' is already running; this duplicate start will exit. {exc}")
         return
 
-    from partner.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data, _config_root
-    from partner.core import Partner
+    from partner.state.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data, _config_root
+    from partner.core.core import Partner
     from partner.mind import set_file_push_callback, set_push_callback
-    from partner.qq_bot.qq_official_bridge import QQQfficialBridge, QQMessageType
-    from partner.restart_tracker import RestartTracker
+    from shells.frontend.qq_bot.qq_official_bridge import QQQfficialBridge, QQMessageType
+    from partner.monitoring.restart_tracker import RestartTracker
 
     tracker = RestartTracker(workspace)
     tracker.record_restart()
@@ -150,7 +150,7 @@ def _run_instance_mode(argv: list[str]):
             safe_name = os.path.basename(str(filename or "partner_file").strip()) or "partner_file"
             safe_name = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]+', "_", safe_name).strip(" ._") or "partner_file"
             stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
-            from partner.workspace_layout import outgoing_dir
+            from partner.workspace.workspace_layout import outgoing_dir
             out_dir = outgoing_dir(workspace)
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, stored_name)
@@ -197,7 +197,7 @@ def _run_instance_mode(argv: list[str]):
             if text.startswith("已停止「"):
                 return
             try:
-                from partner.workspace_manager import get_dialogue_path
+                from partner.workspace.workspace_manager import get_dialogue_path
                 fpath = get_dialogue_path(workspace)
                 ts = datetime.now().strftime("%H:%M:%S")
                 os.makedirs(os.path.dirname(fpath), exist_ok=True)

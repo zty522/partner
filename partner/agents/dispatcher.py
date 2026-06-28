@@ -9,6 +9,7 @@ Supports invocation methods:
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ from typing import Optional
 
 from .manifest import AgentManifest
 from .registry import AgentRegistry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -260,26 +263,42 @@ class AgentDispatcher:
         if subcommand:
             full_cmd.append(subcommand)
 
+        # Normalize parameter names: planner sometimes uses output_dir instead of output
+        if "output_dir" in all_vars and "output" not in all_vars:
+            all_vars["output"] = all_vars["output_dir"]
+        if "file_path" in all_vars and "input" not in all_vars:
+            all_vars["input"] = all_vars["file_path"]
+        if "query" in all_vars and "question" not in all_vars:
+            all_vars["question"] = all_vars["query"]
+
         # Substitute {placeholders} in args from task.parameters and context
         resolved_args = []
         for arg in args:
+            orig = arg
             for key, val in all_vars.items():
                 placeholder = "{" + key + "}"
                 if placeholder in arg:
                     arg = arg.replace(placeholder, str(val))
                     break
+            # Skip args with unresolved placeholders — the parameter wasn't
+            # provided by the planner, so passing '{param}' literally would
+            # confuse the CLI tool's argparser (e.g. -d {device} when the
+            # planner didn't pass device=cpu).
+            if arg != orig and "{" in arg and "}" in arg:
+                # Partial substitution left other placeholders — skip.
+                # Also pop the preceding flag arg if this looks like a value.
+                if resolved_args and resolved_args[-1].startswith("-"):
+                    resolved_args.pop()
+                logger.debug("[DISPATCH] Skipping unresolved arg: %s", orig)
+                continue
+            if "{" in arg and "}" in arg and arg == orig:
+                # No substitution happened at all — literal placeholder.
+                # Skip and also pop the preceding flag if any.
+                if resolved_args and resolved_args[-1].startswith("-"):
+                    resolved_args.pop()
+                logger.debug("[DISPATCH] Skipping unresolved placeholder: %s", orig)
+                continue
             resolved_args.append(arg)
-        # Normalize {output} placeholder: if output path is a directory (no filename),
-        # append a default output filename so tools like pandoc don't try to write
-        # to a directory path.
-        for i, _arg in enumerate(resolved_args):
-            if "{output}" in str(args[i]) if i < len(args) else False:
-                _out_val = resolved_args[i]
-                if _out_val and os.path.isdir(_out_val):
-                    resolved_args[i] = os.path.join(_out_val, "output.pdf")
-                elif _out_val and not os.path.splitext(_out_val)[1]:
-                    # No extension — likely a directory path
-                    resolved_args[i] = os.path.join(_out_val, "output.pdf")
         full_cmd.extend(resolved_args)
 
         # Append the task text as final positional arg (skip for "run" subcommand
@@ -386,7 +405,7 @@ class AgentDispatcher:
         _provider_from_config = None
         _base_url_from_config = None
         try:
-            from ..agent_config_sync import desired_hermes_model_config
+            from ..adapters.agent_config_sync import desired_hermes_model_config
             config = desired_hermes_model_config(cwd)
             if config.get("model") and "__llm_model__" not in all_vars:
                 all_vars["__llm_model__"] = config["model"]
@@ -400,7 +419,7 @@ class AgentDispatcher:
         # Also try reading from Partner's agent API config
         try:
             ws_dir = task.context.get("working_dir", "") or os.getcwd()
-            from ..agent_config_sync import desired_hermes_model_config
+            from ..adapters.agent_config_sync import desired_hermes_model_config
             config = desired_hermes_model_config(ws_dir)
             if config.get("api_key") and not env.get("OPENAI_API_KEY"):
                 env["OPENAI_API_KEY"] = config["api_key"]
@@ -425,6 +444,62 @@ class AgentDispatcher:
             "parameters": task.parameters,
             "context": task.context,
         })
+
+        # ── Pre-flight: clear stale agent runtime sessions ──
+        # Cytobridge-agent (cellcompass) persists sessions in
+        # ~/.cellcompass/runtime_sessions.json.  Stale sessions from
+        # killed/crashed runs cause "Connection error" on next invocation
+        # because the agent tries to recover a corrupted session.
+        # Clear these files before each dispatch so the agent starts fresh.
+        _cellcompass_dir = os.path.expanduser("~/.cellcompass")
+        _session_file = os.path.join(_cellcompass_dir, "runtime_sessions.json")
+        if os.path.isfile(_session_file):
+            try:
+                with open(_session_file, "w") as _sf:
+                    json.dump({"sessions": {}, "updated_at": "", "schema_version": 1}, _sf)
+                logger.debug("[DISPATCH] Cleared %s for fresh start", _session_file)
+            except Exception:
+                pass
+        _conv_dir = os.path.join(_cellcompass_dir, "conversations")
+        if os.path.isdir(_conv_dir):
+            try:
+                for _f in os.listdir(_conv_dir):
+                    _fp = os.path.join(_conv_dir, _f)
+                    if os.path.isfile(_fp):
+                        os.remove(_fp)
+                logger.debug("[DISPATCH] Cleared %s conversations for fresh start", _conv_dir)
+            except Exception:
+                pass
+
+        # ── Pre-flight: kill existing agent process for the same output dir ──
+        # If a previous dispatch to the same agent with the same output
+        # directory is still running, kill it. Two concurrent agents writing
+        # to the same output dir corrupt each other's files.
+        _output_path = str(task.parameters.get("output") or task.parameters.get("output_dir") or "")
+        if _output_path and os.path.isdir(os.path.dirname(_output_path) if not os.path.isdir(_output_path) else _output_path):
+            import subprocess as _sp_kill
+            _my_pid = str(os.getpid())
+            try:
+                _ps = _sp_kill.run(
+                    ["ps", "aux"], capture_output=True, text=True, timeout=10
+                )
+                for _line in _ps.stdout.splitlines():
+                    if command.split()[0] not in _line:
+                        continue
+                    if _my_pid in _line:
+                        continue
+                    if _output_path not in _line:
+                        continue
+                    _parts = _line.split()
+                    if len(_parts) >= 2:
+                        try:
+                            _old_pid = int(_parts[1])
+                            os.kill(_old_pid, 15)  # SIGTERM
+                            logger.warning("[DISPATCH] Killed stale agent PID=%d for output=%s", _old_pid, _output_path)
+                        except (ProcessLookupError, ValueError):
+                            pass
+            except Exception:
+                pass
 
         try:
             r = subprocess.run(
