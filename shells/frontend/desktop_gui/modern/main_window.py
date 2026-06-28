@@ -105,13 +105,13 @@ class ModernMainWindow(QMainWindow):
 
     def _check_first_run(self):
         """Detect first run and show setup wizard if needed."""
-        from partner.state.config import workspace_has_partner_config
-        config_exists = workspace_has_partner_config(self._workspace_path)
-        if config_exists:
+        # Check if config/partner_config.json exists in workspace directly
+        # (avoid importing partner.state which PyInstaller can't bundle)
+        config_path = os.path.join(self._workspace_path, "config", "partner_config.json")
+        if os.path.exists(config_path):
             return  # Already configured
 
-        # Also check fallback: if .partner_workspace pointer exists but
-        # workspace hasn't been set up yet, we still show the wizard
+        # Also check fallback
         self._show_first_run_wizard()
 
     def _show_first_run_wizard(self):
@@ -289,10 +289,11 @@ class ModernMainWindow(QMainWindow):
             return
 
         # Create workspace directory structure
-        os.makedirs(os.path.join(ws, "config"), exist_ok=True)
+        config_dir = os.path.join(ws, "config")
+        os.makedirs(config_dir, exist_ok=True)
         os.makedirs(os.path.join(ws, "instances"), exist_ok=True)
 
-        # Save LLM API config
+        # Build partner_config.json directly (no partner.state imports needed)
         reverse_map = {"DeepSeek": "deepseek", "OpenAI": "openai", "自定义": "custom"}
         provider_raw = self._wizard_provider.currentText()
         api_key = self._wizard_api_key.text().strip()
@@ -311,12 +312,16 @@ class ModernMainWindow(QMainWindow):
             "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
             "name": "Partner",
         }
-        from partner.state.config import save_partner_config_data
-        save_partner_config_data(ws, partner_cfg)
+        with open(os.path.join(config_dir, "partner_config.json"), "w", encoding="utf-8") as f:
+            json.dump(partner_cfg, f, indent=2, ensure_ascii=False)
 
-        # Write pointer file
-        from partner.state.setup import save_workspace_pointer
-        save_workspace_pointer(ws)
+        # Write ~/.partner_workspace pointer file
+        pointer_path = os.path.join(str(Path.home()), ".partner_workspace")
+        try:
+            with open(pointer_path, "w") as f:
+                f.write(ws)
+        except OSError:
+            pass
 
         # Update workspace and reload
         self._workspace_path = ws
