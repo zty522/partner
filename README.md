@@ -92,9 +92,12 @@ GUI 对话界面（展示实例管理、对话记录和实时轮询）：
 
 长流程测试结果对比（test1 全流程 / test2 特定场景）：
 
-| 测试结果 1 | 测试结果 2 |
-|:----------:|:----------:|
-| ![Test1](assets/test1.png) | ![Test2](assets/test2.png) |
+<table>
+  <tr>
+    <td align="center" valign="top"><img src="assets/test1.png" alt="Test1"></td>
+    <td align="center" valign="top"><img src="assets/test2.png" alt="Test2"></td>
+  </tr>
+</table>
 
 ---
 
