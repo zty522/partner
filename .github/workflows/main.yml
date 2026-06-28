@@ -48,20 +48,35 @@ jobs:
       - name: Build Inno Setup installer
         shell: pwsh
         run: |
-          $issFile = "shells/partner_installer.iss"
-          if (Test-Path $issFile) {
-            if (Test-Path env:ISCC_PATH) {
-              & $env:ISCC_PATH $issFile
-              echo "✅ Installer built"
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          $issFile = Resolve-Path "shells/partner_installer.iss"
+          $isccPaths = @(
+            "ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
+          )
+          $iscc = $null
+          foreach ($p in $isccPaths) {
+            $cmd = Get-Command $p -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source; break }
+            if (Test-Path $p) { $iscc = $p; break }
+          }
+          if ($iscc) {
+            Write-Host "ISCC: $iscc"
+            Write-Host "ISS:  $issFile"
+            $output = & $iscc $issFile 2>&1
+            $exitCode = $LASTEXITCODE
+            Write-Host $output -Separator "`n"
+            if ($exitCode -ne 0) {
+              Write-Host "⚠ ISCC failed, falling back to raw EXE upload"
+              Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
             } else {
-              echo "⚠ ISCC.exe not available, renaming raw EXE instead"
-              $ver = "${{ github.ref_name }}".TrimStart('v')
-              Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe"
+              Write-Host "✅ Installer built"
             }
           } else {
-            echo "⚠ No ISS file found, renaming raw EXE instead"
-            $ver = "${{ github.ref_name }}".TrimStart('v')
-            Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe"
+            Write-Host "⚠ ISCC not found, renaming raw EXE"
+            Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
           }
       - name: List dist output
         shell: pwsh
