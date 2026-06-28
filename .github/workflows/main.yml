@@ -15,27 +15,59 @@ jobs:
       - name: Install dependencies
         shell: pwsh
         run: python -m pip install pyinstaller PySide6 -e .
-      - name: Build desktop app
+      - name: Build desktop app (PyInstaller)
         shell: pwsh
         run: |
           python -m PyInstaller shells/partner_windows.spec --clean --noconfirm
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          # Download and install Inno Setup 6 (silent)
+          $isccUrl = "https://jrsoftware.org/download.php/isp.exe"
+          $installer = "$env:TEMP\innosetup.exe"
+          # Try Chocolatey first (faster if cached)
+          $choco = Get-Command choco -ErrorAction SilentlyContinue
+          if ($choco) {
+            choco install innosetup -y --no-progress
+          } else {
+            # Fallback: direct download
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $isccUrl -OutFile $installer -UseBasicParsing
+            Start-Process -FilePath $installer -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$env:ProgramFiles\Inno Setup 6`"" -Wait -NoNewWindow
+          }
+          # Verify ISCC is available
+          $iscc = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $iscc = Get-Command "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue
+          }
+          if ($iscc) {
+            echo "ISCC_PATH=$($iscc.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            echo "ISCC not found after install, will skip installer build"
+          }
+      - name: Build Inno Setup installer
+        shell: pwsh
+        run: |
+          $issFile = "shells/partner_installer.iss"
+          if (Test-Path $issFile) {
+            if (Test-Path env:ISCC_PATH) {
+              & $env:ISCC_PATH $issFile
+              echo "✅ Installer built"
+            } else {
+              echo "⚠ ISCC.exe not available, renaming raw EXE instead"
+              $ver = "${{ github.ref_name }}".TrimStart('v')
+              Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe"
+            }
+          } else {
+            echo "⚠ No ISS file found, renaming raw EXE instead"
+            $ver = "${{ github.ref_name }}".TrimStart('v')
+            Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe"
+          }
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
-      - name: Prepare release assets
-        shell: pwsh
-        run: |
-          # Rename EXE to include version
-          $ver = "${{ github.ref_name }}".TrimStart('v')
-          if (Test-Path dist/Partner.exe) {
-            Copy-Item dist/Partner.exe "dist/Partner-$ver.exe"
-          }
-          if (Test-Path dist/Partner_Setup.exe) {
-            Copy-Item dist/Partner_Setup.exe "dist/Partner-$ver-Setup.exe"
-          }
-      - name: Upload release assets
+      - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/Partner-*.exe
+          files: dist/Partner-*-Setup.exe
           overwrite_files: true

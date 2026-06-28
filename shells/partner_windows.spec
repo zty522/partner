@@ -26,22 +26,6 @@ a = Analysis(
         'PySide6.QtCore',
         'PySide6.QtGui',
         'PySide6.QtWidgets',
-        # Core Partner package tree (needed for runtime imports)
-        'partner',
-        'partner.state',
-        'partner.state.config',
-        'partner.state.setup',
-        'partner.monitoring',
-        'partner.monitoring.instance_root',
-        'partner.cli',
-        'partner.cli.common',
-        'partner.workspace',
-        'partner.workspace.workspace_layout',
-        'partner.file_tools',
-        'partner.mind',
-        'partner.mind.event_types',
-        'partner.mind.harness',
-        'partner.stage_report',
         # Modern GUI (in shells/frontend/desktop_gui/)
         'frontend.desktop_gui',
         'frontend.desktop_gui.modern',
@@ -63,6 +47,19 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+
+# --- Collect ALL partner submodules (deep tree) ---
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
+
+# Add every submodule of partner package to ensure nothing is missed
+_partner_mods = collect_submodules('partner')
+for mod in _partner_mods:
+    if mod not in a.hiddenimports:
+        a.hiddenimports.append(mod)
+
+# Also collect partner data and binaries
+a.datas += collect_data_files('partner')
+a.binaries += collect_dynamic_libs('partner')
 
 pyz = PYZ(a.pure)
 
