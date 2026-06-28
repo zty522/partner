@@ -71,10 +71,32 @@ def _read_pointer(path: Path) -> str:
         return ""
 
 
+def _windows_to_wsl(path: str) -> str:
+    """Convert E:\\work -> /mnt/e/work (for cross-platform pointer resolution on WSL)."""
+    if not path:
+        return path
+    clean = path.replace("\\", "/")
+    if len(clean) >= 2 and clean[1] == ":":
+        drive = clean[0].lower()
+        rest = clean[2:]  # includes the leading /
+        return f"/mnt/{drive}{rest}"
+    return path
+
+
 def _normalize_pointer_path(pointed: str) -> str:
-    """Convert WSL-style paths to Windows paths when running on Windows."""
-    if os.name == "nt" and pointed.startswith("/mnt/"):
-        return _wsl_to_windows(pointed)
+    """Normalize pointer paths across Windows/WSL boundaries.
+
+    On Windows:  /mnt/e/work/...  ->  E:\\work\\...
+    On WSL:      E:\\work\\...      ->  /mnt/e/work/...
+    """
+    normalized = pointed.replace("\\", "/")
+    if os.name == "nt":
+        if normalized.startswith("/mnt/"):
+            return _wsl_to_windows(pointed)
+        return pointed
+    # WSL / Linux: if pointer contains Windows-style path, convert to /mnt/...
+    if normalized and normalized[1] == ":":
+        return _windows_to_wsl(pointed)
     return pointed
 
 
