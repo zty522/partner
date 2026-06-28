@@ -49,17 +49,16 @@ a = Analysis(
 )
 
 # --- Collect ALL partner submodules (deep tree) ---
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_submodules
 
 # Add every submodule of partner package to ensure nothing is missed
 _partner_mods = collect_submodules('partner')
 for mod in _partner_mods:
+    # Skip world_model submodules for now (requires httpx not in CI)
+    if mod.startswith('partner.world_model'):
+        continue
     if mod not in a.hiddenimports:
         a.hiddenimports.append(mod)
-
-# Also collect partner data and binaries
-a.datas += collect_data_files('partner')
-a.binaries += collect_dynamic_libs('partner')
 
 pyz = PYZ(a.pure)
 
