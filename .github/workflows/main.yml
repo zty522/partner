@@ -19,65 +19,12 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller shells/partner_windows.spec --clean --noconfirm
-      - name: Install Inno Setup
-        shell: pwsh
-        run: |
-          # Download and install Inno Setup 6 (silent)
-          $isccUrl = "https://jrsoftware.org/download.php/isp.exe"
-          $installer = "$env:TEMP\innosetup.exe"
-          # Try Chocolatey first (faster if cached)
-          $choco = Get-Command choco -ErrorAction SilentlyContinue
-          if ($choco) {
-            choco install innosetup -y --no-progress
-          } else {
-            # Fallback: direct download
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -Uri $isccUrl -OutFile $installer -UseBasicParsing
-            Start-Process -FilePath $installer -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$env:ProgramFiles\Inno Setup 6`"" -Wait -NoNewWindow
-          }
-          # Verify ISCC is available
-          $iscc = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
-          if (-not $iscc) {
-            $iscc = Get-Command "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" -ErrorAction SilentlyContinue
-          }
-          if ($iscc) {
-            echo "ISCC_PATH=$($iscc.Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            echo "ISCC not found after install, will skip installer build"
-          }
-      - name: Build Inno Setup installer
+      - name: Rename EXE for release
         shell: pwsh
         run: |
           $ver = "${{ github.ref_name }}".TrimStart('v')
-          $issFile = Resolve-Path "shells/partner_installer.iss"
-          $isccPaths = @(
-            "ISCC.exe",
-            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
-            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-            "${env:ProgramFiles}\Inno Setup 7\ISCC.exe"
-          )
-          $iscc = $null
-          foreach ($p in $isccPaths) {
-            $cmd = Get-Command $p -ErrorAction SilentlyContinue
-            if ($cmd) { $iscc = $cmd.Source; break }
-            if (Test-Path $p) { $iscc = $p; break }
-          }
-          if ($iscc) {
-            Write-Host "ISCC: $iscc"
-            Write-Host "ISS:  $issFile"
-            $output = & $iscc $issFile 2>&1
-            $exitCode = $LASTEXITCODE
-            Write-Host $output -Separator "`n"
-            if ($exitCode -ne 0) {
-              Write-Host "⚠ ISCC failed, falling back to raw EXE upload"
-              Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
-            } else {
-              Write-Host "✅ Installer built"
-            }
-          } else {
-            Write-Host "⚠ ISCC not found, renaming raw EXE"
-            Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
-          }
+          Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
+          Write-Host "✅ EXE ready: Partner-$ver-Setup.exe"
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
