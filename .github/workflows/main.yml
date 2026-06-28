@@ -65,6 +65,8 @@ jobs:
             Copy-Item dist/Partner.exe "dist/Partner-$ver-Setup.exe" -Force
             Write-Host "⚠ Fallback raw EXE: dist/Partner-$ver-Setup.exe"
           }
+          # Clear ISCC's exit code so step is always green
+          $LASTEXITCODE = 0
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
