@@ -36,9 +36,6 @@ from partner.monitoring.instance_root import (
     resolve_global_config_path,
     resolve_instances_dir,
 )
-from partner.state.config import workspace_has_partner_config, save_partner_config_data
-from partner.state.setup import save_workspace_pointer
-
 from .theme import THEME, get_default_font, generate_stylesheet
 from .pages import (
     ChatPage,
@@ -108,7 +105,7 @@ class ModernMainWindow(QMainWindow):
 
     def _check_first_run(self):
         """Detect first run and show setup wizard if needed."""
-        # Check if config/partner_config.json exists in workspace
+        from partner.state.config import workspace_has_partner_config
         config_exists = workspace_has_partner_config(self._workspace_path)
         if config_exists:
             return  # Already configured
@@ -314,9 +311,11 @@ class ModernMainWindow(QMainWindow):
             "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
             "name": "Partner",
         }
+        from partner.state.config import save_partner_config_data
         save_partner_config_data(ws, partner_cfg)
 
         # Write pointer file
+        from partner.state.setup import save_workspace_pointer
         save_workspace_pointer(ws)
 
         # Update workspace and reload
