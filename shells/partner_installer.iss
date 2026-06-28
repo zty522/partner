@@ -45,8 +45,10 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName}"; Flags: now
 
 [Code]
 var
-  WorkspacePage: TInputDirWizardPage;
-  CreateWorkspaceCheck: TCheckBox;
+  WorkspacePage: TWizardPage;
+  WsEdit: TEdit;
+  WsBrowseBtn: TButton;
+  CreateDirsCheck: TCheckBox;
 
 function GetUserProfileDir: string;
 begin
@@ -55,39 +57,84 @@ begin
     Result := ExpandConstant('{userappdata}\..\..');
 end;
 
+procedure BrowseWsDir(Sender: TObject);
+var
+  Dir: string;
+begin
+  Dir := '';
+  if BrowseForFolder('Select workspace directory:', Dir, False, WsEdit.Text) then
+    WsEdit.Text := Dir;
+end;
+
 procedure InitializeWizard;
+var
+  DescLabel: TLabel;
+  EditLabel: TLabel;
 begin
   { Page order:
       1. Welcome
-      2. Select Destination Location  (where to install Partner.exe)
-      3. Select Tasks                  (shortcut options)
-      4. Workspace Directory           (where to store instance data) ← HERE }
-  WorkspacePage := CreateInputDirPage(
+      2. Select Destination Location  (app install: C:\Program Files\Partner)
+      3. Select Tasks                  (desktop shortcut)
+      4. Workspace Directory           (instance data) ← THIS PAGE }
+  WorkspacePage := CreateCustomPage(
     wpSelectTasks,
     'Workspace Directory',
-    'Where should Partner store instance data and conversation logs?',
-    'This is NOT the program installation location (that was on the previous page). '
-    + 'Select or create a workspace folder for your instance data.',
-    False,
-    'New Folder'
+    'Where should Partner store instance data and conversation logs?'
   );
 
-  WorkspacePage.Add('');
-  WorkspacePage.Values[0] := GetUserProfileDir() + '\partner_workspace';
+  { Description text }
+  DescLabel := TLabel.Create(WorkspacePage);
+  DescLabel.Parent := WorkspacePage.Surface;
+  DescLabel.Left := 0;
+  DescLabel.Top := 0;
+  DescLabel.Width := WorkspacePage.SurfaceWidth;
+  DescLabel.Height := 40;
+  DescLabel.WordWrap := True;
+  DescLabel.Caption := 'This is where Partner keeps instance data, configs and conversation logs.'
+    + #13#10 + 'This is NOT the program installation location (that was on the previous page).';
+
+  { "Workspace path:" label }
+  EditLabel := TLabel.Create(WorkspacePage);
+  EditLabel.Parent := WorkspacePage.Surface;
+  EditLabel.Left := 0;
+  EditLabel.Top := 56;
+  EditLabel.Width := 100;
+  EditLabel.Height := 16;
+  EditLabel.Caption := 'Workspace path:';
+
+  { Path edit field }
+  WsEdit := TEdit.Create(WorkspacePage);
+  WsEdit.Parent := WorkspacePage.Surface;
+  WsEdit.Left := 0;
+  WsEdit.Top := 74;
+  WsEdit.Width := WorkspacePage.SurfaceWidth - 90;
+  WsEdit.Height := 23;
+  WsEdit.Text := GetUserProfileDir() + '\partner_workspace';
+
+  { Browse button }
+  WsBrowseBtn := TButton.Create(WorkspacePage);
+  WsBrowseBtn.Parent := WorkspacePage.Surface;
+  WsBrowseBtn.Left := WsEdit.Left + WsEdit.Width + 6;
+  WsBrowseBtn.Top := WsEdit.Top - 1;
+  WsBrowseBtn.Width := 80;
+  WsBrowseBtn.Height := 25;
+  WsBrowseBtn.Caption := 'Browse...';
+  WsBrowseBtn.OnClick := @BrowseWsDir;
 
   { Auto-create checkbox }
-  CreateWorkspaceCheck := TCheckBox.Create(WorkspacePage);
-  CreateWorkspaceCheck.Caption := 'Auto-create config/ and instances/ subdirectories';
-  CreateWorkspaceCheck.Checked := True;
-  CreateWorkspaceCheck.Top := 100;
-  CreateWorkspaceCheck.Left := 0;
-  CreateWorkspaceCheck.Width := WorkspacePage.SurfaceWidth;
-  CreateWorkspaceCheck.Parent := WorkspacePage.Surface;
+  CreateDirsCheck := TCheckBox.Create(WorkspacePage);
+  CreateDirsCheck.Parent := WorkspacePage.Surface;
+  CreateDirsCheck.Left := 0;
+  CreateDirsCheck.Top := 112;
+  CreateDirsCheck.Width := WorkspacePage.SurfaceWidth;
+  CreateDirsCheck.Height := 20;
+  CreateDirsCheck.Caption := 'Auto-create config/ and instances/ subdirectories';
+  CreateDirsCheck.Checked := True;
 end;
 
 function GetWorkspacePath(): string;
 begin
-  Result := WorkspacePage.Values[0];
+  Result := Trim(WsEdit.Text);
 end;
 
 procedure WriteWorkspacePointer(WorkspacePath: string);
@@ -101,7 +148,7 @@ end;
 
 procedure CreateWorkspaceDirs(WorkspacePath: string);
 begin
-  if CreateWorkspaceCheck.Checked then
+  if CreateDirsCheck.Checked then
   begin
     ForceDirectories(WorkspacePath + '\config');
     ForceDirectories(WorkspacePath + '\instances');
