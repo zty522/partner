@@ -22,8 +22,20 @@ jobs:
       - name: List dist output
         shell: pwsh
         run: Get-ChildItem dist/ -Recurse
-      - name: Upload EXE
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          # Rename EXE to include version
+          $ver = "${{ github.ref_name }}".TrimStart('v')
+          if (Test-Path dist/Partner.exe) {
+            Copy-Item dist/Partner.exe "dist/Partner-$ver.exe"
+          }
+          if (Test-Path dist/Partner_Setup.exe) {
+            Copy-Item dist/Partner_Setup.exe "dist/Partner-$ver-Setup.exe"
+          }
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Partner.exe
+          files: |
+            dist/Partner-*.exe
           overwrite_files: true
