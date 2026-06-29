@@ -1986,8 +1986,10 @@ class ChatPage(QWidget):
             self._update_loading_elapsed(elapsed)
 
             if elapsed > 120:
+                bot_help = ("[响应超时 - 未收到回复]\n"
+                           "请确认 Partner Bot 正在运行（在 WSL 中执行 partner bot start）")
                 self._replace_loading_with_reply(
-                    "[\u54cd\u5e94\u8d85\u65f6 - \u672a\u6536\u5230\u56de\u590d]",
+                    bot_help,
                     datetime.now().isoformat(),
                     self._selected_instance_id or ""
                 )

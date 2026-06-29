@@ -57,16 +57,15 @@ end;
 procedure InitializeWizard;
 begin
   { Page order:
-      1. Welcome
-      2. Select Destination Location  ← Partner.exe install location
-      3. Select Tasks                  ← desktop shortcut
-      4. Workspace Directory           ← instance data location }
+      1. Workspace Directory           ← first, so user sets data path early
+      2. Select Destination Location    ← app install
+      3. Select Tasks                   ← shortcut }
   WorkspacePage := CreateInputDirPage(
-    wpSelectTasks,
+    wpWelcome,
     'Workspace Directory',
     'Where should Partner store instance data, configs and conversation logs?',
-    'This is NOT the program installation directory (that was on the previous page).'
-    + ' Select a folder on any drive with sufficient space.',
+    'You will choose the program installation location on the NEXT page.'
+    + ' Here, select or create a folder for your workspace data.',
     False,
     'New Folder'
   );
