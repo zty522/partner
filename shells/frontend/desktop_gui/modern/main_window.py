@@ -37,6 +37,7 @@ from partner.monitoring.instance_root import (
     resolve_instances_dir,
 )
 from .theme import THEME, get_default_font, generate_stylesheet
+from .utils.local_config import load_local_config, save_local_config
 from .pages import (
     ChatPage,
     InstancesPage,
@@ -65,10 +66,18 @@ class ModernMainWindow(QMainWindow):
 
     def __init__(self, workspace_path: str | None = None, app: QApplication | None = None):
         super().__init__()
-        self._workspace_path = workspace_path or str(resolve_partner_root())
         self._app = app
         self._sidebar_expanded = True
         self._nav_buttons: list[QPushButton] = []
+
+        # Load local config (persistent user preferences)
+        self._local_cfg = load_local_config()
+        self._workspace_path = (
+            workspace_path
+            or self._local_cfg.get("last_workspace_path")
+            or self._local_cfg.get("default_workspace_path")
+            or str(resolve_partner_root())
+        )
 
         self.setWindowTitle("Partner")
         self.setMinimumSize(1200, 800)
@@ -104,232 +113,19 @@ class ModernMainWindow(QMainWindow):
     # ── First-run setup wizard ──────────────────────────────────────────
 
     def _check_first_run(self):
-        """Detect first run and show setup wizard if needed."""
-        # Check if config/partner_config.json exists in workspace directly
-        # (avoid importing partner.state which PyInstaller can't bundle)
-        config_path = os.path.join(self._workspace_path, "config", "partner_config.json")
-        if os.path.exists(config_path):
-            return  # Already configured
-
-        # Also check fallback
-        self._show_first_run_wizard()
-
-    def _show_first_run_wizard(self):
-        """Show the first-run setup wizard dialog."""
-        from PySide6.QtWidgets import (
-            QDialog, QDialogButtonBox
-        )
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("欢迎使用 Partner")
-        dialog.setMinimumSize(600, 450)
-        dialog.resize(640, 480)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        # Title
-        title = QLabel("🤝 欢迎使用 Partner")
-        title.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {THEME.accent};")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        subtitle = QLabel("您的 AI 研究助手 · 首次配置")
-        subtitle.setStyleSheet(f"font-size: 13px; color: {THEME.txt2};")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(subtitle)
-
-        layout.addSpacing(12)
-
-        # Workspace path
-        ws_label = QLabel("工作区路径（存放实例数据与配置）")
-        ws_label.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {THEME.txt};")
-        layout.addWidget(ws_label)
-
-        ws_row = QWidget()
-        ws_row.setStyleSheet("background: transparent;")
-        ws_row_layout = QHBoxLayout(ws_row)
-        ws_row_layout.setContentsMargins(0, 0, 0, 0)
-
-        from pathlib import Path as _Path
-        default_ws = str(_Path.home() / "partner_workspace")
-        self._wizard_ws_edit = QLineEdit(self._workspace_path if os.path.exists(self._workspace_path) else default_ws)
-        self._wizard_ws_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {THEME.input_bg};
-                color: {THEME.txt};
-                border: 1px solid {THEME.border};
-                border-radius: 8px;
-                padding: 8px 12px;
-                font-size: 13px;
-            }}
-        """)
-        ws_row_layout.addWidget(self._wizard_ws_edit, 1)
-
-        browse_btn = QPushButton("浏览")
-        browse_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt};
-                border: 1px solid {THEME.border};
-                border-radius: 8px;
-                padding: 8px 16px;
-                font-size: 13px;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                border-color: {THEME.accent};
-                color: {THEME.accent};
-            }}
-        """)
-        browse_btn.clicked.connect(lambda: self._wizard_browse_workspace(dialog))
-        ws_row_layout.addWidget(browse_btn)
-        layout.addWidget(ws_row)
-
-        layout.addSpacing(8)
-
-        # LLM API section (collapsible)
-        api_label = QLabel("配置 LLM API（可选，也可在设置页中配置）")
-        api_label.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {THEME.txt};")
-        layout.addWidget(api_label)
-
-        form = QFormLayout()
-        form.setSpacing(8)
-
-        self._wizard_provider = QComboBox()
-        self._wizard_provider.addItems(["DeepSeek", "OpenAI", "自定义"])
-        form.addRow("Provider:", self._wizard_provider)
-
-        self._wizard_api_key = QLineEdit()
-        self._wizard_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._wizard_api_key.setPlaceholderText("sk-... (留空可跳过)")
-        form.addRow("API Key:", self._wizard_api_key)
-
-        self._wizard_model = QComboBox()
-        self._wizard_model.setEditable(True)
-        self._wizard_model.addItems(["deepseek-chat", "deepseek-reasoner", "gpt-4o"])
-        self._wizard_model.setCurrentText("deepseek-chat")
-        form.addRow("默认模型:", self._wizard_model)
-
-        self._wizard_base_url = QLineEdit()
-        self._wizard_base_url.setPlaceholderText("https://api.deepseek.com/v1")
-        self._wizard_base_url.setText("https://api.deepseek.com/v1")
-        form.addRow("Base URL:", self._wizard_base_url)
-
-        layout.addLayout(form)
-        layout.addStretch()
-
-        # Buttons
-        btn_layout = QHBoxLayout()
-        skip_btn = QPushButton("跳过")
-        skip_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 8px;
-                padding: 8px 20px;
-                font-size: 13px;
-                min-height: 38px;
-            }}
-            QPushButton:hover {{
-                border-color: {THEME.accent};
-                color: {THEME.accent};
-            }}
-        """)
-        skip_btn.clicked.connect(dialog.reject)
-        btn_layout.addWidget(skip_btn)
-
-        btn_layout.addStretch()
-
-        save_btn = QPushButton("保存并启动")
-        save_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.accent}, stop:1 {THEME.accent3});
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 24px;
-                font-size: 14px;
-                font-weight: bold;
-                min-height: 38px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
-            }}
-        """)
-        save_btn.clicked.connect(lambda: self._wizard_save(dialog))
-        btn_layout.addWidget(save_btn)
-
-        layout.addLayout(btn_layout)
-
-        dialog.exec()
-
-    def _wizard_browse_workspace(self, dialog):
-        """Browse for workspace directory in wizard."""
-        directory = QFileDialog.getExistingDirectory(
-            dialog, "选择工作区路径",
-            self._wizard_ws_edit.text() if hasattr(self, '_wizard_ws_edit') else ""
-        )
-        if directory and hasattr(self, '_wizard_ws_edit'):
-            self._wizard_ws_edit.setText(directory)
-
-    def _wizard_save(self, dialog):
-        """Save wizard settings."""
-        ws = self._wizard_ws_edit.text().strip()
-        if not ws:
-            QMessageBox.warning(dialog, "提示", "请选择工作区路径")
-            return
-
-        # Create workspace directory structure
-        config_dir = os.path.join(ws, "config")
-        os.makedirs(config_dir, exist_ok=True)
-        os.makedirs(os.path.join(ws, "instances"), exist_ok=True)
-
-        # Build partner_config.json directly (no partner.state imports needed)
-        reverse_map = {"DeepSeek": "deepseek", "OpenAI": "openai", "自定义": "custom"}
-        provider_raw = self._wizard_provider.currentText()
-        api_key = self._wizard_api_key.text().strip()
-        model = self._wizard_model.currentText().strip()
-        base_url = self._wizard_base_url.text().strip() or "https://api.deepseek.com/v1"
-
-        partner_cfg = {
-            "workspace": {"path": ws, "readonly_dirs": []},
-            "agent": {"backend": "hermes"},
-            "llm": {
-                "provider": reverse_map.get(provider_raw, "deepseek"),
-                "api_key": api_key,
-                "model": model or "deepseek-chat",
-                "base_url": base_url,
-            },
-            "scheduler": {"interval_minutes": 30, "max_tasks_per_cycle": 1, "heartbeat_timeout_minutes": 60},
-            "name": "Partner",
-        }
-        with open(os.path.join(config_dir, "partner_config.json"), "w", encoding="utf-8") as f:
-            json.dump(partner_cfg, f, indent=2, ensure_ascii=False)
-
-        # Write ~/.partner_workspace pointer file
+        """Skip setup wizard — always go directly to chat page."""
+        # Still check for pointer file to set workspace
         pointer_path = os.path.join(str(Path.home()), ".partner_workspace")
-        try:
-            with open(pointer_path, "w") as f:
-                f.write(ws)
-        except OSError:
-            pass
-
-        # Update workspace and reload
-        self._workspace_path = ws
-        self._instances_page.set_workspace(ws)
-        self._settings_page.set_workspace(ws)
-
-        QMessageBox.information(dialog, "完成", "配置已保存！\n\n您可以在「配置中心」中随时修改这些设置。")
-        dialog.accept()
+        if os.path.exists(pointer_path):
+            try:
+                with open(pointer_path, "r") as f:
+                    ws = f.read().strip()
+                if ws:
+                    self._workspace_path = ws
+                    self._on_workspace_changed(ws)
+            except Exception:
+                pass
+        self._navigate_to(0)
 
     # ── Layout persistence ──────────────────────────────────────────────────
 
@@ -660,12 +456,20 @@ class ModernMainWindow(QMainWindow):
 
     def _navigate_to(self, index: int):
         """Navigate to a specific page."""
+        # Ensure index is within bounds
+        if index >= self._content_stack.count():
+            return
         self._content_stack.setCurrentIndex(index)
         # QButtonGroup manages checked state via exclusive behavior
 
     def _on_workspace_changed(self, new_workspace: str):
         """Handle workspace path change from settings page."""
         self._workspace_path = new_workspace
+        # Save to local config for next startup
+        save_local_config({
+            "last_workspace_path": new_workspace,
+            "default_workspace_path": new_workspace,
+        })
         self._instances_page.set_workspace(new_workspace)
         self._settings_page.set_workspace(new_workspace)
         self._chat_page.set_workspace(new_workspace)

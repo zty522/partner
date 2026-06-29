@@ -37,8 +37,6 @@ from PySide6.QtWidgets import (
 )
 
 from partner.monitoring.instance_root import (
-    resolve_global_config_path,
-    resolve_instance_workspace,
     resolve_partner_root,
 )
 
@@ -752,8 +750,8 @@ class ChatPage(QWidget):
 
         self._chat_container = QWidget()
         self._chat_layout = QVBoxLayout(self._chat_container)
-        self._chat_layout.setContentsMargins(20, 16, 20, 16)
-        self._chat_layout.setSpacing(10)
+        self._chat_layout.setContentsMargins(12, 8, 12, 8)
+        self._chat_layout.setSpacing(6)
         self._chat_layout.setAlignment(Qt.AlignmentFlag.AlignBottom)
 
         # Empty state
@@ -1380,13 +1378,23 @@ class ChatPage(QWidget):
         return super().eventFilter(obj, event)
 
     def _load_instance_selector(self):
-        """Populate the instance selector."""
+        """Populate the instance selector from the current workspace's global_config.json."""
         self._instance_selector.clear()
-        config_path = resolve_global_config_path()
-        config = _load_json(str(config_path))
-        instances = config.get("instances", {})
-        for inst_id in instances:
-            self._instance_selector.addItem(inst_id, inst_id)
+        ws = self._workspace()
+        # Instances are stored in global_config.json, not partner_config.json
+        config_path = os.path.join(ws, "config", "global_config.json")
+        if os.path.exists(config_path):
+            config = _load_json(config_path)
+            instances = config.get("instances", {})
+            for inst_id in instances:
+                self._instance_selector.addItem(inst_id, inst_id)
+        # Fallback: scan filesystem
+        if self._instance_selector.count() == 0:
+            inst_dir = os.path.join(ws, "instances")
+            if os.path.exists(inst_dir):
+                for entry in sorted(os.listdir(inst_dir)):
+                    if os.path.isdir(os.path.join(inst_dir, entry)):
+                        self._instance_selector.addItem(entry, entry)
 
         if self._instance_selector.count() > 0:
             self._instance_selector.setCurrentIndex(0)
@@ -1448,7 +1456,7 @@ class ChatPage(QWidget):
             return
         self._auto_starting = True
         try:
-            inst_dir = str(resolve_instance_workspace(inst_id))
+            inst_dir = self._instance_dir(inst_id)
         except Exception:
             self._auto_starting = False
             return
@@ -1505,14 +1513,19 @@ class ChatPage(QWidget):
         ))
 
     def _workspace(self) -> str:
-        return str(resolve_partner_root())
+        """Return the current workspace path, falling back to the global default."""
+        return self._workspace_path or str(resolve_partner_root())
+
+    def _instance_dir(self, instance_id: str) -> str:
+        """Resolve an instance directory under the current workspace."""
+        return os.path.join(self._workspace(), "instances", instance_id)
 
     def _inbox_path(self, instance_id: str) -> str:
-        inst_dir = str(resolve_instance_workspace(instance_id))
+        inst_dir = self._instance_dir(instance_id)
         return os.path.join(inst_dir, "state", "desktop_inbox.jsonl")
 
     def _active_plan_path(self, instance_id: str) -> str:
-        inst_dir = str(resolve_instance_workspace(instance_id))
+        inst_dir = self._instance_dir(instance_id)
         return os.path.join(inst_dir, "state", "active_plan.json")
 
     def _on_send(self):
@@ -1796,7 +1809,7 @@ class ChatPage(QWidget):
         inst_id = self._selected_instance_id or self._instance_selector.currentData()
         if not inst_id:
             return False
-        inst_dir = str(resolve_instance_workspace(inst_id))
+        inst_dir = self._instance_dir(inst_id)
 
         # Resolve PID from instance.pid (written by manager.py)
         pid = None
@@ -1875,7 +1888,7 @@ class ChatPage(QWidget):
         self._chat_layout.addWidget(loading)
         QApplication.processEvents()
 
-        self._workspace_path = self._workspace()
+        self._workspace_path = self._workspace_path or self._workspace()
         inst_id = self._selected_instance_id or ""
         turns = _load_dialogue_turns(self._workspace_path, inst_id, offset=0, limit=self._page_size)
 
@@ -1971,9 +1984,32 @@ class ChatPage(QWidget):
             self._loading_more = False
 
     def set_workspace(self, ws: str) -> None:
-        """Called when the workspace path changes in settings. Reloads history."""
+        """Called when the workspace path changes in settings. Reloads everything."""
         self._workspace_path = ws
+        self._messages: list[dict] = []
+        self._polled_message_ids: set[str] = set()
+        self._seen_responses: set[tuple[str, str]] = set()
+        self._pending_message_id: str | None = None
+        self._selected_instance_id = ""
+        self._showing_historical_pipeline = False
+
+        # Clear pipeline panel
+        for w in self._event_step_widgets:
+            self._pipeline_steps_layout.removeWidget(w)
+            w.deleteLater()
+        self._event_step_widgets = []
+        self._pipeline_empty.setVisible(True)
+        self._pipeline_planning.setVisible(False)
+        self._pipeline_progress.setValue(0)
+        self._pipeline_progress.setVisible(False)
+        self._pipeline_progress_label.setText("")
+        self._plan_name_label.setText("")
+        self._pipeline_mode_label.setVisible(False)
+
+        self._load_instance_selector()
         self._load_history()
+        QTimer.singleShot(200, self._update_instance_status_display)
+        QTimer.singleShot(300, self._poll_active_plan)
 
     # ------------------------------------------------------------------
     # Polling
@@ -2265,7 +2301,9 @@ class ChatPage(QWidget):
         instances_to_check = [instance_id] if instance_id else []
         if not instances_to_check:
             try:
-                config = _load_json(str(resolve_global_config_path()))
+                ws = self._workspace()
+                cfg_path = os.path.join(ws, "config", "partner_config.json")
+                config = _load_json(cfg_path)
                 instances_to_check = list(config.get("instances", {}).keys())
             except Exception:
                 return
@@ -2275,7 +2313,7 @@ class ChatPage(QWidget):
         if self._showing_historical_pipeline:
             return
         for inst_id in instances_to_check:
-            inst_dir = str(resolve_instance_workspace(inst_id))
+            inst_dir = self._instance_dir(inst_id)
             plan_path = os.path.join(inst_dir, "state", "active_plan.json")
             if os.path.exists(plan_path):
                 plan = _load_json(plan_path)
@@ -2325,7 +2363,7 @@ class ChatPage(QWidget):
             # Fallback: load current active_plan.json
             instance_id = self._selected_instance_id or ""
             if instance_id:
-                inst_dir = str(resolve_instance_workspace(instance_id))
+                inst_dir = self._instance_dir(instance_id)
                 plan_path = os.path.join(inst_dir, "state", "active_plan.json")
                 try:
                     with open(plan_path, "r", encoding="utf-8") as f:

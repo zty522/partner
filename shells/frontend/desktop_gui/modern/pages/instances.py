@@ -375,27 +375,21 @@ class InstancesPage(QWidget):
         main_layout.addWidget(self._qq_panel)
 
     def _resolve_global_config_path(self) -> str:
-        """Resolve global_config.json using workspace or fallback."""
-        if self._workspace and os.path.exists(self._workspace):
-            path = os.path.join(self._workspace, "config", "global_config.json")
-            if os.path.exists(path):
-                return path
+        """Resolve global_config.json using workspace."""
+        if self._workspace:
+            return os.path.join(self._workspace, "config", "global_config.json")
         return str(resolve_global_config_path())
 
     def _resolve_instances_dir(self) -> str:
-        """Resolve instances directory using workspace or fallback."""
-        if self._workspace and os.path.exists(self._workspace):
-            path = os.path.join(self._workspace, "instances")
-            if os.path.exists(path):
-                return path
+        """Resolve instances directory using workspace."""
+        if self._workspace:
+            return os.path.join(self._workspace, "instances")
         return str(resolve_instances_dir())
 
     def _resolve_instance_dir(self, instance_id: str) -> str:
-        """Resolve instance directory using workspace or fallback."""
-        if self._workspace and os.path.exists(self._workspace):
-            inst_dir = os.path.join(self._workspace, "instances", instance_id)
-            if os.path.exists(inst_dir):
-                return inst_dir
+        """Resolve instance directory using workspace."""
+        if self._workspace:
+            return os.path.join(self._workspace, "instances", instance_id)
         return str(resolve_instance_workspace(instance_id))
 
     def _refresh(self):

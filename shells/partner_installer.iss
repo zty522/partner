@@ -24,8 +24,11 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-DisableProgramGroupPage=yes
-CloseApplications=yes
+DisableDirPage=no
+DisableProgramGroupPage=no
+
+; ★★★ 设置为 no，因为我们将在 [Code] 中手动处理 ★★★
+CloseApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -54,11 +57,38 @@ begin
     Result := 'C:\Users\Default';
 end;
 
+{ ★★★ 新增：强制终止 Partner 进程 ★★★ }
+procedure KillPartnerProcess;
+var
+  ResultCode: Integer;
+begin
+  // 先尝试正常关闭
+  Exec('taskkill', '/IM Partner.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  
+  // 等待 1 秒
+  Sleep(1000);
+  
+  // 如果正常关闭失败，强制终止
+  if ResultCode <> 0 then
+  begin
+    Exec('taskkill', '/F /IM Partner.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Sleep(1000);
+  end;
+  
+  // 再次检查是否还有残留进程
+  Exec('taskkill', '/F /IM Partner.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+{ ★★★ 新增：在安装开始前调用 ★★★ }
+function InitializeSetup: Boolean;
+begin
+  // 在安装程序初始化时，先终止 Partner 进程
+  KillPartnerProcess;
+  Result := True;
+end;
+
 procedure InitializeWizard;
 begin
-  { Page order:
-      1. Select Destination Location    ← app install (standard)
-      2. Workspace Directory            ← workspace data path }
   WorkspacePage := CreateInputDirPage(
     wpSelectDir,
     'Workspace Directory',

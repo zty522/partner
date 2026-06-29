@@ -902,9 +902,11 @@ class SettingsPage(QWidget):
     def _on_reset_workspace(self):
         """Reset workspace settings to defaults."""
         if self._ws_path_edit:
-            self._ws_path_edit.setText(str(resolve_partner_root()))
+            from ..utils.local_config import load_local_config
+            cfg = load_local_config()
+            self._ws_path_edit.setText(cfg.get("default_workspace_path", str(resolve_partner_root())))
         if self._default_instance_combo:
-            self._default_instance_combo.setCurrentText("03")
+            self._default_instance_combo.setCurrentText("default")
 
     def _on_reset_agent(self):
         """Reset agent settings to defaults."""

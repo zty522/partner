@@ -159,7 +159,7 @@ def launch_gui(workspace_path: str | None = None):
     # Import and launch
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(sys.argv)
     app.setApplicationName("Partner")
@@ -175,14 +175,24 @@ def launch_gui(workspace_path: str | None = None):
         from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(icon_path))
 
-    # Use Fusion style for consistent dark theme
-    app.setStyle("Fusion")
+    # Use native Windows style - the stylesheet handles all custom theming.
+    # Avoid Fusion + global stylesheet conflict which can cause white screen in PyInstaller builds.
 
     from .modern import ModernMainWindow
-    window = ModernMainWindow(workspace_path=workspace_path, app=app)
-    window.show()
-
-    sys.exit(app.exec())
+    try:
+        window = ModernMainWindow(workspace_path=workspace_path, app=app)
+        window.show()
+        sys.exit(app.exec())
+    except Exception:
+        import traceback as _tb
+        err = _tb.format_exc()
+        msg = QMessageBox()
+        msg.setWindowTitle("Partner 错误")
+        msg.setText("启动失败，请查看错误信息：")
+        msg.setDetailedText(err)
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.exec()
+        sys.exit(1)
 
 
 def main():

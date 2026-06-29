@@ -139,8 +139,8 @@ class ChatBubble(QFrame):
         hl_color = THEME.chat_user_hl if is_user else THEME.chat_bot_hl
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(4)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(3)
 
         if file_path:
             self._build_file_widget(layout, content)
@@ -151,7 +151,7 @@ class ChatBubble(QFrame):
                 f"background: transparent; color: {THEME.txt}; font-size: 13px;"
             )
             self.content_label.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
             )
             self.content_label.setTextFormat(Qt.TextFormat.PlainText)
             layout.addWidget(self.content_label)
@@ -176,8 +176,8 @@ class ChatBubble(QFrame):
                 background-color: {hl_color};
             }}
         """)
-        self.setMaximumWidth(700)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        self.setMaximumWidth(560)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
     def mousePressEvent(self, event):
         """On left-click, navigate to pipeline snapshot if available, or show live plan."""

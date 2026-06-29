@@ -1,67 +1,78 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for Partner Windows GUI — restructured layout (shells/)."""
 
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all
 
-# Resolve Partner repo root relative to this spec file's location
-_repo_root = Path(SPECPATH).resolve().parent  # shells/.. = repo root
+# ── 使用 SPECPATH（PyInstaller 提供的变量） ──
+_repo_root = Path(SPECPATH).resolve().parent
 _shells_dir = _repo_root / "shells"
 
-# Entry script lives in shells/partner_gui_entry.py
 entry_script = str(_shells_dir / "partner_gui_entry.py")
+
+# ── Collect all PySide6 dependencies ──
+try:
+    pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
+except Exception:
+    pyside6_datas = []
+    pyside6_binaries = []
+    pyside6_hiddenimports = [
+        'PySide6.QtCore',
+        'PySide6.QtGui',
+        'PySide6.QtWidgets',
+        'PySide6.QtNetwork',
+        'PySide6.QtSvg',
+        'PySide6.QtPrintSupport',
+        'PySide6.QtXml',
+        'PySide6.QtMultimedia',
+        'PySide6.QtMultimediaWidgets',
+        'PySide6.QtOpenGL',
+        'PySide6.QtOpenGLWidgets',
+        'shiboken6',
+    ]
 
 a = Analysis(
     [entry_script],
     pathex=[
-        str(_repo_root),   # for partner package
-        str(_shells_dir),  # for frontend.desktop_gui.*
+        str(_repo_root),
+        str(_shells_dir),
     ],
-    binaries=[],
+    binaries=pyside6_binaries,
     datas=[
         (str(_repo_root / 'partner' / 'locales'), 'partner/locales'),
         (str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets'), 'frontend/desktop_gui/assets'),
+        *pyside6_datas,
     ],
     hiddenimports=[
-        # ── PySide6 ──
-        'PySide6.QtCore',
-        'PySide6.QtGui',
-        'PySide6.QtWidgets',
-
-        # ── Partner core modules (imported by GUI at runtime) ──
-        # state package
+        *pyside6_hiddenimports,
         'partner.state',
         'partner.state.config',
         'partner.state.setup',
         'partner.state.state',
         'partner.state.state_persistence',
-        # monitoring
         'partner.monitoring',
         'partner.monitoring.instance_root',
         'partner.monitoring.runtime_monitor',
-        # workspace
         'partner.workspace',
         'partner.workspace.workspace_layout',
-        # cli (needed by TUI path injection)
         'partner.cli',
         'partner.cli.common',
-        # file_tools
         'partner.file_tools',
-
-        # ── Modern GUI (in shells/frontend/desktop_gui/) ──
         'frontend.desktop_gui',
         'frontend.desktop_gui.modern',
         'frontend.desktop_gui.modern.main_window',
         'frontend.desktop_gui.modern.theme',
         'frontend.desktop_gui.modern.widgets',
+        'frontend.desktop_gui.modern.pages',
         'frontend.desktop_gui.modern.pages.chat',
-        'frontend.desktop_gui.modern.pages.settings',
         'frontend.desktop_gui.modern.pages.instances',
+        'frontend.desktop_gui.modern.pages.settings',
         'frontend.desktop_gui.modern.pages.agents',
+        'frontend.desktop_gui.modern.pages.setup_wizard',
         'frontend.desktop_gui.modern.utils.path_mapper',
         'frontend.desktop_gui.modern.utils.config_watcher',
-
-        # ── Legacy GUI (still referenced) ──
+        'frontend.desktop_gui.modern.utils.local_config',
         'frontend.desktop_gui.gui_qt',
     ],
     hookspath=[],
@@ -73,7 +84,6 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# Icon path — under shells/frontend/desktop_gui/assets/
 _icon_path = str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets' / 'partner_app_v2.ico')
 
 exe = EXE(
