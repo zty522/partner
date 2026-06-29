@@ -1,7 +1,7 @@
 {
   "name": "openclaw",
   "version": "1.0.0",
-  "description": "开源命令行 Agent",
+  "description": "开源命令行 Agent，专注编码与分析",
   "capabilities": ["general_purpose", "coding"],
   "input_formats": ["text"],
   "output_formats": ["text"],
@@ -10,5 +10,10 @@
     "command": "openclaw"
   },
   "timeout": 300,
-  "health_check_cmd": "openclaw --version"
+  "health_check_cmd": "openclaw --version",
+  "install_info": {
+    "method": "npm",
+    "package": "openclaw",
+    "description": "npm install -g openclaw"
+  }
 }

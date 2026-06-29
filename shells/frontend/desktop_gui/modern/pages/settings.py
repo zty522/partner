@@ -40,7 +40,7 @@ from partner.monitoring.instance_root import (
 )
 
 from ..theme import THEME
-from ..widgets import SectionHeader, AccentButton, CollapsibleConfigGroup
+from ..widgets import SectionHeader, AccentButton
 from ..utils.path_mapper import (
     ENVIRONMENT_TYPES,
     ENVIRONMENT_LABELS,
@@ -83,7 +83,6 @@ class SettingsPage(QWidget):
     """Configuration center with left category list + right form panels.
 
     Simplified design: each category has minimal visible fields.
-    Advanced options are tucked inside CollapsibleConfigGroup sections.
     """
 
     workspace_changed = Signal(str)
@@ -97,6 +96,24 @@ class SettingsPage(QWidget):
         ("🖥", "服务器"),
     ]
 
+    # Built-in general agents for detection UI
+    GENERAL_AGENTS = {
+        "hermes": {
+            "label": "Hermes",
+            "desc": "通用 AI Agent，支持多种工具和任务",
+            "cmd": "hermes",
+            "install_win": "pip install hermes-agent",
+            "install_linux": "pip3 install hermes-agent",
+        },
+        "openclaw": {
+            "label": "OpenClaw",
+            "desc": "开源命令行 Agent，专注编码与分析",
+            "cmd": "openclaw",
+            "install_win": "npm install -g openclaw",
+            "install_linux": "npm install -g openclaw",
+        },
+    }
+
     def __init__(self, parent: QWidget | None = None, workspace_path: str = ""):
         super().__init__(parent)
         self._workspace = workspace_path
@@ -109,27 +126,23 @@ class SettingsPage(QWidget):
         self._ws_browse_btn: QPushButton | None = None
         self._default_instance_combo: QComboBox | None = None
         # Agent
-        self._agent_list_label: QLabel | None = None
-        self._add_agent_btn: QPushButton | None = None
-        self._agent_timeout_spin: QSpinBox | None = None
-        self._agent_retry_spin: QSpinBox | None = None
+        self._agent_install_btns: dict[str, dict[str, QPushButton]] = {}  # {agent_name: {platform: QPushButton}}
+        self._agent_status_labels: dict[str, dict[str, QLabel]] = {}      # {agent_name: {platform: QLabel}}
+        self._default_agent_combo: QComboBox | None = None
+        self._default_platform_combo: QComboBox | None = None
         # LLM
         self._llm_provider_combo: QComboBox | None = None
         self._llm_api_key_edit: QLineEdit | None = None
         self._llm_model_combo: QComboBox | None = None
         self._llm_base_url_edit: QLineEdit | None = None
-        self._llm_timeout_spin: QSpinBox | None = None
-        self._llm_max_retry_spin: QSpinBox | None = None
         # Ollama
         self._ollama_url_edit: QLineEdit | None = None
         self._ollama_model_combo: QComboBox | None = None
         self._ollama_refresh_btn: QPushButton | None = None
-        self._ollama_timeout_spin: QSpinBox | None = None
         # World Model
         self._wm_enable_cb: QCheckBox | None = None
         self._wm_provider_combo: QComboBox | None = None
         self._wm_endpoint_edit: QLineEdit | None = None
-        self._wm_timeout_spin: QSpinBox | None = None
         # Server
         self._server_name_edit: QLineEdit | None = None
         self._server_host_edit: QLineEdit | None = None
@@ -365,62 +378,149 @@ class SettingsPage(QWidget):
 
         layout.addLayout(form)
 
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: bold;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
-                border-color: {THEME.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
-        """)
-        reset_btn.clicked.connect(self._on_reset_workspace)
-        layout.addWidget(reset_btn)
-
         return self._make_form_page(container)
 
     def _build_agent_page(self) -> QWidget:
-        """Category: Agent — read-only list + add button + advanced."""
+        """Category: Agent — 通用 Agent (hermes/openclaw) + 专精 Agent + 默认选择."""
+        import shutil
+        import subprocess
+
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Registered agents list (readonly)
-        agent_header = QLabel("已注册 Agent 列表:")
-        agent_header.setStyleSheet(
-            f"font-size: 13px; font-weight: bold; color: {THEME.txt2}; background: transparent;"
+        # ── Section: 通用 Agent ──
+        general_header = QLabel("通用 Agent")
+        general_header.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 4px 0;"
         )
-        layout.addWidget(agent_header)
+        layout.addWidget(general_header)
 
-        self._agent_list_label = QLabel("(自动检测中...)")
-        self._agent_list_label.setWordWrap(True)
-        self._agent_list_label.setStyleSheet(
+        general_desc = QLabel("内置通用 Agent，自动检测安装状态")
+        general_desc.setStyleSheet(
+            f"font-size: 12px; color: {THEME.txt3}; background: transparent;"
+        )
+        layout.addWidget(general_desc)
+
+        for agent_key, agent_info in self.GENERAL_AGENTS.items():
+            card = QFrame()
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {THEME.card};
+                    border: 1px solid {THEME.border};
+                    border-radius: 10px;
+                }}
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(14, 10, 14, 10)
+            card_layout.setSpacing(6)
+
+            # Header row: name + version
+            name_row = QHBoxLayout()
+            name_row.setSpacing(8)
+            name_icon = QLabel("🤖")
+            name_icon.setStyleSheet("font-size: 16px; background: transparent;")
+            name_label = QLabel(f"{agent_info['label']}")
+            name_label.setStyleSheet(
+                f"font-size: 14px; font-weight: bold; color: {THEME.txt}; background: transparent;"
+            )
+            ver_label = QLabel(f"v2.0.0" if agent_key == "hermes" else "v1.0.0")
+            ver_label.setStyleSheet(
+                f"font-size: 11px; color: {THEME.txt3}; background: transparent;"
+            )
+            name_row.addWidget(name_icon)
+            name_row.addWidget(name_label)
+            name_row.addWidget(ver_label)
+            name_row.addStretch()
+            card_layout.addLayout(name_row)
+
+            # Description
+            desc_label = QLabel(agent_info["desc"])
+            desc_label.setStyleSheet(
+                f"font-size: 12px; color: {THEME.txt2}; background: transparent;"
+            )
+            desc_label.setWordWrap(True)
+            card_layout.addWidget(desc_label)
+
+            # Platform status rows
+            self._agent_status_labels[agent_key] = {}
+            self._agent_install_btns[agent_key] = {}
+            for platform_key, platform_label in [("windows", "Windows"), ("linux", "Linux")]:
+                plat_row = QHBoxLayout()
+                plat_row.setSpacing(8)
+
+                plat_dot = QLabel("●")
+                plat_dot.setStyleSheet("font-size: 10px; color: #666; background: transparent;")
+                plat_name = QLabel(f"{platform_label}:")
+                plat_name.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.txt2}; background: transparent; min-width: 60px;"
+                )
+                status_label = QLabel("检测中...")
+                status_label.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.txt3}; background: transparent;"
+                )
+                self._agent_status_labels[agent_key][platform_key] = status_label
+
+                install_btn = QPushButton("安装")
+                install_btn.setFixedHeight(28)
+                install_btn.setFixedWidth(100)
+                install_btn.setEnabled(False)
+                install_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {THEME.bg3};
+                        color: {THEME.txt3};
+                        border: 1px solid {THEME.border};
+                        border-radius: 6px;
+                        padding: 4px 12px;
+                        font-size: 11px;
+                        font-weight: bold;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: {THEME.bg3};
+                        color: {THEME.txt3};
+                    }}
+                """)
+                install_btn.clicked.connect(
+                    lambda checked=False, ak=agent_key, pk=platform_key: self._on_install_agent(ak, pk)
+                )
+                self._agent_install_btns[agent_key][platform_key] = install_btn
+
+                plat_row.addWidget(plat_dot)
+                plat_row.addWidget(plat_name)
+                plat_row.addWidget(status_label, 1)
+                plat_row.addWidget(install_btn)
+                plat_row.addStretch()
+                card_layout.addLayout(plat_row)
+
+            layout.addWidget(card)
+
+        # ── Section: 专精 Agent ──
+        spec_header = QLabel("专精 Agent")
+        spec_header.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 4px 0; margin-top: 8px;"
+        )
+        layout.addWidget(spec_header)
+
+        spec_desc = QLabel("其他已注册的专业 Agent（Codex、CytoBridge 等）")
+        spec_desc.setStyleSheet(
+            f"font-size: 12px; color: {THEME.txt3}; background: transparent;"
+        )
+        layout.addWidget(spec_desc)
+
+        self._specialist_list = QLabel("(暂无专精 Agent)")
+        self._specialist_list.setWordWrap(True)
+        self._specialist_list.setStyleSheet(
             f"color: {THEME.txt}; background: transparent; padding: 8px 0;"
         )
-        layout.addWidget(self._agent_list_label)
+        layout.addWidget(self._specialist_list)
 
-        # Add agent button
-        self._add_agent_btn = QPushButton("📄 添加 Agent (选择 manifest 文件)")
-        self._add_agent_btn.setStyleSheet(f"""
+        # Add specialist agent button
+        add_spec_btn = QPushButton("➕ 添加专精 Agent")
+        add_spec_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
@@ -430,7 +530,8 @@ class SettingsPage(QWidget):
                 padding: 8px 20px;
                 font-size: 13px;
                 font-weight: bold;
-                min-height: 42px;
+                min-height: 38px;
+                max-width: 200px;
             }}
             QPushButton:hover {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -444,38 +545,45 @@ class SettingsPage(QWidget):
                 border-color: {THEME.accent_h};
             }}
         """)
-        self._add_agent_btn.clicked.connect(self._on_add_agent)
-        layout.addWidget(self._add_agent_btn)
+        add_spec_btn.clicked.connect(self._on_add_agent)
+        layout.addWidget(add_spec_btn)
 
-        # Advanced options
-        adv_group = CollapsibleConfigGroup("高级设置")
-        adv_form = QWidget()
-        adv_form.setStyleSheet("background: transparent;")
-        adv_fml = QFormLayout(adv_form)
-        adv_fml.setSpacing(8)
-        adv_fml.setContentsMargins(0, 0, 0, 0)
+        # ── Section: 默认 Agent ──
+        default_header = QLabel("默认 Agent")
+        default_header.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 4px 0; margin-top: 8px;"
+        )
+        layout.addWidget(default_header)
 
-        self._agent_timeout_spin = QSpinBox()
-        self._agent_timeout_spin.setRange(1, 99999)
-        self._agent_timeout_spin.setValue(600)
-        self._agent_timeout_spin.setSuffix(" 秒")
-        adv_fml.addRow("超时(秒):", self._agent_timeout_spin)
+        default_form = QWidget()
+        default_form.setStyleSheet("background: transparent;")
+        default_fl = QFormLayout(default_form)
+        default_fl.setSpacing(8)
+        default_fl.setContentsMargins(0, 0, 0, 0)
 
-        self._agent_retry_spin = QSpinBox()
-        self._agent_retry_spin.setRange(0, 99)
-        self._agent_retry_spin.setValue(3)
-        adv_fml.addRow("重试次数:", self._agent_retry_spin)
+        self._default_agent_combo = QComboBox()
+        self._default_agent_combo.addItems(["hermes", "openclaw"])
+        self._default_agent_combo.setCurrentText("hermes")
+        default_fl.addRow("默认 Agent:", self._default_agent_combo)
 
-        adv_group.set_content(adv_form)
-        layout.addWidget(adv_group)
+        self._default_platform_combo = QComboBox()
+        self._default_platform_combo.addItems(["Windows", "Linux"])
+        self._default_platform_combo.setCurrentText("Windows")
+        default_fl.addRow("运行平台:", self._default_platform_combo)
 
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
+        layout.addWidget(default_form)
+
+        # ── 重新检测按钮 ──
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        retry_btn = QPushButton("🔄 重新检测")
+        retry_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
+                color: {THEME.txt};
                 border: 1px solid {THEME.border};
                 border-radius: 10px;
                 padding: 8px 18px;
@@ -486,8 +594,8 @@ class SettingsPage(QWidget):
             QPushButton:hover {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
                 border-color: {THEME.accent};
+                color: {THEME.accent};
             }}
             QPushButton:pressed {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -495,10 +603,197 @@ class SettingsPage(QWidget):
                 border-color: {THEME.accent_h};
             }}
         """)
-        reset_btn.clicked.connect(self._on_reset_agent)
-        layout.addWidget(reset_btn)
+        retry_btn.clicked.connect(lambda: self._run_detection())
+        btn_row.addWidget(retry_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # ── Detection: run immediately (no QTimer — unreliable in frozen EXE) ──
+        self._run_detection()
 
         return self._make_form_page(container)
+
+    def _run_detection(self):
+        """Reset status labels and run detection immediately."""
+        import subprocess
+        # Reset all status labels to show "检测中..."
+        for agent_key in self.GENERAL_AGENTS:
+            for platform_key in ("windows", "linux"):
+                label = self._agent_status_labels.get(agent_key, {}).get(platform_key)
+                if label:
+                    label.setText("检测中...")
+                    label.setStyleSheet(
+                        f"font-size: 12px; color: {THEME.txt3}; background: transparent;"
+                    )
+        # Force UI update so "检测中..." shows before blocking detection
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+        # Run detection
+        self._detect_all_agents()
+
+    def _detect_all_agents(self):
+        """Run detection for all general agents on Windows and Linux."""
+        import shutil
+        import subprocess
+
+        for agent_key in self.GENERAL_AGENTS:
+            cmd = self.GENERAL_AGENTS[agent_key]["cmd"]
+            self._check_agent_on_platform(agent_key, "windows", cmd)
+            self._check_agent_on_platform(agent_key, "linux", cmd)
+
+    def _check_agent_on_platform(self, agent_key: str, platform: str, cmd: str):
+        """Check if an agent command is available on a given platform and update UI.
+
+        Windows: uses shutil.which() to check PATH.
+        Linux: uses WSL 'command -v' and verifies the result is a
+               native Linux path (not Windows interop at /mnt/...).
+               This ensures WSL's own packages are detected correctly
+               rather than Windows npm/pip binaries visible through
+               WSL's Windows PATH interop.
+        """
+        import shutil
+        import subprocess
+
+        status_label = self._agent_status_labels.get(agent_key, {}).get(platform)
+        install_btn = self._agent_install_btns.get(agent_key, {}).get(platform)
+        if not status_label or not install_btn:
+            return
+
+        installed = False
+        try:
+            if platform == "windows":
+                # shutil.which() reliably checks Windows PATH
+                installed = shutil.which(cmd) is not None
+            else:
+                # Linux via WSL — use command -v to find the binary path,
+                # then verify it's a native Linux path (not /mnt/... interop)
+                r = subprocess.run(
+                    ["wsl", "bash", "-lc", f"command -v {cmd}"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if r.returncode == 0:
+                    path = r.stdout.strip()
+                    # Only count as Linux-installed if the binary lives
+                    # in the native Linux filesystem, NOT in Windows PATH
+                    # interop (which appears as /mnt/c/... etc.)
+                    if path and not path.startswith("/mnt/"):
+                        installed = True
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            installed = False
+
+        if installed:
+            status_label.setText("✅ 已安装")
+            status_label.setStyleSheet(
+                f"font-size: 12px; color: {THEME.green}; background: transparent;"
+            )
+            install_btn.setEnabled(False)
+            install_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {THEME.bg3};
+                    color: {THEME.txt3};
+                    border: 1px solid {THEME.border};
+                    border-radius: 6px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+                QPushButton:disabled {{
+                    background-color: {THEME.bg3};
+                    color: {THEME.txt3};
+                }}
+            """)
+        else:
+            status_label.setText("❌ 未安装")
+            status_label.setStyleSheet(
+                f"font-size: 12px; color: {THEME.red}; background: transparent;"
+            )
+            install_btn.setEnabled(True)
+            install_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 12px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+                }}
+                QPushButton:pressed {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent3}, stop:1 #2A5F8A);
+                }}
+            """)
+
+    def _on_install_agent(self, agent_key: str, platform: str):
+        """Install an agent on the specified platform."""
+        import subprocess
+        from PySide6.QtWidgets import QMessageBox
+
+        agent_info = self.GENERAL_AGENTS.get(agent_key)
+        if not agent_info:
+            return
+
+        install_cmd = agent_info["install_win"] if platform == "windows" else agent_info["install_linux"]
+
+        if platform == "linux":
+            # Run via WSL
+            full_cmd = f'wsl bash -c "{install_cmd}"'
+        else:
+            full_cmd = install_cmd
+
+        reply = QMessageBox.question(
+            self, "安装 Agent",
+            f"将在 {platform.title()} 上安装 {agent_info['label']}:\n\n"
+            f"命令: {full_cmd}\n\n"
+            f"确认执行？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Update status
+        status_label = self._agent_status_labels.get(agent_key, {}).get(platform)
+        if status_label:
+            status_label.setText("⏳ 安装中...")
+            from PySide6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+
+        try:
+            result = subprocess.run(
+                full_cmd if platform == "linux" else install_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                QMessageBox.information(
+                    self, "安装成功",
+                    f"{agent_info['label']} 已成功安装到 {platform.title()}!"
+                )
+                # Re-detect
+                self._detect_all_agents()
+            else:
+                error_msg = result.stderr.strip() or f"退出码 {result.returncode}"
+                QMessageBox.warning(
+                    self, "安装失败",
+                    f"{agent_info['label']} 安装失败:\n{error_msg}"
+                )
+                if status_label:
+                    status_label.setText("❌ 安装失败")
+        except subprocess.TimeoutExpired:
+            QMessageBox.warning(self, "安装超时", "安装命令执行超时（>120秒）")
+            if status_label:
+                status_label.setText("❌ 超时")
+        except Exception as e:
+            QMessageBox.warning(self, "安装错误", f"执行安装时出错:\n{e}")
+            if status_label:
+                status_label.setText("❌ 错误")
 
     def _build_llm_page(self) -> QWidget:
         """Category: LLM API — provider, key, model, base URL, purchase link, advanced."""
@@ -568,57 +863,6 @@ class SettingsPage(QWidget):
 
         layout.addLayout(form)
 
-        # Advanced options
-        adv_group = CollapsibleConfigGroup("高级设置")
-        adv_form = QWidget()
-        adv_form.setStyleSheet("background: transparent;")
-        adv_fml = QFormLayout(adv_form)
-        adv_fml.setSpacing(8)
-        adv_fml.setContentsMargins(0, 0, 0, 0)
-
-        self._llm_timeout_spin = QSpinBox()
-        self._llm_timeout_spin.setRange(1, 9999)
-        self._llm_timeout_spin.setValue(60)
-        self._llm_timeout_spin.setSuffix(" 秒")
-        adv_fml.addRow("超时(秒):", self._llm_timeout_spin)
-
-        self._llm_max_retry_spin = QSpinBox()
-        self._llm_max_retry_spin.setRange(0, 99)
-        self._llm_max_retry_spin.setValue(3)
-        adv_fml.addRow("最大重试:", self._llm_max_retry_spin)
-
-        adv_group.set_content(adv_form)
-        layout.addWidget(adv_group)
-
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: bold;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
-                border-color: {THEME.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
-        """)
-        reset_btn.clicked.connect(self._on_reset_llm)
-        layout.addWidget(reset_btn)
-
         return self._make_form_page(container)
 
     def _build_ollama_page(self) -> QWidget:
@@ -676,52 +920,6 @@ class SettingsPage(QWidget):
 
         layout.addLayout(form)
 
-        # Advanced options
-        adv_group = CollapsibleConfigGroup("高级设置")
-        adv_form = QWidget()
-        adv_form.setStyleSheet("background: transparent;")
-        adv_fml = QFormLayout(adv_form)
-        adv_fml.setSpacing(8)
-        adv_fml.setContentsMargins(0, 0, 0, 0)
-
-        self._ollama_timeout_spin = QSpinBox()
-        self._ollama_timeout_spin.setRange(1, 9999)
-        self._ollama_timeout_spin.setValue(30)
-        self._ollama_timeout_spin.setSuffix(" 秒")
-        adv_fml.addRow("超时(秒):", self._ollama_timeout_spin)
-
-        adv_group.set_content(adv_form)
-        layout.addWidget(adv_group)
-
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: bold;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
-                border-color: {THEME.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
-        """)
-        reset_btn.clicked.connect(self._on_reset_ollama)
-        layout.addWidget(reset_btn)
-
         return self._make_form_page(container)
 
     def _build_wm_page(self) -> QWidget:
@@ -759,54 +957,6 @@ class SettingsPage(QWidget):
         form.addRow("超时(秒):", self._wm_timeout_spin)
 
         layout.addLayout(form)
-
-        # Advanced options
-        adv_group = CollapsibleConfigGroup("高级设置")
-        adv_form = QWidget()
-        adv_form.setStyleSheet("background: transparent;")
-        adv_fml = QFormLayout(adv_form)
-        adv_fml.setSpacing(8)
-        adv_fml.setContentsMargins(0, 0, 0, 0)
-
-        self._wm_max_steps_spin = QSpinBox()
-        self._wm_max_steps_spin.setRange(1, 999)
-        self._wm_max_steps_spin.setValue(10)
-        adv_fml.addRow("最大模拟步数:", self._wm_max_steps_spin)
-
-        self._wm_fallback_cb = QCheckBox("回退到 LLM")
-        adv_fml.addRow("", self._wm_fallback_cb)
-
-        adv_group.set_content(adv_form)
-        layout.addWidget(adv_group)
-
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: bold;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
-                border-color: {THEME.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
-        """)
-        reset_btn.clicked.connect(self._on_reset_wm)
-        layout.addWidget(reset_btn)
 
         return self._make_form_page(container)
 
@@ -851,124 +1001,7 @@ class SettingsPage(QWidget):
 
         layout.addLayout(form)
 
-        # Advanced options: key path
-        adv_group = CollapsibleConfigGroup("高级设置")
-        adv_form = QWidget()
-        adv_form.setStyleSheet("background: transparent;")
-        adv_fml = QFormLayout(adv_form)
-        adv_fml.setSpacing(8)
-        adv_fml.setContentsMargins(0, 0, 0, 0)
-
-        self._server_key_path_edit = QLineEdit()
-        self._server_key_path_edit.setPlaceholderText("/home/ubuntu/.ssh/id_rsa")
-        adv_fml.addRow("私钥路径:", self._server_key_path_edit)
-
-        adv_group.set_content(adv_form)
-        layout.addWidget(adv_group)
-
-        # Reset button
-        reset_btn = QPushButton("重置为默认")
-        reset_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
-                color: {THEME.txt2};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: bold;
-                min-height: 36px;
-            }}
-            QPushButton:hover {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
-                color: {THEME.accent};
-                border-color: {THEME.accent};
-            }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
-        """)
-        reset_btn.clicked.connect(self._on_reset_server)
-        layout.addWidget(reset_btn)
-
         return self._make_form_page(container)
-
-    # ── Reset handlers ──────────────────────────────────────────────────
-
-    def _on_reset_workspace(self):
-        """Reset workspace settings to defaults."""
-        if self._ws_path_edit:
-            from ..utils.local_config import load_local_config
-            cfg = load_local_config()
-            self._ws_path_edit.setText(cfg.get("default_workspace_path", str(resolve_partner_root())))
-        if self._default_instance_combo:
-            self._default_instance_combo.setCurrentText("default")
-
-    def _on_reset_agent(self):
-        """Reset agent settings to defaults."""
-        if self._agent_timeout_spin:
-            self._agent_timeout_spin.setValue(600)
-        if self._agent_retry_spin:
-            self._agent_retry_spin.setValue(3)
-
-    def _on_reset_llm(self):
-        """Reset LLM API settings to defaults."""
-        if self._llm_provider_combo:
-            self._llm_provider_combo.setCurrentText("DeepSeek")
-        if self._llm_api_key_edit:
-            self._llm_api_key_edit.setText("")
-        if self._llm_model_combo:
-            self._llm_model_combo.setCurrentText("deepseek-chat")
-        if self._llm_base_url_edit:
-            self._llm_base_url_edit.setText("https://api.deepseek.com/v1")
-        if self._llm_timeout_spin:
-            self._llm_timeout_spin.setValue(60)
-        if self._llm_max_retry_spin:
-            self._llm_max_retry_spin.setValue(3)
-
-    def _on_reset_ollama(self):
-        """Reset Ollama settings to defaults."""
-        if self._ollama_url_edit:
-            self._ollama_url_edit.setText("http://localhost:11434")
-        if self._ollama_model_combo:
-            self._ollama_model_combo.clear()
-            self._ollama_model_combo.setPlaceholderText("(点击刷新检测模型)")
-        if self._ollama_timeout_spin:
-            self._ollama_timeout_spin.setValue(30)
-
-    def _on_reset_wm(self):
-        """Reset World Model settings to defaults."""
-        if self._wm_enable_cb:
-            self._wm_enable_cb.setChecked(False)
-        if self._wm_provider_combo:
-            self._wm_provider_combo.setCurrentIndex(0)
-        if self._wm_endpoint_edit:
-            self._wm_endpoint_edit.setText("http://localhost:8100")
-        if self._wm_timeout_spin:
-            self._wm_timeout_spin.setValue(60)
-        if self._wm_max_steps_spin:
-            self._wm_max_steps_spin.setValue(10)
-        if self._wm_fallback_cb:
-            self._wm_fallback_cb.setChecked(False)
-
-    def _on_reset_server(self):
-        """Reset Server settings to defaults."""
-        if self._server_name_edit:
-            self._server_name_edit.setText("")
-        if self._server_host_edit:
-            self._server_host_edit.setText("")
-        if self._server_port_spin:
-            self._server_port_spin.setValue(22)
-        if self._server_user_edit:
-            self._server_user_edit.setText("ubuntu")
-        if self._server_auth_combo:
-            self._server_auth_combo.setCurrentIndex(0)
-        if self._server_key_path_edit:
-            self._server_key_path_edit.setText("")
 
     # ── Category switching ───────────────────────────────────────────────
 
@@ -1011,18 +1044,32 @@ class SettingsPage(QWidget):
 
         # ── Agent ──
         agent_cfg = partner_cfg.get("agent", {})
+        # Specialised agents list
         registered_agents = agent_cfg.get("registered", [])
-        if self._agent_list_label:
-            if registered_agents:
-                lines = "\n".join(f"  • {a}" for a in registered_agents)
-                self._agent_list_label.setText(lines)
+        general_names = set(self.GENERAL_AGENTS.keys())
+        specialist_agents = [a for a in registered_agents if a not in general_names]
+        if self._specialist_list:
+            if specialist_agents:
+                lines = "\n".join(f"• {a}" for a in specialist_agents)
+                self._specialist_list.setText(lines)
             else:
-                self._agent_list_label.setText("(暂无已注册的 Agent)")
+                self._specialist_list.setText("(暂无专精 Agent)")
 
-        if self._agent_timeout_spin:
-            self._agent_timeout_spin.setValue(int(agent_cfg.get("timeout", 600)))
-        if self._agent_retry_spin:
-            self._agent_retry_spin.setValue(int(agent_cfg.get("retry_count", 3)))
+        # Default agent + platform
+        if self._default_agent_combo:
+            default_agent = agent_cfg.get("default_agent", "hermes")
+            idx = self._default_agent_combo.findText(default_agent)
+            if idx >= 0:
+                self._default_agent_combo.setCurrentIndex(idx)
+            else:
+                self._default_agent_combo.setCurrentText(default_agent)
+        if self._default_platform_combo:
+            default_platform = agent_cfg.get("default_platform", "Windows")
+            idx = self._default_platform_combo.findText(default_platform)
+            if idx >= 0:
+                self._default_platform_combo.setCurrentIndex(idx)
+            else:
+                self._default_platform_combo.setCurrentText(default_platform)
 
         # ── LLM API ──
         llm_cfg = partner_cfg.get("llm", {})
@@ -1046,10 +1093,6 @@ class SettingsPage(QWidget):
             self._llm_base_url_edit.setText(
                 llm_cfg.get("base_url", "https://api.deepseek.com/v1")
             )
-        if self._llm_timeout_spin:
-            self._llm_timeout_spin.setValue(int(llm_cfg.get("timeout", 60)))
-        if self._llm_max_retry_spin:
-            self._llm_max_retry_spin.setValue(int(llm_cfg.get("max_retry", 3)))
 
         # ── Ollama ──
         ollama_cfg = partner_cfg.get("ollama", {})
@@ -1065,8 +1108,6 @@ class SettingsPage(QWidget):
                     self._ollama_model_combo.setCurrentIndex(idx)
                 else:
                     self._ollama_model_combo.setCurrentText(model_name)
-        if self._ollama_timeout_spin:
-            self._ollama_timeout_spin.setValue(int(ollama_cfg.get("timeout", 30)))
 
         # ── World Model ──
         wm_cfg = partner_cfg.get("world_model", {})
@@ -1081,12 +1122,6 @@ class SettingsPage(QWidget):
             self._wm_endpoint_edit.setText(
                 wm_cfg.get("endpoint", "http://localhost:8100")
             )
-        if self._wm_timeout_spin:
-            self._wm_timeout_spin.setValue(int(wm_cfg.get("timeout", 60)))
-        if self._wm_max_steps_spin:
-            self._wm_max_steps_spin.setValue(int(wm_cfg.get("max_steps", 10)))
-        if self._wm_fallback_cb:
-            self._wm_fallback_cb.setChecked(bool(wm_cfg.get("fallback_to_llm", False)))
 
         # ── Server ──
         server_cfg = global_cfg.get("server", {})
@@ -1103,8 +1138,6 @@ class SettingsPage(QWidget):
             idx = self._server_auth_combo.findText(auth)
             if idx >= 0:
                 self._server_auth_combo.setCurrentIndex(idx)
-        if self._server_key_path_edit:
-            self._server_key_path_edit.setText(server_cfg.get("key_path", ""))
 
     # ── Save ─────────────────────────────────────────────────────────────
 
@@ -1132,10 +1165,10 @@ class SettingsPage(QWidget):
 
         # ── Agent ──
         agent_cfg = partner_cfg.get("agent", {})
-        if self._agent_timeout_spin:
-            agent_cfg["timeout"] = self._agent_timeout_spin.value()
-        if self._agent_retry_spin:
-            agent_cfg["retry_count"] = self._agent_retry_spin.value()
+        if self._default_agent_combo:
+            agent_cfg["default_agent"] = self._default_agent_combo.currentText().strip()
+        if self._default_platform_combo:
+            agent_cfg["default_platform"] = self._default_platform_combo.currentText().strip()
         partner_cfg["agent"] = agent_cfg
 
         # ── LLM API ──
@@ -1150,10 +1183,6 @@ class SettingsPage(QWidget):
             llm_cfg["model"] = self._llm_model_combo.currentText().strip()
         if self._llm_base_url_edit:
             llm_cfg["base_url"] = self._llm_base_url_edit.text().strip()
-        if self._llm_timeout_spin:
-            llm_cfg["timeout"] = self._llm_timeout_spin.value()
-        if self._llm_max_retry_spin:
-            llm_cfg["max_retry"] = self._llm_max_retry_spin.value()
         partner_cfg["llm"] = llm_cfg
 
         # ── Ollama ──
@@ -1162,8 +1191,6 @@ class SettingsPage(QWidget):
             ollama_cfg["base_url"] = self._ollama_url_edit.text().strip()
         if self._ollama_model_combo:
             ollama_cfg["model"] = self._ollama_model_combo.currentText().strip()
-        if self._ollama_timeout_spin:
-            ollama_cfg["timeout"] = self._ollama_timeout_spin.value()
         partner_cfg["ollama"] = ollama_cfg
 
         # ── World Model ──
@@ -1174,12 +1201,6 @@ class SettingsPage(QWidget):
             wm_cfg["provider"] = self._wm_provider_combo.currentText()
         if self._wm_endpoint_edit:
             wm_cfg["endpoint"] = self._wm_endpoint_edit.text().strip()
-        if self._wm_timeout_spin:
-            wm_cfg["timeout"] = self._wm_timeout_spin.value()
-        if self._wm_max_steps_spin:
-            wm_cfg["max_steps"] = self._wm_max_steps_spin.value()
-        if self._wm_fallback_cb:
-            wm_cfg["fallback_to_llm"] = self._wm_fallback_cb.isChecked()
         partner_cfg["world_model"] = wm_cfg
 
         # ── Server ──
@@ -1194,8 +1215,6 @@ class SettingsPage(QWidget):
             server_cfg["username"] = self._server_user_edit.text().strip()
         if self._server_auth_combo:
             server_cfg["auth_method"] = self._server_auth_combo.currentText()
-        if self._server_key_path_edit:
-            server_cfg["key_path"] = self._server_key_path_edit.text().strip()
         global_cfg["server"] = server_cfg
 
         # Write to disk
@@ -1233,19 +1252,41 @@ class SettingsPage(QWidget):
             self._ws_path_edit.setText(directory)
 
     def _on_add_agent(self):
-        """Open file dialog to select an agent manifest file."""
+        """Open file dialog to select an agent manifest file, then register it."""
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            from partner.agents.registry import AgentRegistry
+            from partner.monitoring.instance_root import resolve_partner_root
+        except ImportError:
+            # Fallback: just update the specialist list
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "选择 Agent Manifest 文件", "", "Manifest Files (*.json *.yaml *.yml);;All Files (*)"
+            )
+            if file_path:
+                fname = os.path.basename(file_path)
+                current = self._specialist_list.text() if self._specialist_list else ""
+                if current == "(暂无专精 Agent)":
+                    self._specialist_list.setText(f"• {fname}")
+                else:
+                    self._specialist_list.setText(f"{current}\n• {fname}")
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择 Agent Manifest 文件", "", "Manifest Files (*.json *.yaml *.yml);;All Files (*)"
         )
-        if file_path:
-            # TODO: register the agent manifest
-            if self._agent_list_label:
-                current = self._agent_list_label.text()
-                fname = os.path.basename(file_path)
-                if current == "(暂无已注册的 Agent)" or current == "(自动检测中...)":
-                    self._agent_list_label.setText(f"  • {fname}")
-                else:
-                    self._agent_list_label.setText(f"{current}\n  • {fname}")
+        if not file_path:
+            return
+
+        try:
+            registry = AgentRegistry(workspace=str(resolve_partner_root()))
+            success = registry.register_from_file(file_path)
+            if success:
+                QMessageBox.information(self, "成功", "Agent 已注册")
+                self._load_configs()
+            else:
+                QMessageBox.warning(self, "注册失败", "无法注册 Agent")
+        except Exception as e:
+            QMessageBox.warning(self, "注册失败", f"无法注册 Agent: {e}")
 
     def _on_open_api_purchase(self):
         """Open the API key purchase page in the default browser."""

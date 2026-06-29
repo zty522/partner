@@ -12,5 +12,10 @@
     "max_turns": 10
   },
   "timeout": 600,
-  "health_check_cmd": "hermes --version"
+  "health_check_cmd": "hermes --version",
+  "install_info": {
+    "method": "pip",
+    "package": "hermes-agent",
+    "description": "pip install hermes-agent"
+  }
 }
