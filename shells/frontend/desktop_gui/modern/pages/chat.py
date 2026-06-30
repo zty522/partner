@@ -2644,7 +2644,18 @@ class ChatPage(QWidget):
         found_active = False
         # Skip polling when viewing a historical pipeline snapshot
         if self._showing_historical_pipeline:
-            return
+            # Auto-reset after 60s to prevent stuck "historical" mode
+            if hasattr(self, '_snapshot_started_at'):
+                elapsed = (datetime.now() - self._snapshot_started_at).total_seconds()
+                if elapsed > 60:
+                    self._showing_historical_pipeline = False
+                    if hasattr(self, '_pipeline_mode_label'):
+                        self._pipeline_mode_label.setVisible(False)
+                    # Resume live poll timer
+                    if hasattr(self, '_plan_timer') and not self._plan_timer.isActive():
+                        self._plan_timer.start(2000)
+            else:
+                return
         for inst_id in instances_to_check:
             inst_dir = self._instance_dir(inst_id)
             plan_path = os.path.join(inst_dir, "state", "active_plan.json")
@@ -2706,6 +2717,7 @@ class ChatPage(QWidget):
         
         if isinstance(plan, dict):
             self._showing_historical_pipeline = is_snapshot
+            self._snapshot_started_at = datetime.now()
             self._pipeline_empty.setVisible(False)
             self._update_pipeline(plan)
             # Show mode label
@@ -2785,7 +2797,11 @@ class ChatPage(QWidget):
             if s == "success":
                 s = "completed"
             action = ev.get("action", ev.get("type", ev.get("name",
-                       ev.get("event_type", ev.get("summary", f"\u6b65\u9aa4 {i+1}")))))
+                       ev.get("event_type", ev.get("summary", f"步骤 {i+1}")))))
+            # "action" may be literally "(none)" from batch planner
+            if not action or str(action).strip() in ("(none)", "none", ""):
+                action = ev.get("summary", ev.get("type", ev.get("name",
+                         ev.get("event_type", f"步骤 {i+1}"))))
             elapsed = ev.get("elapsed", "")
             agent = ev.get("agent", "")
 
