@@ -337,6 +337,24 @@ def _ensure_shell_api_key(env: dict) -> None:
         except Exception:
             continue
 
+    # Last resort: read ~/.hermes/.env directly (Hermes stores keys there)
+    try:
+        hermes_env = os.path.expanduser("~/.hermes/.env")
+        if os.path.exists(hermes_env):
+            with open(hermes_env, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, _, v = line.partition("=")
+                        k = k.strip()
+                        v = v.strip().strip("\"'")
+                        if k in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY") and v.startswith("sk-"):
+                            env.setdefault(k, v)
+    except Exception:
+        pass
+
 
 class HermesAdapter(AgentAdapter):
     """Adapter for Hermes Agent via cronjob/subprocess."""
