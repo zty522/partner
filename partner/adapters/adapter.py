@@ -306,24 +306,36 @@ def _ensure_shell_api_key(env: dict) -> None:
     """Inject DEEPSEEK_API_KEY / OPENAI_API_KEY into env from shell if missing.
 
     The Partner process may be started (via systemd / auto-restart) without the
-    API keys that the user exports in .bashrc.  This helper tries ``bash -lic``
-    to retrieve the key so Hermes subprocesses have it even when os.environ
-    does not.
+    API keys that the user exports in .bashrc.  This helper tries multiple
+    methods to retrieve the key so Hermes subprocesses have it even when
+    os.environ does not.
+
+    Methods tried in order:
+    1. os.environ (already present — fast path)
+    2. bash -lic (login shell — works in terminals)
+    3. bash -c 'source ~/.bashrc && echo ...' (systemd user services)
+    4. bash -c 'source ~/.profile && echo ...' (fallback)
     """
     if env.get("DEEPSEEK_API_KEY", "").strip() or env.get("OPENAI_API_KEY", "").strip():
         return  # already present
-    try:
-        r = subprocess.run(
-            ["bash", "-lic", 'echo "$DEEPSEEK_API_KEY"'],
-            capture_output=True, text=True, timeout=10,
-        )
-        key = r.stdout.strip() if r.returncode == 0 else ""
-        if key and key.startswith("sk-"):
-            env.setdefault("DEEPSEEK_API_KEY", key)
-            env.setdefault("OPENAI_API_KEY", key)
-            logger.debug("[HermesAdapter] injected shell API key into subprocess env")
-    except Exception:
-        pass
+    for cmd in (
+        ["bash", "-lic", 'echo "$DEEPSEEK_API_KEY"'],
+        ["bash", "-c", 'source ~/.bashrc 2>/dev/null; echo "$DEEPSEEK_API_KEY"'],
+        ["bash", "-c", 'source ~/.profile 2>/dev/null; echo "$DEEPSEEK_API_KEY"'],
+    ):
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True, text=True, timeout=10,
+            )
+            key = r.stdout.strip() if r.returncode == 0 else ""
+            if key and key.startswith("sk-"):
+                env.setdefault("DEEPSEEK_API_KEY", key)
+                env.setdefault("OPENAI_API_KEY", key)
+                logger.debug("[HermesAdapter] injected shell API key via: %s", " ".join(cmd))
+                return
+        except Exception:
+            continue
 
 
 class HermesAdapter(AgentAdapter):

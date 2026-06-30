@@ -2303,6 +2303,37 @@ class ChatPage(QWidget):
             elapsed = int(datetime.now().timestamp() - self._poll_start_time)
             self._update_loading_elapsed(elapsed)
 
+            # While waiting for the final reply, also show progress messages
+            # so the user sees "[进度] 正在 1/6：web_search" instead of just
+            # "思考中... (Xs)" for 120 seconds.
+            inst_id = self._selected_instance_id or ""
+            if inst_id:
+                inst_dir = os.path.join(self._workspace(), "instances", inst_id)
+                qq_path = os.path.join(inst_dir, "state", "qq_chat_history.jsonl")
+                if os.path.exists(qq_path):
+                    rows = _load_jsonl(qq_path, n=10)
+                    latest_ts = ""
+                    for m in self._messages:
+                        mt = str(m.get("timestamp") or "")
+                        if mt > latest_ts:
+                            latest_ts = mt
+                    for row in reversed(rows):
+                        role = row.get("role", "")
+                        if role not in ("assistant", "partner"):
+                            continue
+                        content = row.get("content", row.get("text", ""))
+                        if not content:
+                            continue
+                        ts = str(row.get("timestamp") or row.get("created_at") or "")
+                        if ts <= latest_ts:
+                            continue
+                        if "[进度]" in str(content) or "[EVENT]" in str(content):
+                            dedup_key = (ts, content[:50])
+                            if dedup_key in self._seen_responses:
+                                continue
+                            self._seen_responses.add(dedup_key)
+                            self._add_message("assistant", content, ts, inst_id, source="qq")
+
             if elapsed > 120:
                 bot_help = ("[响应超时 - 未收到回复]\n"
                            "请确认 Partner Bot 正在运行（在 WSL 中执行 partner bot start）")
