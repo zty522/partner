@@ -11,7 +11,6 @@ import asyncio
 import csv
 import inspect
 import json
-import json5 as json5_module
 import logging
 import os
 import re
@@ -22,7 +21,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
-_HAS_JSON5 = True
+try:
+    import json5 as json5_module
+    _HAS_JSON5 = True
+except ImportError:
+    json5_module = None  # type: ignore[assignment]
+    _HAS_JSON5 = False
 from ..harness_core import (
     ArtifactValidator,
     RemediationHandler,
@@ -2749,7 +2753,12 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
     if not source and ctx and ctx.task_instance:
         _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
         if _work_dir and os.path.isdir(_work_dir):
+            # First try root .md files (fast path)
             _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "*.md")))
+            if not _candidates:
+                # Recursive scan — catches cytobridge's analysis_report_zh.md
+                # in subdirectories like cytobridge_output/
+                _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "**", "*.md"), recursive=True))
             if _candidates:
                 source = _candidates[-1]  # newest .md file
     if not source:
@@ -3815,11 +3824,53 @@ def _local_create_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         return {"ok": False, "error": f"create_file failed: {exc}"}
 
 
+def _resolve_paths_in_cmd(cmd: str) -> str:
+    """Scan shell command for likely file paths and resolve non-existent ones.
+
+    Same logic as the pre-flight file resolver in _atomic_execute_skill,
+    but applicable to run_command events where the planner embeds paths
+    directly in shell commands (e.g. ``ls -la /data/pancreas.h5ad``).
+    """
+    import re
+    # Match common data paths: /data/..., /mnt/..., absolute .h5ad/.csv/.txt
+    _path_pattern = re.compile(
+        r'(?:/data/|/mnt/[a-z]/|/home/)[^\s;\"\'&|<>()$`!]+\.\w+'
+    )
+    _resolved = False
+    def _replace_path(m: re.Match) -> str:
+        nonlocal _resolved
+        _p = m.group(0)
+        if os.path.exists(_p):
+            return _p
+        # Strip trailing punctuation that may have been captured
+        _clean = _p.rstrip(".,;:!?")
+        if _clean != _p and os.path.exists(_clean):
+            return _clean
+        try:
+            from ..utils.file_resolver import resolve_file_path
+            _resolved_path, _found = resolve_file_path(_clean, search_timeout=10)
+            if _found:
+                _resolved = True
+                logger.debug("[CMD_RESOLVE] %s → %s", _clean, _resolved_path)
+                return _resolved_path
+        except Exception:
+            pass
+        return _p
+    _result = _path_pattern.sub(_replace_path, cmd)
+    if _resolved:
+        logger.info("[CMD_RESOLVE] resolved paths in command: %s", cmd[:200])
+    return _result
+
+
 def _local_run_command(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     """Run a system command. Parameters: command, timeout, workdir."""
     cmd = str(params.get("command") or params.get("cmd") or "").strip()
     if not cmd:
         return {"ok": False, "error": "missing command"}
+    # ── Hermes-style file path resolution for run_command ──
+    # The planner often embeds paths like /data/pancreas.h5ad in shell
+    # commands.  Resolve them to real filesystem paths before execution.
+    cmd = _resolve_paths_in_cmd(cmd)
     timeout_sec = int(params.get("timeout") or 120)
     workdir = str(params.get("workdir") or "").strip() or ctx.working_dir
     try:
@@ -3840,22 +3891,33 @@ def _local_run_command(ctx: HarnessContext, params: JsonDict) -> JsonDict:
 
 
 def _local_list_directory(ctx: HarnessContext, params: JsonDict) -> JsonDict:
-    """List directory contents. Parameters: path, pattern."""
+    """List directory contents. Parameters: path, pattern, recursive."""
     path = str(params.get("path") or params.get("directory") or "").strip() or ctx.working_dir
     pattern = str(params.get("pattern") or "*").strip()
+    recursive = bool(params.get("recursive", False))
+    # Auto-enable recursive for wildcard patterns — planner often uses *.*
+    # without knowing there are subdirectories with important files.
+    if pattern in ("*", "*.*", "*/*") and not recursive:
+        recursive = True
     try:
         import glob
-        full_pattern = os.path.join(path, pattern)
-        files = sorted(glob.glob(full_pattern))
+        # Use **/ prefix for recursive listing
+        if recursive and not pattern.startswith("**"):
+            full_pattern = os.path.join(path, "**", pattern)
+        else:
+            full_pattern = os.path.join(path, pattern)
+        files = sorted(glob.glob(full_pattern, recursive=recursive or pattern.startswith("**")))
         items = []
         for f in files:
+            if os.path.isdir(f):
+                continue
             stat = os.stat(f)
             items.append({
                 "name": os.path.basename(f),
                 "path": f,
                 "size": stat.st_size,
                 "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "is_dir": os.path.isdir(f),
+                "is_dir": False,
             })
         return {"ok": True, "items": items, "count": len(items)}
     except Exception as exc:
@@ -3905,7 +3967,7 @@ def default_registry() -> EventRegistry:
     registry.register(HarnessEventSpec("web_search", "atomic", "执行网页搜索，返回结构化结果。参数: query, num_results", _agent_event_handler, external_call=True, execution_method="agent"))
     registry.register(HarnessEventSpec("read_file", "atomic", "读取本地文件内容。参数: path, encoding", _local_read_file, reads_existing_artifact=True, execution_method="local"))
     registry.register(HarnessEventSpec("query_api", "atomic", "调用任意 HTTP API。参数: url, method, headers, body", _local_query_api, external_call=True, execution_method="local"))
-    registry.register(HarnessEventSpec("list_directory", "atomic", "列出目录内容。参数: path, pattern", _local_list_directory, reads_existing_artifact=True, execution_method="local"))
+    registry.register(HarnessEventSpec("list_directory", "atomic", "列出目录内容。参数: path, pattern, recursive(bool)", _local_list_directory, reads_existing_artifact=True, execution_method="local"))
 
     # Information Processing
     registry.register(HarnessEventSpec("extract", "atomic", "从文本/JSON/HTML 中提取指定字段。参数: data, fields, format", _llm_event_handler, execution_method="llm"))

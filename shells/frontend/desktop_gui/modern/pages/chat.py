@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from partner.monitoring.instance_root import (
     resolve_partner_root,
+    resolve_global_config_path,
 )
 
 from ..theme import THEME
@@ -68,6 +69,28 @@ def _load_jsonl(path: str, n: int = 500) -> list[dict]:
     except Exception:
         pass
     return rows
+
+
+def _resolve_instance_env(instance_id: str) -> str:
+    """Read environment type from global_config.json for an instance.
+
+    Returns 'wsl', 'local_windows', or auto-detects from working_dir path.
+    """
+    try:
+        cfg = _load_json(str(resolve_global_config_path()))
+        instances = cfg.get("instances", {})
+        info = instances.get(instance_id, {})
+        env = info.get("environment", "").strip().lower()
+        if env in ("wsl", "local_windows", "local_linux"):
+            return env
+        wd = info.get("working_dir", "").replace("\\", "/")
+        if wd.startswith("/mnt/") or wd.startswith("/"):
+            return "wsl"
+        if len(wd) >= 2 and wd[1] == ":":
+            return "local_windows"
+    except Exception:
+        pass
+    return "wsl"
 
 
 def _parse_log_file(path: str) -> list[dict]:
@@ -168,14 +191,76 @@ def _parse_log_file(path: str) -> list[dict]:
     return turns
 
 
+def _dialogue_cache_path(workspace: str, instance_id: str) -> str:
+    """Path to the cached dialogue turns for a given instance.
+
+    Cache contains pre-parsed dialogue turns so subsequent loads are instant
+    (pure JSON deserialization instead of re-parsing log files).
+    """
+    cache_dir = os.path.join(workspace, ".dialogue_cache")
+    return os.path.join(cache_dir, f"{instance_id}.json")
+
+
+def _dialogue_source_mtime(workspace: str, instance_id: str) -> float:
+    """Return the latest modification time of all source files for an instance.
+
+    Used to invalidate the cache when source files change.
+    """
+    import time
+    latest = 0.0
+    inst_dir = Path(workspace) / "instances" / instance_id
+    # Primary source
+    qq_path = inst_dir / "state" / "qq_chat_history.jsonl"
+    if qq_path.exists():
+        try:
+            mtime = qq_path.stat().st_mtime
+            if mtime > latest:
+                latest = mtime
+        except Exception:
+            pass
+    # Secondary: .log files in dialogue/
+    dialogue_dir = inst_dir / "dialogue"
+    if dialogue_dir.is_dir():
+        for log_file in dialogue_dir.glob("*.log"):
+            try:
+                mtime = log_file.stat().st_mtime
+                if mtime > latest:
+                    latest = mtime
+            except Exception:
+                pass
+    return latest
+
+
 def _load_dialogue_turns(workspace: str, instance_id: str = "",
-                         offset: int = 0, limit: int = 200) -> list[dict]:
+                         offset: int = 0, limit: int = 200,
+                         use_cache: bool = True) -> list[dict]:
     """Load turns from qq_chat_history.jsonl (primary) + .log files (fallback).
+
+    When use_cache=True (default), checks a JSON cache file first.  If the
+    cache is recent (source files unchanged), loads from cache — sub-millisecond
+    instead of 100ms+ parsing.
 
     qq_chat_history.jsonl in state/ has the complete conversation including
     both user messages (from QQ) and assistant responses.  Returns entries
     sorted chronologically (oldest first), newest last.
     """
+    # ── Cache fast-path ──────────────────────────────────────────────────
+    if use_cache and instance_id:
+        cache_path = _dialogue_cache_path(workspace, instance_id)
+        if os.path.exists(cache_path):
+            try:
+                cached = _load_json(cache_path)
+                cache_mtime = cached.get("_cache_mtime", 0)
+                source_mtime = _dialogue_source_mtime(workspace, instance_id)
+                if cache_mtime >= source_mtime:
+                    turns = cached.get("turns", [])
+                    if offset == 0:
+                        return turns[-limit:] if limit < len(turns) else turns
+                    return turns[offset:offset + limit]
+            except Exception:
+                pass
+
+    # ── Full parse (slow path) ───────────────────────────────────────────
     turns: list[dict] = []
     instances: list[str] = []
     if instance_id:
@@ -294,6 +379,21 @@ def _load_dialogue_turns(workspace: str, instance_id: str = "",
     # Apply offset/limit pagination (offset=0 -> newest limit entries)
     deduped.sort(key=lambda r: str(r.get("timestamp") or ""))
     total = len(deduped)
+
+    # ── Save full result to cache for instant subsequent loads ──
+    if use_cache and instance_id and deduped:
+        try:
+            cache_path = _dialogue_cache_path(workspace, instance_id)
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            cache_data = {
+                "_cache_mtime": _dialogue_source_mtime(workspace, instance_id),
+                "turns": deduped,
+            }
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+        except Exception:
+            pass
+
     if offset >= total:
         return []
     return deduped[-(offset + limit):][:limit] if offset == 0 else deduped[offset:offset + limit]
@@ -419,6 +519,14 @@ class AttachmentFileWidget(QFrame):
 class ChatPage(QWidget):
     """Chat/dialogue page with dual-column layout: chat (left) + pipeline (right) + input bar."""
 
+    # Signal emitted when the instances page creates/deletes instances — lets
+    # the main window know to propagate updates across all subscribing pages.
+    instances_changed = Signal()
+
+    # Signal emitted after the first deferred initialisation completes.
+    # Lets the main window hide its loading overlay.
+    loading_complete = Signal()
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._messages: list[dict] = []
@@ -445,18 +553,39 @@ class ChatPage(QWidget):
         self.setAcceptDrops(True)
         self._build_ui()
 
-        # Load initial history
-        self._load_history()
+        # ── Defer all heavy I/O so the window shell shows immediately ──
+        QTimer.singleShot(0, self._deferred_init)
 
-        # Poll for new messages every 2 seconds
+    def _deferred_init(self):
+        """Finish initialisation after the event loop has rendered the window.
+
+        Order matters: load instance selector first (which populates the
+        dropdown, selects the newest instance, and triggers _on_instance_changed
+        → _load_history), then start the poll timers.
+        """
+        # Show loading status in the main window overlay
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, '_update_loading_status'):
+                parent._update_loading_status("正在加载对话记录…")
+                break
+            parent = parent.parent() if hasattr(parent, 'parent') else None
+
+        # Step 1: load instance selector → _on_instance_changed → _load_history
+        # This is the single entry point for initial data loading.
+        self._load_instance_selector()
+
+        # Step 2: poll timers for incoming messages and live pipeline
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_new_messages)
         self._poll_timer.start(2000)
 
-        # Poll active plan every 2 seconds
         self._plan_timer = QTimer(self)
         self._plan_timer.timeout.connect(self._poll_active_plan)
         self._plan_timer.start(2000)
+
+        # Notify main window that loading is complete
+        self.loading_complete.emit()
 
     # ------------------------------------------------------------------
     # UI Build
@@ -1133,8 +1262,9 @@ class ChatPage(QWidget):
 
         input_layout.addLayout(input_row)
 
-        # Load instances
-        self._load_instance_selector()
+        # Load instances — _deferred_init handles this first, then history.
+        # Not deferred separately here to avoid race with _deferred_init.
+        # See _deferred_init for the actual call order.
 
     # ------------------------------------------------------------------
     # Drag & Drop
@@ -1378,7 +1508,15 @@ class ChatPage(QWidget):
         return super().eventFilter(obj, event)
 
     def _load_instance_selector(self):
-        """Populate the instance selector from the current workspace's global_config.json."""
+        """Populate the instance selector from the current workspace's global_config.json.
+
+        Blocks the currentIndexChanged signal during rebuild so that
+        _on_instance_changed is NOT triggered by setCurrentIndex(0).
+        The caller (refresh_instance_selector / deferred init) is responsible
+        for setting the final selection and triggering history reload.
+        """
+        # Block signals to prevent _on_instance_changed from firing
+        self._instance_selector.blockSignals(True)
         self._instance_selector.clear()
         ws = self._workspace()
         # Instances are stored in global_config.json, not partner_config.json
@@ -1387,7 +1525,10 @@ class ChatPage(QWidget):
             config = _load_json(config_path)
             instances = config.get("instances", {})
             for inst_id in instances:
-                self._instance_selector.addItem(inst_id, inst_id)
+                env = _resolve_instance_env(inst_id)
+                env_tag = {"wsl": "WSL", "local_windows": "Win", "local_linux": "Linux"}.get(env, env)
+                label = f"{inst_id} [{env_tag}]"
+                self._instance_selector.addItem(label, inst_id)
         # Fallback: scan filesystem
         if self._instance_selector.count() == 0:
             inst_dir = os.path.join(ws, "instances")
@@ -1397,7 +1538,43 @@ class ChatPage(QWidget):
                         self._instance_selector.addItem(entry, entry)
 
         if self._instance_selector.count() > 0:
-            self._instance_selector.setCurrentIndex(0)
+            self._instance_selector.setCurrentIndex(
+                self._instance_selector.count() - 1  # newest last
+            )
+
+        # Restore signal delivery
+        self._instance_selector.blockSignals(False)
+
+        # Ensure _on_instance_changed fires for the initial selection,
+        # since blockSignals suppressed the setCurrentIndex signal.
+        if self._instance_selector.count() > 0:
+            self._on_instance_changed(self._instance_selector.currentIndex())
+
+    def refresh_instance_selector(self):
+        """Public method called by main window when instances change in other pages.
+
+        Repopulates the dropdown. If a new instance was added (the dropdown
+        has more items than before), auto-selects the newest one so the user
+        doesn't have to manually switch.
+        """
+        old_count = self._instance_selector.count()
+        self._load_instance_selector()
+        new_count = self._instance_selector.count()
+        # If new instances appeared, auto-select the newest (already done by
+        # _load_instance_selector which selects the last item).
+        # Otherwise restore previous selection.
+        if new_count == old_count:
+            current_data = self._instance_selector.currentData() or ""
+            if current_data:
+                idx = self._instance_selector.findData(current_data)
+                if idx >= 0:
+                    # _load_instance_selector already called _on_instance_changed,
+                    # but we need to switch back to the old selection manually.
+                    # Block temporarily to avoid a second history reload.
+                    self._instance_selector.blockSignals(True)
+                    self._instance_selector.setCurrentIndex(idx)
+                    self._instance_selector.blockSignals(False)
+                    self._selected_instance_id = current_data
 
     def _on_instance_changed(self, index: int):
         self._selected_instance_id = self._instance_selector.currentData() or ""
@@ -1433,7 +1610,9 @@ class ChatPage(QWidget):
         if hasattr(self, '_status_label'):
             if running:
                 inst_name = self._selected_instance_id
-                self._status_label.setText(f"● {inst_name} 运行中")
+                env = _resolve_instance_env(inst_name)
+                env_tag = {"wsl": "WSL", "local_windows": "Win", "local_linux": "Linux"}.get(env, env)
+                self._status_label.setText(f"● {inst_name} [{env_tag}] 运行中")
                 self._status_label.setStyleSheet(
                     f"font-size: 12px; color: {THEME.green}; background: transparent;"
                 )
@@ -1445,7 +1624,13 @@ class ChatPage(QWidget):
         self._auto_start_instance()
 
     def _auto_start_instance(self):
-        """Auto-start the current instance via WSL subprocess."""
+        """Auto-start the current instance using the system Python.
+
+        In a frozen EXE, sys.executable == Partner.exe (the GUI).  Running
+        Partner.exe -m partner would start another GUI, not the backend.
+        Instead, use the system Python (which has the partner package
+        installed via pip) to launch the backend process.
+        """
         import subprocess as _sp
         inst_id = self._selected_instance_id
         if not inst_id:
@@ -1466,17 +1651,63 @@ class ChatPage(QWidget):
             self._auto_starting = False
             return
 
-        # Start via WSL — let partner process write its own instance.pid
+        # ── Build command ─────────────────────────────────────────────────
+        frozen = getattr(sys, 'frozen', False)
+        if frozen:
+            env_type = _resolve_instance_env(inst_id)
+            if env_type == "wsl":
+                # WSL instance — launch via wsl.exe on WSL's python3
+                wsl_workspace = inst_dir.replace("\\", "/")
+                cmd = ["wsl.exe", "-e", "python3", "-m", "partner",
+                       "--instance-id", inst_id, "--workspace", wsl_workspace]
+                launch_kwargs = {}
+                try:
+                    r = _sp.run(
+                        ["wsl.exe", "-e", "python3", "-c",
+                         "import partner; import os; "
+                         "print(os.path.normpath(os.path.join(partner.__file__, '..', '..')))"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if r.returncode == 0:
+                        wsl_root = r.stdout.strip()
+                        if wsl_root.startswith("/mnt/"):
+                            drive = wsl_root[5]
+                            rest = wsl_root[6:].replace("/", "\\")
+                            launch_kwargs["cwd"] = f"{drive}:{rest}"
+                except Exception:
+                    pass
+            else:
+                # local_windows or local_linux — run natively
+                import shutil as _sh
+                _python_exe = _sh.which("python.exe") or _sh.which("python") or "python"
+                cmd = [_python_exe, "-m", "partner",
+                       "--instance-id", inst_id, "--workspace", inst_dir]
+                launch_kwargs = {}
+                try:
+                    r = _sp.run(
+                        [_python_exe, "-c",
+                         "import partner; import os; "
+                         "print(os.path.normpath(os.path.join(partner.__file__, '..', '..')))"],
+                        capture_output=True, text=True, timeout=5,
+                        creationflags=_sp.CREATE_NO_WINDOW,
+                    )
+                    if r.returncode == 0:
+                        launch_kwargs["cwd"] = r.stdout.strip()
+                except Exception:
+                    pass
+        else:
+            cmd = [sys.executable, "-m", "partner",
+                   "--instance-id", inst_id, "--workspace", inst_dir]
+            launch_kwargs = {}
         try:
             log_path = os.path.join(inst_dir, "state", "record", "instance.log")
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             log_file = open(log_path, "a", encoding="utf-8", errors="replace")
-            # Use wsl.exe to run partner inside WSL
             _sp.Popen(
-                ["wsl.exe", "python", "-m", "partner", "--instance-id", inst_id,
-                 "--workspace", inst_dir],
+                cmd,
                 stdout=log_file, stderr=_sp.STDOUT,
                 creationflags=_sp.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                **launch_kwargs,
             )
             # Update status
             if hasattr(self, '_status_label'):
@@ -1485,9 +1716,9 @@ class ChatPage(QWidget):
                     f"font-size: 12px; color: {THEME.yellow}; background: transparent;"
                 )
                 self._status_label.setVisible(True)
-            # Schedule a status re-check after 5 seconds
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(5000, self._update_instance_status_display)
+            # Keep retrying status check every 5s for up to 30s
+            self._auto_start_retries = 0
+            QTimer.singleShot(5000, self._retry_instance_status)
         except Exception:
             self._auto_starting = False
             if hasattr(self, '_status_label'):
@@ -1496,6 +1727,55 @@ class ChatPage(QWidget):
                     f"font-size: 12px; color: {THEME.red}; background: transparent;"
                 )
                 self._status_label.setVisible(True)
+
+    def _retry_instance_status(self):
+        """Check instance status after auto-start, retry up to 6 times (30s)."""
+        self._auto_start_retries = getattr(self, '_auto_start_retries', 0) + 1
+        if self._check_instance_status():
+            # Instance is now running
+            self._auto_starting = False
+            if hasattr(self, '_status_label'):
+                inst_name = self._selected_instance_id or ""
+                env = _resolve_instance_env(inst_name)
+                env_tag = {"wsl": "WSL", "local_windows": "Win", "local_linux": "Linux"}.get(env, env)
+                self._status_label.setText(f"● {inst_name} [{env_tag}] 运行中")
+                self._status_label.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.green}; background: transparent;"
+                )
+                self._status_label.setVisible(True)
+            return
+
+        # Still not running — retry or give up
+        if self._auto_start_retries >= 6:  # 30 seconds max
+            self._auto_starting = False
+            # Try to read the last lines of instance.log for diagnosis
+            error_hint = "启动超时"
+            inst_dir = self._instance_dir(self._selected_instance_id or "")
+            log_path = os.path.join(inst_dir, "state", "record", "instance.log")
+            if os.path.exists(log_path):
+                try:
+                    lines = open(log_path, "r", encoding="utf-8", errors="replace").read().splitlines()
+                    # Show last non-empty lines (max 2) that look like errors
+                    err_lines = [l.strip() for l in lines if l.strip() and
+                                 any(kw in l.lower() for kw in ("error", "traceback", "exception", "failed", "无法"))]
+                    if err_lines:
+                        error_hint = err_lines[-1][:60]
+                    elif lines:
+                        # Fall back to last line of log
+                        last = lines[-1].strip()[:60]
+                        if last:
+                            error_hint = last
+                except Exception:
+                    pass
+            if hasattr(self, '_status_label'):
+                self._status_label.setText(f"● {error_hint}")
+                self._status_label.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.red}; background: transparent;"
+                )
+                self._status_label.setVisible(True)
+            return
+
+        QTimer.singleShot(5000, self._retry_instance_status)
 
     def send_test_message(self):
         """Send a test message to verify the chat pipeline end-to-end."""
@@ -1803,15 +2083,19 @@ class ChatPage(QWidget):
         self._loading_bubble = None
 
     def _check_instance_status(self) -> bool:
-        """Check if the target instance is running (supports WSL cross-platform)."""
-        import subprocess as _subprocess
+        """Check if the target instance is running (supports WSL cross-platform).
 
+        Three detection methods:
+        1. PID file + os.kill(pid, 0) — works for Windows-native PIDs
+        2. heartbeat.json stamp within 180s — works for WSL instances (cross-platform)
+        3. qq_bot.pid fallback — QQ bridge PID check
+        """
         inst_id = self._selected_instance_id or self._instance_selector.currentData()
         if not inst_id:
             return False
         inst_dir = self._instance_dir(inst_id)
 
-        # Resolve PID from instance.pid (written by manager.py)
+        # Method 1: PID file check
         pid = None
         pid_path = os.path.join(inst_dir, "instance.pid")
         if os.path.exists(pid_path):
@@ -1822,39 +2106,37 @@ class ChatPage(QWidget):
 
         if pid is not None:
             try:
-                # When running as Windows exe (PyInstaller), WSL PIDs are not
-                # visible in the Windows PID namespace. Use wsl.exe to check.
-                if os.name == "nt":
-                    r = _subprocess.run(
-                        ["wsl.exe", "ps", "-p", str(pid), "-o", "pid=", "--no-headers"],
-                        capture_output=True, text=True, timeout=5,
-                        creationflags=_subprocess.CREATE_NO_WINDOW,
-                    )
-                    if r.returncode == 0 and r.stdout.strip():
+                os.kill(pid, 0)
+                return True
+            except (OSError, PermissionError):
+                # WSL PIDs are NOT visible from Windows — os.kill fails with
+                # WinError 87 even when the process is alive. Fall through to
+                # heartbeat check instead of giving up.
+                pass
+
+        # Method 2: heartbeat.json staleness (works cross-platform on shared FS)
+        heartbeat_path = os.path.join(inst_dir, "state", "heartbeat.json")
+        if os.path.exists(heartbeat_path):
+            try:
+                with open(heartbeat_path, "r", encoding="utf-8") as _hb_f:
+                    _hb = json.load(_hb_f)
+                ts = _hb.get("last_heartbeat", "")
+                if ts:
+                    dt = datetime.fromisoformat(ts)
+                    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                    if (now - dt).total_seconds() < 180:
                         return True
-                else:
-                    os.kill(pid, 0)
-                    return True
             except Exception:
                 pass
 
-        # Also check qq_bot.pid (written by QQ bridge at startup)
+        # Method 3: qq_bot.pid (QQ bridge fallback)
         qq_pid_path = os.path.join(inst_dir, "state", "qq_bot.pid")
         if os.path.exists(qq_pid_path):
             try:
                 pid2 = int(Path(qq_pid_path).read_text().strip())
-                if os.name == "nt":
-                    r = _subprocess.run(
-                        ["wsl.exe", "ps", "-p", str(pid2), "-o", "pid=", "--no-headers"],
-                        capture_output=True, text=True, timeout=5,
-                        creationflags=_subprocess.CREATE_NO_WINDOW,
-                    )
-                    if r.returncode == 0 and r.stdout.strip():
-                        return True
-                else:
-                    os.kill(pid2, 0)
-                    return True
-            except Exception:
+                os.kill(pid2, 0)
+                return True
+            except (OSError, PermissionError):
                 pass
 
         return False
@@ -2046,8 +2328,19 @@ class ChatPage(QWidget):
                     if mt > latest_ts:
                         latest_ts = mt
 
-                for instance_dir in sorted(Path(workspace).glob("instances/*"), reverse=True):
-                    inst_id = instance_dir.name
+                # Only poll the currently selected instance, not all instances.
+                # Otherwise, switching instances shows a mix of all histories.
+                target_instances: list[str] = []
+                selected = self._selected_instance_id
+                if selected:
+                    target_instances = [selected]
+                else:
+                    # Fall back to all instances (e.g. during initial load)
+                    for d in sorted(Path(workspace).glob("instances/*"), reverse=True):
+                        target_instances.append(d.name)
+
+                for inst_id in target_instances:
+                    instance_dir = Path(workspace) / "instances" / inst_id
 
                     # Check qq_chat_history.jsonl
                     qq_path = os.path.join(str(instance_dir), "state", "qq_chat_history.jsonl")
@@ -2111,11 +2404,17 @@ class ChatPage(QWidget):
                 pass
             return
 
-        # Active polling: try to find reply
+        # Active polling: try to find reply — only check selected instance
         workspace = self._workspace()
         try:
-            for instance_dir in sorted(Path(workspace).glob("instances/*"), reverse=True):
-                inst_id = instance_dir.name
+            selected_id = self._selected_instance_id
+            if selected_id:
+                target_poll = [selected_id]
+            else:
+                target_poll = [d.name for d in sorted(Path(workspace).glob("instances/*"), reverse=True)]
+
+            for inst_id in target_poll:
+                instance_dir = Path(workspace) / "instances" / inst_id
 
                 # When actively waiting for a reply, only accept messages that are
                 # explicitly tied to our pending message (reply_to match) OR were
@@ -2291,12 +2590,15 @@ class ChatPage(QWidget):
         instance_id = self._selected_instance_id or ""
 
         # Check instance status first — but still attempt to read active_plan
-        # even if status check fails (e.g. WSL PID check unreliable, or bot runs
-        # independently of instance.pid)
+        # even if status check fails.
         if instance_id:
-            self._update_instance_status_display()
-            # Don't bail here — QQ bot writes active_plan.json even when
-            # instance.pid is stale / WSL cross-PID check fails
+            # NOTE: Do NOT call _update_instance_status_display here.
+            # It would restart _auto_start_instance every time the poll timer
+            # fires after a timeout, creating an infinite start→timeout→start
+            # loop ("来回切换").  Status is updated only on instance selection
+            # changes (_on_instance_changed) and the auto-start retry chain
+            # (_retry_instance_status).
+            pass
 
         instances_to_check = [instance_id] if instance_id else []
         if not instances_to_check:

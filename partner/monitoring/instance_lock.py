@@ -76,13 +76,18 @@ class InstanceLock:
             "workspace": self.workspace,
             "started_at": datetime.now().isoformat(),
         }
-        self._file.seek(0)
-        self._file.truncate()
-        self._file.write(json.dumps(payload, ensure_ascii=False))
-        self._file.flush()
         try:
-            os.fsync(self._file.fileno())
-        except Exception:
+            self._file.seek(0)
+            self._file.truncate()
+            self._file.write(json.dumps(payload, ensure_ascii=False))
+            self._file.flush()
+            try:
+                os.fsync(self._file.fileno())
+            except Exception:
+                pass
+        except OSError:
+            # Lock was acquired (msvcrt.locking succeeded), owner metadata
+            # is best-effort only — don't crash on drvfs/9P EIO errors
             pass
 
     def release(self) -> None:

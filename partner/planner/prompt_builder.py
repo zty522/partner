@@ -296,6 +296,20 @@ def build_prompt(
 不要用 web_search、smart_llm_structured_action 或 run_command 替代专用 Agent 的功能。
 调用专用 Agent 后，用 smart_llm_structured_action 或 atomic_write_artifact 处理其结果。
 
+⚠️ cytobridge / cytobridge-agent 特殊规则（必须遵守，违反会导致用户体验严重下降）：
+如果专用 Agent 是 cytobridge 或 cytobridge-agent，它已经自动生成了完整的分析报告 (analysis_report_zh.md + figures/ 下的 PNG 图片)。
+此时规划必须遵循以下模式：
+  1. call_agent_skill(agent="cytobridge" 或 "cytobridge-agent") ← 运行 cytobridge，它自动产出 analysis_report_zh.md + figures/
+     parameters 中**必须包含**以下三个参数，缺一不可：
+     - input: 输入文件路径（如 /mnt/e/work/data/pancreas.h5ad）
+     - question: 从用户消息中提取的完整科学问题描述（如 "对 pancreas.h5ad 做单细胞轨迹推断，分析胰腺细胞的分化路径"）
+     - output: 输出目录（填写工作目录 {working_dir}）
+     缺少 question 会导致 agent 无法获得任务描述，只读取 SKILL.md 后就停止，不会做任何分析。
+  2. atomic_convert_md_to_pdf ← 直接转 PDF（无需 source 参数，会自动在输出目录中找到 .md 文件）
+  ❌ 禁止安排 smart_llm_structured_action 生成新报告（cytobridge 已自带了）
+  ❌ 禁止安排 atomic_write_artifact 写 .md 文件
+  ✅ 最终产物只有 PDF，不交付 .md
+
 请生成一个 JSON 格式的 MicroPlan。严格遵守以下 JSON 语法规则：
 - 每两个相邻的数组元素或字典属性之间必须有逗号
 - 字符串必须用双引号，不能用单引号

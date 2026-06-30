@@ -9,7 +9,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
@@ -58,19 +58,16 @@ def _save_json(path: str, data: dict):
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Check if a PID is alive, supporting WSL cross-platform when running as Windows exe."""
+    """Check if a PID is alive, supporting both Windows and WSL processes."""
     if pid <= 0:
         return False
     try:
         if os.name == "nt":
-            import subprocess as _subprocess
-            r = _subprocess.run(
-                ["wsl.exe", "ps", "-p", str(pid), "-o", "pid=", "--no-headers"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=_subprocess.CREATE_NO_WINDOW,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                return True
+            # Windows PID: use os.kill(pid, 0) which raises OSError if dead.
+            # This works for both native Windows processes and processes
+            # visible through the Windows PID namespace (unlike wsl ps).
+            os.kill(pid, 0)
+            return True
         else:
             os.kill(pid, 0)
             return True
@@ -169,6 +166,8 @@ class NewInstanceDialog(QDialog):
 
 class InstancesPage(QWidget):
     """Instance management page."""
+
+    instances_changed = Signal()  # Emitted when instances are created/modified
 
     def __init__(self, parent: QWidget | None = None, workspace_path: str = ""):
         super().__init__(parent)
@@ -493,8 +492,11 @@ class InstancesPage(QWidget):
                 ws_path = os.path.join(self._resolve_instances_dir(), inst_id)
 
             os.makedirs(ws_path, exist_ok=True)
-            from partner.workspace.workspace_layout import ensure_instance_layout
-            ensure_instance_layout(ws_path)
+
+            # Defer ensure_instance_layout to avoid blocking the UI thread
+            # with module imports and filesystem operations.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, lambda: self._ensure_instance_layout(ws_path))
 
             config.setdefault("instances", {})[inst_id] = {
                 "enabled": True,
@@ -505,6 +507,15 @@ class InstancesPage(QWidget):
             }
             _save_json(str(config_path), config)
             self._refresh()
+            self.instances_changed.emit()
+
+    def _ensure_instance_layout(self, ws_path: str):
+        """Create the instance directory structure in background (deferred)."""
+        try:
+            from partner.workspace.workspace_layout import ensure_instance_layout
+            ensure_instance_layout(ws_path)
+        except Exception as e:
+            print(f"⚠ instance layout error: {e}")
 
     def _on_start_instance(self, instance_id: str, inst_dir: str):
         """Start an instance as a background process."""
@@ -522,15 +533,55 @@ class InstancesPage(QWidget):
             except Exception:
                 pass
 
+        # Also check heartbeat — instance may be running from WSL/systemd
+        # where PID is invisible from Windows
+        hb = _load_json(os.path.join(inst_dir, "state", "heartbeat.json"))
+        ts = hb.get("last_heartbeat", "")
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts)
+                now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                if (now - dt).total_seconds() < 180:
+                    QMessageBox.information(
+                        self, "提示",
+                        f"实例 {instance_id} 正在运行（平台间心跳检测，PID 不可见）"
+                    )
+                    return
+            except Exception:
+                pass
+
         log_path = os.path.join(inst_dir, "state", "record", "instance.log")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         try:
+            # In a frozen PyInstaller EXE, sys.executable == Partner.exe.
+            # Running Partner.exe -m partner would start another GUI instance,
+            # not the backend. Use the system Python instead.
+            import shutil as _sh
+            _python_exe = _sh.which("python.exe") or _sh.which("python") or "python"
+            cmd = [_python_exe, "-m", "partner",
+                   "--instance-id", instance_id, "--workspace", inst_dir]
+            # Discover project root so the subprocess can import 'shells'
+            import subprocess as _sp_root
+            try:
+                r = _sp_root.run(
+                    [_python_exe, "-c",
+                     "import partner; import os; "
+                     "print(os.path.normpath(os.path.join(partner.__file__, '..', '..')))"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=_sp_root.CREATE_NO_WINDOW,
+                )
+                project_root = r.stdout.strip() if r.returncode == 0 else None
+            except Exception:
+                project_root = None
+            launch_kwargs = {"cwd": project_root} if project_root else {}
+
             proc = subprocess.Popen(
-                [sys.executable, "-m", "partner", "--instance-id", instance_id, "--workspace", inst_dir],
+                cmd,
                 stdout=open(log_path, "a", encoding="utf-8", errors="replace"),
                 stderr=subprocess.STDOUT,
                 env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                **launch_kwargs,
             )
             with open(pid_path, "w") as f:
                 f.write(str(proc.pid))
@@ -630,3 +681,4 @@ class InstancesPage(QWidget):
         _save_json(qq_path, qq_cfg)
         QMessageBox.information(self, "保存成功", f"QQ Bot 配置已保存到实例 {self._selected_instance_id}")
         self._refresh()
+        self.instances_changed.emit()

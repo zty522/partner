@@ -307,6 +307,15 @@ async def _call_specialized_agent(
         logger.info("[CALL_AGENT] enriched %s output with %d data blocks (output_dir=%s)",
                      agent, len(_enrich_blocks), _output_dir)
 
+    # ── Package agent outputs into a comprehensive PDF ──
+    # Specialized agents (cytobridge, etc.) produce PNG figures, CSV tables,
+    # and reports as native output.  Package them into a single deliverable
+    # PDF that embeds everything — no need to build custom formatting per agent.
+    _pkg_pdf = _package_agent_outputs(_output_dir, agent)
+    if _pkg_pdf:
+        output_text += f"\n\n【综合报告 PDF】{_pkg_pdf}"
+        logger.info("[CALL_AGENT] packaged %s outputs into PDF: %s", agent, _pkg_pdf)
+
     if task_instance:
         task_instance.append_log("call_agent_specialized_completed", {
             "agent": agent,
@@ -317,6 +326,129 @@ async def _call_specialized_agent(
     # Mark output with [agent] header for clear identification
     result_output = {"content": f"[{agent}]\n{output_text}"}
     return SkillResult(True, output=result_output)
+
+
+# ── Generic agent output packaging ────────────────────────────────────
+# Any specialized agent (cytobridge, docking-agent, etc.) produces PNG
+# figures, CSV data tables, and text reports.  This function scans the
+# output directory, builds a single HTML page with everything embedded
+# (base64 images, inline tables), and converts it to a deliverable PDF.
+
+
+def _package_agent_outputs(output_dir: str, agent_name: str) -> str:
+    """Package agent outputs into a PDF, reusing the agent's own HTML report.
+
+    Strategy:
+    1. If the agent produced its own HTML report (report.html), reuse it:
+       embed PNG figures as base64 so the PDF is self-contained.
+    2. Otherwise fall back to building a simple HTML from discovered files.
+
+    This avoids duplicating the agent's visualization design — let the
+    specialist agent design its own report, Partner just packages it.
+    """
+    if not output_dir or not os.path.isdir(output_dir):
+        return ""
+
+    import glob
+    import re
+
+    pngs = sorted(glob.glob(os.path.join(output_dir, "**/*.png"), recursive=True))
+    csvs = sorted(glob.glob(os.path.join(output_dir, "**/*.csv"), recursive=True))
+    htmls = sorted(glob.glob(os.path.join(output_dir, "*.html"), recursive=False))
+
+    if not pngs and not csvs and not htmls:
+        return ""
+
+    # Strategy 1: reuse agent's native HTML report (the best option)
+    _html_content = None
+    if htmls:
+        # Pick the most substantial HTML (largest file, likely the report)
+        _html_path = max(htmls, key=lambda p: os.path.getsize(p) if os.path.isfile(p) else 0)
+        try:
+            with open(_html_path, "r", encoding="utf-8") as _fh:
+                _html_content = _fh.read(200000)
+
+            # Embed PNG images referenced by the agent's HTML as base64
+            def _embed_img(m: re.Match) -> str:
+                _src = m.group(1)
+                if _src.startswith("data:"):
+                    return m.group(0)  # already embedded
+                # Resolve relative to the HTML file's directory
+                _img_dir = os.path.dirname(_html_path)
+                _img_path = os.path.join(_img_dir, _src)
+                # Also try relative to output_dir (some agents use output_dir as root)
+                if not os.path.isfile(_img_path):
+                    _img_path = os.path.join(output_dir, _src)
+                if os.path.isfile(_img_path):
+                    try:
+                        import base64
+                        with open(_img_path, "rb") as _fh_img:
+                            _b64 = base64.b64encode(_fh_img.read()).decode()
+                        return f'<img src="data:image/png;base64,{_b64}"'
+                    except Exception:
+                        pass
+                return m.group(0)
+
+            _html_content = re.sub(r'<img\s+[^>]*src="([^"]+)"', _embed_img, _html_content)
+            logger.info("[PACKAGE] reusing agent's native HTML: %s", _html_path)
+        except Exception as exc:
+            logger.warning("[PACKAGE] failed to read agent HTML %s: %s", _html_path, exc)
+            _html_content = None
+
+    # Strategy 2 (fallback): build simple HTML from discovered files
+    if _html_content is None:
+        _lines: list[str] = []
+        _lines.append("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+        _lines.append(f"<title>{agent_name} — 分析报告</title>")
+        _lines.append("<style>")
+        _lines.append("body{font-family:system-ui,sans-serif;margin:2cm;line-height:1.6}")
+        _lines.append("img{max-width:100%;margin:1em 0;border:1px solid #ddd}")
+        _lines.append("table{border-collapse:collapse;width:100%;margin:1em 0;font-size:90%}")
+        _lines.append("td,th{border:1px solid #ccc;padding:6px 10px;text-align:left}")
+        _lines.append("th{background:#f0f0f0;font-weight:600}")
+        _lines.append(".section{margin:2em 0}")
+        _lines.append("h2{color:#2c5282;border-bottom:2px solid #e2e8f0}")
+        _lines.append("</style></head><body>")
+        _lines.append(f"<h1>{agent_name} 分析报告</h1>")
+
+        for png_path in pngs:
+            try:
+                import base64
+                with open(png_path, "rb") as _fh:
+                    _b64 = base64.b64encode(_fh.read()).decode()
+                _rel = os.path.relpath(png_path, output_dir)
+                _lines.append(f"<figure><figcaption>{_rel}</figcaption>")
+                _lines.append(f"<img src='data:image/png;base64,{_b64}'>")
+                _lines.append("</figure>")
+            except Exception:
+                pass
+
+        for csv_path in csvs:
+            try:
+                _rel = os.path.relpath(csv_path, output_dir)
+                _lines.append(f"<h3>{_rel}</h3><table>")
+                with open(csv_path, "r", encoding="utf-8") as _fh:
+                    _rows = _fh.readlines()
+                for _i, _row in enumerate(_rows[:50]):
+                    _cells = _row.strip().split(",")
+                    _tag = "th" if _i == 0 else "td"
+                    _lines.append("<tr>" + "".join(f"<{_tag}>{__import__('html').escape(c[:60])}</{_tag}>" for c in _cells) + "</tr>")
+                _lines.append("</table>")
+            except Exception:
+                pass
+
+        _lines.append("</body></html>")
+        _html_content = "\n".join(_lines)
+
+    try:
+        from weasyprint import HTML
+        _pdf_path = os.path.join(output_dir, f"{agent_name}_report.pdf")
+        HTML(string=_html_content).write_pdf(_pdf_path)
+        if os.path.isfile(_pdf_path) and os.path.getsize(_pdf_path) > 1000:
+            return _pdf_path
+    except Exception as exc:
+        logger.warning("[PACKAGE] PDF generation failed for %s: %s", agent_name, exc)
+    return ""
 
 
 def _build_task_prompt(task: str, *, allow_web: bool = False) -> str:

@@ -60,10 +60,16 @@ def _run_instance_mode(argv: list[str]):
             with open(pid_file) as f:
                 old_pid = int(f.read().strip())
             os.kill(old_pid, 0)
-        except (FileNotFoundError, ValueError, ProcessLookupError):
+        except (FileNotFoundError, ValueError, OSError):
             # Process is dead — remove stale PID and proceed
             try:
                 os.remove(pid_file)
+            except Exception:
+                pass
+            # Also clean stale lock if no process holds it
+            lock_file = os.path.join(workspace, "state", "instance_runtime.lock")
+            try:
+                os.remove(lock_file)
             except Exception:
                 pass
     try:
@@ -74,22 +80,34 @@ def _run_instance_mode(argv: list[str]):
         print(f"Partner instance '{args.instance_id}' is already running; this duplicate start will exit. {exc}")
         return
 
-    from partner.state.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data, _config_root
-    from partner.core.core import Partner
-    from partner.mind import set_file_push_callback, set_push_callback
-    from shells.frontend.qq_bot.qq_official_bridge import QQQfficialBridge, QQMessageType
-    from partner.monitoring.restart_tracker import RestartTracker
-
-    tracker = RestartTracker(workspace)
-    tracker.record_restart()
-
-    # Write PID file for GUI / TUI instance status detection
+    # Write PID file BEFORE any imports that may fail (e.g. shells/QQ bridge).
+    # This ensures the GUI can detect the instance as running even when QQ is
+    # not configured or shell imports fail due to missing cwd/PYTHONPATH.
     try:
         pid_path = os.path.join(workspace, "instance.pid")
         with open(pid_path, "w") as f:
             f.write(str(os.getpid()))
     except Exception as exc:
         print(f"Failed to write PID file: {exc}", flush=True)
+
+    from partner.state.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data, _config_root
+    from partner.core.core import Partner
+    from partner.monitoring.restart_tracker import RestartTracker
+
+    tracker = RestartTracker(workspace)
+    tracker.record_restart()
+
+    # QQ bridge import is optional — the instance works fine without it.
+    QQQfficialBridge = None
+    QQMessageType = None
+    try:
+        from shells.frontend.qq_bot.qq_official_bridge import QQQfficialBridge as _QQB, QQMessageType as _QQT
+        QQQfficialBridge = _QQB
+        QQMessageType = _QQT
+    except ImportError:
+        pass
+
+    from partner.mind import set_file_push_callback, set_push_callback
     if tracker.should_stop():
         count = tracker.get_restart_count()
         print(
@@ -140,124 +158,128 @@ def _run_instance_mode(argv: list[str]):
         cfg = os.path.join(workspace, "qq_config.json")
     elif not os.path.exists(cfg):
         cfg = os.path.join(workspace, "qq_config.json")
-    if os.path.exists(cfg):
-        bridge = QQQfficialBridge(workspace)
-        bridge.load_config_from_file(cfg)
+    # ── 通用历史记录写入（所有实例都需要，无论有无 QQ） ──
+    _qq_bridge = None  # may be set below if QQ config exists
 
-        def _history_file_attachment(file_data: bytes, filename: str = "") -> dict | None:
-            if not file_data:
-                return None
-            safe_name = os.path.basename(str(filename or "partner_file").strip()) or "partner_file"
-            safe_name = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]+', "_", safe_name).strip(" ._") or "partner_file"
-            stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
-            from partner.workspace.workspace_layout import outgoing_dir
-            out_dir = outgoing_dir(workspace)
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, stored_name)
-            try:
-                with open(path, "wb") as f:
-                    f.write(file_data)
-            except Exception:
-                return None
-            return {
-                "type": "file",
-                "name": safe_name,
-                "stored_name": stored_name,
-                "size": len(file_data),
-                "rel_path": os.path.relpath(path, workspace).replace("\\", "/"),
-                "server_path": path,
-            }
+    def _history_file_attachment(file_data: bytes, filename: str = "") -> dict | None:
+        if not file_data:
+            return None
+        safe_name = os.path.basename(str(filename or "partner_file").strip()) or "partner_file"
+        safe_name = re.sub(r'[<>:\"/\\|?*\x00-\x1f]+', "_", safe_name).strip(" ._") or "partner_file"
+        stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
+        from partner.workspace.workspace_layout import outgoing_dir
+        out_dir = outgoing_dir(workspace)
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, stored_name)
+        try:
+            with open(path, "wb") as f:
+                f.write(file_data)
+        except Exception:
+            return None
+        return {
+            "type": "file",
+            "name": safe_name,
+            "stored_name": stored_name,
+            "size": len(file_data),
+            "rel_path": os.path.relpath(path, workspace).replace("\\", "/"),
+            "server_path": path,
+        }
 
-        def _append_proactive_history(content: str, openid: str = "", *, kind: str = "message", attachments: list | None = None):
-            text = str(content or "").strip()
-            if not text:
-                return
-            if text in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
-                return
-            row = {
-                "role": "assistant",
-                "content": text,
-                "timestamp": datetime.now().isoformat(),
-                "source": "qq",
-                "channel": "proactive",
-                "sender_id": "partner",
-                "sender_name": "Partner",
-                "target_id": openid,
-                "group_id": "",
-                "delivery": kind,
-            }
-            if attachments:
-                row["attachments"] = attachments
+    def _append_proactive_history(content: str, openid: str = "", *, kind: str = "message", attachments: list | None = None):
+        text = str(content or "").strip()
+        if not text:
+            return
+        if text in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
+            return
+        row = {
+            "role": "assistant",
+            "content": text,
+            "timestamp": datetime.now().isoformat(),
+            "source": "qq",
+            "channel": "proactive",
+            "sender_id": "partner",
+            "sender_name": "Partner",
+            "target_id": openid,
+            "group_id": "",
+            "delivery": kind,
+        }
+        if attachments:
+            row["attachments"] = attachments
+        try:
+            append_history(workspace, row, ("qq_chat_history.jsonl", "dialog_history.jsonl"))
+        except Exception:
+            pass
+        # Also write to daily dialogue log (newest at top)
+        if text.startswith("已停止「"):
+            return
+        try:
+            from partner.workspace.workspace_manager import get_dialogue_path
+            fpath = get_dialogue_path(workspace)
+            ts = datetime.now().strftime("%H:%M:%S")
+            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+            entry = f"[{ts}] [Partner] Partner\n  A: {text}\n\n"
+            old_content = b""
             try:
-                append_history(workspace, row, ("qq_chat_history.jsonl", "dialog_history.jsonl"))
-            except Exception:
+                with open(fpath, "rb") as f:
+                    old_content = f.read()
+            except FileNotFoundError:
                 pass
-            # Also write to daily dialogue log (newest at top)
-            # Skip 已停止「 messages — they are shutdown notices, not user-facing chat
-            if text.startswith("已停止「"):
-                return
-            try:
-                from partner.workspace.workspace_manager import get_dialogue_path
-                fpath = get_dialogue_path(workspace)
-                ts = datetime.now().strftime("%H:%M:%S")
-                os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                entry = f"[{ts}] [Partner] Partner\n  A: {text}\n\n"
-                old_content = b""
-                try:
-                    with open(fpath, "rb") as f:
-                        old_content = f.read()
-                except FileNotFoundError:
-                    pass
-                with open(fpath, "wb") as f:
-                    f.write(entry.encode("utf-8"))
-                    f.write(old_content)
-            except Exception:
-                pass
+            with open(fpath, "wb") as f:
+                f.write(entry.encode("utf-8"))
+                f.write(old_content)
+        except Exception:
+            pass
 
-        def _push_to_last_user(content: str):
-            ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
-            try:
-                with open(ctx_path, "r", encoding="utf-8") as f:
-                    ctx = json.load(f)
-            except Exception as exc:
-                # No context file — desktop user (TUI/GUI) without QQ
-                _append_proactive_history(content, "", kind="message")
-                return True
-            openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
-            if not openid:
-                _append_proactive_history(content, "", kind="message")
-                return True
-            if openid in ("desktop_gui", "tui", "tui_user"):
-                _append_proactive_history(content, openid, kind="message")
-                return True
-            ok = bridge.send_proactive(openid, content, QQMessageType.PRIVATE, bypass_quiet=True)
+    def _push_to_last_user(content: str):
+        ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
+        try:
+            with open(ctx_path, "r", encoding="utf-8") as f:
+                ctx = json.load(f)
+        except Exception:
+            _append_proactive_history(content, "", kind="message")
+            return True
+        openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
+        if not openid:
+            _append_proactive_history(content, "", kind="message")
+            return True
+        if openid in ("desktop_gui", "tui", "tui_user"):
+            _append_proactive_history(content, openid, kind="message")
+            return True
+        # QQ user — send via bridge if available
+        if _qq_bridge is not None:
+            ok = _qq_bridge.send_proactive(openid, content, QQMessageType.PRIVATE, bypass_quiet=True)
             if ok:
                 _append_proactive_history(content, openid, kind="message")
             return ok
+        # No bridge — just write to history
+        _append_proactive_history(content, openid, kind="message")
+        return True
 
-        set_push_callback(_push_to_last_user)
+    set_push_callback(_push_to_last_user)
 
-        def _push_file_to_last_user(file_data: bytes, filename: str = "", caption: str = ""):
-            attachment = _history_file_attachment(file_data, filename)
-            attachments = [attachment] if attachment else []
-            ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
-            try:
-                with open(ctx_path, "r", encoding="utf-8") as f:
-                    ctx = json.load(f)
-            except Exception as exc:
-                print(f"QQ proactive file push skipped: no qq_user_context.json ({exc})")
-                _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-                return True
-            openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
-            if not openid:
-                print("QQ proactive file push skipped: missing openid in qq_user_context.json")
-                _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-                return True
-            text = caption or filename or "Partner 阶段汇报"
-            if openid == "desktop_gui":
-                _append_proactive_history(text, openid, kind="file", attachments=attachments)
-                return True
-            ok = bridge.send_file_proactive(
+    def _push_file_to_last_user(file_data: bytes, filename: str = "", caption: str = ""):
+        attachment = _history_file_attachment(file_data, filename)
+        attachments = [attachment] if attachment else []
+        ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
+        try:
+            with open(ctx_path, "r", encoding="utf-8") as f:
+                ctx = json.load(f)
+        except Exception as exc:
+            print(f"QQ proactive file push skipped: no qq_user_context.json ({exc})")
+            _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
+            return True
+        openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
+        if not openid:
+            print("QQ proactive file push skipped: missing openid in qq_user_context.json")
+            _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
+            return True
+        text = caption or filename or "Partner 阶段汇报"
+        if openid == "desktop_gui":
+            _append_proactive_history(text, openid, kind="file", attachments=attachments)
+            return True
+        # QQ user — send via bridge if available
+        if _qq_bridge is not None:
+            ok = _qq_bridge.send_file_proactive(
                 openid,
                 file_data,
                 4,
@@ -268,10 +290,18 @@ def _run_instance_mode(argv: list[str]):
             if ok:
                 _append_proactive_history(text, openid, kind="file", attachments=attachments)
             return ok
+        # No bridge — just write to history
+        _append_proactive_history(text, openid, kind="file", attachments=attachments)
+        return True
 
-        set_file_push_callback(_push_file_to_last_user)
+    set_file_push_callback(_push_file_to_last_user)
+
+    # ── QQ bridge setup（可选） ──
+    if os.path.exists(cfg) and QQQfficialBridge is not None:
+        _qq_bridge = QQQfficialBridge(workspace)
+        _qq_bridge.load_config_from_file(cfg)
         try:
-            bridge.start()
+            _qq_bridge.start()
         except KeyboardInterrupt:
             raise
         except Exception as exc:
@@ -279,7 +309,7 @@ def _run_instance_mode(argv: list[str]):
         print("QQ bridge stopped or unavailable; Partner mind loop remains running.")
         try:
             while True:
-                time.sleep(3600)
+                time.sleep(60)
         except KeyboardInterrupt:
             sys.exit(0)
         return
@@ -287,7 +317,7 @@ def _run_instance_mode(argv: list[str]):
     print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}; running without QQ bridge.")
     try:
         while True:
-            time.sleep(3600)
+            time.sleep(60)
     except KeyboardInterrupt:
         sys.exit(0)
 

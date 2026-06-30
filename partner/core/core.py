@@ -56,6 +56,7 @@ class Partner:
     def __init__(self, config: PartnerConfig):
         self.config = config
         self.workspace = config.workspace.path
+        self._current_status = "starting"
 
         state_dir = os.path.join(self.workspace, "state")
         os.makedirs(state_dir, exist_ok=True)
@@ -167,9 +168,25 @@ class Partner:
         save_partner_config_data(self.workspace, asdict(self.config))
         print("✅ Partner is running.")
 
+        # Background heartbeat thread — updates every 60s so other
+        # platforms (e.g. Windows GUI) can detect this instance as alive
+        # even when the main loop interval is long (e.g. 30 min).
+        def _background_heartbeat():
+            while True:
+                time.sleep(60)
+                try:
+                    self.state.heartbeat(status=self._current_status)
+                except Exception:
+                    pass
+
+        self._current_status = "idle"
+        t = threading.Thread(target=_background_heartbeat, daemon=True)
+        t.start()
+
     def run_cycle(self) -> Optional[str]:
         """运行一个研究周期（为向后兼容保留）。"""
         self.state.heartbeat(status="working")
+        self._current_status = "working"
         result = None
 
         try:
@@ -189,6 +206,7 @@ class Partner:
             pass
 
         self.state.heartbeat(status="idle")
+        self._current_status = "idle"
         return result
 
     def chat(self, message: str) -> str:

@@ -1046,20 +1046,6 @@ class QQQfficialBridge:
             logger.error(f"Failed to change interval: {e}")
             return self._unavailable_notice()
 
-        # Try to update the cron job schedule
-        try:
-            cron_id = cfg.get("scheduler", {}).get("cron_job_id", "")
-            cron_name = cfg.get("scheduler", {}).get("cron_job_name", "partner-research-cycle")
-            target = cron_id or cron_name
-            if target:
-                subprocess.run(
-                    ["hermes", "cron", "edit", target, "--schedule", f"every {minutes}m"],
-                    capture_output=True, timeout=30,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-        except Exception as e:
-            logger.debug(f"Cron schedule update failed: {e}")
-
         # Log to journal
         try:
             self.journal.log(JournalEntry(

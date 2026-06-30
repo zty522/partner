@@ -302,6 +302,30 @@ class AgentAdapter(ABC):
         return USER_FRIENDLY_PROGRESS_REPLY
 
 
+def _ensure_shell_api_key(env: dict) -> None:
+    """Inject DEEPSEEK_API_KEY / OPENAI_API_KEY into env from shell if missing.
+
+    The Partner process may be started (via systemd / auto-restart) without the
+    API keys that the user exports in .bashrc.  This helper tries ``bash -lic``
+    to retrieve the key so Hermes subprocesses have it even when os.environ
+    does not.
+    """
+    if env.get("DEEPSEEK_API_KEY", "").strip() or env.get("OPENAI_API_KEY", "").strip():
+        return  # already present
+    try:
+        r = subprocess.run(
+            ["bash", "-lic", 'echo "$DEEPSEEK_API_KEY"'],
+            capture_output=True, text=True, timeout=10,
+        )
+        key = r.stdout.strip() if r.returncode == 0 else ""
+        if key and key.startswith("sk-"):
+            env.setdefault("DEEPSEEK_API_KEY", key)
+            env.setdefault("OPENAI_API_KEY", key)
+            logger.debug("[HermesAdapter] injected shell API key into subprocess env")
+    except Exception:
+        pass
+
+
 class HermesAdapter(AgentAdapter):
     """Adapter for Hermes Agent via cronjob/subprocess."""
 
@@ -655,6 +679,7 @@ class HermesAdapter(AgentAdapter):
             env["PYTHONUTF8"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
             logger.debug("[HermesAdapter] using native Hermes HOME/config for workspace=%s", self.workspace)
+            _ensure_shell_api_key(env)
             return env
 
         hermes_home = os.path.join(self.workspace, "system", "hermes_home")
@@ -672,6 +697,7 @@ class HermesAdapter(AgentAdapter):
         os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
         self._sync_hermes_runtime_files(hermes_home)
         self._prune_hermes_runtime(hermes_home)
+        _ensure_shell_api_key(env)
         return env
 
     def _sync_hermes_runtime_files(self, hermes_home: str):
@@ -962,7 +988,7 @@ class HermesAdapter(AgentAdapter):
                     "text": True,
                     "encoding": "utf-8",
                     "errors": "replace",
-                    "cwd": os.path.join(self.workspace, "system", "hermes_work"),
+                    "cwd": os.makedirs(os.path.join(self.workspace, "system", "hermes_work"), exist_ok=True) or os.path.join(self.workspace, "system", "hermes_work"),
                     "env": _env,
                     "creationflags": _NTFLAGS,
                 }

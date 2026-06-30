@@ -89,23 +89,77 @@ def check_dual_installation() -> list[str]:
     return issues
 
 
+def _bring_window_to_front(window_title: str = "Partner") -> bool:
+    """Attempt multiple strategies to find and activate an existing Partner window.
+
+    Returns True if a window was found and activated, False otherwise.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+
+    # Strategy 1: FindWindowW by exact title
+    hwnd = user32.FindWindowW(None, window_title)
+    if hwnd:
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        return True
+
+    # Strategy 2: FindWindowW by Qt class name
+    hwnd = user32.FindWindowW("QMainWindow", window_title)
+    if hwnd:
+        user32.ShowWindow(hwnd, 9)
+        user32.SetForegroundWindow(hwnd)
+        return True
+
+    # Strategy 3: EnumWindows to find any window whose title contains "Partner"
+    _WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found_hwnd = [None]
+
+    def enum_proc(hwnd, lparam):
+        length = user32.GetWindowTextLengthW(hwnd) + 1
+        buffer = ctypes.create_unicode_buffer(length)
+        user32.GetWindowTextW(hwnd, buffer, length)
+        if "Partner" in buffer.value:
+            found_hwnd[0] = hwnd
+            return False  # Stop enumeration
+        return True
+
+    user32.EnumWindows(_WNDENUMPROC(enum_proc), 0)
+    if found_hwnd[0]:
+        user32.ShowWindow(found_hwnd[0], 9)
+        user32.SetForegroundWindow(found_hwnd[0])
+        return True
+
+    return False
+
+
 MUTEX_NAME = "PartnerApp-SingleInstance-Mutex"
 
 
 def _ensure_single_instance() -> bool:
-    """Ensure only one instance runs. If another is running, bring it to front and exit."""
+    """Ensure only one instance runs. If another is running, bring it to front and exit.
+
+    Uses multiple strategies:
+    1. Windows named mutex (fastest, primary check)
+    2. FindWindowW / EnumWindows fallback
+    3. Process list check as last resort
+
+    Returns True if this instance should continue, False if another instance exists.
+    """
     if os.name == "nt":
         try:
             kernel32 = ctypes.windll.kernel32
             mutex = kernel32.CreateMutexW(None, True, MUTEX_NAME)
             err = kernel32.GetLastError()
             if err == 183:  # ERROR_ALREADY_EXISTS
-                # Bring existing window to front
-                user32 = ctypes.windll.user32
-                hwnd = user32.FindWindowW(None, "Partner")
-                if hwnd:
-                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    user32.SetForegroundWindow(hwnd)
+                # Try to bring the existing window to front
+                if _bring_window_to_front("Partner"):
+                    return False
+
+                # Last resort: check by process name and kill this instance
+                # (the window might be a different process with same mutex)
                 return False
             _ensure_single_instance._mutex = mutex
         except Exception:
@@ -182,6 +236,20 @@ def launch_gui(workspace_path: str | None = None):
     try:
         window = ModernMainWindow(workspace_path=workspace_path, app=app)
         window.show()
+
+        # Force Qt to paint the window with the dark theme stylesheet immediately.
+        # Without this, the default white QMainWindow background shows briefly
+        # between the splash closing and the first paint event.
+        app.processEvents()
+
+        # Close PyInstaller splash screen (shown during unpacking).
+        # Now the Qt window is visible with its own loading overlay.
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except Exception:
+            pass
+
         sys.exit(app.exec())
     except Exception:
         import traceback as _tb

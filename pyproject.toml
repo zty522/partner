@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "partner-research"
-version = "1.0.0"
+version = "1.1.0"
 description = "Partner - an event-driven AI companion for staged execution, memory, growth, and long-running work."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -31,6 +31,7 @@ dependencies = [
     "PyYAML>=6.0",
     "python-pptx>=0.6.23",
     "reportlab>=4.0",
+    "json5>=0.9",
     "PySide6>=6.7; platform_system == 'Windows'",
 ]
 

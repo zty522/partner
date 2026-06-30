@@ -241,6 +241,99 @@ class BatchPlanner:
         filtered = [step for step in micro_plan.plan if step.event_type != "curiosity_explore"]
         if len(filtered) != len(micro_plan.plan):
             micro_plan = MicroPlan(plan=filtered, expected_artifacts=micro_plan.expected_artifacts)
+            filtered = micro_plan.plan
+
+        # Sanitize: cytobridge already produces its own analysis_report_zh.md + figures.
+        # Strip any smart_llm_structured_action and atomic_write_artifact that follow
+        # a call_agent_skill(cytobridge) step — they generate a redundant LLM report.
+        # Replace with a direct atomic_convert_md_to_pdf step.
+        _has_cytobridge = any(
+            s.event_type == "call_agent_skill"
+            and s.parameters.get("agent", "").lower() in ("cytobridge", "cytobridge-agent")
+            for s in filtered
+        )
+        if _has_cytobridge:
+            # Find the cytobridge step index
+            _cb_idx = next(
+                i for i, s in enumerate(filtered)
+                if s.event_type == "call_agent_skill"
+                and s.parameters.get("agent", "").lower() in ("cytobridge", "cytobridge-agent")
+            )
+            _cb_id = filtered[_cb_idx].id
+            # ── Ensure cytobridge has ALL required parameters ──
+            _cb_params = dict(filtered[_cb_idx].parameters)
+            _inner_params = dict(_cb_params.get("parameters", {}) or {})
+            _out_dir = task_instance.working_dir if task_instance else ""
+            # 1) Inject output from working_dir if missing
+            if _out_dir and "output" not in _inner_params:
+                _inner_params["output"] = _out_dir
+            # 2) Inject question from user_message / task text if missing
+            if "question" not in _inner_params:
+                _task_text = str(_cb_params.get("task", "") or _inner_params.get("task", "") or user_message or "").strip()
+                if _task_text:
+                    _inner_params["question"] = _task_text
+            # 3) Ensure input is present (the planner should already set this)
+            if "input" not in _inner_params:
+                # Try to extract from task text
+                import re as _re
+                _path_match = _re.search(r"(?:/data/|/mnt/[a-z]/)[\w/. -]+\.\w+", str(_cb_params.get("task", "")))
+                if _path_match:
+                    _inner_params["input"] = _path_match.group(0)
+            _cb_params["parameters"] = _inner_params
+            filtered[_cb_idx] = HarnessStep(
+                id=_cb_id,
+                event_type="call_agent_skill",
+                parameters=_cb_params,
+                depends_on=filtered[_cb_idx].depends_on,
+            )
+            # Remove redundant LLM report and .md write steps
+            _removed_ids = set()
+            _keep = []
+            for s in filtered:
+                if s.event_type in ("smart_llm_structured_action", "atomic_write_artifact"):
+                    # Keep if it doesn't depend on cytobridge (e.g. unrelated analysis)
+                    if _cb_id in s.depends_on:
+                        logger.info("[BATCH_PLANNER] stripped redundant %s step (%s) after cytobridge", s.event_type, s.id)
+                        _removed_ids.add(s.id)
+                        continue
+                _keep.append(s)
+            filtered = _keep
+            # Ensure atomic_convert_md_to_pdf exists (inject or update after cytobridge step)
+            _pdf_source = os.path.join(_out_dir, "analysis_report_zh.md") if _out_dir else ""
+            _existing_pdf_idx = next(
+                (i for i, s in enumerate(filtered) if s.event_type == "atomic_convert_md_to_pdf"),
+                None,
+            )
+            if _existing_pdf_idx is not None:
+                # Update existing step with source parameter and fix dependencies
+                _old = filtered[_existing_pdf_idx]
+                _old_params = dict(_old.parameters)
+                if _pdf_source and not _old_params.get("source"):
+                    _old_params["source"] = _pdf_source
+                # Fix depends_on: replace removed steps with the cytobridge step
+                _old_deps = list(_old.depends_on) if _old.depends_on else []
+                _new_deps = [_cb_id if d in _removed_ids else d for d in _old_deps]
+                if not _new_deps:
+                    _new_deps = [_cb_id]
+                filtered[_existing_pdf_idx] = HarnessStep(
+                    id=_old.id,
+                    event_type="atomic_convert_md_to_pdf",
+                    parameters=_old_params,
+                    depends_on=_old.depends_on,
+                )
+                logger.info("[BATCH_PLANNER] updated existing atomic_convert_md_to_pdf with source=%s", _pdf_source)
+            else:
+                _pdf_step = HarnessStep(
+                    id="step_convert_to_pdf",
+                    event_type="atomic_convert_md_to_pdf",
+                    parameters={"source": _pdf_source} if _pdf_source else {},
+                    depends_on=[_cb_id],
+                )
+                # Insert right after cytobridge step
+                filtered = filtered[:_cb_idx + 1] + [_pdf_step] + filtered[_cb_idx + 1:]
+                logger.info("[BATCH_PLANNER] injected atomic_convert_md_to_pdf step after cytobridge")
+            micro_plan = MicroPlan(plan=filtered, expected_artifacts=micro_plan.expected_artifacts)
+            filtered = micro_plan.plan
 
         # Check step count
         if len(micro_plan.plan) < min_steps:

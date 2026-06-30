@@ -6435,18 +6435,31 @@ async def _handle_batch_plan_event(event: MindEvent):
     # The scan may miss report files if other files fill the 6-slot limit.
     if delivery_dir and not core_step_failed and not missing_required_output:
         _existing_names = {os.path.basename(f) for f in (files or [])}
-        _found_report = []
+        # Collect .md and .pdf candidates separately, then dedup: if both .md
+        # and .pdf exist for the same base name, only keep the .pdf
+        _md_candidates = {}
+        _pdf_candidates = {}
         for _root, _dirs, _names in os.walk(delivery_dir):
             for _n in _names:
-                if not _n.endswith((".md", ".pdf")):
+                if not _n.endswith(('.md', '.pdf')):
                     continue
-                if _n in _existing_names or _n.startswith("_step_"):
+                if _n in _existing_names or _n.startswith('_step_'):
                     continue
                 _fp = os.path.join(_root, _n)
-                if "report" in _n.lower() or "trajectory" in _n.lower() or "分析" in _n or "分化" in _n:
-                    _found_report.append((_fp, os.path.getsize(_fp)))
-        # Sort by size descending (bigger = more complete), insert at front
-        _found_report.sort(key=lambda x: -x[1])
+                if 'report' in _n.lower() or 'trajectory' in _n.lower() or '分析' in _n or '分化' in _n:
+                    _base = os.path.splitext(_n)[0]
+                    if _n.endswith('.md'):
+                        _md_candidates[_base] = (_fp, os.path.getsize(_fp))
+                    else:
+                        _pdf_candidates[_base] = (_fp, os.path.getsize(_fp))
+        # When both .md and .pdf exist for the same base, drop .md — user wants PDF only
+        for _base in list(_md_candidates.keys()):
+            if _base in _pdf_candidates:
+                del _md_candidates[_base]
+        _found_report = sorted(
+            list(_md_candidates.values()) + list(_pdf_candidates.values()),
+            key=lambda x: -x[1],
+        )
         for _fp, _sz in _found_report:
             if _fp not in (files or []):
                 if files is None:

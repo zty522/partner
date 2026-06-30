@@ -560,7 +560,12 @@ def _bot_stop(workspace, platform, quiet=False):
 
 
 def _auto_start_instance(instance_id, workspace):
-    """Auto-start QQ bot for an instance (called by partner-manager)."""
+    """Auto-start QQ bot for an instance (called by partner-manager).
+
+    Starts the QQ bot and enters a watchdog loop. If QQ is not configured
+    (qq_config.json missing), the bot can't start — exits immediately instead
+    of looping forever.
+    """
     if not workspace:
         workspace = str(resolve_instance_workspace(instance_id))
     if not os.path.exists(workspace):
@@ -571,7 +576,12 @@ def _auto_start_instance(instance_id, workspace):
     _bot_start(workspace, "qq", quiet=True)
 
     import time
+    # Check if bot actually started (PID file was written)
     pid_path = os.path.join(workspace, "state", "qq_bot.pid")
+    if not os.path.exists(pid_path):
+        print(f"  ⚠ QQ 未配置或启动失败，不进入 watchdog 循环", file=sys.stderr)
+        return
+
     try:
         while True:
             time.sleep(30)

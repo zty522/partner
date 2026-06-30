@@ -98,17 +98,85 @@ def _get_heartbeat(inst_dir: str) -> str:
     return hb.get("last_heartbeat", "")
 
 
+def _resolve_instance_env(instance_id: str) -> str:
+    """Read environment type from global_config.json for an instance.
+
+    Returns 'wsl', 'local_windows', or auto-detects from working_dir path.
+    """
+    try:
+        cfg = _load_json(str(resolve_global_config_path()))
+        instances = cfg.get("instances", {})
+        info = instances.get(instance_id, {})
+        env = info.get("environment", "").strip().lower()
+        if env in ("wsl", "local_windows", "local_linux"):
+            return env
+        # Auto-detect from working_dir path
+        wd = info.get("working_dir", "").replace("\\", "/")
+        if wd.startswith("/mnt/") or wd.startswith("/"):
+            return "wsl"
+        if wd[1:2] == ":":
+            return "local_windows"
+    except Exception:
+        pass
+    return "wsl"
+
+
 def _start_instance(inst_dir: str, instance_id: str) -> tuple[bool, str]:
     """Start an instance using partner module."""
     log_path = os.path.join(inst_dir, "state/record", "instance.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "partner", "--instance-id", instance_id, "--workspace", inst_dir],
+        env_type = _resolve_instance_env(instance_id)
+        import subprocess as _sp
+
+        if env_type == "wsl":
+            # Run on WSL via wsl.exe
+            wsl_workspace = inst_dir.replace("\\", "/")
+            cmd = ["wsl.exe", "-e", "python3", "-m", "partner",
+                   "--instance-id", instance_id, "--workspace", wsl_workspace]
+            launch_kwargs = {}
+            try:
+                r = _sp.run(
+                    ["wsl.exe", "-e", "python3", "-c",
+                     "import partner; import os; "
+                     "print(os.path.normpath(os.path.join(partner.__file__, '..', '..')))"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    wsl_root = r.stdout.strip()
+                    if wsl_root.startswith("/mnt/"):
+                        drive = wsl_root[5]
+                        rest = wsl_root[6:].replace("/", "\\")
+                        launch_kwargs["cwd"] = f"{drive}:{rest}"
+            except Exception:
+                pass
+        else:
+            # local_windows or local_linux — run natively on this OS
+            import shutil as _sh
+            _python_exe = _sh.which("python.exe") or _sh.which("python") or "python"
+            cmd = [_python_exe, "-m", "partner",
+                   "--instance-id", instance_id, "--workspace", inst_dir]
+            project_root = None
+            try:
+                r = _sp.run(
+                    [_python_exe, "-c",
+                     "import partner; import os; "
+                     "print(os.path.normpath(os.path.join(partner.__file__, '..', '..')))"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=_sp.CREATE_NO_WINDOW,
+                )
+                project_root = r.stdout.strip() if r.returncode == 0 else None
+            except Exception:
+                pass
+            launch_kwargs = {"cwd": project_root} if project_root else {}
+
+        proc = _sp.Popen(
+            cmd,
             stdout=open(log_path, "a", encoding="utf-8", errors="replace"),
-            stderr=subprocess.STDOUT,
+            stderr=_sp.STDOUT,
             env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=_sp.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            **launch_kwargs,
         )
         with open(os.path.join(inst_dir, "instance.pid"), "w") as f:
             f.write(str(proc.pid))
@@ -268,7 +336,9 @@ class DashboardPage(QWidget):
             if inst_id in self._cards:
                 card = self._cards[inst_id]
             else:
-                card = StatusCard(f"实例 {inst_id}", "检测中", THEME.accent)
+                env = _resolve_instance_env(inst_id)
+                env_label = {"wsl": "WSL", "local_windows": "Win", "local_linux": "Linux"}.get(env, env)
+                card = StatusCard(f"实例 {inst_id} [{env_label}]", "检测中", THEME.accent)
                 self._cards[inst_id] = card
                 self._cards_layout.addWidget(card)
                 # Add Start/Stop buttons

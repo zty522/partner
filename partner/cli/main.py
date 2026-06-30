@@ -389,63 +389,8 @@ def cmd_update(args):
             except Exception:
                 pass
 
-        try:
-            cr = subprocess.run(["hermes", "cron", "list"], capture_output=True, text=True, timeout=10)
-            if "partner-research" in cr.stdout:
-                print(f"   ⏰ Cron: 已设置")
-            else:
-                print(f"   ⏰ Cron: 未设置 → 自动创建...")
-                interval = 30
-                try:
-                    cfg = load_partner_config_data(workspace)
-                    interval = cfg.get("scheduler", {}).get("interval_minutes", 30)
-                except Exception:
-                    pass
-                cron_prompt = f"""你是 Partner 的执行引擎。在 {workspace} 下工作。
-
-你的核心原则：
-1. 30 分钟是心跳/恢复间隔，不是项目执行窗口
-2. **不要停下来** — 计划完成后，自己判断下一步最小可验证动作。
-   只有新项目、陌生领域、资料依赖任务或用户明确要求调研时，才先查文献/资料/公开数据路线。
-   不要机械搜索，也不要等用户下指令才继续。
-
-每次心跳：
-1. 检查 active_plan.json → 有活跃计划正在执行就不打断，只更新心跳
-2. 计划已完成 → 读取 goal 和结果 → 判断下一步是审计、复盘、实验、资料核验还是调研
-3. 空闲 + 队列有任务 → 自动创建计划
-4. 每次心跳向 QQ 汇报当前状态
-
-用中文。只在 {workspace} 内写文件。"""
-                cr_create = subprocess.run(
-                    ["hermes", "cron", "create",
-                     "--name", "partner-research-cycle",
-                     f"every {interval}m",
-                     cron_prompt],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if cr_create.returncode == 0:
-                    import re as _re
-                    m = _re.search(r'\[([a-f0-9-]+)\]', cr_create.stdout)
-                    if m:
-                        new_id = m.group(1)
-                        try:
-                            with open(cfg_path) as f:
-                                cfg = json.load(f)
-                            cfg.setdefault("scheduler", {})["cron_job_id"] = new_id
-                            with open(cfg_path, 'w') as f:
-                                json.dump(cfg, f, indent=2, ensure_ascii=False)
-                        except Exception:
-                            pass
-                    print(f"   ✅ Cron 已创建（每 {interval} 分钟）")
-                    subprocess.run(
-                        ["hermes", "cron", "run", "partner-research-cycle", "--accept-hooks"],
-                        capture_output=True, timeout=120,
-                    )
-                    print(f"   🚀 已触发首次研究循环")
-                else:
-                    print(f"   ⚠ Cron 创建失败: {cr_create.stderr[:100]}")
-        except Exception as e:
-            print(f"   ⚠ Cron 检查失败: {e}")
+        # 实例是消息驱动的，没有自主 cron 循环
+        print(f"   ⏰ 模式: 消息驱动（响应式）")
     else:
         print(f"   ℹ 未找到工作区（运行 partner setup 配置）")
         _tty = None

@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -86,6 +86,7 @@ class SettingsPage(QWidget):
     """
 
     workspace_changed = Signal(str)
+    config_saved = Signal()  # Emitted when any config is saved (including non-workspace changes)
 
     CATEGORIES = [
         ("🖥", "工作区"),
@@ -608,8 +609,9 @@ class SettingsPage(QWidget):
         btn_row.addStretch()
         layout.addLayout(btn_row)
 
-        # ── Detection: run immediately (no QTimer — unreliable in frozen EXE) ──
-        self._run_detection()
+        # ── Detection: deferred via QTimer so the UI thread is not blocked
+        #     by WSL subprocess calls (which can take seconds). ──
+        QTimer.singleShot(300, self._run_detection)
 
         return self._make_form_page(container)
 
@@ -670,6 +672,7 @@ class SettingsPage(QWidget):
                 r = subprocess.run(
                     ["wsl", "bash", "-lc", f"command -v {cmd}"],
                     capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 if r.returncode == 0:
                     path = r.stdout.strip()
@@ -770,6 +773,7 @@ class SettingsPage(QWidget):
                 capture_output=True,
                 text=True,
                 timeout=120,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 QMessageBox.information(
@@ -1233,6 +1237,7 @@ class SettingsPage(QWidget):
             self.workspace_changed.emit(new_ws)
 
         QMessageBox.information(self, "保存成功", "配置已保存")
+        self.config_saved.emit()
 
     # ── Event Handlers ───────────────────────────────────────────────────
 

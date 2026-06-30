@@ -3,7 +3,7 @@
 ; Output: dist/Partner_Setup.exe
 
 #define MyAppName "Partner"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Nous Research"
 #define MyAppURL "https://github.com/zty522/partner"
 #define MyAppExeName "Partner.exe"

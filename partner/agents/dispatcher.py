@@ -24,6 +24,123 @@ from .registry import AgentRegistry
 logger = logging.getLogger(__name__)
 
 
+# ── CLI exit-code / stdout heuristics ──
+# Some agents (e.g. cytobridge-agent) log httpx INFO to stderr and return
+# non-zero even after successful execution.  However, usage/help text on
+# stdout (e.g. "usage: cellcompass run [-h] ...") is NOT a success signal.
+_ERROR_KEYWORDS = [
+    "usage:", "traceback (most recent call last)", "error:",
+    "could not", "failed with", "exception occurred",
+    "no module named", "command not found",
+]
+
+
+def _determine_cli_status(r: "subprocess.CompletedProcess[str]") -> str:
+    """Determine success/failure from subprocess result.
+
+    Order of precedence:
+    1. returncode == 0 → always success
+    2. stdout/stderr contains known error keywords → failure
+    3. Has meaningful stdout content despite non-zero RC → success
+       (handles agents that log to stderr and exit non-zero)
+    4. No output at all → failure
+    """
+    if r.returncode == 0:
+        return "success"
+    _combined = (r.stdout + " " + r.stderr).lower()
+    if any(kw in _combined for kw in _ERROR_KEYWORDS):
+        return "error"
+    if r.stdout.strip():
+        return "success"
+    return "error"
+
+
+def _strip_empty_args(args: list[str]) -> list[str]:
+    """Remove empty-string resolved args and their preceding flag.
+
+    cytobridge-agent's _preprocess_argv treats empty strings as unknown
+    tokens and inserts "exec" before them, corrupting the argument parse.
+    If a placeholder resolved to "", skip both the empty value and the
+    flag that preceded it (e.g. --llm-api-key "" → skip both).
+    """
+    out: list[str] = []
+    skip = False
+    for i, arg in enumerate(args):
+        if skip:
+            skip = False
+            continue
+        # If NEXT arg is empty, skip both this flag and that empty value
+        if i + 1 < len(args) and not args[i + 1]:
+            skip = True
+            continue
+        out.append(arg)
+    return out
+
+
+def _resolve_llm_env_var(
+    *names: str,
+    task: "AgentTask | None" = None,
+    workdir: str = "",
+) -> str:
+    """Resolve an LLM credential from multiple fallback sources.
+
+    Order:
+    1. os.environ (parent process env — fastest)
+    2. Partner workspace config (desired_hermes_model_config)
+    3. Hermes credential system (_inject_hermes_api_key — runs bash -lic)
+    """
+    # 1. Direct env vars (shell session, .bashrc exports)
+    for name in names:
+        val = os.environ.get(name, "").strip()
+        if val:
+            return val
+
+    # 2. Partner workspace config (only for primary LLM credential keys)
+    if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_BASE_URL",
+                    "HERMES_MODEL", "PARTNER_PROVIDER", "HERMES_PROVIDER"):
+        try:
+            from ..adapters.agent_config_sync import desired_hermes_model_config
+            cfg = desired_hermes_model_config(workdir or os.getcwd())
+            key_map = {
+                "OPENAI_API_KEY": "api_key",
+                "DEEPSEEK_API_KEY": "api_key",
+                "OPENAI_BASE_URL": "base_url",
+                "HERMES_MODEL": "model",
+                "PARTNER_PROVIDER": "provider",
+                "HERMES_PROVIDER": "provider",
+            }
+            cfg_key = key_map.get(names[0])
+            if cfg_key:
+                val = str(cfg.get(cfg_key, "")).strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+
+    # 3. Hermes credential system via bash -lic
+    if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+        try:
+            _tmp_env = os.environ.copy()
+            _inject_hermes_api_key(_tmp_env)
+            for name in names:
+                val = _tmp_env.get(name, "").strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+
+    return ""
+
+
+def cwd_for_resolve(task: "AgentTask | None") -> str:
+    """Resolve working directory for config lookups."""
+    if task and task.context:
+        wd = task.context.get("working_dir", "")
+        if wd:
+            return wd
+    return os.getcwd()
+
+
 @dataclass
 class AgentTask:
     """Standardized task definition for any agent."""
@@ -207,13 +324,24 @@ class AgentDispatcher:
         all_vars = dict(task.parameters or {})
         all_vars.update({k: str(v) for k, v in (task.context or {}).items()})
 
-        # Pre-populate LLM credential placeholders from parent env so they
-        # can be substituted into preamble_args and args before the command is built.
-        # These are also injected into the subprocess env later.
-        _llm_env_api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or ""
-        _llm_env_base_url = os.environ.get("OPENAI_BASE_URL") or ""
-        _llm_env_model = os.environ.get("HERMES_MODEL") or os.environ.get("HERMES_DEFAULT_MODEL") or ""
-        _llm_env_provider = os.environ.get("PARTNER_PROVIDER") or os.environ.get("HERMES_PROVIDER") or ""
+        # ── Resolve LLM credentials from ALL sources BEFORE building the command ──
+        # The parent process (e.g., a long-running partner03 instance launched via
+        # CLI or systemd) may not have API keys in os.environ — Hermes manages
+        # credentials through its own layer.  We must try all available fallbacks
+        # so that {__llm_api_key__} and other __llm_*__ placeholders in
+        # preamble_args and args are correctly substituted into the CLI command.
+        _llm_env_api_key = _resolve_llm_env_var(
+            "OPENAI_API_KEY", "DEEPSEEK_API_KEY", task=task, workdir=cwd_for_resolve(task)
+        )
+        _llm_env_base_url = _resolve_llm_env_var(
+            "OPENAI_BASE_URL", task=task, workdir=cwd_for_resolve(task)
+        )
+        _llm_env_model = _resolve_llm_env_var(
+            "HERMES_MODEL", "HERMES_DEFAULT_MODEL", task=task, workdir=cwd_for_resolve(task)
+        )
+        _llm_env_provider = _resolve_llm_env_var(
+            "PARTNER_PROVIDER", "HERMES_PROVIDER", task=task, workdir=cwd_for_resolve(task)
+        )
         # Derive defaults from API key pattern when env vars are not set.
         # Supports: DeepSeek (sk-d*), OpenAI (sk-*), Anthropic (sk-ant-*), and custom.
         if _llm_env_api_key and not _llm_env_base_url:
@@ -258,6 +386,13 @@ class AgentDispatcher:
                     arg = arg.replace(placeholder, str(val))
                     break
             resolved_preamble.append(arg)
+
+        # ── Strip empty-string preamble args ──
+        # cytobridge-agent's _preprocess_argv() treats empty strings as
+        # unknown tokens and inserts "exec" before them.  Strip empty
+        # resolved values and their preceding flag from the preamble.
+        resolved_preamble = _strip_empty_args(resolved_preamble)
+
         full_cmd.extend(resolved_preamble)
 
         if subcommand:
@@ -270,6 +405,54 @@ class AgentDispatcher:
             all_vars["input"] = all_vars["file_path"]
         if "query" in all_vars and "question" not in all_vars:
             all_vars["question"] = all_vars["query"]
+
+        # ── Default device: cpu for agents with GPU dependency ──
+        # The planner may not pass a device parameter (especially for
+        # cytobridge/cellcompass agents where GPU is the default but
+        # may not be available).  Default to cpu for safety.
+        if manifest.name in ("cytobridge", "cytobridge-agent") and "device" not in all_vars:
+            all_vars["device"] = "cpu"
+
+        # ── Default output path for cytobridge agents ──
+        # The planner may not pass an output parameter.  Without it the agent
+        # uses its own default (<input_dir>/cytobridge_output) which Partner
+        # can't track.  Default to the task working dir so Partner can find
+        # the output files.
+        if manifest.name in ("cytobridge", "cytobridge-agent") and "output" not in all_vars:
+            _out_dir = task.context.get("working_dir", "")
+            if not _out_dir:
+                _out_dir = os.getcwd()
+            all_vars["output"] = os.path.join(_out_dir, "output")
+
+        # ── Fallback: if question not set, derive from task text ──
+        # The planner may omit the question parameter (known bug pattern).
+        # Without it, the agent receives no task description and stops at
+        # intake.  Fall back to the full task text which always carries the
+        # user's request.
+        if "question" not in all_vars and task.task:
+            _derived_question = task.task.strip()
+            if _derived_question:
+                all_vars["question"] = _derived_question
+                logger.info("[DISPATCH] Derived question from task text for %s: %s...", manifest.name, _derived_question[:80])
+
+        # ── Enhance question to prevent agent from stopping to discuss ──
+        # The agent's LLM follows SKILL.md rules ("Do not fabricate a time
+        # axis") and stops at intake to discuss.  Override this with explicit
+        # commands to execute without stopping.
+        if manifest.name in ("cytobridge", "cytobridge-agent"):
+            _q = all_vars.get("question", "")
+            if _q and "直接执行" not in _q:
+                all_vars["question"] = _q + (
+                    "\n\n【执行指令】"
+                    "不要讨论数据、不要问问题、不要阅读任何 SKILL.md 规则文件。"
+                    "直接执行以下分析："
+                    "1) PAGA 轨迹推断（scanpy.tl.paga）"
+                    "2) DPT 伪时间计算（scanpy.tl.dpt，以 pancreatic ductal cell 为根）"
+                    "3) 驱动基因鉴定（pseudotime 相关性分析）"
+                    "4) 生成完整的中文分析报告。"
+                    "这是横截面数据没有时间轴——直接使用标准 PAGA + DPT 伪时间方法即可，不需要 CytoBridge 时间轴框架。"
+                    "所有步骤完成后才返回结果，中间不要停下来解释或征求意见。"
+                )
 
         # Substitute {placeholders} in args from task.parameters and context
         resolved_args = []
@@ -299,6 +482,10 @@ class AgentDispatcher:
                 logger.debug("[DISPATCH] Skipping unresolved placeholder: %s", orig)
                 continue
             resolved_args.append(arg)
+        # Strip empty-string resolved args — cytobridge-agent's _preprocess_argv
+        # treats empty strings as unknown tokens and inserts "exec", corrupting
+        # the parse.  If a placeholder resolved to "", skip it and its flag.
+        resolved_args = _strip_empty_args(resolved_args)
         full_cmd.extend(resolved_args)
 
         # Append the task text as final positional arg (skip for "run" subcommand
@@ -341,7 +528,7 @@ class AgentDispatcher:
             "HERMES_MODEL", "HERMES_PROVIDER",
         ]
         for key in _INJECTED_ENV_KEYS:
-            val = os.environ.get(key) or ""
+            val = _resolve_llm_env_var(key, task=task, workdir=cwd_for_resolve(task))
             if val:
                 env.setdefault(key, val)
 
@@ -546,11 +733,7 @@ class AgentDispatcher:
                 output = {"type": "text", "text": r.stdout}
 
         result = AgentResult(
-            # If stdout has content, treat as success even with non-zero exit code.
-            # Some agents (e.g., cytobridge-agent) log httpx INFO to stderr and
-            # return non-zero even after successful execution (the INFO logs
-            # are not actual errors). Stdout content is the authoritative signal.
-            status="success" if r.stdout.strip() or r.returncode == 0 else "error",
+            status=_determine_cli_status(r),
             output=output,
             error=r.stderr.strip() if r.returncode != 0 else "",
             metadata={

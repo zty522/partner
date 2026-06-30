@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -38,12 +39,6 @@ from partner.monitoring.instance_root import (
 )
 from .theme import THEME, get_default_font, generate_stylesheet
 from .utils.local_config import load_local_config, save_local_config
-from .pages import (
-    ChatPage,
-    InstancesPage,
-    SettingsPage,
-    AgentsPage,
-)
 
 
 def _load_json(path: str) -> dict:
@@ -102,6 +97,12 @@ class ModernMainWindow(QMainWindow):
         # ── First-run setup wizard ──────────────────────────────────────
         QTimer.singleShot(100, self._check_first_run)
 
+        # ── Progressive loading → update status in phases ────────────────
+        self._loading_phase = 0
+        QTimer.singleShot(50, lambda: self._update_loading_status("正在初始化窗口…"))
+        QTimer.singleShot(200, lambda: self._update_loading_status("正在加载界面组件…"))
+        QTimer.singleShot(500, lambda: self._update_loading_status("正在准备数据…"))
+
     def _center_on_screen(self):
         screen = QApplication.primaryScreen()
         if screen:
@@ -143,11 +144,13 @@ class ModernMainWindow(QMainWindow):
         geo_bytes = self.saveGeometry()
         if geo_bytes:
             data["geometry"] = str(geo_bytes.toBase64(), "utf-8")
-        # Save splitter sizes from child pages
-        if hasattr(self, "_chat_page") and hasattr(self._chat_page, "_splitter"):
-            data["chat_splitter"] = list(self._chat_page._splitter.sizes())
-        if hasattr(self, "_settings_page") and hasattr(self._settings_page, "_splitter"):
-            data["settings_splitter"] = list(self._settings_page._splitter.sizes())
+        # Save splitter sizes from child pages (only if they've been initialised)
+        chat_page = self._page_instances.get(0)
+        if chat_page is not None and hasattr(chat_page, '_splitter'):
+            data["chat_splitter"] = list(chat_page._splitter.sizes())
+        settings_page = self._page_instances.get(2)
+        if settings_page is not None and hasattr(settings_page, '_splitter'):
+            data["settings_splitter"] = list(settings_page._splitter.sizes())
         # Write to disk
         path = self._layout_path()
         try:
@@ -180,24 +183,27 @@ class ModernMainWindow(QMainWindow):
 
     def _apply_splitter_sizes(self, data: dict) -> None:
         """Apply saved splitter sizes after the layout has settled."""
+        chat_page = self._page_instances.get(0)
+        settings_page = self._page_instances.get(2)
+
         # Chat page splitter
         chat_sizes = data.get("chat_splitter")
         if chat_sizes and isinstance(chat_sizes, list) and len(chat_sizes) > 0:
-            if hasattr(self, "_chat_page") and hasattr(self._chat_page, "_splitter"):
+            if chat_page is not None and hasattr(chat_page, '_splitter'):
                 try:
                     sizes = [int(s) for s in chat_sizes]
                     if all(s > 0 for s in sizes):
-                        self._chat_page._splitter.setSizes(sizes)
+                        chat_page._splitter.setSizes(sizes)
                 except (ValueError, TypeError):
                     pass
         # Settings page splitter
         settings_sizes = data.get("settings_splitter")
         if settings_sizes and isinstance(settings_sizes, list) and len(settings_sizes) > 0:
-            if hasattr(self, "_settings_page") and hasattr(self._settings_page, "_splitter"):
+            if settings_page is not None and hasattr(settings_page, '_splitter'):
                 try:
                     sizes = [int(s) for s in settings_sizes]
                     if all(s > 0 for s in sizes):
-                        self._settings_page._splitter.setSizes(sizes)
+                        settings_page._splitter.setSizes(sizes)
                 except (ValueError, TypeError):
                     pass
 
@@ -301,25 +307,33 @@ class ModernMainWindow(QMainWindow):
         self._toggle_btn.clicked.connect(self._toggle_sidebar)
         sidebar_layout.addWidget(self._toggle_btn)
 
+        # ── Loading overlay (shown immediately, hidden when content is ready) ──
+        self._loading_overlay = self._build_loading_overlay()
+        self._loading_overlay.setVisible(True)
+        self._loading_overlay.raise_()
+
         main_layout.addWidget(self._sidebar)
 
         # ── Right content area ──
         self._content_stack = QStackedWidget()
         self._content_stack.setStyleSheet(f"background-color: {THEME.bg};")
 
-        self._chat_page = ChatPage()
-        self._instances_page = InstancesPage(workspace_path=self._workspace_path)
-        self._settings_page = SettingsPage(workspace_path=self._workspace_path)
-        self._settings_page.workspace_changed.connect(self._on_workspace_changed)
-        self._agents_page = AgentsPage()
+        # ── Lazy page creation: create placeholder pages first, instantiate
+        #     real page objects only on first navigation. This makes the window
+        #     shell appear instantly without waiting for I/O-heavy init. ──
+        self._page_instances: dict[int, QWidget] = {}
+        self._page_initialized: set[int] = set()
 
-        self._content_stack.addWidget(self._chat_page)        # index 0
-        self._content_stack.addWidget(self._instances_page)    # index 1
-        self._content_stack.addWidget(self._settings_page)     # index 2
+        # Index 0 → ChatPage, 1 → InstancesPage, 2 → SettingsPage
+        # Add a blank placeholder widget for each so QStackedWidget has them
+        for _ in range(3):
+            placeholder = QWidget()
+            placeholder.setStyleSheet(f"background-color: {THEME.bg};")
+            self._content_stack.addWidget(placeholder)
 
         main_layout.addWidget(self._content_stack, 1)
 
-        # Start at chat page
+        # Start at chat page (triggers lazy creation)
         self._navigate_to(0)
 
         # Set up debug/test menu
@@ -454,13 +468,163 @@ class ModernMainWindow(QMainWindow):
                 btn.setText(f"  {icon_text}")
             btn.setToolTip(label if not self._sidebar_expanded else "")
 
+    def _build_loading_overlay(self) -> QWidget:
+        """Build a loading overlay card shown while the app initialises.
+
+        Shows a card at centre with app name, progress bar, and status hints.
+        Hidden automatically once ChatPage finishes its deferred init.
+        """
+        overlay = QWidget(self)
+        overlay.setObjectName("loadingOverlay")
+        overlay.setStyleSheet(f"""
+            QWidget#loadingOverlay {{
+                background-color: {THEME.bg};
+            }}
+        """)
+
+        layout = QVBoxLayout(overlay)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Card container
+        card = QFrame()
+        card.setObjectName("loadingCard")
+        card.setFixedSize(400, 220)
+        card.setStyleSheet(f"""
+            QFrame#loadingCard {{
+                background-color: {THEME.card};
+                border: 1px solid {THEME.border};
+                border-radius: 16px;
+            }}
+        """)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(32, 28, 32, 28)
+        card_layout.setSpacing(12)
+        card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Logo / title
+        title_label = QLabel("🤝  Partner")
+        title_label.setStyleSheet(f"""
+            font-size: 22px; font-weight: bold; color: {THEME.accent};
+            background: transparent; qproperty-alignment: AlignCenter;
+        """)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(title_label)
+
+        # Status text (updated via _update_loading_status)
+        self._loading_status = QLabel("正在加载…")
+        self._loading_status.setStyleSheet(f"""
+            font-size: 13px; color: {THEME.txt2};
+            background: transparent; qproperty-alignment: AlignCenter;
+        """)
+        self._loading_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.addWidget(self._loading_status)
+
+        # Progress bar (indeterminate — continuous loop)
+        self._loading_progress = QProgressBar()
+        self._loading_progress.setMinimum(0)
+        self._loading_progress.setMaximum(0)  # indeterminate
+        self._loading_progress.setFixedHeight(6)
+        self._loading_progress.setTextVisible(False)
+        self._loading_progress.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {THEME.bg3};
+                border: none;
+                border-radius: 3px;
+            }}
+            QProgressBar::chunk {{
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {THEME.accent}, stop:1 {THEME.green});
+                border-radius: 3px;
+            }}
+        """)
+        card_layout.addWidget(self._loading_progress)
+
+        layout.addWidget(card)
+        return overlay
+
+    def _update_loading_status(self, text: str):
+        """Update the loading overlay status text."""
+        if hasattr(self, '_loading_status') and self._loading_status:
+            self._loading_status.setText(text)
+            from PySide6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+
+    def _hide_loading_overlay(self):
+        """Fade out and hide the loading overlay."""
+        if hasattr(self, '_loading_overlay') and self._loading_overlay:
+            self._loading_overlay.setVisible(False)
+            # Allow the content area to receive mouse events
+            self._content_stack.raise_()
+
     def _navigate_to(self, index: int):
-        """Navigate to a specific page."""
-        # Ensure index is within bounds
+        """Navigate to a specific page, creating it lazily on first visit."""
         if index >= self._content_stack.count():
             return
+
+        # Lazy-create the page on first visit
+        if index not in self._page_initialized:
+            page = self._create_page(index)
+            if page is not None:
+                # Replace placeholder at this index
+                self._content_stack.removeWidget(self._content_stack.widget(index))
+                self._content_stack.insertWidget(index, page)
+
+                self._page_instances[index] = page
+                self._page_initialized.add(index)
+
         self._content_stack.setCurrentIndex(index)
-        # QButtonGroup manages checked state via exclusive behavior
+
+    def _create_page(self, index: int) -> QWidget | None:
+        """Factory: create the page widget for a given navigation index.
+
+        Also wires cross-page signals once so every page stays in sync.
+        """
+        from .pages import ChatPage, InstancesPage, SettingsPage
+
+        if index == 0:
+            page = ChatPage()
+            # Connect cross-page sync signals (set up once here)
+            page.instances_changed.connect(self._on_any_instances_changed)
+            page.loading_complete.connect(self._hide_loading_overlay)
+            return page
+        elif index == 1:
+            page = InstancesPage(workspace_path=self._workspace_path)
+            page.instances_changed.connect(self._on_any_instances_changed)
+            return page
+        elif index == 2:
+            page = SettingsPage(workspace_path=self._workspace_path)
+            page.workspace_changed.connect(self._on_workspace_changed)
+            page.config_saved.connect(self._on_config_saved)
+            return page
+        return None
+
+    # ── Cross-page sync handlers ──────────────────────────────────────────
+
+    def _on_any_instances_changed(self):
+        """Called when instances are created/modified on any page.
+
+        The originating page already refreshed itself (it calls _refresh()
+        before emitting the signal), so here we only sync OTHER pages
+        to avoid duplicate I/O that freezes the UI.
+        """
+        # Refresh chat page's instance selector
+        chat_page = self._page_instances.get(0)
+        if chat_page is not None and hasattr(chat_page, 'refresh_instance_selector'):
+            chat_page.refresh_instance_selector()
+        # Refresh settings page's default instance combo
+        settings_page = self._page_instances.get(2)
+        if settings_page is not None and hasattr(settings_page, '_load_configs'):
+            settings_page._load_configs()
+
+    def _on_config_saved(self):
+        """Called when the settings page saves any config.
+
+        Refreshes the chat page's instance selector in case the default
+        instance or workspace changed.
+        """
+        chat_page = self._page_instances.get(0)
+        if chat_page is not None and hasattr(chat_page, 'refresh_instance_selector'):
+            chat_page.refresh_instance_selector()
 
     def _on_workspace_changed(self, new_workspace: str):
         """Handle workspace path change from settings page."""
@@ -470,9 +634,11 @@ class ModernMainWindow(QMainWindow):
             "last_workspace_path": new_workspace,
             "default_workspace_path": new_workspace,
         })
-        self._instances_page.set_workspace(new_workspace)
-        self._settings_page.set_workspace(new_workspace)
-        self._chat_page.set_workspace(new_workspace)
+        # Propagate workspace to all initialized pages
+        for idx in list(self._page_instances):
+            pg = self._page_instances[idx]
+            if hasattr(pg, 'set_workspace'):
+                pg.set_workspace(new_workspace)
 
     def _update_status(self):
         """Update the tray icon tooltip with instance status."""
@@ -506,13 +672,17 @@ class ModernMainWindow(QMainWindow):
 
     def _refresh_all(self):
         """Refresh all pages."""
-        self._instances_page._refresh()
+        for idx in list(self._page_instances):
+            pg = self._page_instances[idx]
+            if hasattr(pg, '_refresh'):
+                pg._refresh()
         self._update_status()
 
     def _send_test_message(self):
         """Send a test message to the chat page for debugging."""
-        if hasattr(self, '_chat_page') and hasattr(self._chat_page, 'send_test_message'):
-            self._chat_page.send_test_message()
+        chat_page = self._page_instances.get(0)
+        if chat_page is not None and hasattr(chat_page, 'send_test_message'):
+            chat_page.send_test_message()
         else:
             QMessageBox.information(self, "提示", "聊天页面未初始化")
 
