@@ -442,6 +442,23 @@ def _package_agent_outputs(output_dir: str, agent_name: str) -> str:
 
     try:
         from weasyprint import HTML
+        # ── Append standard references for single-cell analysis ──
+        # The agent's report may not include references for the methods it used
+        # (PAGA, DPT, scanpy, etc.). Add them to the HTML before PDF conversion.
+        _references_html = """
+<div class="references-section" style="margin-top:3em;padding-top:1em;border-top:2px solid #4A90D9;">
+<h2 style="color:#2c5282;">参考文献</h2>
+<ul style="line-height:1.8;font-size:90%;">
+<li>Wolf, F.A., Angerer, P., Theis, F.J. (2018). SCANPY: large-scale single-cell gene expression data analysis. <i>Genome Biology</i>, 19:15. doi:10.1186/s13059-017-1382-0</li>
+<li>Wolf, F.A., Hamey, F., Plass, M. et al. (2019). PAGA: graph abstraction reconciles clustering with trajectory inference through a topology preserving map of single cells. <i>Genome Biology</i>, 20:59. doi:10.1186/s13059-019-1663-x</li>
+<li>Haghverdi, L., Büttner, M., Wolf, F.A. et al. (2016). Diffusion pseudotime robustly reconstructs lineage branching. <i>Nature Methods</i>, 13:845–848. doi:10.1038/nmeth.3971</li>
+<li>Bastidas-Ponce, A., Tritschler, S., Dony, L. et al. (2019). Comprehensive single cell mRNA profiling reveals a detailed roadmap for pancreatic endocrinogenesis. <i>Development</i>, 146(12):dev173849. doi:10.1242/dev.173849</li>
+</ul>
+</div>"""
+        if "</body>" in _html_content:
+            _html_content = _html_content.replace("</body>", _references_html + "\n</body>")
+        else:
+            _html_content += _references_html
         _pdf_path = os.path.join(output_dir, f"{agent_name}_report.pdf")
         HTML(string=_html_content).write_pdf(_pdf_path)
         if os.path.isfile(_pdf_path) and os.path.getsize(_pdf_path) > 1000:

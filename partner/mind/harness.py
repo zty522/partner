@@ -1941,21 +1941,89 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
     # ── Pre-flight file existence check ──
     # Before dispatching to the agent, check if referenced input files exist.
     # This prevents the agent from running and returning a misleading error.
+    def _is_path_like(s: str) -> bool:
+        """Heuristic: real file paths are single-line, don't contain markdown/diff syntax."""
+        if not s:
+            return False
+        if "\n" in s or "\\n" in s:
+            return False
+        # Reject strings containing markdown/diff characters
+        _non_path_tokens = ["┊", "---", "@@", "###", "## ", "# ", "| ", "> ", "* ",
+                            "->", "→", "ACTION:", "DONE:", "FINDINGS:", "NEXT:"]
+        for tok in _non_path_tokens:
+            if tok in s:
+                return False
+        return True
+
+    def _extract_h5ad_path(text: str, require_exists: bool = False) -> str:
+        """Extract the best .h5ad file path from arbitrary text using regex.
+        
+        When require_exists=False, returns the first match.
+        When require_exists=True, returns the first match that exists on disk,
+        preferring ./data/ and /mnt/ paths over /data/ (root).
+        """
+        # Match .h5ad paths: relative (./data/...), /mnt/... absolute, /data/... root
+        _h5ad_pattern = re.compile(
+            r'(\./[\w/ .-]+|\.?[/\w][\w/ .-]*?)\.h5ad(?=\s|$|\)|]|`|,|$|\))'
+        )
+        all_matches = _h5ad_pattern.findall(text)
+        if not all_matches:
+            return ""
+        # Build full paths
+        candidates = []
+        for m in all_matches:
+            _full = m.strip() + ".h5ad"
+            _full = _full.rstrip(".,;:!?)`")
+            candidates.append(_full)
+        if not require_exists:
+            return candidates[0]
+        # With require_exists, try each candidate via file resolver
+        from ..utils.file_resolver import resolve_file_path
+        for c in candidates:
+            _resolved, _found = resolve_file_path(c, search_timeout=8)
+            if _found:
+                return _resolved
+        return candidates[0]
+
     input_file = str(params.get("input") or params.get("file") or params.get("data") or params.get("file_path") or "").strip()
     if not input_file:
         # Also check nested "parameters" dict where the planner stores them
         _nested = params.get("parameters")
         if isinstance(_nested, dict):
             input_file = str(_nested.get("input") or _nested.get("file") or _nested.get("data") or _nested.get("file_path") or "").strip()
+    # If the extracted input is not path-like (e.g. step3 result contains
+    # full diff/markdown text instead of a clean path), try to extract a
+    # real .h5ad path from the text content.
+    if input_file and not _is_path_like(input_file):
+        logger.info("[HARNESS] input param is not path-like, extracting .h5ad path from content")
+        _extracted = _extract_h5ad_path(input_file, require_exists=True)
+        if _extracted:
+            input_file = _extracted
+        else:
+            input_file = ""  # Reset to fall through to task-text scan
     if not input_file:
         # Also scan task text for likely file paths
-        _path_match = re.search(r"(?:/data/|/mnt/[a-z]/|[a-zA-Z]:\\\\)[\w/. -]+\.\w+", task)
+        _path_match = re.search(r"(?:/data/|/mnt/[a-z]/|[a-zA-Z]:\\)[\w/. -]+\.\w+", task)
         if _path_match:
             input_file = _path_match.group(0)
+    # Last resort: scan the task text for .h5ad paths (catches relative paths
+    # in the user request that the planner embeds as task text)
+    if not input_file:
+        input_file = _extract_h5ad_path(task, require_exists=True)
     if input_file:
         # Normalize common prefixes
         if not os.path.isabs(input_file) and not input_file.startswith("/"):
-            input_file = "/" + input_file
+            # For relative paths like ./data/pancreas.h5ad or data/pancreas.h5ad,
+            # try resolving relative to workspace working_dir first
+            _work_dir = getattr(ctx, "working_dir", None) or params.get("working_dir", "")
+            if _work_dir and os.path.isdir(_work_dir):
+                _candidate = os.path.normpath(os.path.join(_work_dir, input_file))
+                if os.path.exists(_candidate):
+                    input_file = _candidate
+                else:
+                    input_file = "/" + input_file
+            else:
+                input_file = "/" + input_file
         if not os.path.exists(input_file):
             # Hermes-style dynamic file search using find/locate/os.walk
             from ..utils.file_resolver import resolve_file_path
@@ -2749,36 +2817,118 @@ def _atomic_convert_md_to_pdf(ctx: HarnessContext, params: JsonDict) -> JsonDict
                             break
                     except Exception:
                         continue
-    # Phase 2: fallback — scan working dir for any .md files from prior steps
-    if not source and ctx and ctx.task_instance:
-        _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
-        if _work_dir and os.path.isdir(_work_dir):
-            # First try root .md files (fast path)
-            _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "*.md")))
-            if not _candidates:
-                # Recursive scan — catches cytobridge's analysis_report_zh.md
-                # in subdirectories like cytobridge_output/
-                _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "**", "*.md"), recursive=True))
-            if _candidates:
-                source = _candidates[-1]  # newest .md file
     if not source:
         return {"ok": False, "error": "missing source path (pass source or path)"}
     source_path = _safe_project_path(ctx, source)
     if not os.path.exists(source_path):
-        return {"ok": False, "error": f"source file not found: {source_path}"}
+        # Source param exists but file not found (planner may have hardcoded
+        # a default name like analysis_report_zh.md that doesn't match the
+        # agent's actual output). Reset and fall through to scanning.
+        source = ""
+        logger.info("[MD2PDF] source not found, scanning working dir for markdown or HTML...")
+    # Phase 2: fallback — scan working dir for any .md files from prior steps
+    if not source and ctx and ctx.task_instance:
+        _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
+        if _work_dir and os.path.isdir(_work_dir):
+            _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "*.md")))
+            if not _candidates:
+                _candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "**", "*.md"), recursive=True))
+            if _candidates:
+                source = _candidates[-1]
+    # Phase 3: fallback — scan for .html files from agent output (e.g. report.html)
+    if not source and ctx and ctx.task_instance:
+        _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
+        if _work_dir and os.path.isdir(_work_dir):
+            _html_candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "*.html")))
+            if not _html_candidates:
+                _html_candidates = sorted(_glob_mod.glob(os.path.join(_work_dir, "**", "*.html"), recursive=True))
+            if _html_candidates:
+                source = _html_candidates[-1]
+    if not source:
+        return {"ok": False, "error": "no .md or .html file found in working directory"}
+    source_path = _safe_project_path(ctx, source)
     dest = str(params.get("dest") or params.get("output") or params.get("filename") or "").strip()
     if not dest:
         base = os.path.splitext(source_path)[0]
         dest = base + ".pdf"
     dest_path = _safe_project_path(ctx, dest)
     
+    # ── Phase 4: Check if _package_agent_outputs already created a good PDF ──
+    # _package_agent_outputs() (called inside call_agent_skill step) creates
+    # cytobridge-agent_report.pdf with images embedded as base64. If that PDF
+    # already exists and is well-formed (>=100KB with embedded images), reuse it
+    # instead of regenerating a lower-quality version from bare HTML.
+    _work_dir = str(getattr(ctx.task_instance, "working_dir", "") or "")
+    if _work_dir and os.path.isdir(_work_dir):
+        _existing_pdfs = sorted(
+            [f for f in os.listdir(_work_dir) if f.endswith(".pdf") and f != os.path.basename(dest_path)],
+            key=lambda f: os.path.getsize(os.path.join(_work_dir, f)),
+            reverse=True,
+        )
+        for _pdf in _existing_pdfs:
+            _pdf_path = os.path.join(_work_dir, _pdf)
+            if os.path.getsize(_pdf_path) >= 100000:  # >=100KB = has embedded images
+                logger.info("[MD2PDF] reusing existing high-quality PDF: %s (%d bytes)",
+                           _pdf, os.path.getsize(_pdf_path))
+                import shutil
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.copy2(_pdf_path, dest_path)
+                # Remove the original packaged PDF to avoid duplicate delivery.
+                # Both files are identical after the copy; only report.pdf stays.
+                if _pdf != os.path.basename(dest_path):
+                    try:
+                        os.remove(_pdf_path)
+                        logger.info("[MD2PDF] removed duplicate source PDF: %s", _pdf)
+                    except Exception as _rm_exc:
+                        logger.debug("[MD2PDF] could not remove %s: %s", _pdf, _rm_exc)
+                size = os.path.getsize(dest_path)
+                return {
+                    "ok": True,
+                    "path": dest_path,
+                    "files": [dest_path],
+                    "content": f"PDF reused from packaged output: {dest_path} ({size} bytes)",
+                    "artifact_content": f"PDF: {dest_path}",
+                    "findings": [f"PDF reused from packaged output: {dest_path} ({size} bytes)"],
+                }
+    
     try:
         import markdown
         from weasyprint import HTML
         with open(source_path, "r", encoding="utf-8") as f:
-            md_content = f.read()
-        html_content = markdown.markdown(md_content, extensions=["extra", "codehilite", "tables"])
-        html_full = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><base href="{os.path.dirname(os.path.abspath(source_path))}/"><style>
+            src_content = f.read()
+        # If source is already HTML (e.g. report.html from cytobridge), use directly
+        # without going through markdown conversion
+        _is_html = source_path.lower().endswith(".html")
+        if _is_html:
+            html_full = src_content
+            # Embed PNG images as base64 so the PDF includes them properly.
+            # WeasyPrint may not resolve relative image paths from the HTML,
+            # and even if it does, base64 embedding ensures the PDF is portable.
+            import re as _re_embed
+            _img_dir = os.path.dirname(os.path.abspath(source_path))
+            def _embed_img_html(m: _re_embed.Match) -> str:
+                _src = m.group(1)
+                if _src.startswith("data:"):
+                    return m.group(0)
+                # Resolve relative to HTML file directory or output directory
+                _candidates = [
+                    os.path.join(_img_dir, _src),
+                    os.path.join(_work_dir or _img_dir, _src),
+                ]
+                for _cand in _candidates:
+                    if os.path.isfile(_cand):
+                        try:
+                            import base64
+                            with open(_cand, "rb") as _fh:
+                                _b64 = base64.b64encode(_fh.read()).decode()
+                            return f'<img src="data:image/png;base64,{_b64}"'
+                        except Exception:
+                            pass
+                return m.group(0)
+            html_full = _re_embed.sub(r'<img\s+[^>]*src="([^"]+)"', _embed_img_html, html_full)
+        else:
+            html_content = markdown.markdown(src_content, extensions=["extra", "codehilite", "tables"])
+            html_full = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><base href="{os.path.dirname(os.path.abspath(source_path))}/"><style>
 @font-face {{
     font-family: 'CJK Fallback';
     src: local('WenQuanYi Zen Hei'), local('SimHei'), local('Noto Sans CJK SC'), local('Noto Sans SC');

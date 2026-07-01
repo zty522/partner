@@ -6460,6 +6460,19 @@ async def _handle_batch_plan_event(event: MindEvent):
             list(_md_candidates.values()) + list(_pdf_candidates.values()),
             key=lambda x: -x[1],
         )
+        # Deduplicate: if multiple report PDFs exist (e.g. cytobridge-agent_report.pdf
+        # from _package_agent_outputs + report.pdf from step3), only keep the largest one.
+        # The larger one has embedded images, the smaller is bare HTML-to-PDF.
+        _pdf_entries = [e for e in _found_report if e[0].endswith('.pdf')]
+        _md_entries = [e for e in _found_report if e[0].endswith('.md')]
+        if len(_pdf_entries) > 1:
+            # Keep only the largest PDF
+            _best_pdf = max(_pdf_entries, key=lambda x: x[1])
+            _found_report = [e for e in _found_report if not e[0].endswith('.pdf') or e == _best_pdf]
+            # Add the best PDF first (highest priority)
+            _found_report.insert(0, _best_pdf)
+            logger.info("[DELIVERY] deduplicated %d PDFs, keeping largest: %s (%dB)",
+                       len(_pdf_entries), os.path.basename(_best_pdf[0]), _best_pdf[1])
         for _fp, _sz in _found_report:
             if _fp not in (files or []):
                 if files is None:

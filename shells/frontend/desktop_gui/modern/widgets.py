@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
@@ -27,6 +28,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -176,8 +179,13 @@ class ChatBubble(QFrame):
                 background-color: {hl_color};
             }}
         """)
-        self.setMaximumWidth(560)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+    def showEvent(self, event):
+        """Adjust max width when bubble becomes visible (parent layout now sized)."""
+        super().showEvent(event)
+        if self.parent() and self.parent().width() > 0:
+            self.setMaximumWidth(int(self.parent().width() * 0.85))
 
     def mousePressEvent(self, event):
         """On left-click, navigate to pipeline snapshot if available, or show live plan."""
@@ -547,3 +555,245 @@ class CollapsibleConfigGroup(QFrame):
         if " " in text:
             rest = text.split(" ", 1)[1]
             self._toggle_btn.setText(f"{arrow} {rest}")
+
+
+# ---------------------------------------------------------------------------
+# ComboBox helpers — disable wheel focus + white dropdown styling
+# ---------------------------------------------------------------------------
+
+COMBO_WHITE_VIEW_STYLE = """
+QComboBox QAbstractItemView {
+    background-color: white;
+    color: #333333;
+    border: 1px solid #d0d0d0;
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: #4a90d9;
+    selection-color: white;
+    outline: none;
+}
+QComboBox QAbstractItemView::item {
+    padding: 8px 14px;
+    border-radius: 6px;
+    min-height: 30px;
+}
+QComboBox QAbstractItemView::item:hover {
+    background-color: #e8f0fe;
+    color: #1a73e8;
+}
+QComboBox QAbstractItemView::item:selected {
+    background-color: #4a90d9;
+    color: white;
+    font-weight: bold;
+}
+"""
+
+
+class _ComboWheelFilter(QWidget):
+    """Event filter that passes wheel events through combo boxes to parent scroll areas."""
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            event.ignore()
+            return False
+        return super().eventFilter(obj, event)
+
+
+def fix_combo_wheel(combo: QComboBox):
+    """Install wheel-event passthrough so combo doesn't steal scroll from parent."""
+    combo.installEventFilter(_ComboWheelFilter(combo))
+
+
+# ---------------------------------------------------------------------------
+# DirBrowser — WSL/SSH directory browser (FileZilla-style tree)
+# ---------------------------------------------------------------------------
+
+
+class DirBrowser(QWidget):
+    """Directory browser that connects to WSL/SSH and shows folder tree.
+
+    For WSL: uses wsl.exe bash -lc "ls -1p /" to list directories.
+    For SSH: uses ssh user@host "ls -1p /" to list directories (not fully implemented).
+    """
+
+    path_selected = Signal(str)
+
+    def __init__(self, env_type: str = "wsl", ssh_host: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._env_type = env_type
+        self._ssh_host = ssh_host
+        self._current_path = "/"
+        self._distro = ""  # WSL distro name for multi-distro browsing
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        # Path display
+        path_row = QHBoxLayout()
+        path_row.setSpacing(6)
+        path_label = QLabel("当前路径:")
+        path_label.setStyleSheet(
+            f"font-size: 11px; color: {THEME.txt2}; background: transparent;"
+        )
+        path_row.addWidget(path_label)
+
+        self._path_display = QLabel("/")
+        self._path_display.setStyleSheet(
+            f"font-size: 11px; color: {THEME.txt}; background: transparent; "
+            f"padding: 4px 8px; border: 1px solid {THEME.border}; border-radius: 4px;"
+        )
+        self._path_display.setWordWrap(True)
+        path_row.addWidget(self._path_display, 1)
+        layout.addLayout(path_row)
+
+        # Tree widget
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.setIndentation(16)
+        self._tree.setAnimated(True)
+        self._tree.setExpandsOnDoubleClick(True)
+        self._tree.setStyleSheet(f"""
+            QTreeWidget {{
+                background-color: {THEME.input_bg};
+                color: {THEME.txt};
+                border: 1px solid {THEME.border};
+                border-radius: 6px;
+                padding: 4px;
+                font-size: 12px;
+            }}
+            QTreeWidget::item {{
+                padding: 4px 6px;
+                border-radius: 4px;
+            }}
+            QTreeWidget::item:hover {{
+                background-color: {THEME.card_hl};
+            }}
+            QTreeWidget::item:selected {{
+                background-color: {THEME.accent};
+                color: white;
+            }}
+        """)
+        self._tree.itemClicked.connect(self._on_item_clicked)
+        self._tree.itemExpanded.connect(self._on_item_expanded)
+        layout.addWidget(self._tree, 1)
+
+        # Confirm button
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        confirm_btn = QPushButton("✅ 确认选择")
+        confirm_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 20px;
+                font-size: 12px;
+                font-weight: bold;
+                min-height: 32px;
+            }}
+            QPushButton:hover {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+            }}
+        """)
+        confirm_btn.clicked.connect(lambda: self.path_selected.emit(self._current_path))
+        btn_row.addWidget(confirm_btn)
+        layout.addLayout(btn_row)
+
+        # Load root directory
+        QTimer.singleShot(100, self._load_root)
+
+    def set_distro(self, distro: str):
+        """Set WSL distro name for multi-distro browsing."""
+        self._distro = distro
+
+    def _load_root(self):
+        """Load the root directory listing."""
+        self._tree.clear()
+        root_item = QTreeWidgetItem(self._tree, ["/"])
+        root_item.setData(0, Qt.ItemDataRole.UserRole, "/")
+        # Add a dummy child so the expand arrow appears
+        QTreeWidgetItem(root_item, ["..."])
+        self._tree.setCurrentItem(root_item)
+        self._current_path = "/"
+        self._path_display.setText("/")
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
+        """Handle single click on a tree item — update current path."""
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path:
+            self._current_path = path
+            self._path_display.setText(path)
+
+    def _on_item_expanded(self, item: QTreeWidgetItem):
+        """Handle expansion of a tree item — load its children."""
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if not path:
+            return
+        # Remove the dummy child
+        while item.childCount() > 0:
+            child = item.takeChild(0)
+            if child.data(0, Qt.ItemDataRole.UserRole) == "..." or child.text(0) == "...":
+                del child
+            else:
+                # Put back real children if any
+                item.addChild(child)
+                break
+
+        entries = self._list_directory(path)
+        for entry in entries:
+            child_item = QTreeWidgetItem(item, [entry["name"]])
+            child_item.setData(0, Qt.ItemDataRole.UserRole, entry["full_path"])
+            child_item.setToolTip(0, entry["full_path"])
+            if entry["is_dir"]:
+                # Add dummy child to show expand arrow
+                QTreeWidgetItem(child_item, ["..."])
+
+    def _list_directory(self, path: str) -> list[dict]:
+        """List contents of a directory via WSL or SSH. Returns list of {name, full_path, is_dir}."""
+        import subprocess
+        entries = []
+        try:
+            if self._env_type == "wsl":
+                if self._distro:
+                    cmd = ["wsl.exe", "-d", self._distro, "bash", "-lc", f"ls -1ap '{path}' 2>/dev/null"]
+                else:
+                    cmd = ["wsl.exe", "bash", "-lc", f"ls -1ap '{path}' 2>/dev/null"]
+                r = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace",
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0,
+                )
+                raw = r.stdout
+            elif self._env_type == "ssh" and self._ssh_host:
+                cmd = ["ssh", self._ssh_host, f"ls -1ap '{path}' 2>/dev/null"]
+                r = subprocess.run(
+                    cmd,
+                    capture_output=True, text=True, timeout=10,
+                )
+                raw = r.stdout
+            else:
+                return entries
+
+            lines = raw.strip().split("\n")
+            for line in lines:
+                line = line.strip().replace("\r", "")
+                if not line or line in (".", ".."):
+                    continue
+                is_dir = line.endswith("/")
+                name = line.rstrip("/")
+                full_path = path.rstrip("/") + "/" + name if path != "/" else "/" + name
+                entries.append({
+                    "name": name + ("/" if is_dir else ""),
+                    "full_path": full_path,
+                    "is_dir": is_dir,
+                })
+            # Sort: directories first, then files
+            entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+        return entries

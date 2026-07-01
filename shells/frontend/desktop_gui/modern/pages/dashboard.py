@@ -101,7 +101,8 @@ def _get_heartbeat(inst_dir: str) -> str:
 def _resolve_instance_env(instance_id: str) -> str:
     """Read environment type from global_config.json for an instance.
 
-    Returns 'wsl', 'local_windows', or auto-detects from working_dir path.
+    Resolution chain: instance-level → workspace-level → path auto-detect → default.
+    Returns 'wsl', 'local_windows', or 'local_linux'.
     """
     try:
         cfg = _load_json(str(resolve_global_config_path()))
@@ -110,6 +111,12 @@ def _resolve_instance_env(instance_id: str) -> str:
         env = info.get("environment", "").strip().lower()
         if env in ("wsl", "local_windows", "local_linux"):
             return env
+        # Workspace-level fallback (from partner_config.json)
+        cfg_dir = os.path.dirname(str(resolve_global_config_path()))
+        partner_cfg = _load_json(os.path.join(cfg_dir, "partner_config.json"))
+        ws_env = partner_cfg.get("workspace", {}).get("environment", "").strip().lower()
+        if ws_env in ("wsl", "local_windows", "local_linux"):
+            return ws_env
         # Auto-detect from working_dir path
         wd = info.get("working_dir", "").replace("\\", "/")
         if wd.startswith("/mnt/") or wd.startswith("/"):

@@ -10,11 +10,14 @@ import json
 import os
 from pathlib import Path
 
+import yaml
+
 from PySide6.QtCore import Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -24,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -40,7 +44,7 @@ from partner.monitoring.instance_root import (
 )
 
 from ..theme import THEME
-from ..widgets import SectionHeader, AccentButton
+from ..widgets import SectionHeader, AccentButton, fix_combo_wheel, COMBO_WHITE_VIEW_STYLE
 from ..utils.path_mapper import (
     ENVIRONMENT_TYPES,
     ENVIRONMENT_LABELS,
@@ -89,12 +93,11 @@ class SettingsPage(QWidget):
     config_saved = Signal()  # Emitted when any config is saved (including non-workspace changes)
 
     CATEGORIES = [
-        ("🖥", "工作区"),
+        ("🐧", "Linux"),
         ("🤖", "Agent"),
         ("🧠", "LLM API"),
         ("🦙", "Ollama"),
         ("🌐", "世界模型"),
-        ("🖥", "服务器"),
     ]
 
     # Built-in general agents for detection UI
@@ -115,6 +118,19 @@ class SettingsPage(QWidget):
         },
     }
 
+    POPULAR_MODELS = [
+        ("llama3.3", "Meta Llama 3.3 70B", "6.7B"),
+        ("llama3.2", "Meta Llama 3.2 3B", "2.0B"),
+        ("llama3.1", "Meta Llama 3.1 8B", "4.7B"),
+        ("qwen2.5", "Qwen 2.5 7B", "4.7B"),
+        ("qwen2.5-coder", "Qwen 2.5 Coder 7B", "4.7B"),
+        ("mistral", "Mistral 7B", "4.1B"),
+        ("mixtral", "Mixtral 8x7B", "26B"),
+        ("gemma2", "Google Gemma 2 9B", "5.5B"),
+        ("deepseek-r1", "DeepSeek R1 7B", "4.7B"),
+        ("nomic-embed-text", "Nomic Embed Text", "0.14B"),
+    ]
+
     def __init__(self, parent: QWidget | None = None, workspace_path: str = ""):
         super().__init__(parent)
         self._workspace = workspace_path
@@ -122,10 +138,6 @@ class SettingsPage(QWidget):
         self._empty_label: QLabel | None = None
 
         # Instance attrs for each category widget (set by _build_* methods)
-        # Workspace
-        self._ws_path_edit: QLineEdit | None = None
-        self._ws_browse_btn: QPushButton | None = None
-        self._default_instance_combo: QComboBox | None = None
         # Agent
         self._agent_install_btns: dict[str, dict[str, QPushButton]] = {}  # {agent_name: {platform: QPushButton}}
         self._agent_status_labels: dict[str, dict[str, QLabel]] = {}      # {agent_name: {platform: QLabel}}
@@ -135,21 +147,18 @@ class SettingsPage(QWidget):
         self._llm_provider_combo: QComboBox | None = None
         self._llm_api_key_edit: QLineEdit | None = None
         self._llm_model_combo: QComboBox | None = None
-        self._llm_base_url_edit: QLineEdit | None = None
-        # Ollama
-        self._ollama_url_edit: QLineEdit | None = None
-        self._ollama_model_combo: QComboBox | None = None
+        self._llm_base_url_combo: QComboBox | None = None
+        # Ollama — env-select + detection + model install
+        self._ollama_env_combo: QComboBox | None = None
+        self._ollama_status_label: QLabel | None = None
+        self._ollama_models_label: QLabel | None = None
+        self._ollama_url_edit: QLineEdit | None = None  # kept for backward compat, hidden
+        self._ollama_models_container: QVBoxLayout | None = None
         self._ollama_refresh_btn: QPushButton | None = None
-        # World Model
-        self._wm_enable_cb: QCheckBox | None = None
-        self._wm_provider_combo: QComboBox | None = None
-        self._wm_endpoint_edit: QLineEdit | None = None
-        # Server
-        self._server_name_edit: QLineEdit | None = None
-        self._server_host_edit: QLineEdit | None = None
-        self._server_port_spin: QSpinBox | None = None
-        self._server_user_edit: QLineEdit | None = None
-        self._server_auth_combo: QComboBox | None = None
+        # World Model — env-select + detection labels
+        self._wm_env_combo: QComboBox | None = None
+        self._wm_aether_label: QLabel | None = None
+        self._wm_cosmos_label: QLabel | None = None
 
         self._build_ui()
         self._load_configs()
@@ -240,12 +249,11 @@ class SettingsPage(QWidget):
         self._form_stack = QStackedWidget()
 
         # Build each category form widget
-        self._form_stack.addWidget(self._build_workspace_page())
+        self._form_stack.addWidget(self._build_linux_page())
         self._form_stack.addWidget(self._build_agent_page())
         self._form_stack.addWidget(self._build_llm_page())
         self._form_stack.addWidget(self._build_ollama_page())
         self._form_stack.addWidget(self._build_wm_page())
-        self._form_stack.addWidget(self._build_server_page())
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -321,37 +329,150 @@ class SettingsPage(QWidget):
 
     # ── Category Form Builders ───────────────────────────────────────────
 
-    def _build_workspace_page(self) -> QWidget:
-        """Category: 工作区 — workspace path + default instance."""
+    def _build_linux_page(self) -> QWidget:
+        """Category: Linux — WSL detection, SSH server configuration."""
+        import subprocess
+
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
-        layout.setSpacing(10)
+        layout.setSpacing(14)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
+        # ── Title ──
+        title = QLabel("Linux 环境配置")
+        title.setStyleSheet(
+            f"font-size: 18px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 4px 0;"
+        )
+        layout.addWidget(title)
 
-        # Workspace path with browse button
-        path_row = QWidget()
-        path_row.setStyleSheet("background: transparent;")
-        path_layout = QHBoxLayout(path_row)
-        path_layout.setContentsMargins(0, 0, 0, 0)
-        self._ws_path_edit = QLineEdit()
-        self._ws_path_edit.setPlaceholderText("/mnt/e/work/partner_workspace")
-        self._ws_browse_btn = QPushButton("📂 浏览...")
-        self._ws_browse_btn.setStyleSheet(f"""
+        desc = QLabel("检测 WSL 发行版和配置 SSH 远程连接")
+        desc.setStyleSheet(
+            f"font-size: 12px; color: {THEME.txt3}; background: transparent;"
+        )
+        layout.addWidget(desc)
+
+        # ── WSL Detection Section ──
+        wsl_header = QLabel("🐧 WSL 检测")
+        wsl_header.setStyleSheet(
+            f"font-size: 15px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 8px 0 4px 0;"
+        )
+        layout.addWidget(wsl_header)
+
+        detect_btn = QPushButton("🔍 检测 WSL")
+        detect_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 8px 24px;
+                font-size: 13px;
+                font-weight: bold;
+                min-height: 38px;
+                max-width: 160px;
+            }}
+            QPushButton:hover {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+            }}
+            QPushButton:pressed {{
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {THEME.accent3}, stop:1 #2A5F8A);
+            }}
+        """)
+        detect_btn.clicked.connect(self._on_detect_wsl)
+        layout.addWidget(detect_btn)
+
+        self._wsl_result_label = QLabel("点击按钮检测 WSL 发行版")
+        self._wsl_result_label.setWordWrap(True)
+        self._wsl_result_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; "
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px;"
+        )
+        layout.addWidget(self._wsl_result_label)
+
+        # ── SSH Server Configuration Section ──
+        ssh_header = QLabel("🔌 SSH 服务器配置")
+        ssh_header.setStyleSheet(
+            f"font-size: 15px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 12px 0 4px 0;"
+        )
+        layout.addWidget(ssh_header)
+
+        # Add SSH server form
+        ssh_form = QWidget()
+        ssh_form.setStyleSheet("background: transparent;")
+        ssh_form_layout = QFormLayout(ssh_form)
+        ssh_form_layout.setSpacing(8)
+        ssh_form_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._ssh_name_edit = QLineEdit()
+        self._ssh_name_edit.setPlaceholderText("例如: my-server")
+        self._ssh_name_edit.setStyleSheet(
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px; "
+            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            f"stop:0 {THEME.input_bg}, stop:1 {THEME.bg3}); color: {THEME.txt}; "
+            f"min-height: 34px;"
+        )
+        ssh_form_layout.addRow("名称:", self._ssh_name_edit)
+
+        self._ssh_host_edit = QLineEdit()
+        self._ssh_host_edit.setPlaceholderText("例如: 192.168.1.100")
+        self._ssh_host_edit.setStyleSheet(
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px; "
+            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            f"stop:0 {THEME.input_bg}, stop:1 {THEME.bg3}); color: {THEME.txt}; "
+            f"min-height: 34px;"
+        )
+        ssh_form_layout.addRow("Host:", self._ssh_host_edit)
+
+        port_row = QHBoxLayout()
+        self._ssh_port_edit = QLineEdit()
+        self._ssh_port_edit.setPlaceholderText("22")
+        self._ssh_port_edit.setStyleSheet(
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px; "
+            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            f"stop:0 {THEME.input_bg}, stop:1 {THEME.bg3}); color: {THEME.txt}; "
+            f"min-height: 34px; max-width: 120px;"
+        )
+        port_row.addWidget(self._ssh_port_edit)
+
+        self._ssh_user_edit = QLineEdit()
+        self._ssh_user_edit.setPlaceholderText("root")
+        self._ssh_user_edit.setStyleSheet(
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px; "
+            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, "
+            f"stop:0 {THEME.input_bg}, stop:1 {THEME.bg3}); color: {THEME.txt}; "
+            f"min-height: 34px;"
+        )
+        port_row.addWidget(self._ssh_user_edit, 1)
+        ssh_form_layout.addRow("端口 / 用户:", port_row)
+
+        self._ssh_auth_combo = QComboBox()
+        self._ssh_auth_combo.addItems(["password", "key", "agent"])
+        fix_combo_wheel(self._ssh_auth_combo)
+        self._ssh_auth_combo.setStyleSheet(self._ssh_auth_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
+        ssh_form_layout.addRow("认证方式:", self._ssh_auth_combo)
+
+        layout.addWidget(ssh_form)
+
+        add_ssh_btn = QPushButton("➕ 添加 SSH 服务器")
+        add_ssh_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
                 color: {THEME.txt};
                 border: 1px solid {THEME.border};
                 border-radius: 10px;
-                padding: 8px 16px;
+                padding: 8px 20px;
                 font-size: 13px;
                 font-weight: bold;
-                min-height: 42px;
+                min-height: 38px;
+                max-width: 200px;
             }}
             QPushButton:hover {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -359,27 +480,470 @@ class SettingsPage(QWidget):
                 border-color: {THEME.accent};
                 color: {THEME.accent};
             }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
         """)
-        self._ws_browse_btn.clicked.connect(self._on_browse_workspace)
-        path_layout.addWidget(self._ws_path_edit, 1)
-        path_layout.addWidget(self._ws_browse_btn)
-        form.addRow("工作区路径:", path_row)
+        add_ssh_btn.clicked.connect(self._on_add_ssh_server)
+        layout.addWidget(add_ssh_btn)
 
-        # Default instance
-        self._default_instance_combo = QComboBox()
-        self._default_instance_combo.setEditable(True)
-        self._default_instance_combo.addItems(["01", "02", "03", "04", "05"])
-        self._default_instance_combo.setCurrentText("03")
-        form.addRow("默认实例:", self._default_instance_combo)
+        # ── Configured SSH servers list ──
+        ssh_list_header = QLabel("已配置的 SSH 服务器")
+        ssh_list_header.setStyleSheet(
+            f"font-size: 14px; font-weight: bold; color: {THEME.txt}; "
+            f"background: transparent; padding: 8px 0 4px 0;"
+        )
+        layout.addWidget(ssh_list_header)
 
-        layout.addLayout(form)
+        self._ssh_server_list = QLabel("(无已配置的 SSH 服务器)")
+        self._ssh_server_list.setWordWrap(True)
+        self._ssh_server_list.setStyleSheet(
+            f"font-size: 12px; color: {THEME.txt}; background: transparent; "
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px;"
+        )
+        layout.addWidget(self._ssh_server_list)
 
+        layout.addStretch()
         return self._make_form_page(container)
+
+    def _on_detect_wsl(self):
+        """Run wsl.exe -l -q to detect installed WSL distros."""
+        import subprocess
+        self._wsl_result_label.setText("⏳ 检测中...")
+        self._wsl_result_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; "
+            f"padding: 8px 12px; border: 1px solid {THEME.border}; border-radius: 8px;"
+        )
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        # Clear previous distro rows if any
+        self._clear_wsl_distro_rows()
+
+        try:
+            # Windows CMD outputs UTF-16-LE, try decoding properly
+            r = subprocess.run(["wsl.exe", "-l", "-q"], capture_output=True, timeout=15,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            raw = r.stdout
+            try:
+                text = raw.decode("utf-16-le").strip()
+            except UnicodeDecodeError:
+                text = raw.decode("utf-8", errors="replace").strip()
+            distros = [d.strip().replace("\r", "") for d in text.split("\n") if d.strip() and not d.startswith("*")]
+
+            if distros:
+                result = "\n".join(f"  ✅ {d}" for d in distros)
+                self._wsl_result_label.setText(f"检测到以下 WSL 发行版:\n{result}")
+                self._wsl_result_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.green}; background: transparent; "
+                    f"padding: 8px 12px; border: 1px solid {THEME.green}; border-radius: 8px;"
+                )
+                # Show distro browser rows
+                self._show_wsl_distro_rows(distros)
+            else:
+                self._wsl_result_label.setText("未检测到 WSL 发行版")
+                self._wsl_result_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.red}; background: transparent; "
+                    f"padding: 8px 12px; border: 1px solid {THEME.red}; border-radius: 8px;"
+                )
+        except FileNotFoundError:
+            self._wsl_result_label.setText("WSL 未安装或 wsl.exe 不在 PATH 中")
+            self._wsl_result_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; "
+                f"padding: 8px 12px; border: 1px solid {THEME.red}; border-radius: 8px;"
+            )
+        except Exception as e:
+            self._wsl_result_label.setText(f"检测失败: {e}")
+            self._wsl_result_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; "
+                f"padding: 8px 12px; border: 1px solid {THEME.red}; border-radius: 8px;"
+            )
+
+    def _clear_wsl_distro_rows(self):
+        """Remove WSL distro browse rows from the layout."""
+        if hasattr(self, '_wsl_distro_widgets'):
+            for w in self._wsl_distro_widgets:
+                w.setParent(None)
+                w.deleteLater()
+            self._wsl_distro_widgets = []
+
+    def _show_wsl_distro_rows(self, distros: list[str]):
+        """Show browse folder buttons for each WSL distro with agent detection, selectable rows, and set-default button."""
+        import subprocess
+
+        if not hasattr(self, '_wsl_distro_widgets'):
+            self._wsl_distro_widgets = []
+        if not hasattr(self, '_wsl_distro_rows_data'):
+            self._wsl_distro_rows_data = {}  # distro -> dict of row widgets
+        if not hasattr(self, '_wsl_selected_distro'):
+            self._wsl_selected_distro = ""
+
+        # Find the layout — it's the layout of the container in the linux page
+        # We insert after the wsl_result_label
+        parent_layout = self._wsl_result_label.parent().layout()
+        if not parent_layout:
+            return
+
+        # Find index of wsl_result_label
+        insert_idx = -1
+        for i in range(parent_layout.count()):
+            item = parent_layout.itemAt(i)
+            if item and item.widget() is self._wsl_result_label:
+                insert_idx = i + 1
+                break
+
+        # Load current default distro from config
+        default_distro = ""
+        if self._workspace:
+            config_path = os.path.join(self._workspace, "config", "global_config.json")
+            config = _load_json(config_path)
+            default_distro = config.get("wsl", {}).get("default_distro", "")
+
+        self._wsl_distro_rows_data = {}
+
+        for distro in distros:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 2, 0, 2)
+            row_layout.setSpacing(8)
+
+            is_default = (distro == default_distro)
+
+            # Default indicator (star)
+            default_label = QLabel("★" if is_default else "☆")
+            default_label.setToolTip("点击设为默认 WSL 发行版")
+            default_label.setStyleSheet(
+                f"font-size: 14px; color: {THEME.accent if is_default else THEME.txt3}; "
+                f"background: transparent; font-weight: bold;"
+            )
+            default_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            row_layout.addWidget(default_label)
+
+            # Distro label
+            distro_label = QLabel(f"  📦 {distro}")
+            distro_label.setStyleSheet(
+                f"font-size: 12px; font-weight: bold; color: {THEME.txt}; background: transparent;"
+            )
+            row_layout.addWidget(distro_label)
+
+            # Agent status: Hermes
+            hermes_label = QLabel("检测中...")
+            hermes_label.setStyleSheet(
+                f"font-size: 10px; color: {THEME.txt3}; background: transparent;"
+            )
+            row_layout.addWidget(hermes_label)
+
+            # Verify distro exists first (prevents false fallback to default distro)
+            distro_valid = False
+            try:
+                verify = subprocess.run(
+                    ["wsl.exe", "-d", distro, "bash", "-lc", "echo ok"],
+                    capture_output=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                distro_valid = (verify.returncode == 0)
+            except Exception:
+                distro_valid = False
+
+            if distro_valid:
+                # Run Hermes detection on this specific distro
+                try:
+                    rh = subprocess.run(
+                        ["wsl.exe", "-d", distro, "bash", "-lc", "command -v hermes 2>/dev/null"],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    hermes_path = rh.stdout.strip() if rh.returncode == 0 else ""
+                    has_hermes = bool(hermes_path)
+                    hermes_label.setText("🤖" if has_hermes else "")
+                    hermes_label.setToolTip(f"Hermes: {'已安装' if has_hermes else '未安装'}")
+                except Exception:
+                    hermes_label.setText("")
+            else:
+                hermes_label.setText("")
+
+            # Agent status: OpenClaw
+            openclaw_label = QLabel("检测中..." if distro_valid else "")
+            openclaw_label.setStyleSheet(
+                f"font-size: 10px; color: {THEME.txt3}; background: transparent;"
+            )
+            row_layout.addWidget(openclaw_label)
+
+            if distro_valid:
+                # Run OpenClaw detection on this specific distro
+                try:
+                    ro = subprocess.run(
+                        ["wsl.exe", "-d", distro, "bash", "-lc", "command -v openclaw 2>/dev/null"],
+                        capture_output=True, timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    openclaw_path = ro.stdout.strip() if ro.returncode == 0 else ""
+                    has_openclaw = bool(openclaw_path)
+                    openclaw_label.setText("🦾" if has_openclaw else "")
+                    openclaw_label.setToolTip(f"OpenClaw: {'已安装' if has_openclaw else '未安装'}")
+                except Exception:
+                    openclaw_label.setText("")
+            else:
+                openclaw_label.setText("")
+
+            # Browse button
+            browse_btn = QPushButton("📂 浏览文件夹")
+            browse_btn.setFixedHeight(30)
+            browse_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
+                    color: {THEME.txt};
+                    border: 1px solid {THEME.border};
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.card_hl}, stop:1 {THEME.bg2});
+                    border-color: {THEME.accent};
+                    color: {THEME.accent};
+                }}
+            """)
+            browse_btn.clicked.connect(lambda checked=False, d=distro: self._on_browse_wsl_distro(d))
+            row_layout.addWidget(browse_btn)
+
+            # Set default button (visible only when selected)
+            set_default_btn = QPushButton("★ 设为默认")
+            set_default_btn.setVisible(is_default)  # visible if already default
+            set_default_btn.setFixedHeight(30)
+            set_default_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+                }}
+                QPushButton:pressed {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent3}, stop:1 #2A5F8A);
+                }}
+            """)
+            set_default_btn.clicked.connect(lambda checked=False, d=distro: self._on_set_default_wsl(d))
+            row_layout.addWidget(set_default_btn)
+
+            # Path label
+            path_label = QLabel("")
+            path_label.setStyleSheet(
+                f"font-size: 11px; color: {THEME.txt3}; background: transparent;"
+            )
+            row_layout.addWidget(path_label, 1)
+
+            # Default usage label (shown only for default distro)
+            default_usage_label = QLabel("默认使用" if is_default else "")
+            default_usage_label.setStyleSheet(
+                f"font-size: 11px; color: {THEME.green}; background: transparent; font-weight: bold;"
+            )
+            row_layout.addWidget(default_usage_label)
+
+            # Store row data for later access
+            self._wsl_distro_rows_data[distro] = {
+                "row": row,
+                "default_label": default_label,
+                "distro_label": distro_label,
+                "hermes_label": hermes_label,
+                "openclaw_label": openclaw_label,
+                "browse_btn": browse_btn,
+                "set_default_btn": set_default_btn,
+                "path_label": path_label,
+                "default_usage_label": default_usage_label,
+                "is_default": is_default,
+            }
+
+            # Make entire row clickable
+            row.mousePressEvent = lambda e, d=distro: self._on_wsl_distro_selected(d)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            # Also make the default_label click to select + set default
+            def _on_default_label_clicked(e, d=distro):
+                self._on_wsl_distro_selected(d)
+                self._on_set_default_wsl(d)
+            default_label.mousePressEvent = _on_default_label_clicked
+
+            if insert_idx >= 0:
+                parent_layout.insertWidget(insert_idx, row)
+                insert_idx += 1
+            else:
+                parent_layout.addWidget(row)
+            self._wsl_distro_widgets.append(row)
+
+    def _on_wsl_distro_selected(self, distro: str):
+        """Select a WSL distro row and highlight it."""
+        if not hasattr(self, '_wsl_distro_rows_data'):
+            return
+
+        # Deselect all rows
+        for d, data in self._wsl_distro_rows_data.items():
+            row = data.get("row")
+            if row:
+                if d == distro:
+                    row.setStyleSheet(
+                        f"background-color: rgba(74, 144, 217, 0.08); border-radius: 6px;"
+                    )
+                else:
+                    row.setStyleSheet("background: transparent;")
+
+        # Show set-default button for this distro
+        if distro in self._wsl_distro_rows_data:
+            data = self._wsl_distro_rows_data[distro]
+            btn = data.get("set_default_btn")
+            if btn:
+                btn.setVisible(True)
+
+        # Hide set-default buttons for all other distros
+        for d, data in self._wsl_distro_rows_data.items():
+            if d != distro:
+                btn = data.get("set_default_btn")
+                if btn:
+                    btn.setVisible(False)
+
+        self._wsl_selected_distro = distro
+
+    def _on_set_default_wsl(self, distro: str):
+        """Set a WSL distro as the default and save to config."""
+        if not self._workspace:
+            return
+        config_path = os.path.join(self._workspace, "config", "global_config.json")
+        config = _load_json(config_path)
+        wsl_config = config.setdefault("wsl", {})
+        wsl_config["default_distro"] = distro
+        _save_json(config_path, config)
+
+        # Update all existing rows to reflect the new default
+        if hasattr(self, '_wsl_distro_rows_data'):
+            for d, data in self._wsl_distro_rows_data.items():
+                is_default = (d == distro)
+                # Update star label
+                default_label = data.get("default_label")
+                if default_label:
+                    default_label.setText("★" if is_default else "☆")
+                    default_label.setStyleSheet(
+                        f"font-size: 14px; color: {THEME.accent if is_default else THEME.txt3}; "
+                        f"background: transparent; font-weight: bold;"
+                    )
+                # Update default usage label
+                usage_label = data.get("default_usage_label")
+                if usage_label:
+                    usage_label.setText("默认使用" if is_default else "")
+                # Update set-default button visibility
+                btn = data.get("set_default_btn")
+                if btn:
+                    btn.setVisible(False)  # Hide all after setting default
+
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "默认设置", f"已将 {distro} 设为默认 WSL 发行版")
+
+    def _on_browse_wsl_distro(self, distro: str):
+        """Open WSL directory browser for a specific distro."""
+        from ..widgets import DirBrowser
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"选择 {distro} 工作目录")
+        dialog.resize(600, 400)
+        browser = DirBrowser(env_type="wsl")
+        browser.set_distro(distro)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(browser)
+        browser.path_selected.connect(lambda p: self._on_wsl_distro_path_selected(p, dialog, distro))
+        dialog.exec()
+
+    def _on_wsl_distro_path_selected(self, path: str, dialog: QDialog, distro: str):
+        """Save the selected WSL distro path."""
+        dialog.accept()
+        # Save path to global_config or remember it
+        if self._workspace:
+            config_path = os.path.join(self._workspace, "config", "global_config.json")
+            config = _load_json(config_path)
+            wsl_config = config.setdefault("wsl", {})
+            distro_config = wsl_config.setdefault(distro, {})
+            distro_config["workspace_dir"] = path
+            _save_json(config_path, config)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "路径已保存",
+                f"已将 {distro} 的工作目录设置为:\n{path}"
+            )
+
+    def _on_add_ssh_server(self):
+        """Add SSH server configuration to global_config.json."""
+        name = self._ssh_name_edit.text().strip()
+        host = self._ssh_host_edit.text().strip()
+        port = self._ssh_port_edit.text().strip() or "22"
+        user = self._ssh_user_edit.text().strip() or "root"
+        auth = self._ssh_auth_combo.currentText().strip()
+
+        if not name or not host:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "提示", "名称和 Host 为必填项")
+            return
+
+        if not self._workspace or not os.path.exists(self._workspace):
+            return
+
+        config_path = os.path.join(self._workspace, "config", "global_config.json")
+        config = _load_json(config_path)
+        servers = config.setdefault("servers", {})
+
+        # Check for duplicate name
+        if name in servers:
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "覆盖确认",
+                f"SSH 服务器 '{name}' 已存在，是否覆盖？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        servers[name] = {
+            "host": host,
+            "port": int(port),
+            "user": user,
+            "auth_method": auth,
+        }
+        _save_json(config_path, config)
+
+        # Clear form
+        self._ssh_name_edit.clear()
+        self._ssh_host_edit.clear()
+        self._ssh_port_edit.setText("22")
+        self._ssh_user_edit.setText("root")
+        self._ssh_auth_combo.setCurrentIndex(0)
+
+        self._refresh_ssh_server_list()
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "成功", f"SSH 服务器 '{name}' 已添加")
+
+    def _refresh_ssh_server_list(self):
+        """Refresh the configured SSH servers display."""
+        if not self._workspace or not os.path.exists(self._workspace):
+            return
+        config_path = os.path.join(self._workspace, "config", "global_config.json")
+        config = _load_json(config_path)
+        servers = config.get("servers", {})
+        if not servers:
+            self._ssh_server_list.setText("(无已配置的 SSH 服务器)")
+        else:
+            lines = []
+            for sname, sinfo in servers.items():
+                auth = sinfo.get("auth_method", "password")
+                host = sinfo.get("host", "?")
+                port = sinfo.get("port", 22)
+                user = sinfo.get("user", "root")
+                lines.append(f"  🔌 {sname}  —  {user}@{host}:{port}  ({auth})")
+            self._ssh_server_list.setText("\n".join(lines))
 
     def _build_agent_page(self) -> QWidget:
         """Category: Agent — 通用 Agent (hermes/openclaw) + 专精 Agent + 默认选择."""
@@ -411,12 +975,11 @@ class SettingsPage(QWidget):
             card.setStyleSheet(f"""
                 QFrame {{
                     background-color: {THEME.card};
-                    border: 1px solid {THEME.border};
                     border-radius: 10px;
                 }}
             """)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 10, 14, 10)
+            card_layout.setContentsMargins(14, 10, 14, 14)
             card_layout.setSpacing(6)
 
             # Header row: name + version
@@ -566,11 +1129,15 @@ class SettingsPage(QWidget):
         self._default_agent_combo = QComboBox()
         self._default_agent_combo.addItems(["hermes", "openclaw"])
         self._default_agent_combo.setCurrentText("hermes")
+        fix_combo_wheel(self._default_agent_combo)
+        self._default_agent_combo.setStyleSheet(self._default_agent_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         default_fl.addRow("默认 Agent:", self._default_agent_combo)
 
         self._default_platform_combo = QComboBox()
         self._default_platform_combo.addItems(["Windows", "Linux"])
         self._default_platform_combo.setCurrentText("Windows")
+        fix_combo_wheel(self._default_platform_combo)
+        self._default_platform_combo.setStyleSheet(self._default_platform_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         default_fl.addRow("运行平台:", self._default_platform_combo)
 
         layout.addWidget(default_form)
@@ -813,14 +1380,21 @@ class SettingsPage(QWidget):
 
         # Provider
         self._llm_provider_combo = QComboBox()
-        self._llm_provider_combo.addItems(["DeepSeek", "OpenAI", "自定义"])
+        self._llm_provider_combo.addItems([
+            "DeepSeek", "OpenAI", "Anthropic", "Google Gemini",
+            "Groq", "Together AI", "Mistral AI", "xAI",
+            "自定义",
+        ])
         self._llm_provider_combo.currentTextChanged.connect(self._on_llm_provider_changed)
+        fix_combo_wheel(self._llm_provider_combo)
+        self._llm_provider_combo.setStyleSheet(self._llm_provider_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         form.addRow("Provider:", self._llm_provider_combo)
 
         # API Key (password mode)
         self._llm_api_key_edit = QLineEdit()
         self._llm_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._llm_api_key_edit.setPlaceholderText("sk-...")
+        self._llm_api_key_edit.mousePressEvent = lambda e: self._on_llm_key_clicked()
         form.addRow("API Key:", self._llm_api_key_edit)
 
         # Default model
@@ -828,16 +1402,34 @@ class SettingsPage(QWidget):
         self._llm_model_combo.setEditable(True)
         self._llm_model_combo.addItems([
             "deepseek-chat", "deepseek-reasoner",
-            "gpt-4o", "gpt-4o-mini",
+            "gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3", "o4-mini",
+            "claude-sonnet-4", "claude-haiku-4", "claude-opus-4",
+            "gemini-2.5-pro", "gemini-2.5-flash",
+            "mixtral-8x22b", "mistral-large",
+            "grok-3", "grok-3-mini",
         ])
         self._llm_model_combo.setCurrentText("deepseek-chat")
+        fix_combo_wheel(self._llm_model_combo)
+        self._llm_model_combo.setStyleSheet(self._llm_model_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         form.addRow("默认模型:", self._llm_model_combo)
 
         # Base URL
-        self._llm_base_url_edit = QLineEdit()
-        self._llm_base_url_edit.setPlaceholderText("https://api.deepseek.com/v1")
-        self._llm_base_url_edit.setText("https://api.deepseek.com/v1")
-        form.addRow("Base URL:", self._llm_base_url_edit)
+        self._llm_base_url_combo = QComboBox()
+        self._llm_base_url_combo.setEditable(True)
+        self._llm_base_url_combo.addItems([
+            "https://api.deepseek.com/v1",
+            "https://api.openai.com/v1",
+            "https://api.anthropic.com/v1",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://api.groq.com/openai/v1",
+            "https://api.together.xyz/v1",
+            "https://api.mistral.ai/v1",
+            "https://api.x.ai/v1",
+        ])
+        self._llm_base_url_combo.setCurrentText("https://api.deepseek.com/v1")
+        fix_combo_wheel(self._llm_base_url_combo)
+        self._llm_base_url_combo.setStyleSheet(self._llm_base_url_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
+        form.addRow("Base URL:", self._llm_base_url_combo)
 
         # Purchase link button
         purchase_btn = QPushButton("🔗 获取 API Key →")
@@ -870,42 +1462,50 @@ class SettingsPage(QWidget):
         return self._make_form_page(container)
 
     def _build_ollama_page(self) -> QWidget:
-        """Category: Ollama — service URL, model combo, refresh, advanced."""
+        """Category: Ollama — env-select, detection, model list with install buttons."""
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
         layout.setSpacing(10)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
+        # ── Environment selector ──
+        self._ollama_env_combo = QComboBox()
+        self._ollama_env_combo.addItems([
+            "🐧 WSL Linux",
+            "🪟 Windows",
+            "☁️ 远程服务器",
+        ])
+        self._ollama_env_combo.currentIndexChanged.connect(self._on_ollama_env_changed)
+        fix_combo_wheel(self._ollama_env_combo)
+        self._ollama_env_combo.setStyleSheet(self._ollama_env_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
+        layout.addWidget(self._ollama_env_combo)
 
-        # Service URL
-        self._ollama_url_edit = QLineEdit()
-        self._ollama_url_edit.setPlaceholderText("http://localhost:11434")
-        self._ollama_url_edit.setText("http://localhost:11434")
-        form.addRow("服务 URL:", self._ollama_url_edit)
+        # ── Detection status row (label + refresh button) ──
+        status_row = QWidget()
+        status_row.setStyleSheet("background: transparent;")
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(8)
 
-        # Available models
-        self._ollama_model_combo = QComboBox()
-        self._ollama_model_combo.setEditable(True)
-        self._ollama_model_combo.setPlaceholderText("(点击刷新检测模型)")
-        form.addRow("可用模型:", self._ollama_model_combo)
+        self._ollama_status_label = QLabel("选择环境后自动检测...")
+        self._ollama_status_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+        self._ollama_status_label.setWordWrap(True)
+        status_layout.addWidget(self._ollama_status_label, 1)
 
-        # Refresh button
-        self._ollama_refresh_btn = QPushButton("🔄 刷新模型")
+        self._ollama_refresh_btn = QPushButton("🔄 刷新检测")
+        self._ollama_refresh_btn.setFixedHeight(28)
         self._ollama_refresh_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {THEME.bg2}, stop:1 {THEME.bg3});
                 color: {THEME.txt};
                 border: 1px solid {THEME.border};
-                border-radius: 10px;
-                padding: 8px 20px;
-                font-size: 13px;
-                font-weight: bold;
-                min-height: 42px;
+                border-radius: 6px;
+                padding: 2px 12px;
+                font-size: 11px;
             }}
             QPushButton:hover {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -913,97 +1513,76 @@ class SettingsPage(QWidget):
                 border-color: {THEME.accent};
                 color: {THEME.accent};
             }}
-            QPushButton:pressed {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {THEME.bg3}, stop:1 {THEME.border});
-                border-color: {THEME.accent_h};
-            }}
         """)
-        self._ollama_refresh_btn.clicked.connect(self._on_refresh_ollama_models)
-        form.addRow("", self._ollama_refresh_btn)
+        self._ollama_refresh_btn.clicked.connect(
+            lambda: self._detect_ollama(self._ollama_env_combo.currentText() if self._ollama_env_combo else "")
+        )
+        status_layout.addWidget(self._ollama_refresh_btn)
 
-        layout.addLayout(form)
+        layout.addWidget(status_row)
+
+        # ── Available models summary ──
+        self._ollama_models_label = QLabel("")
+        self._ollama_models_label.setStyleSheet(
+            f"font-size: 12px; color: {THEME.txt3}; background: transparent; padding: 4px 0;"
+        )
+        self._ollama_models_label.setWordWrap(True)
+        layout.addWidget(self._ollama_models_label)
+
+        # ── Model cards container (populated by _detect_ollama) ──
+        models_widget = QWidget()
+        models_widget.setStyleSheet("background: transparent;")
+        self._ollama_models_container = QVBoxLayout(models_widget)
+        self._ollama_models_container.setSpacing(6)
+        self._ollama_models_container.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(models_widget, 1)
+
+        # Hidden URL edit for backward compat
+        self._ollama_url_edit = QLineEdit()
+        self._ollama_url_edit.setVisible(False)
+        self._ollama_url_edit.setText("http://localhost:11434")
+        layout.addWidget(self._ollama_url_edit)
+
+        # Run initial detection via timer
+        QTimer.singleShot(500, lambda: self._detect_ollama(self._ollama_env_combo.currentText()))
 
         return self._make_form_page(container)
 
     def _build_wm_page(self) -> QWidget:
-        """Category: 世界模型 — enable, provider, endpoint, timeout."""
+        """Category: 世界模型 — env-select + backend detection."""
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(container)
         layout.setSpacing(10)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
+        # ── Environment selector ──
+        self._wm_env_combo = QComboBox()
+        self._wm_env_combo.addItems([
+            "🐧 WSL Linux",
+            "🪟 Windows",
+            "☁️ 远程服务器",
+        ])
+        self._wm_env_combo.currentIndexChanged.connect(self._on_wm_env_changed)
+        fix_combo_wheel(self._wm_env_combo)
+        self._wm_env_combo.setStyleSheet(self._wm_env_combo.styleSheet() + COMBO_WHITE_VIEW_STYLE)
+        layout.addWidget(self._wm_env_combo)
 
-        # Enable
-        self._wm_enable_cb = QCheckBox("启用世界模型")
-        form.addRow("", self._wm_enable_cb)
+        # ── Detection labels ──
+        self._wm_aether_label = QLabel("AETHER 后端: ⏳ 检测中...")
+        self._wm_aether_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+        layout.addWidget(self._wm_aether_label)
 
-        # Provider
-        self._wm_provider_combo = QComboBox()
-        self._wm_provider_combo.addItems(["AETHER", "MCP-Cosmos"])
-        form.addRow("Provider:", self._wm_provider_combo)
+        self._wm_cosmos_label = QLabel("MCP-Cosmos 后端: ⏳ 检测中...")
+        self._wm_cosmos_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+        layout.addWidget(self._wm_cosmos_label)
 
-        # Endpoint URL
-        self._wm_endpoint_edit = QLineEdit()
-        self._wm_endpoint_edit.setPlaceholderText("http://localhost:8100")
-        self._wm_endpoint_edit.setText("http://localhost:8100")
-        form.addRow("端点 URL:", self._wm_endpoint_edit)
-
-        # Timeout
-        self._wm_timeout_spin = QSpinBox()
-        self._wm_timeout_spin.setRange(1, 9999)
-        self._wm_timeout_spin.setValue(60)
-        self._wm_timeout_spin.setSuffix(" 秒")
-        form.addRow("超时(秒):", self._wm_timeout_spin)
-
-        layout.addLayout(form)
-
-        return self._make_form_page(container)
-
-    def _build_server_page(self) -> QWidget:
-        """Category: 服务器 (远程) — name, host, port, user, auth method."""
-        container = QWidget()
-        container.setStyleSheet("background: transparent;")
-        layout = QVBoxLayout(container)
-        layout.setSpacing(10)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setContentsMargins(0, 0, 0, 0)
-
-        # Name
-        self._server_name_edit = QLineEdit()
-        self._server_name_edit.setPlaceholderText("my-server")
-        form.addRow("名称:", self._server_name_edit)
-
-        # Host
-        self._server_host_edit = QLineEdit()
-        self._server_host_edit.setPlaceholderText("192.168.1.100")
-        form.addRow("主机:", self._server_host_edit)
-
-        # Port
-        self._server_port_spin = QSpinBox()
-        self._server_port_spin.setRange(1, 65535)
-        self._server_port_spin.setValue(22)
-        form.addRow("端口:", self._server_port_spin)
-
-        # Username
-        self._server_user_edit = QLineEdit()
-        self._server_user_edit.setPlaceholderText("ubuntu")
-        self._server_user_edit.setText("ubuntu")
-        form.addRow("用户名:", self._server_user_edit)
-
-        # Auth method
-        self._server_auth_combo = QComboBox()
-        self._server_auth_combo.addItems(["密码", "私钥"])
-        form.addRow("认证方式:", self._server_auth_combo)
-
-        layout.addLayout(form)
+        # Run initial detection via timer
+        QTimer.singleShot(500, lambda: self._detect_wm_backends(self._wm_env_combo.currentText()))
 
         return self._make_form_page(container)
 
@@ -1018,6 +1597,9 @@ class SettingsPage(QWidget):
 
     def _load_configs(self):
         """Load all configs from disk into the UI fields."""
+        # Always try to load LLM config from Hermes (even without workspace)
+        self._load_llm_from_hermes()
+
         if not self._workspace or not os.path.exists(self._workspace):
             self._show_empty_state("工作区未配置或路径不存在")
             return
@@ -1031,20 +1613,6 @@ class SettingsPage(QWidget):
 
         global_cfg = _load_json(os.path.join(config_dir, "global_config.json"))
         partner_cfg = _load_json(os.path.join(config_dir, "partner_config.json"))
-
-        # ── Workspace ──
-        ws_info = partner_cfg.get("workspace", {})
-        ws_path = ws_info.get("path", self._workspace)
-        if self._ws_path_edit:
-            self._ws_path_edit.setText(ws_path)
-
-        default_inst = global_cfg.get("default_instance", "03")
-        if self._default_instance_combo:
-            idx = self._default_instance_combo.findText(str(default_inst))
-            if idx >= 0:
-                self._default_instance_combo.setCurrentIndex(idx)
-            else:
-                self._default_instance_combo.setCurrentText(str(default_inst))
 
         # ── Agent ──
         agent_cfg = partner_cfg.get("agent", {})
@@ -1075,75 +1643,143 @@ class SettingsPage(QWidget):
             else:
                 self._default_platform_combo.setCurrentText(default_platform)
 
-        # ── LLM API ──
-        llm_cfg = partner_cfg.get("llm", {})
-        provider_map = {"deepseek": "DeepSeek", "openai": "OpenAI", "custom": "自定义"}
-        llm_provider = llm_cfg.get("provider", "deepseek")
-        mapped = provider_map.get(llm_provider.lower(), "DeepSeek")
+        # ── Ollama ──
+        # No direct loading needed — detection runs on env change
+        if self._ollama_url_edit:
+            self._ollama_url_edit.setText("http://localhost:11434")
+
+        # Trigger Ollama detection on initial load (currentIndexChanged
+        # does NOT fire for the default selection at index 0)
+        if hasattr(self, '_ollama_env_combo') and self._ollama_env_combo:
+            env = self._ollama_env_combo.currentText()
+            if env:
+                self._detect_ollama(env)
+
+        # ── World Model ──
+        # Detection runs on env change — no static fields to load
+
+        # ── SSH Servers ──
+        if hasattr(self, '_refresh_ssh_server_list'):
+            self._refresh_ssh_server_list()
+
+    # ── Save ─────────────────────────────────────────────────────────────
+
+    def _load_llm_from_hermes(self):
+        """Load LLM config from Hermes config.yaml and .env into the UI fields.
+        Called unconditionally (even without workspace) so LLM fields are
+        always populated on first load.
+        """
+        hermes_provider = "deepseek"
+        hermes_model = "deepseek-chat"
+        hermes_base_url = "https://api.deepseek.com/v1"
+        hermes_api_key = ""
+
+        # Read from Hermes config.yaml (try Windows path first, then WSL)
+        hermes_cfg_path = os.path.expanduser("~/.hermes/config.yaml")
+        cfg_yaml_str = None
+        if os.path.exists(hermes_cfg_path):
+            try:
+                with open(hermes_cfg_path) as _fh:
+                    cfg_yaml_str = _fh.read()
+            except Exception:
+                pass
+        if not cfg_yaml_str:
+            # Try reading from WSL via wsl.exe
+            try:
+                import subprocess as _sp
+                r = _sp.run(
+                    ["wsl.exe", "bash", "-lc", "cat /home/os/.hermes/config.yaml 2>/dev/null"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=_sp.CREATE_NO_WINDOW if hasattr(_sp, 'CREATE_NO_WINDOW') else 0,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    cfg_yaml_str = r.stdout
+            except Exception:
+                pass
+        if cfg_yaml_str:
+            try:
+                _cfg = yaml.safe_load(cfg_yaml_str) or {}
+                _cfg_model = _cfg.get("model", {}) or {}
+                hermes_provider = _cfg_model.get("provider", "deepseek")
+                hermes_model = _cfg_model.get("default", "deepseek-chat")
+                hermes_base_url = _cfg_model.get("base_url", "https://api.deepseek.com")
+            except Exception:
+                pass
+
+        # Read API key from .env (try Windows path first, then WSL)
+        hermes_env_path = os.path.expanduser("~/.hermes/.env")
+        env_text = None
+        if os.path.exists(hermes_env_path):
+            try:
+                with open(hermes_env_path) as _fh:
+                    env_text = _fh.read()
+            except Exception:
+                pass
+        if not env_text:
+            try:
+                import subprocess as _sp
+                r = _sp.run(
+                    ["wsl.exe", "bash", "-lc", "cat /home/os/.hermes/.env 2>/dev/null"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=_sp.CREATE_NO_WINDOW if hasattr(_sp, 'CREATE_NO_WINDOW') else 0,
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    env_text = r.stdout
+            except Exception:
+                pass
+        if env_text:
+            try:
+                for _line in env_text.split("\n"):
+                    _line = _line.strip()
+                    if "=" in _line and not _line.startswith("#"):
+                        _k, _v = _line.split("=", 1)
+                        if _k.strip() in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                                           "OPENROUTER_API_KEY"):
+                            hermes_api_key = _v.strip().strip("'\"")
+                            break
+            except Exception:
+                pass
+
+        # Populate UI fields
+        provider_display = {"deepseek": "DeepSeek", "openai": "OpenAI", "anthropic": "Anthropic",
+                            "google": "Google Gemini", "groq": "Groq", "together": "Together AI",
+                            "mistral": "Mistral AI", "xai": "xAI", "custom": "自定义"}
+        display = provider_display.get(hermes_provider.lower(), "DeepSeek")
         if self._llm_provider_combo:
-            idx = self._llm_provider_combo.findText(mapped)
+            idx = self._llm_provider_combo.findText(display)
             if idx >= 0:
                 self._llm_provider_combo.setCurrentIndex(idx)
-        if self._llm_api_key_edit:
-            self._llm_api_key_edit.setText(llm_cfg.get("api_key", ""))
+            else:
+                self._llm_provider_combo.setCurrentText(display)
+
+        # API key with mask
+        key = hermes_api_key
+        if key and len(key) > 8 and self._llm_api_key_edit:
+            masked = key[:4] + "*" * 8 + key[-4:]
+            self._llm_api_key_edit.setText(masked)
+            self._llm_api_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+        elif self._llm_api_key_edit:
+            self._llm_api_key_edit.setText(key)
+            if key:
+                self._llm_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+
+        # Model
+        model = hermes_model
         if self._llm_model_combo:
-            model_val = llm_cfg.get("model", "deepseek-chat")
-            idx = self._llm_model_combo.findText(model_val)
+            idx = self._llm_model_combo.findText(model)
             if idx >= 0:
                 self._llm_model_combo.setCurrentIndex(idx)
             else:
-                self._llm_model_combo.setCurrentText(model_val)
-        if self._llm_base_url_edit:
-            self._llm_base_url_edit.setText(
-                llm_cfg.get("base_url", "https://api.deepseek.com/v1")
-            )
+                self._llm_model_combo.setCurrentText(model)
 
-        # ── Ollama ──
-        ollama_cfg = partner_cfg.get("ollama", {})
-        if self._ollama_url_edit:
-            self._ollama_url_edit.setText(
-                ollama_cfg.get("base_url", "http://localhost:11434")
-            )
-        if self._ollama_model_combo:
-            model_name = ollama_cfg.get("model", "")
-            if model_name:
-                idx = self._ollama_model_combo.findText(model_name)
-                if idx >= 0:
-                    self._ollama_model_combo.setCurrentIndex(idx)
-                else:
-                    self._ollama_model_combo.setCurrentText(model_name)
-
-        # ── World Model ──
-        wm_cfg = partner_cfg.get("world_model", {})
-        if self._wm_enable_cb:
-            self._wm_enable_cb.setChecked(bool(wm_cfg.get("enabled", False)))
-        if self._wm_provider_combo:
-            provider = wm_cfg.get("provider", "AETHER")
-            idx = self._wm_provider_combo.findText(provider)
+        # Base URL
+        base_url = hermes_base_url
+        if self._llm_base_url_combo:
+            idx = self._llm_base_url_combo.findText(base_url)
             if idx >= 0:
-                self._wm_provider_combo.setCurrentIndex(idx)
-        if self._wm_endpoint_edit:
-            self._wm_endpoint_edit.setText(
-                wm_cfg.get("endpoint", "http://localhost:8100")
-            )
-
-        # ── Server ──
-        server_cfg = global_cfg.get("server", {})
-        if self._server_name_edit:
-            self._server_name_edit.setText(server_cfg.get("name", ""))
-        if self._server_host_edit:
-            self._server_host_edit.setText(server_cfg.get("host", ""))
-        if self._server_port_spin:
-            self._server_port_spin.setValue(int(server_cfg.get("port", 22)))
-        if self._server_user_edit:
-            self._server_user_edit.setText(server_cfg.get("username", "ubuntu"))
-        if self._server_auth_combo:
-            auth = server_cfg.get("auth_method", "密码")
-            idx = self._server_auth_combo.findText(auth)
-            if idx >= 0:
-                self._server_auth_combo.setCurrentIndex(idx)
-
-    # ── Save ─────────────────────────────────────────────────────────────
+                self._llm_base_url_combo.setCurrentIndex(idx)
+            else:
+                self._llm_base_url_combo.setCurrentText(base_url)
 
     def _on_save(self):
         """Save all configs to disk."""
@@ -1158,15 +1794,6 @@ class SettingsPage(QWidget):
         global_cfg = _load_json(os.path.join(config_dir, "global_config.json"))
         partner_cfg = _load_json(os.path.join(config_dir, "partner_config.json"))
 
-        # ── Workspace ──
-        old_workspace = self._workspace
-        partner_cfg["workspace"] = partner_cfg.get("workspace", {})
-        if self._ws_path_edit:
-            partner_cfg["workspace"]["path"] = self._ws_path_edit.text().strip()
-
-        if self._default_instance_combo:
-            global_cfg["default_instance"] = self._default_instance_combo.currentText().strip()
-
         # ── Agent ──
         agent_cfg = partner_cfg.get("agent", {})
         if self._default_agent_combo:
@@ -1176,50 +1803,33 @@ class SettingsPage(QWidget):
         partner_cfg["agent"] = agent_cfg
 
         # ── LLM API ──
-        reverse_map = {"DeepSeek": "deepseek", "OpenAI": "openai", "自定义": "custom"}
+        reverse_map = {"DeepSeek": "deepseek", "OpenAI": "openai", "Anthropic": "anthropic",
+                       "Google Gemini": "google", "Groq": "groq", "Together AI": "together",
+                       "Mistral AI": "mistral", "xAI": "xai", "自定义": "custom"}
         llm_cfg = partner_cfg.get("llm", {})
         if self._llm_provider_combo:
             raw = self._llm_provider_combo.currentText()
             llm_cfg["provider"] = reverse_map.get(raw, "deepseek")
         if self._llm_api_key_edit:
-            llm_cfg["api_key"] = self._llm_api_key_edit.text().strip()
+            current_text = self._llm_api_key_edit.text().strip()
+            # Don't overwrite if the text contains masked placeholder
+            if "****" not in current_text:
+                llm_cfg["api_key"] = current_text
         if self._llm_model_combo:
             llm_cfg["model"] = self._llm_model_combo.currentText().strip()
-        if self._llm_base_url_edit:
-            llm_cfg["base_url"] = self._llm_base_url_edit.text().strip()
+        if self._llm_base_url_combo:
+            llm_cfg["base_url"] = self._llm_base_url_combo.currentText().strip()
         partner_cfg["llm"] = llm_cfg
 
         # ── Ollama ──
-        ollama_cfg = partner_cfg.get("ollama", {})
+        # No model/url saving needed in new env-detection mode; keep URL for compat
         if self._ollama_url_edit:
+            ollama_cfg = partner_cfg.get("ollama", {})
             ollama_cfg["base_url"] = self._ollama_url_edit.text().strip()
-        if self._ollama_model_combo:
-            ollama_cfg["model"] = self._ollama_model_combo.currentText().strip()
-        partner_cfg["ollama"] = ollama_cfg
+            partner_cfg["ollama"] = ollama_cfg
 
         # ── World Model ──
-        wm_cfg = partner_cfg.get("world_model", {})
-        if self._wm_enable_cb:
-            wm_cfg["enabled"] = self._wm_enable_cb.isChecked()
-        if self._wm_provider_combo:
-            wm_cfg["provider"] = self._wm_provider_combo.currentText()
-        if self._wm_endpoint_edit:
-            wm_cfg["endpoint"] = self._wm_endpoint_edit.text().strip()
-        partner_cfg["world_model"] = wm_cfg
-
-        # ── Server ──
-        server_cfg = global_cfg.get("server", {})
-        if self._server_name_edit:
-            server_cfg["name"] = self._server_name_edit.text().strip()
-        if self._server_host_edit:
-            server_cfg["host"] = self._server_host_edit.text().strip()
-        if self._server_port_spin:
-            server_cfg["port"] = self._server_port_spin.value()
-        if self._server_user_edit:
-            server_cfg["username"] = self._server_user_edit.text().strip()
-        if self._server_auth_combo:
-            server_cfg["auth_method"] = self._server_auth_combo.currentText()
-        global_cfg["server"] = server_cfg
+        # No fields to save in detection-only mode
 
         # Write to disk
         from partner.state.config import save_partner_config_data
@@ -1229,12 +1839,6 @@ class SettingsPage(QWidget):
         # Write pointer file so resolve_partner_root() can find workspace
         from partner.state.setup import save_workspace_pointer
         save_workspace_pointer(self._workspace)
-
-        # Detect workspace path change and emit signal
-        new_ws = self._ws_path_edit.text().strip() if self._ws_path_edit else ""
-        if new_ws and new_ws != old_workspace:
-            self._workspace = new_ws
-            self.workspace_changed.emit(new_ws)
 
         QMessageBox.information(self, "保存成功", "配置已保存")
         self.config_saved.emit()
@@ -1247,14 +1851,6 @@ class SettingsPage(QWidget):
             self._empty_label.setText(message)
             self._empty_label.setVisible(True)
             self._splitter.setVisible(False)
-
-    def _on_browse_workspace(self):
-        """Open directory browser for workspace path."""
-        directory = QFileDialog.getExistingDirectory(
-            self, "选择工作区路径", self._ws_path_edit.text() if self._ws_path_edit else ""
-        )
-        if directory and self._ws_path_edit:
-            self._ws_path_edit.setText(directory)
 
     def _on_add_agent(self):
         """Open file dialog to select an agent manifest file, then register it."""
@@ -1299,58 +1895,531 @@ class SettingsPage(QWidget):
         urls = {
             "DeepSeek": "https://platform.deepseek.com/api_keys",
             "OpenAI": "https://platform.openai.com/api-keys",
+            "Anthropic": "https://console.anthropic.com/settings/keys",
+            "Google Gemini": "https://aistudio.google.com/apikey",
+            "Groq": "https://console.groq.com/keys",
+            "Together AI": "https://api.together.xyz/settings/api-keys",
+            "Mistral AI": "https://console.mistral.ai/api-keys",
+            "xAI": "https://console.x.ai/api-keys",
             "自定义": "https://platform.deepseek.com/api_keys",
         }
         url = urls.get(provider, "https://platform.deepseek.com/api_keys")
         QDesktopServices.openUrl(QUrl(url))
 
-    def _on_refresh_ollama_models(self):
-        """Refresh available Ollama models by calling the local API."""
-        # Reset combo to show loading
-        if self._ollama_model_combo:
-            self._ollama_model_combo.clear()
-            self._ollama_model_combo.setPlaceholderText("(检测中...)")
+    def _on_ollama_env_changed(self, index: int):
+        """Handle Ollama environment change — run detection."""
+        env_text = self._ollama_env_combo.currentText() if self._ollama_env_combo else ""
+        self._detect_ollama(env_text)
 
-        base_url = self._ollama_url_edit.text().strip() if self._ollama_url_edit else "http://localhost:11434"
-        api_url = f"{base_url.rstrip('/')}/api/tags"
+    def _detect_ollama(self, env_text: str):
+        """Detect Ollama installation and show model list with install buttons."""
+        import subprocess
+        import shutil
+
+        if not self._ollama_status_label or not self._ollama_models_label:
+            return
+
+        self._ollama_status_label.setText("⏳ 检测中...")
+        self._ollama_status_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+        self._ollama_models_label.setText("")
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        # Clear existing model cards
+        if self._ollama_models_container:
+            self._clear_layout(self._ollama_models_container)
+
+        installed = False
+        installed_models = []
 
         try:
-            import urllib.request
-            import json as _json
+            if env_text == "🐧 WSL Linux":
+                r = subprocess.run(
+                    ["wsl", "bash", "-lc", "command -v ollama 2>/dev/null"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if r.returncode == 0:
+                    path = r.stdout.strip()
+                    installed = bool(path and not path.startswith("/mnt/"))
+                    if installed:
+                        r2 = subprocess.run(
+                            ["wsl", "bash", "-lc", "ollama list 2>/dev/null"],
+                            capture_output=True, text=True, timeout=15,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        if r2.returncode == 0:
+                            lines = r2.stdout.strip().split("\n")
+                            for line in lines[1:]:
+                                parts = line.split()
+                                if parts:
+                                    installed_models.append(parts[0])
+            elif env_text == "🪟 Windows":
+                installed = shutil.which("ollama") is not None
+                if installed:
+                    r = subprocess.run(
+                        ["ollama", "list"],
+                        capture_output=True, text=True, timeout=15,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    if r.returncode == 0:
+                        lines = r.stdout.strip().split("\n")
+                        for line in lines[1:]:
+                            parts = line.split()
+                            if parts:
+                                installed_models.append(parts[0])
+            else:  # ☁️ 远程服务器
+                self._ollama_status_label.setText("需连接后检测")
+                self._ollama_status_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.txt3}; background: transparent; padding: 4px 0;"
+                )
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            installed = False
 
-            req = urllib.request.Request(api_url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = _json.loads(resp.read().decode())
+        installed_set = set(installed_models)
 
-            models = [m["name"] for m in data.get("models", [])]
-            if self._ollama_model_combo:
-                self._ollama_model_combo.clear()
-                if models:
-                    self._ollama_model_combo.addItems(models)
-                    self._ollama_model_combo.setCurrentIndex(0)
-                else:
-                    self._ollama_model_combo.setPlaceholderText("(无可用模型)")
-        except Exception:
-            if self._ollama_model_combo:
-                self._ollama_model_combo.clear()
-                self._ollama_model_combo.setPlaceholderText("(无法连接 Ollama 服务)")
+        if installed:
+            self._ollama_status_label.setText("✅ Ollama 已安装")
+            self._ollama_status_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.green}; background: transparent; padding: 4px 0;"
+            )
+            if installed_models:
+                self._ollama_models_label.setText(f"已安装模型: {', '.join(installed_models)}")
+                self._ollama_models_label.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.txt}; background: transparent; padding: 4px 0;"
+                )
+            else:
+                self._ollama_models_label.setText("可用模型: (无已安装模型)")
+                self._ollama_models_label.setStyleSheet(
+                    f"font-size: 12px; color: {THEME.txt3}; background: transparent; padding: 4px 0;"
+                )
+
+            # Build model cards
+            if self._ollama_models_container:
+                section_title = QLabel("热门模型")
+                section_title.setStyleSheet(
+                    f"font-size: 13px; font-weight: bold; color: {THEME.txt}; background: transparent; padding: 8px 0 4px 0;"
+                )
+                self._ollama_models_container.addWidget(section_title)
+
+                for model_name, description, size in self.POPULAR_MODELS:
+                    model_row = self._build_ollama_model_card(model_name, description, size, installed_set, env_text)
+                    self._ollama_models_container.addWidget(model_row)
+
+                self._ollama_models_container.addStretch()
+        else:
+            self._ollama_status_label.setText("❌ Ollama 未安装")
+            self._ollama_status_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+            )
+            # Show install button
+            install_ollama_btn = QPushButton("📥 安装 Ollama")
+            install_ollama_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                    color: white; border: none; border-radius: 8px;
+                    padding: 8px 20px; font-size: 13px; font-weight: bold;
+                    min-height: 36px; max-width: 200px;
+                }}
+                QPushButton:hover {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+                }}
+            """)
+            install_ollama_btn.clicked.connect(lambda: self._install_ollama_itself(env_text))
+            if self._ollama_models_container:
+                self._ollama_models_container.addWidget(install_ollama_btn)
+
+    def _build_ollama_model_card(self, model_name: str, description: str, size: str, installed_set: set, env_text: str) -> QWidget:
+        """Build a single model card row with name, desc, size, install button, and progress bar."""
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background-color: {THEME.bg2};
+                border: 1px solid {THEME.border};
+                border-radius: 8px;
+                padding: 8px 12px;
+            }}
+        """)
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(10)
+
+        # Name + description
+        info_col = QVBoxLayout()
+        info_col.setSpacing(2)
+        name_label = QLabel(f"<b>{model_name}</b>")
+        name_label.setStyleSheet(f"font-size: 13px; color: {THEME.txt}; background: transparent;")
+        info_col.addWidget(name_label)
+
+        desc_label = QLabel(description)
+        desc_label.setStyleSheet(f"font-size: 11px; color: {THEME.txt2}; background: transparent;")
+        info_col.addWidget(desc_label)
+        card_layout.addLayout(info_col, 1)
+
+        # Size badge
+        size_label = QLabel(size)
+        size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        size_label.setFixedWidth(56)
+        size_label.setStyleSheet(f"""
+            font-size: 11px; color: {THEME.txt3};
+            background-color: {THEME.bg2};
+            border-radius: 4px;
+            padding: 2px 6px;
+        """)
+        card_layout.addWidget(size_label)
+
+        is_installed = model_name in installed_set
+
+        # Install button / installed badge
+        btn = QPushButton("✅ 已安装" if is_installed else "⬇ 安装")
+        btn.setFixedHeight(30)
+        btn.setMinimumWidth(90)
+        if is_installed:
+            btn.setEnabled(False)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {THEME.bg3};
+                    color: {THEME.green};
+                    border: 1px solid {THEME.green};
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-size: 11px;
+                }}
+            """)
+        else:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 14px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 {THEME.accent2}, stop:1 {THEME.accent_h});
+                }}
+            """)
+            btn.clicked.connect(lambda checked=False, mn=model_name, et=env_text: self._install_ollama_model(mn, et))
+        card_layout.addWidget(btn)
+
+        # Progress bar (hidden initially)
+        progress = QProgressBar()
+        progress.setFixedHeight(12)
+        progress.setMinimumWidth(160)
+        progress.setRange(0, 0)  # indeterminate
+        progress.setVisible(False)
+        progress.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {THEME.bg2};
+                border: 1px solid {THEME.border};
+                border-radius: 4px;
+                text-align: center;
+                font-size: 9px;
+                color: {THEME.txt2};
+            }}
+            QProgressBar::chunk {{
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {THEME.accent}, stop:1 {THEME.accent3});
+                border-radius: 3px;
+            }}
+        """)
+        card_layout.addWidget(progress)
+
+        # Store the progress bar as an attribute on the button for access during install
+        btn._progress_bar = progress
+        btn._card = card
+
+        return card
+
+    def _install_ollama_itself(self, env_text: str):
+        """Install Ollama itself on the selected environment."""
+        import subprocess
+        self._ollama_status_label.setText("⏳ 正在安装 Ollama...")
+        self._ollama_status_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        try:
+            if env_text == "🐧 WSL Linux":
+                cmd = ["wsl", "bash", "-lc",
+                       "curl -fsSL https://ollama.com/install.sh | sh 2>&1"]
+            else:
+                cmd = ["powershell", "-Command",
+                       "& {Invoke-WebRequest -Uri https://ollama.com/install.ps1 -OutFile install.ps1; .\\install.ps1; Remove-Item install.ps1}"]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            if r.returncode == 0:
+                self._ollama_status_label.setText("✅ Ollama 安装成功！请重新检测")
+                self._ollama_status_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.green}; background: transparent; padding: 4px 0;"
+                )
+            else:
+                self._ollama_status_label.setText(f"❌ 安装失败: {r.stderr.strip()[-100:]}")
+                self._ollama_status_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+                )
+        except Exception as e:
+            self._ollama_status_label.setText(f"❌ 安装出错: {e}")
+            self._ollama_status_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+            )
+
+    def _install_ollama_model(self, model_name: str, env_text: str):
+        """Install an Ollama model: run ollama pull with progress feedback."""
+        import subprocess
+
+        self._ollama_status_label.setText(f"⏳ 正在安装 {model_name}...")
+        self._ollama_status_label.setStyleSheet(
+            f"font-size: 13px; color: {THEME.txt2}; background: transparent; padding: 4px 0;"
+        )
+
+        # Find the button that triggered this install and show its progress bar
+        # We find it by searching the current model cards
+        target_progress = None
+        target_btn = None
+        if self._ollama_models_container:
+            for i in range(self._ollama_models_container.count()):
+                item = self._ollama_models_container.itemAt(i)
+                if item and item.widget():
+                    # Check if this widget has children matching our model name
+                    card = item.widget()
+                    btn = card.findChild(QPushButton)
+                    if btn and btn.text() == "⬇ 安装" and btn._progress_bar is not None:
+                        # Verify this is the right card by checking for the model name label
+                        labels = card.findChildren(QLabel)
+                        card_model_name = None
+                        for label in labels:
+                            txt = label.text()
+                            if f"<b>{model_name}</b>" in txt or model_name in txt:
+                                card_model_name = model_name
+                                break
+                        if card_model_name:
+                            target_progress = btn._progress_bar
+                            target_btn = btn
+                            break
+
+        if target_progress:
+            target_progress.setVisible(True)
+            target_progress.setRange(0, 0)  # indeterminate
+
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        try:
+            if env_text == "🐧 WSL Linux":
+                proc = subprocess.Popen(
+                    ["wsl", "bash", "-lc", f"ollama pull {model_name} 2>&1"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                proc = subprocess.Popen(
+                    ["ollama", "pull", model_name],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+
+            # Read output and update progress
+            import threading as _threading
+            output_lines = []
+
+            def _reader_thread():
+                for line in proc.stdout:
+                    output_lines.append(line)
+
+            reader = _threading.Thread(target=_reader_thread, daemon=True)
+            reader.start()
+
+            # Wait with periodic UI updates
+            from PySide6.QtCore import QCoreApplication
+            while proc.poll() is None:
+                proc.wait(1)
+                QCoreApplication.processEvents()
+
+            reader.join(timeout=2)
+            proc.wait(timeout=30)
+
+            if proc.returncode == 0:
+                self._ollama_status_label.setText(f"✅ {model_name} 安装成功")
+                self._ollama_status_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.green}; background: transparent; padding: 4px 0;"
+                )
+                if target_progress:
+                    target_progress.setRange(0, 100)
+                    target_progress.setValue(100)
+                    QTimer.singleShot(1500, lambda: target_progress.setVisible(False))
+                if target_btn:
+                    target_btn.setText("✅ 已安装")
+                    target_btn.setEnabled(False)
+                    target_btn.setStyleSheet(f"""
+                        QPushButton {{
+                            background-color: {THEME.bg3};
+                            color: {THEME.green};
+                            border: 1px solid {THEME.green};
+                            border-radius: 6px;
+                            padding: 4px 14px;
+                            font-size: 11px;
+                        }}
+                    """)
+            else:
+                error_text = "".join(output_lines[-5:]) if output_lines else "未知错误"
+                self._ollama_status_label.setText(f"❌ {model_name} 安装失败: {error_text.strip()}")
+                self._ollama_status_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+                )
+                if target_progress:
+                    target_progress.setVisible(False)
+
+        except Exception as e:
+            self._ollama_status_label.setText(f"❌ 安装出错: {e}")
+            self._ollama_status_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+            )
+            if target_progress:
+                target_progress.setVisible(False)
+
+        # Re-run detection to refresh installed model list
+        QTimer.singleShot(2000, lambda: self._detect_ollama(env_text))
+
+    def _clear_layout(self, layout):
+        """Recursively remove all widgets and sub-layouts from a layout."""
+        if layout is not None:
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+                elif item.layout():
+                    self._clear_layout(item.layout())
+
+    # ── World Model detection ────────────────────────────────────────────
+
+    def _on_wm_env_changed(self, index: int):
+        """Handle World Model environment change — run detection."""
+        env_text = self._wm_env_combo.currentText() if self._wm_env_combo else ""
+        self._detect_wm_backends(env_text)
+
+    def _detect_wm_backends(self, env_text: str):
+        """Detect AETHER and MCP-Cosmos backends in the selected environment."""
+        import subprocess
+        import shutil
+
+        if not self._wm_aether_label or not self._wm_cosmos_label:
+            return
+
+        self._wm_aether_label.setText("AETHER 后端: ⏳ 检测中...")
+        self._wm_cosmos_label.setText("MCP-Cosmos 后端: ⏳ 检测中...")
+        from PySide6.QtCore import QCoreApplication
+        QCoreApplication.processEvents()
+
+        aether_found = False
+        cosmos_found = False
+
+        try:
+            if env_text == "🐧 WSL Linux":
+                r1 = subprocess.run(
+                    ["wsl", "bash", "-lc", "command -v aether 2>/dev/null || command -v aetherd 2>/dev/null || echo ''"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                aether_found = bool(r1.stdout.strip())
+                r2 = subprocess.run(
+                    ["wsl", "bash", "-lc", "command -v mcp-cosmos 2>/dev/null || command -v cosmos 2>/dev/null || echo ''"],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                cosmos_found = bool(r2.stdout.strip())
+            elif env_text == "🪟 Windows":
+                aether_found = shutil.which("aether") is not None or shutil.which("aetherd") is not None
+                cosmos_found = shutil.which("mcp-cosmos") is not None or shutil.which("cosmos") is not None
+            else:  # ☁️ 远程服务器
+                self._wm_aether_label.setText("AETHER 后端: ⏳ 需连接后检测")
+                self._wm_aether_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.txt3}; background: transparent; padding: 4px 0;"
+                )
+                self._wm_cosmos_label.setText("MCP-Cosmos 后端: ⏳ 需连接后检测")
+                self._wm_cosmos_label.setStyleSheet(
+                    f"font-size: 13px; color: {THEME.txt3}; background: transparent; padding: 4px 0;"
+                )
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+        if aether_found:
+            self._wm_aether_label.setText("AETHER 后端: ✅")
+            self._wm_aether_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.green}; background: transparent; padding: 4px 0;"
+            )
+        else:
+            self._wm_aether_label.setText("AETHER 后端: ❌")
+            self._wm_aether_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+            )
+
+        if cosmos_found:
+            self._wm_cosmos_label.setText("MCP-Cosmos 后端: ✅")
+            self._wm_cosmos_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.green}; background: transparent; padding: 4px 0;"
+            )
+        else:
+            self._wm_cosmos_label.setText("MCP-Cosmos 后端: ❌")
+            self._wm_cosmos_label.setStyleSheet(
+                f"font-size: 13px; color: {THEME.red}; background: transparent; padding: 4px 0;"
+            )
+
+    def _on_llm_key_clicked(self):
+        """Clear masked API key and switch to password mode for editing."""
+        if self._llm_api_key_edit:
+            self._llm_api_key_edit.clear()
+            self._llm_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._llm_api_key_edit.setFocus()
 
     def _on_llm_provider_changed(self, provider: str):
         """Update placeholders when provider changes."""
         presets = {
             "DeepSeek": ("https://api.deepseek.com/v1", "deepseek-chat"),
             "OpenAI": ("https://api.openai.com/v1", "gpt-4o"),
+            "Anthropic": ("https://api.anthropic.com/v1", "claude-sonnet-4"),
+            "Google Gemini": ("https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-flash"),
+            "Groq": ("https://api.groq.com/openai/v1", "mixtral-8x22b"),
+            "Together AI": ("https://api.together.xyz/v1", "mixtral-8x22b"),
+            "Mistral AI": ("https://api.mistral.ai/v1", "mistral-large"),
+            "xAI": ("https://api.x.ai/v1", "grok-3"),
             "自定义": ("https://api.deepseek.com/v1", "deepseek-chat"),
         }
         url, model = presets.get(provider, ("https://api.deepseek.com/v1", "deepseek-chat"))
-        if self._llm_base_url_edit and not self._llm_base_url_edit.text().strip():
-            self._llm_base_url_edit.setText(url)
+        if self._llm_base_url_combo:
+            idx = self._llm_base_url_combo.findText(url)
+            if idx >= 0:
+                self._llm_base_url_combo.setCurrentIndex(idx)
+            else:
+                self._llm_base_url_combo.setCurrentText(url)
         if self._llm_model_combo:
             idx = self._llm_model_combo.findText(model)
             if idx >= 0:
                 self._llm_model_combo.setCurrentIndex(idx)
             else:
                 self._llm_model_combo.setCurrentText(model)
+
+    def _get_selected_env_key(self) -> str:
+        """Get the internal env key for the instance environment combo."""
+        env_map = {
+            "🐧 WSL Linux": "wsl_linux",
+            "🪟 Windows": "local_windows",
+            "☁️ 远程服务器": "ssh_remote",
+        }
+        text = self._ws_instance_env_combo.currentText() if self._ws_instance_env_combo else ""
+        return env_map.get(text, "wsl_linux")
 
     def showEvent(self, event):
         """Refresh configs when the tab is shown."""

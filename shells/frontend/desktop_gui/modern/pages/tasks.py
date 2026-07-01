@@ -33,7 +33,7 @@ from partner.monitoring.instance_root import (
 )
 
 from ..theme import THEME
-from ..widgets import SectionHeader, AccentButton, EventPipelineWidget
+from ..widgets import SectionHeader, AccentButton, EventPipelineWidget, fix_combo_wheel, COMBO_WHITE_VIEW_STYLE
 
 
 def _load_json(path: str) -> dict:
@@ -115,6 +115,8 @@ class TasksPage(QWidget):
 
         self._instance_selector = QComboBox()
         self._instance_selector.setMinimumWidth(150)
+        fix_combo_wheel(self._instance_selector)
+        self._instance_selector.setStyleSheet(self._instance_selector.styleSheet() + COMBO_WHITE_VIEW_STYLE)
 
         self._submit_btn = AccentButton("提交任务")
         self._submit_btn.clicked.connect(self._on_submit_task)

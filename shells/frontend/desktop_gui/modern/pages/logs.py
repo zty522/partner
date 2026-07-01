@@ -32,7 +32,7 @@ from partner.monitoring.instance_root import (
 )
 
 from ..theme import THEME, get_mono_font
-from ..widgets import SectionHeader, AccentButton
+from ..widgets import SectionHeader, AccentButton, fix_combo_wheel, COMBO_WHITE_VIEW_STYLE
 
 
 def _load_json(path: str) -> dict:
@@ -160,6 +160,8 @@ class LogsPage(QWidget):
         self._instance_selector = QComboBox()
         self._instance_selector.setMinimumWidth(150)
         self._instance_selector.currentIndexChanged.connect(self._on_instance_changed)
+        fix_combo_wheel(self._instance_selector)
+        self._instance_selector.setStyleSheet(self._instance_selector.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         controls.addWidget(QLabel("实例:"))
         controls.addWidget(self._instance_selector)
 
@@ -167,6 +169,8 @@ class LogsPage(QWidget):
         self._file_selector.setMinimumWidth(150)
         self._file_selector.currentIndexChanged.connect(self._on_file_changed)
         self._file_selector.addItems(["partner.log", "qq_bot.log", "world_model.log", "instance.log"])
+        fix_combo_wheel(self._file_selector)
+        self._file_selector.setStyleSheet(self._file_selector.styleSheet() + COMBO_WHITE_VIEW_STYLE)
         controls.addWidget(QLabel("日志文件:"))
         controls.addWidget(self._file_selector)
 

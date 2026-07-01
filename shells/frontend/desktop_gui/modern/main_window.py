@@ -94,10 +94,7 @@ class ModernMainWindow(QMainWindow):
         # Restore previous layout (geometry, sidebar state, splitter sizes)
         self._restore_layout()
 
-        # ── First-run setup wizard ──────────────────────────────────────
-        QTimer.singleShot(100, self._check_first_run)
-
-        # ── Progressive loading → update status in phases ────────────────
+        # ── Initialise ──────────
         self._loading_phase = 0
         QTimer.singleShot(50, lambda: self._update_loading_status("正在初始化窗口…"))
         QTimer.singleShot(200, lambda: self._update_loading_status("正在加载界面组件…"))
@@ -111,21 +108,7 @@ class ModernMainWindow(QMainWindow):
             frame.moveCenter(center)
             self.move(frame.topLeft())
 
-    # ── First-run setup wizard ──────────────────────────────────────────
-
-    def _check_first_run(self):
-        """Skip setup wizard — always go directly to chat page."""
-        # Still check for pointer file to set workspace
-        pointer_path = os.path.join(str(Path.home()), ".partner_workspace")
-        if os.path.exists(pointer_path):
-            try:
-                with open(pointer_path, "r") as f:
-                    ws = f.read().strip()
-                if ws:
-                    self._workspace_path = ws
-                    self._on_workspace_changed(ws)
-            except Exception:
-                pass
+    # ── Initialise — no setup wizard, always go directly to chat ──────────
         self._navigate_to(0)
 
     # ── Layout persistence ──────────────────────────────────────────────────
@@ -335,9 +318,6 @@ class ModernMainWindow(QMainWindow):
 
         # Start at chat page (triggers lazy creation)
         self._navigate_to(0)
-
-        # Set up debug/test menu
-        self._setup_test_menu()
 
     def _setup_system_tray(self):
         """Set up system tray icon and menu."""
@@ -677,26 +657,6 @@ class ModernMainWindow(QMainWindow):
             if hasattr(pg, '_refresh'):
                 pg._refresh()
         self._update_status()
-
-    def _send_test_message(self):
-        """Send a test message to the chat page for debugging."""
-        chat_page = self._page_instances.get(0)
-        if chat_page is not None and hasattr(chat_page, 'send_test_message'):
-            chat_page.send_test_message()
-        else:
-            QMessageBox.information(self, "提示", "聊天页面未初始化")
-
-    def _setup_test_menu(self):
-        """Set up a debug/test menu in the menu bar."""
-        menu_bar = self.menuBar()
-        # Check if test menu already exists
-        for action in menu_bar.actions():
-            if action.text() == "调试":
-                return
-        test_menu = menu_bar.addMenu("调试")
-        send_test_action = QAction("发送测试消息", self)
-        send_test_action.triggered.connect(self._send_test_message)
-        test_menu.addAction(send_test_action)
 
     def _show_about(self):
         """Show the About dialog."""

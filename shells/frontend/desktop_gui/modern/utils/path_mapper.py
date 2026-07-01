@@ -91,3 +91,70 @@ def infer_environment_from_path(path: str) -> str:
     if path.startswith("/home/") or path.startswith("/root/"):
         return "ssh_remote"
     return detect_current_environment()
+
+
+def normalize_workspace_path(raw_path: str, target_env: str) -> tuple[str, list[str]]:
+    """Normalize workspace path format to match target environment.
+
+    Returns (normalized_path, warnings_list).
+
+    Rules:
+      target_env='wsl_linux' + raw='E:\\work\\ws'  → '/mnt/e/work/ws'
+      target_env='local_windows' + raw='/mnt/e/work/ws'  → 'E:\\work\\ws'
+      target_env='wsl_linux' + raw='/mnt/e/work/ws'  → unchanged
+      target_env='ssh_remote' + raw='E:\\...' or '/mnt/...'  → error
+    """
+    warnings = []
+    clean = raw_path.replace("\\\\", "/").strip().rstrip("/\\\\".strip())
+
+    if target_env == "wsl_linux":
+        # Convert Windows paths to /mnt/x/...
+        if is_windows_path(clean):
+            normalized = windows_to_wsl(clean)
+            if clean[0].upper() == "C":
+                warnings.append("⚠️ 系统盘 C: 可能不如数据盘适合存放工作区数据")
+            return normalized, warnings
+        if is_wsl_path(clean):
+            return clean, warnings
+        warnings.append(f"⚠️ 路径格式可能不受支持: {raw_path}")
+        return clean, warnings
+
+    elif target_env == "local_windows":
+        # Convert /mnt/x/... to X:\\...
+        if is_wsl_path(clean):
+            return wsl_to_windows(clean), warnings
+        if is_windows_path(clean):
+            return clean, warnings
+        warnings.append(f"❌ Linux 路径 {raw_path} 无法在 Windows 环境中直接访问")
+        return raw_path, warnings
+
+    elif target_env == "ssh_remote":
+        # SSH paths must be absolute Linux paths
+        if is_windows_path(clean) or is_wsl_path(clean):
+            warnings.append(f"❌ 远程服务器不能使用本地路径 {raw_path}")
+            return raw_path, warnings
+        if clean.startswith("/"):
+            return clean, warnings
+        warnings.append(f"❌ 路径必须是绝对路径: {raw_path}")
+        return raw_path, warnings
+
+    # Fallback: try to detect
+    detected = infer_environment_from_path(raw_path)
+    if detected != target_env:
+        warnings.append(f"⚠️ 路径格式与所选环境 ({target_env}) 不匹配")
+    return raw_path, warnings
+
+
+def environment_to_short_label(env: str) -> str:
+    """Return short label for environment selector display."""
+    return {
+        "wsl_linux": "🐧 WSL Linux",
+        "local_windows": "🪟 Windows",
+        "ssh_remote": "☁️ 远程服务器",
+    }.get(env, env)
+
+
+def environment_to_tag(env: str) -> str:
+    """Return short tag for instance display."""
+    m = {"wsl_linux": "WSL", "local_windows": "Win", "ssh_remote": "SSH"}
+    return m.get(env, env)

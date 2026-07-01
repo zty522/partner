@@ -21,7 +21,6 @@ _PYSIDE6_USED = [
     'PySide6.QtXml',
 ]
 _PYSIDE6_EXCLUDED = [
-    # QtQml / QtQuick 体系（最大的一坨）
     'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtQuick3D',
     'PySide6.QtQuickControls2', 'PySide6.QtQuickLayouts',
     'PySide6.QtQuickParticles', 'PySide6.QtQuickShapes',
@@ -31,21 +30,16 @@ _PYSIDE6_EXCLUDED = [
     'PySide6.QtQmlImportScanner', 'PySide6.QtQmlLocalStorage',
     'PySide6.QtQmlModels', 'PySide6.QtQmlToolingSettings',
     'PySide6.QtQmlWorkerScript', 'PySide6.QtQmlXmlListModel',
-    # Qt3D
     'PySide6.Qt3DCore', 'PySide6.Qt3DRender', 'PySide6.Qt3DInput',
     'PySide6.Qt3DLogic', 'PySide6.Qt3DExtras', 'PySide6.Qt3DAnimation',
-    # 多媒体
     'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',
     'PySide6.QtSpatialAudio',
-    # Web
     'PySide6.QtWebChannel', 'PySide6.QtWebEngine',
     'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineQuick',
     'PySide6.QtWebEngineWidgets', 'PySide6.QtWebSockets',
     'PySide6.QtWebView',
-    # 蓝牙/NFC/定位/传感器
     'PySide6.QtBluetooth', 'PySide6.QtNfc', 'PySide6.QtPositioning',
     'PySide6.QtSensors', 'PySide6.QtSensorsQuick',
-    # 其他不用
     'PySide6.QtDataVisualization', 'PySide6.QtGraphs',
     'PySide6.QtGraphsWidgets', 'PySide6.QtGrpc',
     'PySide6.QtHelp', 'PySide6.QtHttpServer',
@@ -76,6 +70,7 @@ a = Analysis(
     hiddenimports=[
         *pyside6_hiddenimports,
         'shiboken6',
+        'yaml',
         'partner.state',
         'partner.state.config',
         'partner.state.setup',
@@ -117,7 +112,6 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 _icon_path = str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets' / 'partner_app_v2.ico')
-
 _splash_path = str(_shells_dir / 'frontend' / 'desktop_gui' / 'assets' / 'splash.bmp')
 
 exe = EXE(

@@ -42,7 +42,7 @@ from partner.monitoring.instance_root import (
 )
 
 from ..theme import THEME
-from ..widgets import ChatBubble, EventStepWidget
+from ..widgets import ChatBubble, EventStepWidget, fix_combo_wheel, COMBO_WHITE_VIEW_STYLE
 
 
 def _load_json(path: str) -> dict:
@@ -74,7 +74,8 @@ def _load_jsonl(path: str, n: int = 500) -> list[dict]:
 def _resolve_instance_env(instance_id: str) -> str:
     """Read environment type from global_config.json for an instance.
 
-    Returns 'wsl', 'local_windows', or auto-detects from working_dir path.
+    Resolution chain: instance-level → workspace-level → path auto-detect → default.
+    Returns 'wsl', 'local_windows', or 'local_linux'.
     """
     try:
         cfg = _load_json(str(resolve_global_config_path()))
@@ -83,6 +84,12 @@ def _resolve_instance_env(instance_id: str) -> str:
         env = info.get("environment", "").strip().lower()
         if env in ("wsl", "local_windows", "local_linux"):
             return env
+        # Workspace-level fallback (from partner_config.json)
+        cfg_dir = os.path.dirname(str(resolve_global_config_path()))
+        partner_cfg = _load_json(os.path.join(cfg_dir, "partner_config.json"))
+        ws_env = partner_cfg.get("workspace", {}).get("environment", "").strip().lower()
+        if ws_env in ("wsl", "local_windows", "local_linux"):
+            return ws_env
         wd = info.get("working_dir", "").replace("\\", "/")
         if wd.startswith("/mnt/") or wd.startswith("/"):
             return "wsl"
@@ -549,6 +556,7 @@ class ChatPage(QWidget):
         self._loading_more: bool = False       # Guard against re-entrant scroll-up
         # Historical pipeline snapshot flag — stops _poll_active_plan from overwriting
         self._showing_historical_pipeline: bool = False
+        self._last_user_message: str = ""  # Set on send, shown in pipeline panel
 
         self.setAcceptDrops(True)
         self._build_ui()
@@ -723,6 +731,7 @@ class ChatPage(QWidget):
         self._source_filter_combo = QComboBox()
         self._source_filter_combo.addItems(["全部", "GUI", "QQ", "CLI"])
         self._source_filter_combo.setFixedSize(110, 32)
+        fix_combo_wheel(self._source_filter_combo)
         self._source_filter_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -757,29 +766,7 @@ class ChatPage(QWidget):
             QComboBox::down-arrow:hover {{
                 border-top-color: {THEME.accent};
             }}
-            QComboBox QAbstractItemView {{
-                background-color: {THEME.bg2};
-                color: {THEME.txt};
-                border: 1px solid {THEME.border};
-                border-radius: 10px;
-                selection-background-color: {THEME.bg3};
-                selection-color: {THEME.accent};
-                padding: 4px;
-            }}
-            QComboBox QAbstractItemView::item {{
-                padding: 8px 12px;
-                border-radius: 6px;
-                min-height: 30px;
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                background-color: rgba(74, 144, 217, 0.10);
-                color: {THEME.accent};
-            }}
-            QComboBox QAbstractItemView::item:selected {{
-                background-color: rgba(74, 144, 217, 0.15);
-                color: {THEME.accent};
-                font-weight: bold;
-            }}
+            {COMBO_WHITE_VIEW_STYLE}
         """)
         self._source_filter_combo.currentTextChanged.connect(self._on_source_filter_changed)
         title_layout.addWidget(self._source_filter_combo)
@@ -787,8 +774,9 @@ class ChatPage(QWidget):
 
         # Instance selector (moved from input area to header)
         self._instance_selector = QComboBox()
-        self._instance_selector.setFixedSize(110, 32)
+        self._instance_selector.setFixedSize(130, 32)
         self._instance_selector.setPlaceholderText("实例...")
+        fix_combo_wheel(self._instance_selector)
         self._instance_selector.setStyleSheet(f"""
             QComboBox {{
                 background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -816,28 +804,7 @@ class ChatPage(QWidget):
                 border-top: 9px solid {THEME.txt2};
                 margin-right: 4px;
             }}
-            QComboBox QAbstractItemView {{
-                background-color: {THEME.bg};
-                color: {THEME.txt};
-                border: 1px solid {THEME.border};
-                border-radius: 8px;
-                padding: 4px;
-                selection-background-color: {THEME.bg3};
-            }}
-            QComboBox QAbstractItemView::item {{
-                padding: 6px 14px;
-                border-radius: 6px;
-                min-height: 30px;
-            }}
-            QComboBox QAbstractItemView::item:hover {{
-                background-color: rgba(74, 144, 217, 0.10);
-                color: {THEME.accent};
-            }}
-            QComboBox QAbstractItemView::item:selected {{
-                background-color: rgba(74, 144, 217, 0.15);
-                color: {THEME.accent};
-                font-weight: bold;
-            }}
+            {COMBO_WHITE_VIEW_STYLE}
         """)
         self._instance_selector.currentIndexChanged.connect(self._on_instance_changed)
         title_layout.addWidget(self._instance_selector)
@@ -850,17 +817,6 @@ class ChatPage(QWidget):
         )
         self._status_label.setVisible(False)
         title_layout.addWidget(self._status_label)
-
-        # Workspace path label (compact)
-        ws_path = self._workspace()
-        ws_label = QLabel(f"\U0001f4c1 {ws_path}")
-        ws_label.setStyleSheet(
-            f"font-size: 10px; color: {THEME.txt3}; background: transparent;"
-        )
-        ws_label.setToolTip(ws_path)
-        ws_label.setMaximumWidth(180)
-        ws_label.setWordWrap(False)
-        title_layout.addWidget(ws_label)
 
         layout.addWidget(title_bar)
 
@@ -1070,6 +1026,20 @@ class ChatPage(QWidget):
         self._pipeline_steps_layout = QVBoxLayout()
         self._pipeline_steps_layout.setSpacing(6)
         self._pipeline_layout.addLayout(self._pipeline_steps_layout)
+
+        # User message card — shown at top of steps when a message is being processed
+        self._pipeline_user_msg_label = QLabel("")
+        self._pipeline_user_msg_label.setWordWrap(True)
+        self._pipeline_user_msg_label.setVisible(False)
+        self._pipeline_user_msg_label.setStyleSheet(f"""
+            font-size: 12px;
+            color: {THEME.txt};
+            background-color: {THEME.card};
+            border: 1px solid {THEME.border};
+            border-radius: 10px;
+            padding: 10px 14px;
+        """)
+        self._pipeline_steps_layout.addWidget(self._pipeline_user_msg_label)
 
         # Summary section (between steps and artifacts)
         self._pipeline_summary_section = QWidget()
@@ -1585,6 +1555,9 @@ class ChatPage(QWidget):
         self._poll_retries = 0
         self._auto_starting = False  # Reset for the new instance
 
+        # Clear user message for the previous instance
+        self._last_user_message = ""
+
         # Reload dialogue history for the new instance
         self._load_history()
 
@@ -1861,6 +1834,9 @@ class ChatPage(QWidget):
             else:
                 display_text = file_info
         self._add_message("user", display_text, instance_id=instance_id, source="gui")
+
+        # Store message for pipeline display
+        self._last_user_message = display_text
 
         self._input.clear()
         self._clear_attachments()
@@ -2282,6 +2258,7 @@ class ChatPage(QWidget):
         self._event_step_widgets = []
         self._pipeline_empty.setVisible(True)
         self._pipeline_planning.setVisible(False)
+        self._pipeline_user_msg_label.setVisible(False)
         self._pipeline_progress.setValue(0)
         self._pipeline_progress.setVisible(False)
         self._pipeline_progress_label.setText("")
@@ -2749,6 +2726,18 @@ class ChatPage(QWidget):
         # Hide empty state
         self._pipeline_empty.setVisible(False)
 
+        # Show user message card at top of steps
+        if self._last_user_message:
+            self._pipeline_user_msg_label.setText(f"📝 {self._last_user_message[:200]}")
+            self._pipeline_user_msg_label.setVisible(True)
+            # Ensure it's at index 0 (before event step widgets)
+            idx = self._pipeline_steps_layout.indexOf(self._pipeline_user_msg_label)
+            if idx != 0:
+                self._pipeline_steps_layout.removeWidget(self._pipeline_user_msg_label)
+                self._pipeline_steps_layout.insertWidget(0, self._pipeline_user_msg_label)
+        else:
+            self._pipeline_user_msg_label.setVisible(False)
+
         # Get events/steps
         events = plan.get("events", []) or plan.get("steps", []) or plan.get("phases", [])
 
@@ -2930,6 +2919,11 @@ class ChatPage(QWidget):
         self._pipeline_progress.setVisible(False)
         self._pipeline_progress_label.setText("")
         self._pipeline_planning.setVisible(False)
+
+        # Hide user message card
+        self._pipeline_user_msg_label.setVisible(False)
+        # Clear last message when plan completes
+        self._last_user_message = ""
 
         # Hide all event step widgets
         for widget in self._event_step_widgets:
