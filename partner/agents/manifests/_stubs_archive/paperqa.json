@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "paperqa",
+  "description": "PaperQA automated paper Q&A agent",
+  "version": "latest",
+  "category": "research_agents",
+  "domains": [
+    "ai_agents",
+    "research agents"
+  ],
+  "install": {
+    "command": "pip install paper-qa",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import paperqa; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_paperqa",
+      "deploy_paperqa"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

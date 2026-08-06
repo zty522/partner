@@ -32,7 +32,12 @@ async def execute_agent_task(
     task_instance: Any = None,
     allow_web: bool = False,
     agent_params: dict | None = None,
+    progress_callback: Any = None,
+    **extra_kwargs,  # Absorb unknown params gracefully
 ) -> SkillResult:
+    # Log unknown params for debugging, never crash
+    if extra_kwargs:
+        logger.debug("[AGENT_TASK] received extra kwargs (ignored): %s", list(extra_kwargs.keys()))
     """Forward a task text to an agent and return its response.
 
     Two dispatch paths:
@@ -57,7 +62,7 @@ async def execute_agent_task(
     if agent in _GENERAL_AGENTS:
         return await _call_general_agent(agent, workspace, task, task_instance, allow_web, agent_params)
     else:
-        return await _call_specialized_agent(agent, workspace, task, task_instance, agent_params)
+        return await _call_specialized_agent(agent, workspace, task, task_instance, agent_params, progress_callback)
 
 
 async def _call_general_agent(
@@ -136,6 +141,7 @@ async def _call_specialized_agent(
     task: str,
     task_instance: Any,
     agent_params: dict | None = None,
+    progress_callback: Any = None,
 ) -> SkillResult:
     """Call a specialized CLI agent through AgentDispatcher.
 
@@ -179,12 +185,31 @@ async def _call_specialized_agent(
             except Exception as _disc_exc:
                 logger.warning("[CALL_AGENT] Auto-discovery error for '%s': %s", agent, _disc_exc)
 
+        # ── Wrap async progress_callback for dispatcher's daemon poll thread ──
+        _safe_cb = progress_callback
+        if _safe_cb is not None:
+            import asyncio as _asyncio_wrap
+            import inspect as _inspect_wrap
+            if _inspect_wrap.iscoroutinefunction(_safe_cb):
+                try:
+                    _main_loop = _asyncio_wrap.get_running_loop()
+                except RuntimeError:
+                    _main_loop = None
+                if _main_loop is not None:
+                    def _threadsafe_cb(msg):
+                        _asyncio_wrap.run_coroutine_threadsafe(_safe_cb(msg), _main_loop)
+                    _safe_cb = _threadsafe_cb
+                else:
+                    _safe_cb = None
         result = await dispatcher.dispatch(
             AgentTask(
                 agent=agent,
                 task=task,
                 parameters=dict(agent_params or {}),
-                context={"working_dir": workspace or os.getcwd()},
+                context={
+                    "working_dir": workspace or os.getcwd(),
+                    "progress_callback": _safe_cb
+                },
             )
         )
     except Exception as exc:

@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "sql_agent",
+  "description": "SQL query generation and analysis agent",
+  "version": "latest",
+  "category": "data_agents",
+  "domains": [
+    "ai_agents",
+    "data agents"
+  ],
+  "install": {
+    "command": "pip install sqlalchemy",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import sqlalchemy; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_sql_agent",
+      "deploy_sql_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

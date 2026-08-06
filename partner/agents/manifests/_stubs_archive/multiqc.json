@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "multiqc",
+  "description": "Aggregate results from bioinformatics analyses",
+  "version": "latest",
+  "category": "quality_control",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y multiqc",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "multiqc --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_multiqc",
+      "analyze_with_multiqc"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

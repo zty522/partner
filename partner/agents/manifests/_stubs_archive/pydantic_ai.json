@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pydantic_ai",
+  "description": "Pydantic AI agent framework",
+  "version": "latest",
+  "category": "agent_frameworks",
+  "domains": [
+    "ai_agents",
+    "agent frameworks"
+  ],
+  "install": {
+    "command": "pip install pydantic-ai",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pydantic_ai; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_pydantic_ai",
+      "deploy_pydantic_ai"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

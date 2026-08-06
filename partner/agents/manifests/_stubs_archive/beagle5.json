@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "beagle5",
+  "description": "Genotype phasing and imputation",
+  "version": "latest",
+  "category": "population_genetics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y beagle5",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "beagle --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_beagle5",
+      "analyze_with_beagle5"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

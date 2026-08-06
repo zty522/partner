@@ -6104,18 +6104,67 @@ async def _handle_batch_plan_event(event: MindEvent):
                     bypass_rate_limit=True,
                 )
             if core_step_failed_across_iterations:
-                logger.info("[ITERATION] core agent step failed; stopping iterations task_id=%s iteration=%s", task.task_id, iteration)
-                if progress_updates:
-                    await _enqueue_visible_report(
-                        "核心 Agent 步骤失败，不再重新规划。请检查环境和配置。",
-                        EventType.CHECK,
-                        event_kind=visible_kind,
-                        priority=3,
-                        source="batch_plan:core_failed",
-                        parent_id=event.id,
-                        bypass_rate_limit=True,
+                logger.info("[ITERATION] core agent step failed; attempting self-heal + tree-search task_id=%s iteration=%s", task.task_id, iteration)
+                healed = False
+                step_list = []
+                try:
+                    if hasattr(task, 'step_results') and isinstance(task.step_results, dict):
+                        for sid, sr in task.step_results.items():
+                            if isinstance(sr, dict):
+                                sr["step_id"] = sid
+                            step_list.append(sr)
+                except Exception:
+                    pass
+                
+                # Try self-heal first
+                try:
+                    from ..evolution.self_heal import auto_heal
+                    heal_result = auto_heal(
+                        workspace=_workspace,
+                        task_description=root_request or title,
+                        step_results=step_list,
+                        llm_check_feedback=check_result,
+                        adapter=_adapter,
+                        working_dir=getattr(task, 'working_dir', '') or '',
                     )
-                break
+                    if heal_result.get("should_retry") and heal_result.get("fix_result", {}).get("applied"):
+                        logger.info("[SELFHEAL] fix applied: %s", heal_result.get("root_cause", "")[:100])
+                        core_step_failed_across_iterations = False
+                        healed = True
+                except Exception as _he:
+                    logger.debug("[SELFHEAL] skipped: %s", _he)
+                
+                # If self-heal failed, try ERA-style tree search
+                if not healed:
+                    try:
+                        from ..evolution.tree_search import tree_search_heal
+                        tree_result = tree_search_heal(
+                            workspace=_workspace,
+                            task_description=root_request or title,
+                            step_results=step_list,
+                            llm_feedback=check_result,
+                            adapter=_adapter,
+                            working_dir=getattr(task, 'working_dir', '') or '',
+                        )
+                        if tree_result:
+                            logger.info("[TREE_SEARCH] best fix found")
+                            core_step_failed_across_iterations = False
+                            healed = True
+                    except Exception as _te:
+                        logger.debug("[TREE_SEARCH] skipped: %s", _te)
+                
+                if not healed:
+                    if progress_updates:
+                        await _enqueue_visible_report(
+                            "核心 Agent 步骤失败，自修复和树搜索均未成功。",
+                            EventType.CHECK,
+                            event_kind=visible_kind,
+                            priority=3,
+                            source="batch_plan:core_failed",
+                            parent_id=event.id,
+                            bypass_rate_limit=True,
+                        )
+                    break
             if check_result.get("satisfied"):
                 logger.info("[CHECK] satisfied; stopping iteration task_id=%s iteration=%s", task.task_id, iteration)
                 if progress_updates:
@@ -7801,7 +7850,7 @@ async def _handle_project(event: MindEvent):
         set_project_status(_workspace, title, "active", "检测到未消化用户/老师信号，重新激活项目")
         project_status = "active"
     elif project_status == "waiting":
-        logger.info(f"[PROJECT] Project is waiting for user evaluation/resource; skip execution: {title}")
+        logger.info(f"[PROJECT] Project auto-continues without user evaluation: {title}")
         logger.info(f"[MIND] DONE event_type=project, id={event.id[:8]}, "
                     f"title='{title[:40]}'")
         return

@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "google_adk",
+  "description": "Google Agent Development Kit",
+  "version": "latest",
+  "category": "agent_frameworks",
+  "domains": [
+    "ai_agents",
+    "agent frameworks"
+  ],
+  "install": {
+    "command": "pip install google-adk",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import google.adk; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_google_adk",
+      "deploy_google_adk"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "kraken2",
+  "description": "K-mer based taxonomic classification",
+  "version": "latest",
+  "category": "metagenomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y kraken2",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "kraken2 --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_kraken2",
+      "analyze_with_kraken2"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

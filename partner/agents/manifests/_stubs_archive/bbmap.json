@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "bbmap",
+  "description": "Short-read aligner and BBMap suite",
+  "version": "latest",
+  "category": "alignment",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y bbmap",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "bbmap.sh 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_bbmap",
+      "analyze_with_bbmap"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# Safety Default Rules for Partner
+
+rules:
+  - id: "safety-exec-01"
+    category: prohibition
+    statement: "NEVER execute system-level destructive commands (shutdown, reboot, mkfs, dd) under any circumstances"
+    applies_to: ["terminal"]
+    priority: 1
+    enabled: true
+
+  - id: "safety-exec-02"
+    category: prohibition
+    statement: "NEVER expose API keys, tokens, or secrets in command output or generated files"
+    applies_to: ["terminal", "file_write", "report_generation"]
+    priority: 1
+    enabled: true
+
+  - id: "safety-exec-03"
+    category: constraint
+    statement: "Timeout all external calls at 300 seconds maximum; log and report timeouts clearly"
+    applies_to: ["agent_call", "external_tool"]
+    priority: 2
+    enabled: true
+
+  - id: "safety-exec-04"
+    category: constraint
+    statement: "Maintain an audit trail: log all significant actions to the instance state/logs directory"
+    applies_to: ["executor", "harness"]
+    priority: 3
+    enabled: true

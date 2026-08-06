@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "semantic_kernel",
+  "description": "Microsoft Semantic Kernel for AI orchestration",
+  "version": "latest",
+  "category": "agent_frameworks",
+  "domains": [
+    "ai_agents",
+    "agent frameworks"
+  ],
+  "install": {
+    "command": "pip install semantic-kernel",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import semantic_kernel; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_semantic_kernel",
+      "deploy_semantic_kernel"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

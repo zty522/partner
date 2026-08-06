@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "scipy",
+  "description": "Scientific computing library",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install scipy",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import scipy; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_scipy",
+      "analyze_with_scipy"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

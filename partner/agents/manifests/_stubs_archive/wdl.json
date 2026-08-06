@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "wdl",
+  "description": "Workflow Description Language tools",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install wdl-tools",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import wdl; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_wdl",
+      "analyze_with_wdl"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

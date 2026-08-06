@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pout2mzid",
+  "description": "Convert Percolator output to mzIdentML",
+  "version": "latest",
+  "category": "proteomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install pout2mzid",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pout2mzid; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pout2mzid",
+      "analyze_with_pout2mzid"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

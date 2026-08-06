@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "airflow_agent",
+  "description": "Apache Airflow workflow agent",
+  "version": "latest",
+  "category": "data_agents",
+  "domains": [
+    "ai_agents",
+    "data agents"
+  ],
+  "install": {
+    "command": "pip install apache-airflow",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import airflow; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_airflow_agent",
+      "deploy_airflow_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

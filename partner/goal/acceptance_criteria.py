@@ -142,3 +142,70 @@ class AcceptanceCriteriaGenerator:
                 except Exception:
                     continue
         return fallback
+
+
+# ── Goal extraction (for harness stop detection) ──────────────────
+
+def extract_goals_from_message(user_message: str) -> list[dict]:
+    """Extract structured goal checklist from a user message.
+    
+    Returns list of {"goal": str, "type": str, "verified": bool}
+    Types: artifact (需要生成文件), format (指定格式), 
+           content (需要包含内容), action (需要执行操作)
+    """
+    goals = []
+    if not user_message:
+        return goals
+    
+    msg_lower = user_message.lower()
+    
+    # Format requirements
+    if any(kw in msg_lower for kw in ["pdf", "PDF"]):
+        goals.append({"goal": "输出 PDF 格式报告", "type": "format", "verified": False})
+    if any(kw in msg_lower for kw in ["表格", "csv", "xlsx", "markdown"]):
+        goals.append({"goal": "输出结构化表格/文件", "type": "format", "verified": False})
+    if "markdown" in msg_lower or "md" in msg_lower.split():
+        goals.append({"goal": "输出 Markdown 格式", "type": "format", "verified": False})
+    
+    # Artifact requirements
+    if any(kw in msg_lower for kw in ["报告", "report", "总结", "summary"]):
+        goals.append({"goal": "生成完整报告文件", "type": "artifact", "verified": False})
+    if any(kw in msg_lower for kw in ["文件", "保存", "导出", "生成"]):
+        goals.append({"goal": "生成文件产物", "type": "artifact", "verified": False})
+    
+    # Action requirements
+    if any(kw in msg_lower for kw in ["接入", "安装", "integrate", "install"]):
+        goals.append({"goal": "自动接入新工具", "type": "action", "verified": False})
+    if any(kw in msg_lower for kw in ["benchmark", "测试", "评估"]):
+        goals.append({"goal": "运行 Benchmark 评估", "type": "action", "verified": False})
+    if any(kw in msg_lower for kw in ["审视", "review", "能力"]):
+        goals.append({"goal": "完成自我能力审视", "type": "action", "verified": False})
+    
+    return goals
+
+
+def _load_goals_yaml(workspace: str) -> dict:
+    """Load harness_goals.yaml config."""
+    import os as _os
+    import yaml as _yaml
+    candidates = [
+        _os.path.join(workspace, "config", "harness_goals.yaml"),
+        _os.path.join(workspace, "harness_goals.yaml"),
+        _os.path.join(_os.path.dirname(_os.path.dirname(workspace)), "config", "harness_goals.yaml"),
+    ]
+    defaults = {
+        "harness_goals": {
+            "enabled": True, "max_iterations": 3, "max_total_timeout": 600,
+            "no_progress_threshold": 2, "stop_on_goal_satisfied": True,
+        }
+    }
+    for path in candidates:
+        if _os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    loaded = _yaml.safe_load(f) or {}
+                if isinstance(loaded, dict):
+                    return loaded
+            except Exception:
+                pass
+    return defaults

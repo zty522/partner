@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from .manifest import AgentManifest
+from .path_resolver import resolve_input_path
 from .registry import AgentRegistry
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,14 @@ _ERROR_KEYWORDS = [
     "no module named", "command not found",
 ]
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Global concurrency limiter for agent subprocesses
+# ═══════════════════════════════════════════════════════════════════
+import threading as _throttle_thread
+_MAX_CONCURRENT_SUBPROCESSES = 2
+_subprocess_semaphore = _throttle_thread.BoundedSemaphore(_MAX_CONCURRENT_SUBPROCESSES)
 
 def _determine_cli_status(r: "subprocess.CompletedProcess[str]") -> str:
     """Determine success/failure from subprocess result.
@@ -406,6 +415,23 @@ class AgentDispatcher:
         if "query" in all_vars and "question" not in all_vars:
             all_vars["question"] = all_vars["query"]
 
+        # ── Dynamic input path resolution ──
+        # If the input path doesn't exist on disk, search across known data
+        # directories (configurable per agent via path_resolver module).
+        # This allows the planner to specify e.g. "/data/pancreas.h5ad" and
+        # have it automatically resolved to "/mnt/e/work/data/pancreas.h5ad"
+        # without the planner needing to know the exact filesystem layout.
+        if "input" in all_vars and all_vars["input"]:
+            _orig_input = all_vars["input"]
+            all_vars["input"] = resolve_input_path(
+                str(_orig_input), agent_name=manifest.name,
+            )
+            if all_vars["input"] != _orig_input:
+                logger.info(
+                    "[DISPATCH] Resolved input path: %s → %s",
+                    _orig_input, all_vars["input"],
+                )
+
         # ── Default device: cpu for agents with GPU dependency ──
         # The planner may not pass a device parameter (especially for
         # cytobridge/cellcompass agents where GPU is the default but
@@ -444,14 +470,15 @@ class AgentDispatcher:
             if _q and "直接执行" not in _q:
                 all_vars["question"] = _q + (
                     "\n\n【执行指令】"
-                    "不要讨论数据、不要问问题、不要阅读任何 SKILL.md 规则文件。"
-                    "直接执行以下分析："
-                    "1) PAGA 轨迹推断（scanpy.tl.paga）"
-                    "2) DPT 伪时间计算（scanpy.tl.dpt，以 pancreatic ductal cell 为根）"
-                    "3) 驱动基因鉴定（pseudotime 相关性分析）"
-                    "4) 生成完整的中文分析报告。"
-                    "这是横截面数据没有时间轴——直接使用标准 PAGA + DPT 伪时间方法即可，不需要 CytoBridge 时间轴框架。"
-                    "所有步骤完成后才返回结果，中间不要停下来解释或征求意见。"
+                    "完成完整的单细胞轨迹推断分析全流程，不要只做数据检查就停下来讨论：\n"
+                    "1) 数据加载与预处理（筛选目标细胞类型、标准化、高变基因）\n"
+                    "2) 降维与可视化（PCA、UMAP、neighbors）\n"
+                    "3) 轨迹推断：如果有时间轴数据（time_point/time_key），使用 CytoBridge flow matching 训练管线；"
+                    "如果是横截面数据，使用标准 PAGA + DPT 伪时间方法。\n"
+                    "4) 驱动基因鉴定（pseudotime 相关性分析）\n"
+                    "5) 差异表达分析与分化路径推断\n"
+                    "6) 生成完整的 HTML 分析报告（含图表、表格、文字描述）\n"
+                    "直接执行所有步骤，完成后才输出结果，中间不要停下来解释或征求意见。"
                 )
 
         # Substitute {placeholders} in args from task.parameters and context
@@ -493,8 +520,12 @@ class AgentDispatcher:
         # ALSO skip when args already contain {input} — the task is already
         # fully specified by parameters; appending it as a positional arg
         # would confuse tools like pandoc that treat positional args as inputs.
-        _has_input_placeholder = any("{input}" in str(a) for a in args)
-        if task.task and subcommand != "run" and not _has_input_placeholder:
+        # Check if the task is already fully specified via placeholders.
+        # If {input}, {question}, or {query} is in the args, the task text
+        # is already captured — don't append it as a positional arg.
+        _task_placeholders = ("{input}", "{question}", "{query}", "{task}")
+        _has_task_placeholder = any(ph in str(a) for a in args for ph in _task_placeholders)
+        if task.task and subcommand != "run" and not _has_task_placeholder:
             full_cmd.append(task.task)
 
         # Prepare working directory
@@ -540,6 +571,15 @@ class AgentDispatcher:
         # api.openai.com which rejects DeepSeek keys with 401
         if env.get("OPENAI_API_KEY", "").startswith("sk-d") and not env.get("OPENAI_BASE_URL"):
             env["OPENAI_BASE_URL"] = "https://api.deepseek.com"
+
+        # ── Unset system proxy for agent subprocesses ──
+        # In WSL, http_proxy often points to the Windows host (172.26.176.1:10090)
+        # which is unreachable from background/nohup processes. Agent subprocesses
+        # connect directly to LLM APIs (api.deepseek.com, api.openai.com) and
+        # don't need the system proxy. Clear them to avoid SYN-SENT hangs.
+        for _proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                           "all_proxy", "ALL_PROXY"):
+            env.pop(_proxy_var, None)
 
         # ── no_proxy for LLM endpoint ──
         # Now that OPENAI_BASE_URL is fully resolved (from env, DeepSeek detection,
@@ -626,10 +666,18 @@ class AgentDispatcher:
                 pass
 
         # Build input payload for stdin
+        # Filter out non-serializable values (functions, callbacks) from context
+        _serializable_context = {}
+        for _k, _v in (task.context or {}).items():
+            try:
+                json.dumps({_k: _v})
+                _serializable_context[_k] = _v
+            except (TypeError, ValueError):
+                pass  # Skip non-serializable values (e.g. progress_callback function)
         stdin_payload = json.dumps({
             "task": task.task,
             "parameters": task.parameters,
-            "context": task.context,
+            "context": _serializable_context,
         })
 
         # ── Pre-flight: clear stale agent runtime sessions ──
@@ -688,16 +736,66 @@ class AgentDispatcher:
             except Exception:
                 pass
 
+        # ── Progress polling ──
+        _output_dir = task.parameters.get("output") or task.parameters.get("output_dir") or ""
+        _progress_reader = None
+        _progress_thread = None
+        _progress_stop = None
+        _progress_cb = task.context.get("progress_callback") if task.context else None
+        
+        if _output_dir and _progress_cb:
+            try:
+                from .agent_progress import ProgressReader
+                import threading as _thr
+                _progress_reader = ProgressReader(_output_dir)
+                _progress_stop = _thr.Event()
+                
+                def _poll_progress():
+                    while not _progress_stop.is_set():
+                        raw = _progress_reader.read_latest()
+                        if raw:
+                            pct = raw.get("pct", 0)
+                            stage = raw.get("msg", raw.get("stage", ""))
+                            eta = raw.get("eta_seconds")
+                            eta_str = f" (预计剩余 {eta//60}min)" if eta and eta > 60 else ""
+                            msg = f"[{pct}%] {stage}{eta_str}"
+                            try:
+                                _progress_cb(msg)
+                            except Exception:
+                                pass
+                        _progress_stop.wait(5)  # poll every 5 seconds
+                
+                _progress_thread = _thr.Thread(target=_poll_progress, daemon=True)
+                _progress_thread.start()
+            except Exception:
+                pass
+
         try:
-            r = subprocess.run(
-                full_cmd,
-                input=stdin_payload,
-                capture_output=True,
-                text=True,
-                timeout=manifest.timeout,
-                cwd=cwd,
-                env=env,
-            )
+            with _subprocess_semaphore:
+                import asyncio as _async_disp
+                proc = await _async_disp.create_subprocess_exec(
+                    *full_cmd,
+                    stdin=_async_disp.subprocess.PIPE,
+                    stdout=_async_disp.subprocess.PIPE,
+                    stderr=_async_disp.subprocess.PIPE,
+                    cwd=cwd,
+                    env=env,
+                )
+                try:
+                    stdout_bytes, stderr_bytes = await _async_disp.wait_for(
+                        proc.communicate(input=stdin_payload.encode() if stdin_payload else None),
+                        timeout=manifest.timeout,
+                    )
+                    r = subprocess.CompletedProcess(
+                        args=full_cmd,
+                        returncode=proc.returncode or 0,
+                        stdout=stdout_bytes.decode(errors='replace') if stdout_bytes else "",
+                        stderr=stderr_bytes.decode(errors='replace') if stderr_bytes else "",
+                    )
+                except _async_disp.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    raise subprocess.TimeoutExpired(cmd=full_cmd, timeout=manifest.timeout)
         except FileNotFoundError:
             return AgentResult(
                 status="error",
@@ -719,6 +817,12 @@ class AgentDispatcher:
                 output={},
                 metadata={"duration": time.time() - start},
             )
+        finally:
+            # Stop progress polling
+            if _progress_stop:
+                _progress_stop.set()
+            if _progress_thread:
+                _progress_thread.join(timeout=2)
 
         duration = time.time() - start
 
@@ -732,6 +836,29 @@ class AgentDispatcher:
                 # Plain text output
                 output = {"type": "text", "text": r.stdout}
 
+        # ── Mask sensitive API keys in logged command ──
+        # The full command may contain --llm-api-key, --api-key, etc.
+        # with the actual key value visible in ps aux and logs.
+        # Redact these for the metadata record.
+        _logged_cmd = " ".join(full_cmd)
+        _sensitive_prefixes = ["--llm-api-key", "--api-key", "--apikey", "-k", "--key", "DEEPSEEK_API_KEY=", "OPENAI_API_KEY="]
+        for _prefix in _sensitive_prefixes:
+            _idx = _logged_cmd.find(_prefix)
+            if _idx >= 0:
+                _after = _logged_cmd[_idx + len(_prefix):].lstrip()
+                # Find the end of the value (next space or quote)
+                _val_end = len(_after)
+                if _after.startswith('"') or _after.startswith("'"):
+                    _quote = _after[0]
+                    _close = _after.find(_quote, 1)
+                    if _close >= 0:
+                        _val_end = _close + 1
+                else:
+                    _space = _after.find(" ")
+                    if _space >= 0:
+                        _val_end = _space
+                _logged_cmd = _logged_cmd[:_idx + len(_prefix)] + " ********" + _logged_cmd[_idx + len(_prefix) + _val_end:]
+
         result = AgentResult(
             status=_determine_cli_status(r),
             output=output,
@@ -739,7 +866,7 @@ class AgentDispatcher:
             metadata={
                 "duration": round(duration, 3),
                 "returncode": r.returncode,
-                "command": " ".join(full_cmd),
+                "command": _logged_cmd,
                 "parse_error": parse_error,
             },
         )
@@ -765,10 +892,18 @@ class AgentDispatcher:
                 output={},
             )
 
+        # Filter out non-serializable values from context for HTTP dispatch
+        _http_serializable_context = {}
+        for _k, _v in (task.context or {}).items():
+            try:
+                json.dumps({_k: _v})
+                _http_serializable_context[_k] = _v
+            except (TypeError, ValueError):
+                pass
         payload = {
             "task": task.task,
             "parameters": task.parameters,
-            "context": task.context,
+            "context": _http_serializable_context,
         }
 
         data = json.dumps(payload).encode("utf-8")

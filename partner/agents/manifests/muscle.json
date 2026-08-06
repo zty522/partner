@@ -1,0 +1,13 @@
+{
+  "name": "muscle",
+  "version": "1.0.0",
+  "description": "CLI tool: muscle",
+  "endpoint_type": "cli",
+  "capabilities": [
+    "muscle_analysis"
+  ],
+  "endpoint_config": {
+    "command": "/usr/bin/muscle",
+    "category": "specialized"
+  }
+}

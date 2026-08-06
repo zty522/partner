@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "continue_dev",
+  "description": "Continue.dev open-source AI code assistant",
+  "version": "latest",
+  "category": "code_agents",
+  "domains": [
+    "ai_agents",
+    "code agents"
+  ],
+  "install": {
+    "command": "pip install continue",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import continuedev; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_continue_dev",
+      "deploy_continue_dev"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

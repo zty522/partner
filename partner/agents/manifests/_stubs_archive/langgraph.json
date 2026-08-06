@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "langgraph",
+  "description": "LangGraph graph-based agent orchestration",
+  "version": "latest",
+  "category": "agent_frameworks",
+  "domains": [
+    "ai_agents",
+    "agent frameworks"
+  ],
+  "install": {
+    "command": "pip install langgraph",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import langgraph; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_langgraph",
+      "deploy_langgraph"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

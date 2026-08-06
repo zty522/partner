@@ -360,9 +360,9 @@ def cmd_update(args):
             try:
                 with open(plan_path) as f:
                     plan = json.load(f)
-                status_map = {"idle": "空闲", "planning": "规划中", "active": "执行中",
+                status_map = {"": "", "planning": "规划中", "active": "执行中",
                               "completed": "已完成"}
-                raw = plan.get("status", "idle")
+                raw = plan.get("status", "")
                 disp = status_map.get(raw, raw)
                 title = plan.get("title", "")
                 summary = plan.get("heartbeat_summary", "")
@@ -833,6 +833,10 @@ def build_parser() -> argparse.ArgumentParser:
     # agent management
     from .agent_cli import register_subparser as register_agent
     register_agent(sub)
+
+    # benchmark (NatureBench 兼容)
+    from .benchmark_cli import register_subparser as register_benchmark
+    register_benchmark(sub)
 
     # default (no subcommand)
     parser.set_defaults(func=cmd_default)

@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "copilot",
+  "description": "GitHub Copilot code completion agent",
+  "version": "latest",
+  "category": "code_agents",
+  "domains": [
+    "ai_agents",
+    "code agents"
+  ],
+  "install": {
+    "command": "pip install",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "which gh 2>/dev/null && echo OK || echo not_found",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_copilot",
+      "deploy_copilot"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

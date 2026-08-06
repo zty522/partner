@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "biopython",
+  "description": "Python tools for computational molecular biology",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install biopython",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import Bio; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_biopython",
+      "analyze_with_biopython"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pycircos",
+  "description": "Python library for circos plots",
+  "version": "latest",
+  "category": "visualization",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install pycircos",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pycircos; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pycircos",
+      "analyze_with_pycircos"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

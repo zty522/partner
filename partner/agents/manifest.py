@@ -7,8 +7,6 @@ using this manifest, which Partner uses for discovery and invocation.
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 @dataclass
 class AgentManifest:
@@ -32,6 +30,14 @@ class AgentManifest:
     @classmethod
     def from_dict(cls, data: dict) -> 'AgentManifest':
         """Create manifest from a dictionary."""
+        # ── Detect discoverer format (no standard endpoint_config) ──
+        _has_standard_format = bool(data.get("endpoint_config")) or data.get("endpoint_type") == "http"
+        _has_discoverer_format = not _has_standard_format and isinstance(data.get("install"), dict)
+
+        if _has_discoverer_format:
+            # Auto-convert discoverer format to standard AgentManifest format
+            data = cls._convert_discoverer_format(data)
+
         # Resolve timeout: prefer top-level, fallback to endpoint_config.timeout,
         # then to default 300. This handles manifests where auto-discovery
         # stored timeout inside endpoint_config instead of at the top level.
@@ -51,6 +57,92 @@ class AgentManifest:
             health_check_cmd=str(data.get("health_check_cmd", "")),
             install_info=dict(data.get("install_info", {})),
         )
+
+    @classmethod
+    def _convert_discoverer_format(cls, data: dict) -> dict:
+        """Convert auto-discoverer format manifest to standard AgentManifest format."""
+        name = str(data.get("name", ""))
+        result = dict(data)  # shallow copy
+
+        # ── Extract command name ──
+        command = ""
+
+        # Method 1: from test.command (first word before space/pipe/redirect)
+        test_cmd = data.get("test", {}).get("command", "")
+        if test_cmd:
+            first_word = test_cmd.split()[0] if test_cmd.split() else ""
+            if first_word and first_word not in ("python", "python3", "echo", "time") and not first_word.startswith("$"):
+                command = first_word
+
+        # Method 2: from install.command (last non-flag word)
+        if not command:
+            install_cmd = data.get("install", {}).get("command", "")
+            if install_cmd:
+                parts = install_cmd.split()
+                if len(parts) >= 3 and parts[0] in ("conda", "pip", "npm", "brew"):
+                    for p in reversed(parts):
+                        if not p.startswith("-") and p not in ("install", "conda", "pip", "npm", "brew", "sudo"):
+                            command = p
+                            break
+
+        # Method 3: use name as command
+        if not command:
+            command = name
+
+        # Method 4: when test.command starts with python, the real binary is the name
+        if test_cmd and test_cmd.startswith(("python ", "python3 ")):
+            command = name
+
+        # Note: no shutil.which() calls here — they are EXPENSIVE on WSL
+        # (0.13s per missing command × 333 manifests = 45s).
+        # The dispatcher will validate the command at call time.
+        # If command doesn't exist on PATH, dispatch will return a clear error.
+
+        # Build health check
+        _health_cmd = test_cmd if test_cmd else f"{command} --version"
+
+        # Build endpoint_config
+        result["endpoint_type"] = "cli"
+        result["endpoint_config"] = {"command": command, "args": []}
+        if not result.get("health_check_cmd"):
+            result["health_check_cmd"] = _health_cmd
+
+        # Flatten capabilities
+        caps = data.get("capabilities", {})
+        if isinstance(caps, dict):
+            flat_caps = []
+            for action in caps.get("actions", []):
+                flat_caps.append(action.replace(f"{name}_", "").replace("run_", "").replace("analyze_with_", name))
+            for domain in data.get("domains", []):
+                flat_caps.append(domain)
+            category = data.get("category", "")
+            if category:
+                flat_caps.append(category)
+            result["capabilities"] = flat_caps if flat_caps else [name]
+
+        # input/output formats
+        if isinstance(caps, dict):
+            in_fmts = caps.get("input_formats", [])
+            out_fmts = caps.get("output_formats", [])
+            if in_fmts and not result.get("input_formats"):
+                result["input_formats"] = in_fmts
+            if out_fmts and not result.get("output_formats"):
+                result["output_formats"] = out_fmts
+
+        # Timeout from execution block
+        exec_block = data.get("execution", {})
+        if isinstance(exec_block, dict) and exec_block.get("timeout"):
+            result["timeout"] = int(exec_block["timeout"])
+
+        # Description fallback
+        if not result.get("description"):
+            result["description"] = f"{name} — auto-discovered tool"
+
+        # Version fallback (use name as version, no which() call — too slow on WSL)
+        if not result.get("version") or result["version"] == "latest":
+            result["version"] = f"1.0.0 (command: {command})"
+
+        return result
 
     @classmethod
     def from_file(cls, path: str) -> 'AgentManifest':

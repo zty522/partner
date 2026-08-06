@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "kofamscan",
+  "description": "KEGG ortholog annotation",
+  "version": "latest",
+  "category": "annotation",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y kofamscan",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "exec_annotation --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_kofamscan",
+      "analyze_with_kofamscan"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

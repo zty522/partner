@@ -1,0 +1,37 @@
+# Bioinformatics Research Default Rules
+
+rules:
+  - id: "bioinfo-data-01"
+    category: constraint
+    statement: "All bioinformatics analysis outputs must be saved to the project workspace, never to /tmp"
+    applies_to: ["bioinformatics", "cytobridge", "data_analysis"]
+    priority: 2
+    enabled: true
+
+  - id: "bioinfo-data-02"
+    category: constraint
+    statement: "Always record software versions (e.g. scanpy.__version__, samtools --version) in analysis logs"
+    applies_to: ["bioinformatics"]
+    priority: 3
+    enabled: true
+
+  - id: "bioinfo-method-01"
+    category: convention
+    statement: "Single-cell analysis should follow the standard scanpy workflow: filter, normalize, HVG, PCA, neighbors, UMAP, clustering"
+    applies_to: ["single_cell", "trajectory_inference"]
+    priority: 4
+    enabled: true
+
+  - id: "bioinfo-repro-01"
+    category: constraint
+    statement: "Set random seeds (random_state=42 or equivalent) in all stochastic analysis steps"
+    applies_to: ["bioinformatics"]
+    priority: 3
+    enabled: true
+
+  - id: "bioinfo-viz-01"
+    category: preference
+    statement: "Generate publication-quality figures (300 DPI, appropriate font sizes, colorblind-friendly palette)"
+    applies_to: ["visualization"]
+    priority: 5
+    enabled: true

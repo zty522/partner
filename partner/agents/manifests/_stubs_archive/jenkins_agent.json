@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "jenkins_agent",
+  "description": "Jenkins CI/CD automation agent",
+  "version": "latest",
+  "category": "automation",
+  "domains": [
+    "ai_agents",
+    "automation"
+  ],
+  "install": {
+    "command": "pip install python-jenkins",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import jenkins; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_jenkins_agent",
+      "deploy_jenkins_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

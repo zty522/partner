@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "edger",
+  "description": "Empirical analysis of digital gene expression",
+  "version": "latest",
+  "category": "rna_seq",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y r-edger",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "R -e 'library(edgeR); print(\"OK\")' 2>&1 | tail -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_edger",
+      "analyze_with_edger"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

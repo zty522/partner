@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "picard",
+  "description": "Java-based SAM/BAM processing tools",
+  "version": "latest",
+  "category": "sequence_processing",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y picard",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "picard 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_picard",
+      "analyze_with_picard"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

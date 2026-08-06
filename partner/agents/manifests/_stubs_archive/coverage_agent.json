@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "coverage_agent",
+  "description": "Code coverage analysis agent",
+  "version": "latest",
+  "category": "testing",
+  "domains": [
+    "ai_agents",
+    "testing"
+  ],
+  "install": {
+    "command": "pip install coverage",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import coverage; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_coverage_agent",
+      "deploy_coverage_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

@@ -95,6 +95,7 @@ class BatchPlanner:
     workspace: str
     config: dict[str, Any] = field(default_factory=dict)
     world_model_client: Any = None  # Optional[WorldModelClient] instance
+    _last_wm_warning_ts: float = 0.0  # Rate-limit WorldModel warnings to 1 per 5 min
 
     @classmethod
     def from_workspace(cls, workspace: str) -> "BatchPlanner":
@@ -122,7 +123,10 @@ class BatchPlanner:
             else:
                 logger.info("[BATCH_PLANNER] WorldModelClient disabled in config")
         except Exception as exc:
-            logger.warning("[BATCH_PLANNER] failed to init WorldModelClient: %s", exc)
+            import time as _wm_time
+            if _wm_time.time() - BatchPlanner._last_wm_warning_ts > 300:
+                logger.warning("[BATCH_PLANNER] WorldModel 不可用 (AETHER GPU 未连接): %s", exc)
+                BatchPlanner._last_wm_warning_ts = _wm_time.time()
 
         return cls(
             workspace=workspace,
@@ -196,6 +200,7 @@ class BatchPlanner:
             raw = str(result.value or "")
             if not _is_unavailable_sentinel(raw):
                 break
+            logger.warning("[BATCH_PLANNER] unavailable sentinel, raw output (first 500): %s", raw[:500])
             if attempt < unavailable_retries:
                 logger.warning("[BATCH_PLANNER] unavailable sentinel, retrying...")
                 if retry_delay:
@@ -207,21 +212,50 @@ class BatchPlanner:
         try:
             micro_plan = _normalize_micro_plan(_json_from_llm(raw), max_steps=max_steps)
         except Exception as exc:
-            logger.error("[BATCH_PLANNER] failed to parse JSON: %s\nRaw: %s", exc, raw[:500])
-            # Retry once with stricter instruction
+            # Extract error position from JSONDecodeError if applicable
+            error_pos = getattr(exc, 'pos', 'unknown')
+            error_type = type(exc).__name__
+            raw_preview = raw[:800]
+            logger.error("[BATCH_PLANNER] failed to parse JSON: %s (type=%s, pos=%s)\nRaw: %s", exc, error_type, error_pos, raw_preview)
+            task_instance.append_log('batch_planner_json_error', {
+                'raw_preview': raw_preview,
+                'error': str(exc),
+                'error_type': error_type,
+                'error_pos': error_pos,
+            })
+            # Retry: always retry at least once on JSON parse failure
             micro_plan = None
-            if attempt < unavailable_retries:
-                logger.info("[BATCH_PLANNER] retrying with fix instruction")
+            _retry_count = 0
+            _max_retries = max(1, int(self.config.get("max_json_retries") or 2))
+            while micro_plan is None and _retry_count < _max_retries:
+                _retry_count += 1
+                logger.info("[BATCH_PLANNER] retry %d/%d with stricter JSON instruction", _retry_count, _max_retries)
+                # Use a very explicit instruction: ONLY output JSON, no explanation
+                if _retry_count == 1:
+                    retry_prompt = prompt + (
+                        "\n\n⚠️ 你上一轮的输出没有包含有效的 JSON 计划数组。\n"
+                        "请只输出一个 JSON 对象，不要任何解释、分析或对话。\n"
+                        "你必须输出一个 JSON 数组（plan 字段）或直接输出 JSON 数组。\n"
+                        "输出格式严格为：{\"plan\": [{\"id\": \"step1\", \"event_type\": \"...\", \"parameters\": {...}}, ...]}\n"
+                        "不要包含```markdown包裹，不要任何其他文字。"
+                    )
+                else:
+                    # Fallback: ultra-short prompt for stubborn cases
+                    retry_prompt = (
+                        "你是一个任务规划器。用户要求："
+                        + user_message[:200]
+                        + "\n\n可用操作（只能使用以下 event_type）：\n"
+                        + "\n".join(e.split("(")[0].strip() for e in registry.describe_for_prompt().split("\n") if e.strip())[:1000]
+                        + "\n\n只输出 JSON 数组，不要任何解释：\n"
+                        + '[{\"id\": \"step1\", \"event_type\": \"...\", \"parameters\": {}, \"depends_on\": []}]'
+                    )
                 result = await robust.execute(
                     event_name="batch_planner",
                     task_instance=task_instance,
-                    operation=lambda: adapter.chat(
-                        prompt + "\n\n上一轮输出的 JSON 格式错误，请严格输出合法 JSON。\n错误：" + str(exc)[:200],
-                        purpose="batch_plan"
-                    ),
+                    operation=lambda: adapter.chat(retry_prompt, purpose="batch_plan"),
                     on_timeout="fail_fast",
                     on_failure="fail_fast",
-                    metadata={"model": llm_model, "max_steps": max_steps, "attempt": attempt + 2},
+                    metadata={"model": llm_model, "max_steps": max_steps, "attempt": attempt + _retry_count},
                 )
                 planner_calls += 1
                 if result.ok:
@@ -229,13 +263,17 @@ class BatchPlanner:
                     if not _is_unavailable_sentinel(raw2):
                         try:
                             micro_plan = _normalize_micro_plan(_json_from_llm(raw2), max_steps=max_steps)
-                            logger.info("[BATCH_PLANNER] retry succeeded")
-                        except Exception:
-                            pass
-                # If retry also failed, try once more with json5 fallback in _json_from_llm
-                # (already handled inside _json_from_llm — it tries json5 before raising)
+                            logger.info("[BATCH_PLANNER] retry %d succeeded", _retry_count)
+                            break
+                        except Exception as retry_exc:
+                            logger.warning("[BATCH_PLANNER] retry %d also failed: %s", _retry_count, retry_exc)
+                            task_instance.append_log('batch_planner_retry_error', {
+                                'raw_preview': str(raw2)[:500],
+                                'error': str(retry_exc),
+                                'attempt': _retry_count,
+                            })
             if micro_plan is None:
-                raise RuntimeError(f"Batch planner returned invalid JSON: {exc}") from exc
+                raise RuntimeError(f"Batch planner returned invalid JSON [type={type(exc).__name__}, pos={getattr(exc, 'pos', 'unknown')}]: {exc}") from exc
 
         # Sanitize: remove curiosity_explore steps
         filtered = [step for step in micro_plan.plan if step.event_type != "curiosity_explore"]
@@ -335,6 +373,55 @@ class BatchPlanner:
             micro_plan = MicroPlan(plan=filtered, expected_artifacts=micro_plan.expected_artifacts)
             filtered = micro_plan.plan
 
+        # ── Habit auto-application: apply user preferences from habits ──
+        try:
+            _habit_config = _load_yaml_config(self.workspace, "evolution_internal.yaml", {})
+            _internal_cfg = _habit_config.get("internal_evolution", {})
+            if _internal_cfg.get("habit_auto_apply", True):
+                from ..meta.learning import load_habits
+                _habits = load_habits()
+                
+                # Apply PDF preference
+                if _habits.get("prefer_pdf", False):
+                    # Check if final step already outputs PDF
+                    _has_pdf = any(
+                        s.event_type == "atomic_convert_md_to_pdf" for s in micro_plan.plan
+                    ) if micro_plan.plan else False
+                    _has_md = any(
+                        s.event_type == "atomic_write_artifact" 
+                        and "md" in str(s.parameters.get("filename", "")).lower()
+                        for s in micro_plan.plan
+                    ) if micro_plan.plan else False
+                    if not _has_pdf and _has_md:
+                        # Add PDF conversion after the last MD write step
+                        _last_md_idx = -1
+                        for _i, _s in enumerate(micro_plan.plan):
+                            if _s.event_type == "atomic_write_artifact" and "md" in str(_s.parameters.get("filename", "")).lower():
+                                _last_md_idx = _i
+                        if _last_md_idx >= 0:
+                            _pdf_step = HarnessStep(
+                                id=f"step{len(micro_plan.plan) + 1}",
+                                event_type="atomic_convert_md_to_pdf",
+                                parameters={},
+                                depends_on=[micro_plan.plan[_last_md_idx].id],
+                            )
+                            micro_plan.plan.append(_pdf_step)
+                            logger.info("[BATCH_PLANNER] habit auto-apply: added PDF conversion (user prefers PDF)")
+                
+                # Apply avoid_web_search preference
+                if _habits.get("avoid_web_search", False):
+                    _stripped = [s for s in micro_plan.plan if s.event_type not in ("web_search",)]
+                    if len(_stripped) < len(micro_plan.plan):
+                        logger.info("[BATCH_PLANNER] habit auto-apply: removed %d web_search steps (user prefers no web search)",
+                                    len(micro_plan.plan) - len(_stripped))
+                        micro_plan = type(micro_plan)(
+                            plan=_stripped,
+                            expected_artifacts=micro_plan.expected_artifacts,
+                        )
+                logger.info("[BATCH_PLANNER] habit auto-apply complete")
+        except Exception as _h_exc:
+            logger.debug("[BATCH_PLANNER] habit auto-apply failed (non-fatal): %s", _h_exc)
+
         # Check step count
         if len(micro_plan.plan) < min_steps:
             logger.warning("[BATCH_PLANNER] plan has only %d steps (configured min is %d), accepting anyway", len(micro_plan.plan), min_steps)
@@ -371,36 +458,31 @@ class BatchPlanner:
                 sim_ok = sim_result.get("status") in ("ok", "success", "simulated")
                 if sim_ok:
                     backend = sim_result.get("_backend", sim_result.get("backend", "aether"))
-                    risk = sim_result.get("total_risk_score", sim_result.get("risk", 0))
-                    suggestions = sim_result.get("suggestions", [])
-                    per_step = sim_result.get("per_step_risk", [])
-                    parallel_rec = sim_result.get("parallel_recommendation", "")
-                    optimized = " ✓ 已优化" if sim_result.get("optimized_plan") else ""
-                    # Build detail string
-                    details = []
-                    if suggestions:
-                        added = sum(1 for s in suggestions if s.get("type") == "add_step")
-                        modified = sum(1 for s in suggestions if s.get("type") == "modify_parameter")
-                        reorder = sum(1 for s in suggestions if s.get("type") == "reorder")
-                        if added:
-                            details.append(f"插入{added}个步骤")
-                        if modified:
-                            details.append(f"调整{modified}个参数")
-                        if reorder:
-                            details.append("重排序")
-                    if per_step:
-                        high_risk = sum(1 for p in per_step if p.get("risk", 0) > 0.5)
-                        if high_risk:
-                            details.append(f"{high_risk}步高风险(已加安全措施)")
-                    if parallel_rec:
-                        details.append(f"推荐{'并行' if parallel_rec == 'parallel' else '串行'}执行")
-                    detail_str = f"：{', '.join(details)}" if details else ""
-                    wm_label = f"[世界模型] 计划已由 {backend} 模拟，风险评估通过 (risk={risk}){optimized}{detail_str}"
+                    frames = sim_result.get("frames_generated", 0)
+                    elapsed = sim_result.get("elapsed_seconds", 0)
+                    session_id = sim_result.get("session_id", "")
+                    video_path = sim_result.get("video_path", "")
+                    local_dir = sim_result.get("local_session_dir", "")
+
+                    # Build display message
+                    parts = [f"生成{frames}帧视频 ({elapsed:.1f}s)"]
+                    if video_path:
+                        parts.append(f"视频已保存")
+                    if local_dir:
+                        parts.append(f"完整记录: {local_dir}")
+                    wm_label = f"[世界模型] AETHER GPU 模拟完成 ({backend}): {'; '.join(parts)}"
+
+                    # Save video/metadata paths to task metadata
+                    if isinstance(getattr(task_instance, "metadata", None), dict):
+                        task_instance.metadata["world_model_status"] = wm_label
+                        task_instance.metadata["world_model_video_path"] = video_path or ""
+                        task_instance.metadata["world_model_session_dir"] = local_dir or ""
+                        task_instance.metadata["world_model_session_id"] = session_id or ""
                 else:
-                    reason = sim_result.get("reason", "unknown")
-                    wm_label = f"[世界模型] 模拟器降级 ({reason})，采用标准计划"
-                if isinstance(getattr(task_instance, "metadata", None), dict):
-                    task_instance.metadata["world_model_status"] = wm_label
+                    reason = sim_result.get("error", sim_result.get("reason", "unknown"))
+                    wm_label = f"[世界模型] AETHER 不可用 ({reason})"
+                    if isinstance(getattr(task_instance, "metadata", None), dict):
+                        task_instance.metadata["world_model_status"] = wm_label
 
                 if sim_ok and sim_result.get("optimized_plan"):
                     logger.info(
@@ -411,22 +493,13 @@ class BatchPlanner:
                         micro_plan, sim_result["optimized_plan"], task_instance
                     )
                 elif sim_ok:
-                    # Apply suggestions and per-step optimizations even without full plan replacement
-                    plan_modified = self._apply_world_model_suggestions(
-                        micro_plan, sim_result, task_instance
+                    logger.info(
+                        "[BATCH_PLANNER] WorldModel simulation OK (AETHER video, no text optimizations)"
                     )
-                    if plan_modified:
-                        logger.info(
-                            "[BATCH_PLANNER] WorldModel suggestions applied: plan optimized"
-                        )
-                    else:
-                        logger.info(
-                            "[BATCH_PLANNER] WorldModel simulation OK, no optimizations"
-                        )
                 else:
                     logger.info(
-                        "[BATCH_PLANNER] WorldModel simulation fallback: %s",
-                        sim_result.get("reason", "unknown"),
+                        "[BATCH_PLANNER] WorldModel simulation failed (suppressed if repeated): %s",
+                        sim_result.get("error", "unknown"),
                     )
             except Exception as exc:
                 logger.warning(

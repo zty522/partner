@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "aide",
+  "description": "AI-driven code development agent",
+  "version": "latest",
+  "category": "code_agents",
+  "domains": [
+    "ai_agents",
+    "code agents"
+  ],
+  "install": {
+    "command": "pip install aide",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import aide; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_aide",
+      "deploy_aide"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

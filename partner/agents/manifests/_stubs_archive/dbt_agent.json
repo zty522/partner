@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "dbt_agent",
+  "description": "dbt data transformation agent",
+  "version": "latest",
+  "category": "data_agents",
+  "domains": [
+    "ai_agents",
+    "data agents"
+  ],
+  "install": {
+    "command": "pip install dbt-core",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "which dbt 2>/dev/null && echo OK || echo not_found",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_dbt_agent",
+      "deploy_dbt_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

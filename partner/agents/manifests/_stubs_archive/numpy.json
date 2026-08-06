@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "numpy",
+  "description": "Numerical computing library",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install numpy",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import numpy; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_numpy",
+      "analyze_with_numpy"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

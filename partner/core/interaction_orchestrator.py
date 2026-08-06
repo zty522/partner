@@ -104,49 +104,315 @@ def _classify_for_direct_reply(adapter, text: str) -> dict | None:
         return None
 
 
+def _classify_intent_for_approval(adapter: object, text: str) -> dict | None:
+    """Use LLM to classify if user message is an approval/rejection of improvements.
+
+    Reads the prompt from prompts/intent_classifier.txt and parses LLM output.
+    Returns dict with keys: intent, approve_ids, reject_ids, reason.
+    Returns None on failure.
+    """
+    if not adapter or not (text or "").strip():
+        return None
+    try:
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "prompts", "intent_classifier.txt"
+        )
+        prompt_template = open(prompt_path, encoding="utf-8").read()
+        prompt = prompt_template.replace("{user_message}", text.strip())
+
+        reply = adapter.chat(prompt, purpose="intent_classify")
+        if not reply or not reply.strip():
+            return None
+
+        cleaned = reply.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        cleaned = cleaned.strip()
+
+        result = json.loads(cleaned)
+        if isinstance(result, dict) and result.get("intent") in ("normal", "approve", "reject", "approve_partial", "reject_partial"):
+            return result
+        return None
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.debug("[INTENT_CLASSIFY] LLM intent classification failed: %s", exc)
+        return None
+
+
+def _classify_approval_intent(adapter: object, text: str) -> dict | None:
+    """Use LLM to classify approval/rejection intent with confidence + target.
+
+    Reads the new prompt from prompts/approval_intent_classifier.txt.
+    Returns dict with keys: intent (approve/reject/other), target, confidence.
+    Returns None on failure or low confidence (< 0.6) — caller falls through to normal routing.
+    """
+    if not adapter or not (text or "").strip():
+        return None
+    try:
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "prompts", "approval_intent_classifier.txt"
+        )
+        prompt_template = open(prompt_path, encoding="utf-8").read()
+        prompt = prompt_template.replace("{user_message}", text.strip())
+
+        reply = adapter.chat(prompt, purpose="approval_classify")
+        if not reply or not reply.strip():
+            return None
+
+        cleaned = reply.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        cleaned = cleaned.strip()
+
+        result = json.loads(cleaned)
+        if not isinstance(result, dict):
+            return None
+
+        intent = result.get("intent")
+        if intent not in ("approve", "reject", "other"):
+            return None
+
+        confidence = float(result.get("confidence", 0))
+
+        # Low confidence → treat as "other", log for observability
+        if confidence < 0.6:
+            logger.info(
+                "[APPROVAL_CLASSIFY] low confidence (%.2f) for intent=%s, treating as other: %s",
+                confidence, intent, text[:60],
+            )
+            return {"intent": "other", "target": None, "confidence": confidence}
+
+        return {
+            "intent": intent,
+            "target": result.get("target"),
+            "confidence": confidence,
+        }
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.debug("[APPROVAL_CLASSIFY] LLM classification failed: %s", exc)
+        return None
+
+
+def _build_approval_payload(original_text: str, intent_result: dict) -> str:
+    """Build a human-readable approval message for the APPLY_ARCHITECTURE_IMPROVEMENT handler.
+
+    Converts LLM intent classification into a structured message that
+    the handler can process via approve_from_message().
+
+    Supports two formats:
+    - New format (from _classify_approval_intent): intent + target + confidence
+    - Legacy format (from _classify_intent_for_approval): intent + approve_ids/reject_ids + reason
+    """
+    intent = intent_result.get("intent", "approve")
+    # New format: single 'target' field
+    target = intent_result.get("target")
+
+    if target is not None:
+        # New format with target
+        if intent == "approve":
+            if target == "全部":
+                return "approve all"
+            elif isinstance(target, list) and target:
+                ids_str = ",".join(str(i) for i in target)
+                return f"approve {ids_str}"
+            else:
+                return "approve all"
+        elif intent == "reject":
+            if target == "全部":
+                return "reject all"
+            elif isinstance(target, list) and target:
+                ids_str = ",".join(str(i) for i in target)
+                return f"reject {ids_str}"
+            else:
+                return "reject all"
+        return original_text
+
+    # Legacy format: separate approve_ids / reject_ids
+    approve_ids = intent_result.get("approve_ids")
+    reject_ids = intent_result.get("reject_ids")
+
+    if intent == "approve":
+        return "approve all"
+    elif intent == "reject":
+        return "reject all"
+    elif intent == "approve_partial" and approve_ids:
+        ids_str = ",".join(str(i) for i in approve_ids)
+        return f"approve {ids_str}"
+    elif intent == "reject_partial" and reject_ids:
+        ids_str = ",".join(str(i) for i in reject_ids)
+        return f"reject {ids_str}"
+    else:
+        return original_text
+
+
+def _classify_routing_intent(adapter: object, text: str) -> dict | None:
+    """Use LLM to classify user message intent into one of 4 paths.
+
+    Paths (defined in prompts/intent_classifier.txt):
+      - direct_reply: simple chat, greetings, quick Q&A
+      - batch_plan: multi-step task execution
+      - self_evolution: user wants Partner to learn/improve itself
+      - correction: user wants to correct/amend previous message
+
+    Returns dict {intent, reason, confidence, corrected_text} on success, None on failure.
+    """
+    if not adapter or not (text or "").strip():
+        return None
+    try:
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "prompts", "intent_classifier.txt"
+        )
+        prompt_template = open(prompt_path, encoding="utf-8").read()
+        prompt = prompt_template.replace("{user_message}", text.strip())
+
+        reply = adapter.chat(prompt, purpose="routing_classify")
+        if not reply or not reply.strip():
+            return None
+
+        cleaned = reply.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned
+            if cleaned.startswith("json"):
+                cleaned = cleaned[4:].strip()
+        cleaned = cleaned.strip()
+
+        result = json.loads(cleaned)
+        if not isinstance(result, dict):
+            return None
+
+        intent = result.get("intent")
+        if intent not in ("direct_reply", "batch_plan", "self_evolution", "correction"):
+            logger.debug("[ROUTING_CLASSIFY] unknown intent=%s, treating as failure", intent)
+            return None
+
+        return {
+            "intent": intent,
+            "reason": result.get("reason", ""),
+            "confidence": float(result.get("confidence", 0)),
+            "corrected_text": result.get("corrected_text") if intent == "correction" else None,
+        }
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.debug("[ROUTING_CLASSIFY] LLM routing classification failed: %s", exc)
+        return None
+
+
 def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision]:
     """LLM-based direct reply routing: classify then possibly generate reply.
 
-    Replaces the old _try_direct_reply_fast_path that used hardcoded regex patterns.
+    First checks if message is an approval/rejection of architecture improvements
+    (via LLM intent classifier), then falls through to existing routing for
+    normal messages.
+
     Returns InteractionDecision if message is a direct_reply candidate, None for complex_task.
     """
     if not (text or "").strip():
         return None
 
+    # ── Step 1: LLM intent classifier for approval/rejection ──
+    # No hardcoded keywords — LLM understands natural language like
+    # "好的，应用这个方案", "方案2和3可以，方案1不行", "算了，不用了"
+    adapter = self.get_adapter()
+    if adapter:
+        # Try new classifier first (approval_intent_classifier.txt with confidence)
+        intent_result = _classify_approval_intent(adapter, text)
+        if intent_result and intent_result.get("intent") in ("approve", "reject"):
+            logger.info(
+                "[ROUTING] LLM classified as %s (confidence=%.2f): %s",
+                intent_result["intent"], intent_result.get("confidence", 0), text[:60],
+            )
+            return InteractionDecision(
+                reply_to_user="",
+                need_lifeline_update=False,
+                event_type="apply_architecture_improvement",
+                event_kind=intent_result["intent"],
+                task_title=f"架构改进{intent_result['intent']}",
+                task_description=_build_approval_payload(text, intent_result),
+                priority=3,
+            )
+
+        # Fallback: legacy classifier (intent_classifier.txt) for backward compatibility
+        intent_result = _classify_intent_for_approval(adapter, text)
+        if intent_result and intent_result.get("intent") in ("approve", "reject", "approve_partial", "reject_partial"):
+            logger.info("[ROUTING] LLM (legacy) classified as %s: %s", intent_result["intent"], text[:60])
+            return InteractionDecision(
+                reply_to_user="",
+                need_lifeline_update=False,
+                event_type="apply_architecture_improvement",
+                event_kind=intent_result["intent"],
+                task_title=f"架构改进{intent_result['intent']}",
+                task_description=_build_approval_payload(text, intent_result),
+                priority=3,
+            )
+
+    # ── Step 1: 3-path routing classifier via prompts/intent_classifier.txt ──
+    # Classifies into: direct_reply (simple chat), batch_plan (multi-step task),
+    # self_evolution (user wants Partner to learn/improve itself)
     adapter = self.get_adapter()
     if not adapter:
         return None
 
-    # Step 1: Classify via LLM
-    classification = _classify_for_direct_reply(adapter, text)
-    if not classification:
-        logger.debug("[ROUTING] direct_reply classification failed or returned empty")
+    routing = _classify_routing_intent(adapter, text)
+    if not routing:
+        logger.debug("[ROUTING] 3-path routing classification failed → fall through to batch_plan")
         return None
 
-    if classification.get("type") != "direct_reply":
-        logger.debug("[ROUTING] LLM classified as complex_task, routing to batch_plan")
-        return None
-
-    # Step 2: Use pre-generated reply from classification
-    reply_text = classification.get("reply", "")
-    if not reply_text or not reply_text.strip():
-        logger.debug("[ROUTING] direct_reply classification had no reply, falling through")
-        return None
-
-    sanitized = self._sanitize_reply_to_user(reply_text)
-    if not sanitized:
-        return None
-
-    # NOTE: The USER_MESSAGE handler in executor.py creates the DIRECT_REPLY event
-    # from this InteractionDecision, so we do NOT enqueue a separate event here.
-
-    return InteractionDecision(
-        reply_to_user=sanitized,
-        need_lifeline_update=False,
-        event_type="interaction_reply",
-        event_kind="direct_reply",
-        stop_after_completion=True,
+    intent = routing["intent"]
+    confidence = routing["confidence"]
+    logger.info(
+        "[ROUTING] 3-path classified as %s (confidence=%.2f): %s",
+        intent, confidence, text[:60],
     )
+
+    if intent == "direct_reply":
+        # Generate a simple reply using the adapter directly
+        simple_prompt = f"用户说：{text}\n\n请用中文简短回复，不超过50字。"
+        reply_text = adapter.chat(simple_prompt, purpose="simple_reply")
+        sanitized = self._sanitize_reply_to_user(reply_text or "")
+        if not sanitized:
+            return None
+        # NOTE: The USER_MESSAGE handler in executor.py creates the DIRECT_REPLY event
+        return InteractionDecision(
+            reply_to_user=sanitized,
+            need_lifeline_update=False,
+            event_type="interaction_reply",
+            event_kind="direct_reply",
+            stop_after_completion=True,
+        )
+
+    if intent == "self_evolution":
+        return InteractionDecision(
+            reply_to_user="",
+            need_lifeline_update=False,
+            event_type="self_evolution",
+            event_kind="self_evolution",
+            task_title=f"自进化学习：{text[:40]}",
+            task_description=text,
+            priority=5,
+        )
+
+    if intent == "correction":
+        corrected_text = routing.get("corrected_text") or ""
+        if not corrected_text.strip():
+            logger.info("[ROUTING] correction intent but no corrected_text provided; falling through to batch_plan")
+            return None
+        logger.info("[ROUTING] correction intent: original=%s -> corrected=%s", text[:60], corrected_text[:60])
+        return InteractionDecision(
+            reply_to_user="",
+            need_lifeline_update=False,
+            event_type="correction",
+            event_kind="correction",
+            task_title=f"消息更正：{corrected_text[:40]}",
+            task_description=json.dumps({
+                "original_text": text,
+                "corrected_text": corrected_text,
+            }, ensure_ascii=False),
+            priority=3,
+        )
+
+    # intent == "batch_plan": fall through to _batch_plan_for_message
+    return None
 
 
 EVENT_CAPABILITIES = {
@@ -2473,7 +2739,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                     # carry over into the new planning cycle.
                     plan["phases"] = []
                     plan["current_phase_index"] = 0
-                    plan["status"] = "planning" if existing.get("status") in ("idle", "completed", "planning") else existing.get("status", "planning")
+                    plan["status"] = "planning" if existing.get("status") in ("", "completed", "planning") else existing.get("status", "planning")
                     plan["title"] = title or existing.get("title", "")
                     plan["goal"] = heartbeat_summary
                     plan["last_heartbeat"] = now

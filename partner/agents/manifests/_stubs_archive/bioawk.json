@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "bioawk",
+  "description": "AWK extension for biological formats",
+  "version": "latest",
+  "category": "sequence_processing",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y bioawk",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "bioawk --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_bioawk",
+      "analyze_with_bioawk"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

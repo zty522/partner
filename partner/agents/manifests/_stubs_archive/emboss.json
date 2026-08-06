@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "emboss",
+  "description": "European Molecular Biology Open Software Suite",
+  "version": "latest",
+  "category": "sequence_processing",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y emboss",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "embossversion 2>&1",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_emboss",
+      "analyze_with_emboss"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

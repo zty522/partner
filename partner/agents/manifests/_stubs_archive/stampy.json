@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "stampy",
+  "description": "Short-read aligner for divergent genomes",
+  "version": "latest",
+  "category": "alignment",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y stampy",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "stampy.py 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_stampy",
+      "analyze_with_stampy"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -24,6 +24,9 @@ def _get_builtin_manifest_dir() -> str:
 
 def _get_user_manifest_dir() -> str:
     """Return the path to the user's ~/.partner/agents/ directory."""
+    env_dir = os.environ.get("PARTNER_DATA_DIR", "")
+    if env_dir:
+        return os.path.join(env_dir, "agents")
     return os.path.join(os.path.expanduser("~"), ".partner", "agents")
 
 
@@ -158,6 +161,26 @@ class AgentRegistry:
     def find_by_capability(self, capability: str) -> list[AgentManifest]:
         """Find agents with a specific capability."""
         return [m for m in self.list_agents() if capability in m.capabilities]
+
+    def list_all_capabilities(self) -> dict:
+        """Return structured capability overview for self-review / capability inventory."""
+        agents = self.list_agents()
+        capabilities = {
+            "agents": [],
+            "total_agents": len(agents),
+        }
+        for a in agents:
+            hc = self.health_check(a.name)
+            capabilities["agents"].append({
+                "name": a.name,
+                "description": a.description,
+                "capabilities": list(a.capabilities),
+                "health_status": hc.get("status", "unknown"),
+                "health_details": hc.get("details", ""),
+                "endpoint_type": a.endpoint_type,
+                "category": a.endpoint_config.get("category", "general") if a.endpoint_config else "general",
+            })
+        return capabilities
 
     # ── Health ──
 

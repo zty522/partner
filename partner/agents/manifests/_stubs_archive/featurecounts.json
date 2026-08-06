@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "featurecounts",
+  "description": "Read counting for RNA-seq",
+  "version": "latest",
+  "category": "rna_seq",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y subread",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "featureCounts --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_featurecounts",
+      "analyze_with_featurecounts"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "curl_agent",
+  "description": "cURL-based API interaction agent",
+  "version": "latest",
+  "category": "web_agents",
+  "domains": [
+    "ai_agents",
+    "web agents"
+  ],
+  "install": {
+    "command": "pip install pycurl",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pycurl; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_curl_agent",
+      "deploy_curl_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

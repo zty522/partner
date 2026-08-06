@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "matplotlib",
+  "description": "Python plotting library",
+  "version": "latest",
+  "category": "visualization",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install matplotlib",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import matplotlib; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_matplotlib",
+      "analyze_with_matplotlib"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -393,7 +393,7 @@ def _get_instance_status(instance_id: str, workspace: str) -> dict:
         "qq_pid": None,
         "world_model_enabled": False,
         "heartbeat": "N/A",
-        "plan_status": "idle",
+        "plan_status": "",
     }
     state_dir = os.path.join(workspace, "state")
 
@@ -451,7 +451,7 @@ def _get_instance_status(instance_id: str, workspace: str) -> dict:
             with open(plan_path) as f:
                 plan = json.load(f)
             result["heartbeat"] = plan.get("last_heartbeat", "N/A")
-            result["plan_status"] = plan.get("status", "idle")
+            result["plan_status"] = plan.get("status", "")
         except Exception:
             pass
 
@@ -602,7 +602,7 @@ def _auto_start_instance(instance_id, workspace):
 
 def _bot_start(workspace, platform, quiet=False):
     label = {"qq": "QQ"}.get(platform, platform)
-    pp = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pp = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if platform == "qq":
         cfg = os.path.join(workspace, "qq_config.json")
         if not os.path.exists(cfg):
@@ -702,7 +702,7 @@ def _cmd_queue_clear(args):
     try:
         from datetime import datetime
         plan = {
-            "status": "idle",
+            "status": "",
             "title": "",
             "goal": "",
             "created_at": datetime.now().isoformat(),

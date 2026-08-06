@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "metabase_agent",
+  "description": "Metabase analytics agent",
+  "version": "latest",
+  "category": "data_agents",
+  "domains": [
+    "ai_agents",
+    "data agents"
+  ],
+  "install": {
+    "command": "pip install metabase",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import metabase; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_metabase_agent",
+      "deploy_metabase_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

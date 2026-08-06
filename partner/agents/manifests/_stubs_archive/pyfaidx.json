@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pyfaidx",
+  "description": "FASTA index and retrieval",
+  "version": "latest",
+  "category": "format_conversion",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install pyfaidx",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pyfaidx; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pyfaidx",
+      "analyze_with_pyfaidx"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

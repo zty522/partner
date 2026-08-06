@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "das_tool",
+  "description": "Genome bin refinement and evaluation",
+  "version": "latest",
+  "category": "metagenomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y das_tool",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "DAS_Tool --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_das_tool",
+      "analyze_with_das_tool"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

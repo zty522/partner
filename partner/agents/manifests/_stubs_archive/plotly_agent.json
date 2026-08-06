@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "plotly_agent",
+  "description": "Plotly chart generation agent",
+  "version": "latest",
+  "category": "data_agents",
+  "domains": [
+    "ai_agents",
+    "data agents"
+  ],
+  "install": {
+    "command": "pip install plotly",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import plotly; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_plotly_agent",
+      "deploy_plotly_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

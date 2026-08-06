@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "openai_agents",
+  "description": "OpenAI Agents SDK",
+  "version": "latest",
+  "category": "agent_frameworks",
+  "domains": [
+    "ai_agents",
+    "agent frameworks"
+  ],
+  "install": {
+    "command": "pip install openai-agents",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import agents; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_openai_agents",
+      "deploy_openai_agents"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

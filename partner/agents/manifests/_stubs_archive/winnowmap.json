@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "winnowmap",
+  "description": "Long-read aligner based on minimap2 with k-mer weighting",
+  "version": "latest",
+  "category": "alignment",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y winnowmap",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "winnowmap --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_winnowmap",
+      "analyze_with_winnowmap"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

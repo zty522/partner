@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "checkm",
+  "description": "Assessing genome quality of metagenome bins",
+  "version": "latest",
+  "category": "metagenomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y checkm-genome",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "checkm --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_checkm",
+      "analyze_with_checkm"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

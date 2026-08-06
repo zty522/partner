@@ -25,42 +25,45 @@ _NTFLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 def _run_subprocess_tree(run_kwargs: dict):
-    """Run a subprocess and kill its whole process tree on timeout.
-
-    Agent backends may launch tools that launch their own children.  Plain
-    subprocess.run(timeout=...) only guarantees the top-level process is
-    handled; leaving child commands alive can block later Partner events.
+    """Run a subprocess using hermes_chat_wrapper.sh to avoid PIPE deadlock.
+    
+    On WSL/Linux with Python 3.13 calling hermes (Python 3.11), subprocess.PIPE
+    causes a mysterious buffer deadlock. The wrapper script uses shell file
+    redirection instead, which avoids the issue entirely.
     """
+    import tempfile
     kwargs = dict(run_kwargs)
     timeout = kwargs.pop("timeout", None)
-    capture_output = bool(kwargs.pop("capture_output", False))
-    if capture_output:
-        kwargs.setdefault("stdout", subprocess.PIPE)
-        kwargs.setdefault("stderr", subprocess.PIPE)
-    if os.name == "nt":
-        kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | _NTFLAGS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        kwargs.pop("creationflags", None)
-        kwargs["start_new_session"] = True
-    proc = subprocess.Popen(**kwargs)
+    args = kwargs.pop("args", None)
+    encoding = kwargs.pop("encoding", "utf-8")
+    errors = kwargs.pop("errors", "replace")
+    
+    stdout_f = tempfile.NamedTemporaryFile(mode='w+', suffix='.stdout', delete=False, encoding=encoding, errors=errors)
+    stderr_f = tempfile.NamedTemporaryFile(mode='w+', suffix='.stderr', delete=False, encoding=encoding, errors=errors)
+    
+    # Use wrapper script: hermes_chat_wrapper.sh <stdout> <stderr> -- args...
+    wrapper = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'hermes_chat_wrapper.sh')
+    cmd = [wrapper, stdout_f.name, stderr_f.name] + (args if isinstance(args, list) else [args])
+    
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        if os.name == "nt":
-            try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
-            except Exception:
-                proc.kill()
-        else:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except Exception:
-                proc.kill()
-        stdout, stderr = proc.communicate()
-        exc.output = stdout
-        exc.stderr = stderr
-        raise exc
-    return subprocess.CompletedProcess(kwargs.get("args"), proc.returncode, stdout, stderr)
+        subprocess.run(cmd, timeout=(timeout + 5) if timeout else None)
+    except subprocess.TimeoutExpired:
+        stdout_f.close(); stderr_f.close()
+        os.unlink(stdout_f.name); os.unlink(stderr_f.name)
+        raise
+    finally:
+        stdout_f.close(); stderr_f.close()
+    
+    try:
+        with open(stdout_f.name, 'r', encoding=encoding, errors=errors) as f:
+            stdout = f.read()
+        with open(stderr_f.name, 'r', encoding=encoding, errors=errors) as f:
+            stderr = f.read()
+    finally:
+        os.unlink(stdout_f.name)
+        os.unlink(stderr_f.name)
+    
+    return subprocess.CompletedProcess(args, 0, stdout, stderr)
 
 
 def _cleanup_workspace_tool_processes(workspace: str) -> list[int]:
@@ -660,7 +663,7 @@ class HermesAdapter(AgentAdapter):
         executable = self._hermes_executable()
 
         # A frozen Windows build can inherit Python/PyInstaller variables from
-        # Partner.exe. Hermes owns its own Python venv; leaking Python 3.14
+        # Partner.exe. Hermes owns its own Python venv; leaking Python 3.13+
         # paths into the child process makes provider plugins fail to import.
         for name in (
             "PYTHONHOME",
@@ -670,8 +673,23 @@ class HermesAdapter(AgentAdapter):
             "_PYI_APPLICATION_HOME_DIR",
             "_PYI_PARENT_PROCESS_LEVEL",
             "PYINSTALLER_RESET_ENVIRONMENT",
+            # Conda/virtualenv vars — Hermes uses its own venv
+            "CONDA_PREFIX",
+            "CONDA_DEFAULT_ENV",
+            "CONDA_PYTHON_EXE",
+            "CONDA_PROMPT_MODIFIER",
+            "CONDA_SHLVL",
+            "VIRTUAL_ENV",
+            "VIRTUAL_ENV_PROMPT",
         ):
             env.pop(name, None)
+
+        # WSL proxy workaround: clear proxy vars to prevent SYN-SENT hangs
+        # Background hermes subprocesses on WSL hit Windows proxy 172.26.176.1:10090
+        # and hang forever. Direct HTTP to DeepSeek needs no proxy.
+        for proxy_var in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                          "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"):
+            env.pop(proxy_var, None)
 
         exe_dir = os.path.dirname(executable) if executable and os.path.isabs(executable) else ""
         venv_root = os.path.dirname(exe_dir) if os.path.basename(exe_dir).lower() in {"scripts", "bin"} else ""
@@ -679,7 +697,7 @@ class HermesAdapter(AgentAdapter):
         cleaned_path = []
         for part in path_parts:
             lowered = part.replace("\\", "/").lower()
-            if "python314" in lowered or "/_internal" in lowered or "pyinstaller" in lowered:
+            if any(kw in lowered for kw in ("python313", "python314", "/_internal", "pyinstaller", "miniconda", "anaconda", "conda")):
                 continue
             cleaned_path.append(part)
         hermes_path_prefix = []
@@ -866,25 +884,27 @@ class HermesAdapter(AgentAdapter):
     def _add_purpose_flags(self, cmd: list[str], purpose: str) -> None:
         """Add purpose-specific CLI flags to cmd (used for Ollama fallback rebuild)."""
         if purpose == "classify":
-            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
         elif purpose == "interaction":
-            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
         elif purpose == "batch_plan":
-            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            # batch_plan needs full toolset for planning, no -t flag
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
         elif purpose == "project":
             cmd.extend(["-t", self._resolve_tools_for_purpose("project"), "--ignore-rules"])
         elif purpose == "action":
             cmd.extend(["-t", self._resolve_tools_for_purpose("action"), "--ignore-rules"])
         elif purpose == "action_think":
-            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
         elif purpose == "report":
-            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
         elif purpose == "direct_reply":
-            cmd.extend(["-t", "terminal,file,web", "--ignore-rules", "--max-turns", "2"])
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
             self._clear_session_id(purpose)
-            import os as _os
-            _os.environ.setdefault("PARTNER_HERMES_USE_NATIVE_HOME", "true")
-            del _os
+        elif purpose in ("approval_classify", "intent_classify", "routing_classify"):
+            # Classification purposes: single-turn, no accumulated context
+            cmd.extend(["--ignore-rules", "--max-turns", "1"])
+            self._clear_session_id(purpose)  # Always fresh session for classifiers
 
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
         """Chat via hermes subprocess."""
@@ -892,35 +912,49 @@ class HermesAdapter(AgentAdapter):
         import time
 
         # Load timeout from external_calls.yaml config
-        def _load_per_event_timeout(purpose: str) -> int | None:
-            try:
-                from ..harness_core.robust_executor import load_harness_config
+        def _load_per_event_config(purpose: str) -> tuple[int | None, int]:
+                """Load timeout and retries for a given purpose from external_calls config.
 
-                config = load_harness_config(self.workspace)
-                external = config.get("external_calls", {})
-                per_event = external.get("per_event", {})
-                event_map = {
-                    "action": "agent_call",
-                    "classify": "classify",
-                    "interaction": "interaction",
-                    "batch_plan": "batch_planner",
-                    "project": "agent_call",
-                    "action_think": "classify",
-                    "direct_reply": "direct_reply",
-                    "report": "report",
-                }
-                config_key = event_map.get(purpose)
-                if config_key and config_key in per_event:
-                    raw = per_event[config_key].get("timeout")
-                    if raw is not None:
-                        return int(raw)
-                # Fallback to global default
-                global_timeout = external.get("timeout")
-                if global_timeout is not None:
-                    return int(global_timeout)
-            except Exception:
-                pass
-            return None
+                Returns:
+                    (timeout_sec: int|None, retries: int)
+                """
+                try:
+                    from ..harness_core.robust_executor import load_harness_config
+
+                    config = load_harness_config(self.workspace)
+                    external = config.get("external_calls", {})
+                    per_event = external.get("per_event", {})
+                    event_map = {
+                        "action": "agent_call",
+                        "classify": "classify",
+                        "interaction": "interaction",
+                        "batch_plan": "batch_planner",
+                        "project": "agent_call",
+                        "action_think": "classify",
+                        "direct_reply": "direct_reply",
+                        "report": "report",
+                        "focus_extract": "focus_extract",
+                        "routing_classify": "focus_extract",
+                        "approval_classify": "classify",
+                        "intent_classify": "classify",
+                    }
+                    config_key = event_map.get(purpose)
+                    if config_key and config_key in per_event:
+                        ev_cfg = per_event[config_key]
+                        raw_timeout = ev_cfg.get("timeout")
+                        raw_retries = ev_cfg.get("retries")
+                        timeout_sec = int(raw_timeout) if raw_timeout is not None else None
+                        retries = int(raw_retries) if raw_retries is not None else 0
+                        return timeout_sec, retries
+                    # Fallback to global defaults
+                    global_timeout = external.get("timeout")
+                    global_retries = external.get("retries", 0)
+                    timeout_sec = int(global_timeout) if global_timeout is not None else None
+                    retries = int(global_retries) if global_retries is not None else 0
+                    return timeout_sec, retries
+                except Exception:
+                    pass
+                return None, 0
 
         cmd = [self._hermes_executable(), "chat", "-q", message, "-Q"]
         session_id = self._read_session_id(purpose)
@@ -956,7 +990,13 @@ class HermesAdapter(AgentAdapter):
             # Thinking-only events should not start terminal/file/web tool chains.
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
         elif purpose == "report":
+            # Report: lightweight single-turn, no tools
             cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+        elif purpose in ("focus_extract", "routing_classify"):
+            # Lightweight single-turn, no tools — faster startup
+            cmd.extend(["-t", "", "--ignore-rules", "--max-turns", "1"])
+            # Clear any stale session to avoid resumption overhead on new extraction
+            self._clear_session_id(purpose)
         elif purpose == "direct_reply":
             # Fast path: two turns for: propose tool call -> execute -> respond
             cmd.extend(["-t", "terminal,file,web", "--ignore-rules", "--max-turns", "2"])
@@ -974,8 +1014,8 @@ class HermesAdapter(AgentAdapter):
             if not has_model:
                 cmd.extend(["-m", model])
 
-        timeout_sec = _load_per_event_timeout(purpose)
-        max_retries = 2
+        timeout_sec, cfg_retries = _load_per_event_config(purpose)
+        max_retries = cfg_retries if timeout_sec is not None else 2
         if timeout_sec is None:
             # Fallback to env vars (preserving backward compatibility)
             if purpose == "classify":
@@ -996,11 +1036,25 @@ class HermesAdapter(AgentAdapter):
             elif purpose == "report":
                 timeout_sec = _env_optional_timeout("PARTNER_REPORT_TIMEOUT_SEC", None)
                 max_retries = 0
+            elif purpose in ("focus_extract", "routing_classify"):
+                timeout_sec = 120
+                max_retries = 1
         else:
-            # When config provides the timeout, no retries
-            max_retries = 0
+            # Use retries from config (already set above)
+            pass
 
         logger.info("[HermesAdapter] chat purpose=%s timeout_sec=%s max_retries=%s", purpose, timeout_sec, max_retries)
+
+        # Try DirectAPI first — bypasses hermes subprocess PIPE deadlock on WSL
+        try:
+            from .direct_api import chat as direct_chat
+            t = timeout_sec or 60
+            result = direct_chat(message, purpose=purpose, timeout=t)
+            if result:
+                logger.info("[HermesAdapter] DirectAPI OK for purpose=%s (%d chars)", purpose, len(result))
+                return result
+        except Exception:
+            pass
 
         for attempt in range(max_retries + 1):
             started_at = time.time()
@@ -1113,6 +1167,11 @@ class HermesAdapter(AgentAdapter):
                 # Success
                 if result.returncode == 0 and out:
                     return self._strip_session_noise(out) or out
+                # Success with empty stdout — check stderr for useful content
+                if result.returncode == 0 and not out and err:
+                    stripped_err = self._strip_session_noise(err)
+                    if stripped_err and 'Traceback' not in stripped_err and 'KeyboardInterrupt' not in stripped_err:
+                        return stripped_err
 
                 # Ollama fallback: if Ollama-routed call failed, retry without Ollama (using default API)
                 if _ollama_env and result.returncode != 0 and not (out and self._strip_session_noise(out)):

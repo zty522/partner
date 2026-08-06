@@ -10,7 +10,7 @@
   7  = 低
   10 = 最低（心跳）
 
-保留的事件类型：PROJECT, REPORT, CRON_TICK, WAKE_UP, REFLECTION,
+保留的事件类型：PROJECT, REPORT, REFLECTION,
 CROSS_PROJECT, MEMORY_CONSOLIDATE, CONTENT_DIGEST, CONTENT_PATROL, DIRECT_REPLY。
 
 动作级事件：BATCH_PLAN, DIRECT_TASK, LITERATURE_REVIEW, DATA_FETCH, DATA_ANALYSIS, VISUALIZATION,
@@ -53,15 +53,19 @@ class EventType(str, Enum):
     HABIT_UPDATE = "habit_update"      # 经验/习惯/成长记录和抽象化
     OLLAMA_STATUS = "ollama_status"    # Ollama 状态探测：检查轻量模型是否可用
     TASK_FAILED = "task_failed"           # 任务失败总结：通知用户并提供诊断信息
-    STOP_PROJECT = "stop_project"      # 显式停止当前执行链：由 LLM selector 选择后才等待/清 active
+    STOP_PROJECT = "stop_project"      # 显式停止当前执行链
+    EXECUTE_CODE = "execute_code"      # 执行 Python 代码：写脚本、运行、产出结果：由 LLM selector 选择后才等待/清 active
     REPORT = "report"                  # 汇报：向用户推送进展或结果
-    CRON_TICK = "cron_tick"            # 由外部 cron 注入的周期性触发
-    WAKE_UP = "wake_up"                # 启动唤醒：恢复状态后自动探索
     REFLECTION = "reflection"          # 独立长反思：跨轮次整理失败/边界/策略
-    CROSS_PROJECT = "cross_project"    # 默认网络：跨项目迁移和旧失败重解释
+    SELF_REVIEW = "self_review"        # 自我审视：生成能力清单、识别差距、搜索解决方案
+    CROSS_PROJECT = "cross_project"    # 默认网络：跨
+    CRON_TICK = "cron_tick"            # 定时触发：cron 周期性健康检查和任务推进
+    WAKE_UP = "wake_up"                # 唤醒：从等待室恢复执行项目迁移
+    # (duplicates removed)
     MEMORY_CONSOLIDATE = "memory_consolidate"  # 记忆压缩：保持 prompt 轻量
     CONTENT_DIGEST = "content_digest"  # 外部内容消化：用户分享/自巡游素材 → 假设/灵感
     CONTENT_PATROL = "content_patrol"  # 受控巡游：公开内容入口 → content_feed
+    APPLY_ARCHITECTURE_IMPROVEMENT = "apply_architecture_improvement"  # 应用架构改进方案
 
 
 @dataclass
@@ -114,26 +118,6 @@ def report(content: str, priority: int = 3, source: str = "",
         payload={"content": content},
         source=source,
         parent_id=parent_id,
-    )
-
-
-def cron_tick(source: str = "cron") -> MindEvent:
-    """创建一个周期心跳念头。"""
-    return MindEvent(
-        type=EventType.CRON_TICK,
-        priority=10,
-        payload={},
-        source=source,
-    )
-
-
-def wake_up(source: str = "startup") -> MindEvent:
-    """创建一个唤醒念头（启动后立即调度）。"""
-    return MindEvent(
-        type=EventType.WAKE_UP,
-        priority=1,  # 最高优先级
-        payload={},
-        source=source,
     )
 
 

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "samtools_fmt",
+  "description": "SAM/BAM/CRAM format conversion (via samtools)",
+  "version": "latest",
+  "category": "format_conversion",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y samtools",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "samtools view --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_samtools_fmt",
+      "analyze_with_samtools_fmt"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

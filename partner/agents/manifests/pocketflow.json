@@ -1,0 +1,96 @@
+{
+  "name": "pocketflow",
+  "version": "1.0.0",
+  "description": "PocketFlow — 在蛋白质结合口袋中生成全新配体分子 (Nature MI 2024)。输入口袋PDB文件，输出生成的分子（SDF/SMILES），100%化学有效。",
+  "capabilities": [
+    "molecular_generation",
+    "structure_based_drug_design",
+    "pocket_based_generation",
+    "de_novo_drug_design"
+  ],
+  "input_formats": [
+    "pdb"
+  ],
+  "output_formats": [
+    "sdf",
+    "mol",
+    "mol2",
+    "smiles",
+    "json"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【分子生成】PocketFlow分子生成模型(Nature MI 2024)。输入蛋白质口袋PDB文件，生成全新配体分子。输出SDF/SMILES格式分子。参数: input=口袋PDB路径 output=输出目录 num_gen=生成数量(默认100) device=cpu/cuda",
+    "command": "python",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/pocketflow_wrapper.py"
+    ],
+    "args": [
+      "--pocket",
+      "{input}",
+      "--num_gen",
+      "{num_gen}",
+      "--device",
+      "{device}",
+      "--name",
+      "{name}",
+      "--output",
+      "{output}",
+      "--format",
+      "json"
+    ],
+    "timeout": 3600,
+    "inject_llm_credentials": false
+  },
+  "timeout": 3600,
+  "health_check_cmd": "test -f /mnt/e/work/partner_workspace/external/PocketFlow/main_generate.py",
+  "install_info": {
+    "method": "conda",
+    "package": "pocketflow",
+    "description": "conda env create -f environment.yml (in PocketFlow repo)"
+  },
+  "tool_profile": {
+    "type": "molecular_generation",
+    "has_own_llm": false,
+    "needs_input_file": true,
+    "input_description": "蛋白质口袋PDB文件（必需）",
+    "expected_outputs": [
+      {
+        "format": "sdf",
+        "description": "生成的分子3D结构",
+        "typical_size": "10-500KB"
+      },
+      {
+        "format": "smiles",
+        "description": "生成的分子SMILES字符串",
+        "typical_size": "1-10KB"
+      }
+    ],
+    "expected_runtime": {
+      "min_seconds": 30,
+      "max_seconds": 3600,
+      "typical_seconds": 300
+    },
+    "task_constraints": {
+      "suitable_for": [
+        "给定蛋白质口袋生成新配体分子",
+        "从头药物设计"
+      ],
+      "not_suitable_for": [
+        "文献查询",
+        "多方法对比"
+      ]
+    },
+    "param_convention": {
+      "use": [
+        "input",
+        "output",
+        "num_gen",
+        "device"
+      ],
+      "note": "input=口袋PDB路径(必填) output=输出目录 num_gen=生成数量 device=cpu/cuda"
+    }
+  },
+  "is_tool": true
+}

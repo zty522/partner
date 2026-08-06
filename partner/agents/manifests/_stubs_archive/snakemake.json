@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "snakemake",
+  "description": "Workflow management system",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y snakemake",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "snakemake --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_snakemake",
+      "analyze_with_snakemake"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

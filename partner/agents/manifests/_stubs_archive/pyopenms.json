@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pyopenms",
+  "description": "Python bindings for OpenMS",
+  "version": "latest",
+  "category": "proteomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "pip install pyopenms",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pyopenms; print(\"OK\")'",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pyopenms",
+      "analyze_with_pyopenms"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

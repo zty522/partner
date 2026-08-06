@@ -257,6 +257,207 @@ def cmd_world_model_configure(args):
     print()
 
 
+def _find_world_model_outputs(workspace: str) -> str:
+    """Find the world_model_outputs directory."""
+    candidates = [
+        os.path.join(workspace, "world_model_outputs"),
+        os.path.join(workspace, "..", "world_model_outputs"),
+        os.path.join(os.path.expanduser("~"), "partner_workspace", "world_model_outputs"),
+        "/mnt/e/work/partner_workspace/world_model_outputs",
+    ]
+    for path in candidates:
+        resolved = os.path.normpath(path)
+        if os.path.isdir(resolved):
+            return resolved
+    return ""
+
+
+def cmd_world_model_view(args):
+    """View world model output records."""
+    workspace = get_workspace() or "/mnt/e/work/partner_workspace"
+    output_dir = _find_world_model_outputs(workspace)
+
+    if not output_dir or not os.path.isdir(output_dir):
+        print(f"{C_YELLOW}⚠ 没有找到世界模型输出目录{C_RESET}")
+        print(f"  搜索路径: {workspace}/world_model_outputs/")
+        print(f"  启动世界模型服务器后会在此目录生成记录")
+        return
+
+    if args.list or not args.session:
+        # List all sessions
+        sessions = sorted(os.listdir(output_dir), reverse=True)
+        if not sessions:
+            print(f"{C_YELLOW}⚠ 没有世界模型执行记录{C_RESET}")
+            return
+        print(f"{C_BOLD}世界模型执行记录 ({len(sessions)} 个会话):{C_RESET}")
+        print()
+        for s in sessions:
+            session_dir = os.path.join(output_dir, s)
+            if not os.path.isdir(session_dir):
+                continue
+            # Check for README
+            readme_path = os.path.join(session_dir, "README.md")
+            gen_log_path = os.path.join(session_dir, "generation_log.json")
+            video_path = os.path.join(session_dir, "video.mp4")
+            frames_dir = os.path.join(session_dir, "frames")
+
+            # Extract basic info
+            task = s.split("_", 2)[-1] if "_" in s else s
+            has_video = os.path.isfile(video_path)
+            has_frames = os.path.isdir(frames_dir)
+            frame_count = len(os.listdir(frames_dir)) if has_frames else 0
+
+            status = ""
+            if os.path.isfile(gen_log_path):
+                try:
+                    with open(gen_log_path) as f:
+                        gl = json.load(f)
+                    status = gl.get("status", "unknown")
+                    elapsed = gl.get("elapsed_seconds", 0)
+                    frames = gl.get("frames_generated", frame_count)
+                except Exception:
+                    status = "unknown"
+                    elapsed = 0
+                    frames = 0
+            else:
+                elapsed = 0
+                frames = 0
+
+            parts = [
+                f"{C_CYAN if status == 'completed' else C_YELLOW}{status}{C_RESET}",
+                f"帧: {frames}",
+            ]
+            if has_video:
+                parts.append(f"{C_GREEN}✓ 有视频{C_RESET}")
+            if elapsed:
+                parts.append(f"耗时: {elapsed}s")
+
+            print(f"  {C_BOLD}{s[:50]}{C_RESET}")
+            print(f"    任务: {task[:60]}")
+            print(f"    状态: {' | '.join(parts)}")
+            print()
+    else:
+        # Show specific session
+        session = args.session
+        session_dir = None
+        for entry in os.listdir(output_dir):
+            if session in entry:
+                session_dir = os.path.join(output_dir, entry)
+                break
+
+        if not session_dir:
+            print(f"{C_RED}❌ 未找到匹配的会话: {session}{C_RESET}")
+            return
+
+        print(f"{C_BOLD}会话: {os.path.basename(session_dir)}{C_RESET}")
+        print(f"{C_BOLD}路径: {session_dir}{C_RESET}")
+        print()
+
+        # Show file listing
+        files = []
+        for root, dirs, filenames in os.walk(session_dir):
+            for fn in filenames:
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, session_dir)
+                size = os.path.getsize(full)
+                files.append((rel, size))
+        print(f"{C_CYAN}输出文件 ({len(files)}):{C_RESET}")
+        for rel, size in sorted(files):
+            size_str = f"{size/1024:.0f}KB" if size > 1024 else f"{size}B"
+            print(f"  {C_DIM}{rel:40s} {size_str:>8s}{C_RESET}")
+        print()
+
+        # Show README content if exists
+        readme_path = os.path.join(session_dir, "README.md")
+        if os.path.isfile(readme_path) and args.detail:
+            print(f"{C_CYAN}=== 过程记录 ==={C_RESET}")
+            with open(readme_path) as f:
+                print(f.read())
+        elif os.path.isfile(readme_path):
+            print(f"{C_DIM}使用 --detail 或 -d 查看完整过程记录{C_RESET}")
+
+        # Show video path
+        video_path = os.path.join(session_dir, "video.mp4")
+        if os.path.isfile(video_path):
+            print(f"{C_GREEN}✓ 视频已保存:{C_RESET} {video_path}")
+            print(f"  共 {os.path.getsize(video_path)/1024:.0f}KB")
+
+        # Show generation log
+        gen_log_path = os.path.join(session_dir, "generation_log.json")
+        if os.path.isfile(gen_log_path) and args.detail:
+            try:
+                with open(gen_log_path) as f:
+                    gl = json.load(f)
+                print(f"\n{C_CYAN}=== 生成参数 ==={C_RESET}")
+                print(f"  模型: {gl.get('model', 'N/A')}")
+                print(f"  帧数: {gl.get('frames_generated', 0)}")
+                print(f"  推理步数: {gl.get('parameters', {}).get('num_inference_steps', 4)}")
+                print(f"  耗时: {gl.get('elapsed_seconds', 0)}s")
+                print(f"  Prompt: {gl.get('prompt', '')[:100]}...")
+            except Exception:
+                pass
+
+
+def cmd_world_model_record(args):
+    """Show the full generation process record for a session."""
+    workspace = get_workspace() or "/mnt/e/work/partner_workspace"
+    output_dir = _find_world_model_outputs(workspace)
+
+    if not output_dir:
+        print(f"{C_RED}❌ 未找到世界模型输出目录{C_RESET}")
+        return
+
+    session = args.session
+    session_dir = None
+    for entry in sorted(os.listdir(output_dir), reverse=True):
+        if session in entry:
+            session_dir = os.path.join(output_dir, entry)
+            break
+
+    if not session_dir:
+        print(f"{C_RED}❌ 未找到匹配的会话: {session}{C_RESET}")
+        return
+
+    # Show complete README
+    readme_path = os.path.join(session_dir, "README.md")
+    if os.path.isfile(readme_path):
+        with open(readme_path, encoding="utf-8") as f:
+            print(f.read())
+    else:
+        print(f"{C_YELLOW}⚠ 该会话无 README 记录文件{C_RESET}")
+
+    # Show generation_log
+    gen_log_path = os.path.join(session_dir, "generation_log.json")
+    if os.path.isfile(gen_log_path):
+        print(f"\n{'='*60}")
+        print(f"完整生成日志 (generation_log.json)")
+        print(f"{'='*60}")
+        with open(gen_log_path, encoding="utf-8") as f:
+            gl = json.load(f)
+        print(json.dumps(gl, indent=2, ensure_ascii=False))
+
+    # Show input prompt
+    prompt_path = os.path.join(session_dir, "input_prompt.txt")
+    if os.path.isfile(prompt_path):
+        print(f"\n{'='*60}")
+        print(f"输入 Prompt")
+        print(f"{'='*60}")
+        with open(prompt_path, encoding="utf-8") as f:
+            print(f.read())
+
+    # List all files
+    print(f"\n{'='*60}")
+    print(f"所有输出文件")
+    print(f"{'='*60}")
+    for root, dirs, filenames in os.walk(session_dir):
+        for fn in sorted(filenames):
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, session_dir)
+            size = os.path.getsize(full)
+            size_str = f"{size/1024:.1f}KB" if size > 1024 else f"{size}B"
+            print(f"  {rel:45s} {size_str:>8s}")
+
+
 def register_subparser(sub):
     """Register the 'world-model' subcommand family."""
     p = sub.add_parser(
@@ -278,3 +479,17 @@ def register_subparser(sub):
     p_configure = wm_sub.add_parser("configure", help=_cli_txt("交互式配置", "Interactive configuration"))
     p_configure.add_argument("--workspace", "-w", help=_cli_txt("工作区路径", "Workspace path"))
     p_configure.set_defaults(func=cmd_world_model_configure)
+
+    # New: view command - list and view world model outputs
+    p_view = wm_sub.add_parser("view", help=_cli_txt("查看世界模型输出记录", "View world model output records"))
+    p_view.add_argument("session", nargs="?", help=_cli_txt("会话ID或部分名称", "Session ID or partial name"))
+    p_view.add_argument("--workspace", "-w", help=_cli_txt("工作区路径", "Workspace path"))
+    p_view.add_argument("--list", "-l", action="store_true", help=_cli_txt("列出所有会话", "List all sessions"))
+    p_view.add_argument("--detail", "-d", action="store_true", help=_cli_txt("显示完整记录", "Show full record"))
+    p_view.set_defaults(func=cmd_world_model_view)
+
+    # New: record command - show the full generation process log for a session
+    p_record = wm_sub.add_parser("record", help=_cli_txt("查看完整过程记录", "View full process record"))
+    p_record.add_argument("session", help=_cli_txt("会话ID或部分名称", "Session ID or partial name"))
+    p_record.add_argument("--workspace", "-w", help=_cli_txt("工作区路径", "Workspace path"))
+    p_record.set_defaults(func=cmd_world_model_record)

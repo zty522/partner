@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "bwa-mem2",
+  "description": "Next-generation BWA-MEM with improved speed",
+  "version": "latest",
+  "category": "alignment",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y bwa-mem2",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "bwa-mem2 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_bwa-mem2",
+      "analyze_with_bwa-mem2"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

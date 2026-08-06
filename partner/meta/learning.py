@@ -24,9 +24,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-LEARNING_DIR = os.path.expanduser("~/.partner/learning")
-GLOBAL_DB_PATH = os.path.expanduser("~/.partner/learning.db")
-HABITS_PATH = os.path.expanduser("~/.partner/habits.json")  # kept for backward compat, will be phased out
+from ..utils.workspace import get_learning_db_path, get_learning_dir, get_habits_path
+
+LEARNING_DIR = get_learning_dir()
+GLOBAL_DB_PATH = get_learning_db_path()
+HABITS_PATH = get_habits_path()  # kept for backward compat, will be phased out
 _habits_cache: dict[str, Any] | None = None
 _global_db_local = threading.local()
 
@@ -656,6 +658,143 @@ def format_growth_for_prompt(user_id: str = "default", max_events: int = 3) -> s
         category = str(ev.get("category") or "milestone")
         lines.append(f"- [{category}] {milestone}")
 
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ── Experience Stats (for self-evolution) ──────────────────────────
+
+def get_experience_stats() -> dict:
+    """Return aggregate stats: total, success rate, by agent, by output type.
+    
+    Delegates to evolution_db if available, otherwise computes inline.
+    """
+    try:
+        from ..evolution.evolution_db import get_experience_stats as _evo_stats
+        return _evo_stats()
+    except Exception:
+        pass
+    # Fallback: compute from learning DB directly
+    init_db()
+    db = _get_db()
+    total = db.execute("SELECT COUNT(*) AS c FROM experiences").fetchone()["c"]
+    successes = db.execute("SELECT COUNT(*) AS c FROM experiences WHERE success=1").fetchone()["c"]
+    by_agent = db.execute(
+        """SELECT agent_used, COUNT(*) AS cnt, SUM(success) AS ok
+           FROM experiences WHERE agent_used != ''
+           GROUP BY agent_used ORDER BY cnt DESC"""
+    ).fetchall()
+    by_output = db.execute(
+        """SELECT output_type, COUNT(*) AS cnt, SUM(success) AS ok
+           FROM experiences GROUP BY output_type ORDER BY cnt DESC"""
+    ).fetchall()
+    return {
+        "total": total,
+        "successes": successes,
+        "success_rate": round(successes / max(total, 1), 4),
+        "by_agent": [dict(r) for r in by_agent],
+        "by_output": [dict(r) for r in by_output],
+    }
+
+
+def get_experiences_by_task_type(task_keyword: str, limit: int = 50) -> list[dict]:
+    """Get experiences matching a task type keyword."""
+    init_db()
+    db = _get_db()
+    rows = db.execute(
+        "SELECT * FROM experiences WHERE user_message LIKE ? OR task_summary LIKE ? ORDER BY id DESC LIMIT ?",
+        (f"%{task_keyword}%", f"%{task_keyword}%", limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Growth Summary (for self-evolution) ─────────────────────────────
+
+def generate_growth_summary(days: int = 30) -> dict:
+    """Analyze recent growth events and produce a capability trend summary.
+    
+    Returns structured data about milestones by category, recent trends,
+    and areas of improvement/degradation.
+    """
+    init_db()
+    db = _get_db()
+    
+    # Count milestones by category in the last N days
+    rows = db.execute(
+        """SELECT category, COUNT(*) as cnt,
+                  MAX(created_at) as last_created
+           FROM growth
+           WHERE created_at >= datetime('now', ?)
+           GROUP BY category
+           ORDER BY cnt DESC""",
+        (f"-{days} days",),
+    ).fetchall()
+    
+    milestones_by_category = {r["category"]: {"count": r["cnt"], "last": r["last_created"]} for r in rows}
+    
+    # Total milestone count
+    total = db.execute(
+        "SELECT COUNT(*) as c FROM growth WHERE created_at >= datetime('now', ?)",
+        (f"-{days} days",),
+    ).fetchone()["c"]
+    
+    # Most recent 5 milestones
+    recent = db.execute(
+        "SELECT milestone, category, created_at FROM growth ORDER BY created_at DESC LIMIT 5"
+    ).fetchall()
+    
+    return {
+        "total_milestones": total,
+        "milestones_by_category": milestones_by_category,
+        "recent_milestones": [dict(r) for r in recent],
+        "period_days": days,
+    }
+
+
+def generate_capability_trend() -> str:
+    """Generate a natural-language capability trend description for prompt injection.
+    
+    Analyzes growth and experience data over time to show trends
+    like "文献综述成功率从 60% 提升到 85%".
+    """
+    # Count successes/failures by time periods (recent vs older)
+    init_db()
+    db = _get_db()
+    
+    # Recent 30 days
+    recent = db.execute(
+        """SELECT success, COUNT(*) as cnt FROM experiences
+           WHERE created_at >= datetime('now', '-30 days')
+           GROUP BY success"""
+    ).fetchall()
+    recent_map = {r["success"]: r["cnt"] for r in recent}
+    recent_total = sum(recent_map.values())
+    recent_ok = recent_map.get(1, 0)
+    recent_rate = recent_ok / max(recent_total, 1)
+    
+    # Older (30-60 days ago)
+    older = db.execute(
+        """SELECT success, COUNT(*) as cnt FROM experiences
+           WHERE created_at BETWEEN datetime('now', '-60 days') AND datetime('now', '-30 days')
+           GROUP BY success"""
+    ).fetchall()
+    older_map = {r["success"]: r["cnt"] for r in older}
+    older_total = sum(older_map.values())
+    older_ok = older_map.get(1, 0)
+    older_rate = older_ok / max(older_total, 1)
+    
+    # Growth events
+    growth_count = db.execute(
+        "SELECT COUNT(*) as c FROM growth WHERE created_at >= datetime('now', '-30 days')"
+    ).fetchone()["c"]
+    
+    lines = []
+    lines.append("## 能力趋势（基于历史数据）")
+    if recent_total >= 5:
+        direction = "提升" if recent_rate > older_rate else "下降" if recent_rate < older_rate else "持平"
+        lines.append(f"- 近 30 天任务成功率：{recent_rate:.0%}（{recent_total} 条），相比 30 天前 {older_rate:.0%}，趋势：{direction}")
+    if growth_count > 0:
+        lines.append(f"- 近 30 天积累 {growth_count} 个成长里程碑")
     lines.append("")
     return "\n".join(lines)
 

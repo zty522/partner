@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "deseq2",
+  "description": "Differential gene expression analysis",
+  "version": "latest",
+  "category": "rna_seq",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y r-deseq2",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "R -e 'library(DESeq2); print(\"OK\")' 2>&1 | tail -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_deseq2",
+      "analyze_with_deseq2"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

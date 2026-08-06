@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "msnbase",
+  "description": "Mass spectrometry data processing in R/Bioc",
+  "version": "latest",
+  "category": "proteomics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y r-msnbase",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "R -e 'library(MSnbase); print(\"OK\")' 2>&1 | tail -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_msnbase",
+      "analyze_with_msnbase"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "cloudwatch_agent",
+  "description": "AWS CloudWatch monitoring agent",
+  "version": "latest",
+  "category": "monitoring",
+  "domains": [
+    "ai_agents",
+    "monitoring"
+  ],
+  "install": {
+    "command": "pip install boto3",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import boto3; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_cloudwatch_agent",
+      "deploy_cloudwatch_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

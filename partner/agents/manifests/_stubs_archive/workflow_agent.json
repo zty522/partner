@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "workflow_agent",
+  "description": "Workflow orchestrator agent",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "ai_agents",
+    "general"
+  ],
+  "install": {
+    "command": "pip install",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_workflow_agent",
+      "deploy_workflow_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

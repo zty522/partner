@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "biotech_agent",
+  "description": "Biotechnology research and analysis agent",
+  "version": "latest",
+  "category": "domain_agents",
+  "domains": [
+    "ai_agents",
+    "domain agents"
+  ],
+  "install": {
+    "command": "pip install biopython",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import Bio; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_biotech_agent",
+      "deploy_biotech_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

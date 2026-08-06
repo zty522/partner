@@ -1,0 +1,119 @@
+{
+  "name": "cytobridge",
+  "version": "1.0.0",
+  "description": "CytoBridge — 单细胞轨迹推断 Agent，支持 PAGA、DPT、RNA velocity 等分析方法",
+  "capabilities": [
+    "single_cell",
+    "trajectory_inference",
+    "paga",
+    "dpt",
+    "rna_velocity",
+    "driver_gene_identification"
+  ],
+  "input_formats": [
+    "h5ad"
+  ],
+  "output_formats": [
+    "md",
+    "csv",
+    "png"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【数据分析】单细胞轨迹推断专用Agent。输入h5ad文件，自动完成：预处理→降维(UMAP)→PAGA/DPT轨迹推断→驱动基因→差异表达→HTML+MD双报告。自带LLM，只需传文件路径+简短任务描述，不要写长篇指令。预计耗时10-60分钟（取决于数据大小）。输出: analysis_report_zh.md, HTML报告, PNG图表, CSV表格。参数: input=h5ad路径 output=输出目录 question=简短描述",
+    "command": "/home/os/miniconda3/envs/cytobridge/bin/python",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/cytobridge_wrapper.py",
+      "--partner-output",
+      "{output}"
+    ],
+    "args": [
+      "--llm-base-url",
+      "{__llm_base_url__}",
+      "--llm-api-key",
+      "{__llm_api_key__}",
+      "--llm-model",
+      "deepseek-v4-pro",
+      "run",
+      "--question",
+      "{question}",
+      "--output",
+      "{output}",
+      "-d",
+      "{device}",
+      "{input}"
+    ],
+    "timeout": 14400,
+    "inject_llm_credentials": false
+  },
+  "timeout": 14400,
+  "health_check_cmd": "/home/os/miniconda3/envs/cytobridge/bin/python -m cytobridge_agent.cli --help",
+  "install_info": {
+    "method": "pip",
+    "package": "cytobridge-agent",
+    "description": "pip install cytobridge-agent"
+  },
+  "agent_profile": {
+    "type": "data_analysis",
+    "has_own_llm": true,
+    "needs_input_file": true,
+    "input_description": "h5ad 格式的单细胞数据文件（必需）",
+    "expected_outputs": [
+      {
+        "format": "md",
+        "description": "中文分析报告（analysis_report_zh.md）",
+        "typical_size": "10-50KB"
+      },
+      {
+        "format": "html",
+        "description": "交互式HTML报告（含图表）",
+        "typical_size": "1-10MB"
+      },
+      {
+        "format": "png",
+        "description": "UMAP图、轨迹图、热图、小提琴图等",
+        "typical_size": "100KB-2MB each"
+      },
+      {
+        "format": "csv",
+        "description": "差异表达基因表、驱动基因表",
+        "typical_size": "100KB-1MB"
+      },
+      {
+        "format": "h5ad",
+        "description": "预处理后的数据文件",
+        "typical_size": "50-500MB"
+      }
+    ],
+    "expected_runtime": {
+      "min_seconds": 300,
+      "max_seconds": 3600,
+      "typical_seconds": 1800
+    },
+    "task_constraints": {
+      "max_task_chars": 500,
+      "suitable_for": [
+        "单细胞轨迹推断（PAGA/DPT/RNA velocity）",
+        "差异表达分析",
+        "驱动基因鉴定",
+        "细胞分化路径分析"
+      ],
+      "not_suitable_for": [
+        "简单数据查询",
+        "文献检索",
+        "非单细胞数据"
+      ]
+    },
+    "param_convention": {
+      "use": [
+        "input",
+        "output",
+        "question"
+      ],
+      "do_not_use": [],
+      "note": "input 必须是真实存在的 h5ad 文件路径（禁止编造）。question 是简短的分析描述（1-2句话即可，不要写长篇执行指令）。agent 自带 LLM，会自己规划分析步骤。"
+    }
+  },
+  "is_agent": true
+}

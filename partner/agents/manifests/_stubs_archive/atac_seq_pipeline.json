@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "atac_seq_pipeline",
+  "description": "ATAC-seq processing pipeline",
+  "version": "latest",
+  "category": "epigenetics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y atac-seq-pipeline",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "atac-seq-pipeline --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_atac_seq_pipeline",
+      "analyze_with_atac_seq_pipeline"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "name": "bioinformatics",
+  "version": "1.0.0",
+  "description": "开源生物信息学工具集 —— 分子操作(RDKit)、序列分析(BioPython)、多序列比对(MUSCLE/MAFFT)、序列搜索(BLAST)。全部免费开源，无需 API Key。",
+  "capabilities": [
+    "molecule_analysis",
+    "molecular_fingerprint",
+    "molecular_similarity",
+    "sequence_translate",
+    "sequence_analysis",
+    "sequence_alignment",
+    "blast_search",
+    "ncbi_query"
+  ],
+  "input_formats": ["smiles", "fasta", "genbank", "sdf", "text"],
+  "output_formats": ["text", "fasta", "sdf", "json"],
+  "endpoint_type": "python_api",
+  "endpoint_config": {
+    "module": "partner.bioinformatics",
+    "function": "_dispatch",
+    "category": "specialized",
+    "description_for_planner": "开源生信工具集。提供分子操作(RDKit: SMILES验证/指纹/相似度/性质预测)、序列分析(BioPython: 翻译/GC含量/反向互补/格式转换/NCBI查询)、多序列比对(MUSCLE/MAFFT)、序列搜索(BLASTP/BLASTN)。参数: tool=molecule/sequence/alignment/blast, input=输入数据, op=操作类型。全部免费，不需要 API Key。",
+    "tool_map": {
+      "分子操作": "molecule",
+      "SMILES验证": "molecule",
+      "分子指纹": "molecule",
+      "分子相似度": "molecule",
+      "序列翻译": "sequence",
+      "GC含量": "sequence",
+      "多序列比对": "alignment",
+      "BLAST搜索": "blast"
+    }
+  },
+  "timeout": 300,
+  "health_check_cmd": "python3 -c \"from partner.bioinformatics import BioAdapter; a=BioAdapter(); t=a.list_tools(); exit(0 if t else 1)\"",
+  "install_info": {
+    "method": "pip",
+    "package": "biopython",
+    "source": "biopython>=1.83",
+    "description": "安装 BioPython (pip install biopython)。RDKit 需从 conda 安装 (conda install -c conda-forge rdkit)。CLI 工具 (BLAST/MUSCLE/MAFFT) 需从 bioconda 安装。"
+  },
+  "notes": "不需要任何 API Key。所有工具已在当前系统可用的：RDKit ✓, BioPython ✓, BLAST ✓, MUSCLE ✓, MAFFT ✓, seqkit ✓, samtools ✓"
+}

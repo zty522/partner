@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "bcftools",
+  "description": "Utilities for variant calling and manipulation of VCF/BCF",
+  "version": "latest",
+  "category": "variant_calling",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y bcftools",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "bcftools --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_bcftools",
+      "analyze_with_bcftools"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

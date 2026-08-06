@@ -230,17 +230,44 @@ def _json_from_llm(raw: str) -> Any:
     # Strip [ollama] prefix added by OllamaLiteAdapter before JSON parsing
     if text.startswith("[ollama]") or text.startswith("[ollama]\n"):
         text = text.split("\n", 1)[1].strip() if "\n" in text else text[len("[ollama]"):].strip()
+    # Strip markdown code block fences (json, plain, or no language)
     if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"^```(?:json|plain|text)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
+
+    # Aggressive extraction: find the outermost {…} or […] in the text
     start_obj = text.find("{")
     start_arr = text.find("[")
     starts = [x for x in (start_obj, start_arr) if x >= 0]
     if not starts:
+        # No { or [ found — try to find JSON-like content without braces
+        # (LLM sometimes outputs just a bare array like "step1", "step2")
         raise ValueError("no JSON object/array in planner output")
     start = min(starts)
-    end = text.rfind("}" if text[start] == "{" else "]")
-    if end <= start:
-        raise ValueError("incomplete JSON in planner output")
+
+    # Count brackets to find the matching close bracket
+    if text[start] == "{":
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == "{": depth += 1
+            elif text[i] == "}": depth -= 1
+            if depth == 0:
+                end = i
+                break
+        else:
+            raise ValueError("incomplete JSON object in planner output")
+    else:  # text[start] == "["
+        depth = 0
+        end = start
+        for i in range(start, len(text)):
+            if text[i] == "[": depth += 1
+            elif text[i] == "]": depth -= 1
+            if depth == 0:
+                end = i
+                break
+        else:
+            raise ValueError("incomplete JSON array in planner output")
+
     json_text = text[start:end + 1]
 
     # Attempt 1: standard parse
@@ -251,6 +278,16 @@ def _json_from_llm(raw: str) -> Any:
 
     # Attempt 2: fix common LLM JSON errors with regex + retry
     fixed = _repair_json_commas(json_text)
+    # Also repair: replace single quotes with double quotes (but preserve internal apostrophes)
+    if "'" in fixed and '"' not in fixed[:100]:
+        # Only fix single quotes if there are no double quotes yet (avoid breaking mixed use)
+        fixed = fixed.replace("'", '"')
+    # Fix: True/False/None to true/false/null
+    fixed = re.sub(r'\bTrue\b', 'true', fixed)
+    fixed = re.sub(r'\bFalse\b', 'false', fixed)
+    fixed = re.sub(r'\bNone\b', 'null', fixed)
+    # Fix: trailing commas before ] or }
+    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
     try:
         return json.loads(fixed)
     except json.JSONDecodeError:
@@ -266,6 +303,31 @@ def _json_from_llm(raw: str) -> Any:
             return json5_module.loads(fixed)
         except Exception:
             pass
+
+    # Attempt 4: try to salvage a partial JSON by finding the longest valid prefix
+    try:
+        # Try each closing bracket position to find the longest valid JSON
+        for salvage_end in range(end, start, -1):
+            candidate = json_text[:salvage_end + 1]
+            # Balance brackets
+            if candidate.count("{") != candidate.count("}"):
+                continue
+            if candidate.count("[") != candidate.count("]"):
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        # Final attempt: wrap bare content in {"plan": [...]}
+        # Some LLMs output just the array items without proper wrapping
+        if text.startswith("[") or text.strip().startswith("["):
+            try:
+                bare_arr = json_text if text[start] == "[" else "[" + json_text + "]"
+                return {"plan": json.loads(bare_arr)}
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # All attempts exhausted
     raise ValueError(
@@ -698,8 +760,15 @@ class MicroPlanner:
 - 如果任务只需要获取外部数据（天气、汇率、股价等），优先使用 atomic_http_get 而不是 call_agent_skill。
 - 如果输入/依赖结果是 JSON 且 expected_artifacts 要求结构化表格文件，使用 smart_llm_structured_action 处理数据后用 atomic_write_artifact 写入文件；不要用 SmartEvent 做 JSON→表格转换。
 - 如果 expected_artifacts 指定了文件扩展名或多个可选扩展名（例如 *.csv, *.xlsx），生成文件的 filename/format 必须满足这些扩展名；不要用 Markdown 文件替代 CSV/XLS/XLSX 等目标格式。
-- 如果用户目标包含明确的数量/时段/范围要求，表格生成步骤必须用 min_rows 或其他本地参数声明最低完整性要求；外部数据源本身也必须能覆盖该范围。
-- 如果最近 Harness 结果里出现 table completeness check failed（rows < min_rows），不要重复同一个数据源/同一 rows_path 计划；必须改用能覆盖范围的数据源，或写入目标格式的明确失败/部分结果说明，不能声称已完成。
+|- 如果用户目标包含明确的数量/时段/范围要求，表格生成步骤必须用 min_rows 或其他本地参数声明最低完整性要求；外部数据源本身也必须能覆盖该范围。
+|- 如果最近 Harness 结果里出现 table completeness check failed（rows < min_rows），不要重复同一个数据源/同一 rows_path 计划；必须改用能覆盖范围的数据源，或写入目标格式的明确失败/部分结果说明，不能声称已完成。
+|- 【重要】如果用户目标是"学习方法/方法论"(如学习某个模型的设计思路、改进策略、技术路线等)，不要做工具接入(manifest生成、安装、测试)。应该做：
+   1) web_search / github_search 搜索论文、技术博客、架构分析
+   2) summarize 总结技术方法、架构创新、改进思路
+   3) smart_llm_structured_action 提取可借鉴的方法论规则和经验教训
+   4) atomic_write_artifact 将学到的规则写入 evolution_rules 或学习报告
+   5) 最终产出是"方法论学习报告+进化规则"，不是"工具manifest+安装"
+   判断标准：如果目标包含"学习"、"方法"、"思路"、"分析"、"怎么改进"、"架构"、"设计"等词，就是方法论学习模式。
 - 不要为读取文件、列目录、HTTP GET、写文件、拼装结果调用 LLM。
 - atomic_http_get 的 url 参数必须包含 https:// 协议头。wttr.in 不支持 num_of_days 参数；如需指定天数，使用 Open-Meteo API（api.open-meteo.com）的 forecast_days=N 参数。
 - 如果目标要求生成自然语言内容、复杂判断或下一步决策，才使用 smart_llm_structured_action。
@@ -837,10 +906,28 @@ class PlanExecutor:
                 if all(dep in results for dep in step.depends_on)
             ]
             if not ready:
-                raise RuntimeError("plan has unresolved or cyclic dependencies")
+                # Attempt to salvage: treat steps with unresolvable deps as ready
+                salvaged = []
+                for step in pending.values():
+                    missing_deps = [d for d in step.depends_on if d not in results and d not in pending]
+                    if missing_deps:
+                        logger.warning("[PLAN_EXECUTOR] step '%s' has unresolved deps %s — will skip them", step.id, missing_deps)
+                        step.depends_on = [d for d in step.depends_on if d not in missing_deps]
+                        salvaged.append(step)
+                if salvaged:
+                    ready = salvaged
+                    logger.info("[PLAN_EXECUTOR] salvaged %d step(s) by dropping unresolvable dependencies", len(salvaged))
+                else:
+                    # Still stuck — likely a true cyclic dependency
+                    pending_ids = list(pending.keys())
+                    logger.error("[PLAN_EXECUTOR] cyclic dependency detected among steps: %s — removing last step to break cycle", pending_ids)
+                    # Remove the last pending step to break the cycle
+                    dead_step = pending.pop(pending_ids[-1])
+                    logger.info("[PLAN_EXECUTOR] dropped step '%s' to resolve cycle, continuing with %d remaining", dead_step.id, len(pending))
+                    continue
             if len(ready) > 1:
                 logger.info(
-                    "[HARNESS_PARALLEL] running %s ready steps for title=%s: %s",
+                    "[HARNESS_PARALLEL] 🚀 running %s steps IN PARALLEL for title=%s: %s",
                     len(ready),
                     ctx.title,
                     [step.id for step in ready],
@@ -866,7 +953,14 @@ class PlanExecutor:
                     ],
                     "total_steps": total_steps,
                 })
+            _batch_start = time.time()
             batch = await asyncio.gather(*(self._run_step(ctx, step, results, step_ordinals.get(step.id, 0), total_steps) for step in ready))
+            _batch_elapsed = time.time() - _batch_start
+            if len(ready) > 1:
+                logger.info(
+                    "[HARNESS_PARALLEL] ✅ %d parallel steps completed in %.1fs",
+                    len(ready), _batch_elapsed,
+                )
             for step, result, kind in batch:
                 results[step.id] = result
                 pending.pop(step.id, None)
@@ -1062,26 +1156,75 @@ class PlanExecutor:
                             })
         try:
             # --- Retry logic for transient failures ---
-            MAX_STEP_RETRIES = 2
+            MAX_STEP_RETRIES = 3
             attempt = 0
             last_exc = None
             result = None
             while attempt <= MAX_STEP_RETRIES:
                 try:
+                    # ── [SANDBOX] 对代码生成类步骤做沙箱预检 ──
+                    _sandbox_skip = False
+                    _code_events = {"smart_llm_structured_action", "generate_code", "execute_python",
+                                    "run_python", "atomic_run_python"}
+                    if step.event_type in _code_events:
+                        _instruction = str(params.get("instruction", "") or params.get("task", "") or params.get("code", "") or "")
+                        # 如果 instruction 包含 Python 代码特征，跑沙箱验证
+                        if any(kw in _instruction for kw in ("python", "def ", "import ", "class ", "matplotlib", "plt.",
+                                                              "subprocess", "open(", "with open", "numpy", "np.")):
+                            try:
+                                from partner.sandbox.service import SandboxService as _SBX
+                                if not hasattr(ctx, '_sbx_service'):
+                                    ctx._sbx_service = _SBX(workspace=getattr(ctx, 'working_dir', '/tmp'))
+                                # 提取代码块
+                                _code_lines = []
+                                _in_code = False
+                                for _line in _instruction.split('\n'):
+                                    if _line.strip().startswith('```'):
+                                        _in_code = not _in_code
+                                        continue
+                                    if _in_code:
+                                        _code_lines.append(_line)
+                                _code = '\n'.join(_code_lines) or _instruction
+                                if len(_code) > 20:
+                                    _sbx_result = await ctx._sbx_service.validate_code(_code, f"step_{step.id}.py")
+                                    if not _sbx_result.success:
+                                        _err_msg = _sbx_result.error_detail or _sbx_result.stderr or "沙箱预检失败"
+                                        logger.warning("[SANDBOX] Step %s (%s) 沙箱预检失败: %s",
+                                                        step.id, step.event_type, _err_msg[:100])
+                                        # 记录但不阻止执行（soft check）
+                                        if ctx.task_instance:
+                                            ctx.task_instance.append_log("sandbox_precheck_warning", {
+                                                "step_id": step.id,
+                                                "event_type": step.event_type,
+                                                "error": _err_msg[:200],
+                                            })
+                                    else:
+                                        logger.info("[SANDBOX] Step %s (%s) 沙箱预检通过 (%.1fms)",
+                                                     step.id, step.event_type, _sbx_result.duration * 1000)
+                            except ImportError:
+                                pass  # sandbox 模块不可用时跳过
+                            except Exception as _sbx_e:
+                                logger.debug("[SANDBOX] Step %s 沙箱预检异常: %s", step.id, _sbx_e)
+                    # ── [SANDBOX] 结束 ──
+
                     result = await _maybe_await(spec.handler(ctx, params))
                     if isinstance(result, dict) and result.get("ok") is False and attempt < MAX_STEP_RETRIES:
-                        # Check if the error is retryable
+                        # Retry ALL step failures (up to MAX_STEP_RETRIES retries)
                         error_str = str(result.get("error", ""))
-                        retryable_signals = ["timeout", "time out", "connection", "refused",
-                                             "temporarily", "rate limit", "too many",
-                                             "resource temporarily", "try again", "503", "502"]
-                        if any(s in error_str.lower() for s in retryable_signals):
-                            attempt += 1
-                            wait = 2 ** attempt
-                            logger.info("[RETRY step %s/%s] attempt %d failed (%s), retrying in %ds",
-                                        ordinal or "?", total_steps, attempt, error_str, wait)
-                            await asyncio.sleep(wait)
-                            continue
+                        attempt += 1
+                        wait = 2 ** attempt
+                        logger.info("[RETRY step %s/%s] attempt %d/%d failed (%s), retrying in %ds",
+                                    ordinal or "?", total_steps, attempt, MAX_STEP_RETRIES, error_str[:100], wait)
+                        if ctx.task_instance:
+                            ctx.task_instance.append_log("step_retry", {
+                                "step_id": step.id,
+                                "attempt": attempt,
+                                "max_retries": MAX_STEP_RETRIES,
+                                "error": error_str[:200],
+                                "wait_sec": wait,
+                            })
+                        await asyncio.sleep(wait)
+                        continue
                     last_exc = None
                     break
                 except (ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
@@ -1577,6 +1720,27 @@ async def run_harness_plan(
         total_llm_calls += exec_llm_calls
         fallback_paths = _collect_fallback_paths(results)
         parsed = _latest_structured_result(results) or _compose_parsed_from_results(ctx, results)
+        
+        # ── Goal-based stop detection ──
+        try:
+            from ..goal.acceptance_criteria import _load_goals_yaml
+            goals_cfg = _load_goals_yaml(workspace).get("harness_goals", {})
+            if goals_cfg.get("enabled", True):
+                max_timeout = int(goals_cfg.get("max_total_timeout", 600))
+                _start = getattr(ctx, "_harness_start_time", 0)
+                if _start == 0:
+                    _start = __import__("time").time()
+                    ctx._harness_start_time = _start
+                elapsed = __import__("time").time() - _start
+                if elapsed > max_timeout:
+                    logger.warning("[HARNESS] timeout after %.1fs (limit %ds)", elapsed, max_timeout)
+                    return HarnessResult(False, {
+                        "action": "timeout", "step_done": "执行超时",
+                        "findings": [f"总执行时间超过 {max_timeout}s"],
+                    }, micro_plan.plan, results, reason=f"timeout after {elapsed:.0f}s", llm_calls=total_llm_calls, stalled_steps=stalled)
+        except Exception as _ge:
+            logger.debug("[HARNESS] goal check failed: %s", _ge)
+        
         validation = validator.validate(task)
         # If any step reported file_not_found, override validation to failed
         # so the pipeline stops and reports the missing file to the user.
@@ -1942,7 +2106,12 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
     # Before dispatching to the agent, check if referenced input files exist.
     # This prevents the agent from running and returning a misleading error.
     def _is_path_like(s: str) -> bool:
-        """Heuristic: real file paths are single-line, don't contain markdown/diff syntax."""
+        """Heuristic: real file paths are single-line, contain path separators
+        or known extensions, and don't contain markdown/diff syntax.
+        
+        Pure natural-language strings (Chinese, English sentences without
+        path structure) are rejected — they are descriptions, not file paths.
+        """
         if not s:
             return False
         if "\n" in s or "\\n" in s:
@@ -1953,6 +2122,15 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
         for tok in _non_path_tokens:
             if tok in s:
                 return False
+        # ── Positive path indicators: must have at least one ──
+        # A real file path contains a path separator OR a file extension.
+        # Pure natural-language strings (e.g. "蛋白质口袋分子生成方法综述")
+        # have neither and should be treated as descriptions, not paths.
+        _has_slash = "/" in s or "\\" in s
+        _has_ext = bool(re.search(r'\.\w{1,10}$', s))  # .h5ad, .pdf, .md, .py, etc.
+        _is_abs_windows = bool(re.match(r'^[a-zA-Z]:', s))
+        if not (_has_slash or _has_ext or _is_abs_windows):
+            return False
         return True
 
     def _extract_h5ad_path(text: str, require_exists: bool = False) -> str:
@@ -1991,6 +2169,19 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
         _nested = params.get("parameters")
         if isinstance(_nested, dict):
             input_file = str(_nested.get("input") or _nested.get("file") or _nested.get("data") or _nested.get("file_path") or "").strip()
+    # ── Resolve .h5ad file paths to real locations ──
+    # Users often write /data/xxx.h5ad but the actual file may be at
+    # /mnt/e/work/data/xxx.h5ad or another searchable location.
+    if input_file and input_file.endswith(".h5ad") and not os.path.exists(input_file):
+        _resolved = _extract_h5ad_path(input_file, require_exists=True)
+        if _resolved and _resolved != input_file:
+            logger.info("[HARNESS] resolved h5ad path: %s → %s", input_file, _resolved)
+            input_file = _resolved
+            # Update params so the resolved path flows to agent dispatch
+            params["input"] = input_file
+            _nested = params.get("parameters")
+            if isinstance(_nested, dict):
+                _nested["input"] = input_file
     # If the extracted input is not path-like (e.g. step3 result contains
     # full diff/markdown text instead of a clean path), try to extract a
     # real .h5ad path from the text content.
@@ -2078,6 +2269,7 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
             task_instance=ctx.task_instance,
             allow_web=bool(params.get("allow_web", False)),
             agent_params=agent_params,
+            progress_callback=ctx.progress_callback,
         )
     except Exception as exc:
         logger.warning("[HARNESS] call_agent_skill failed agent=%s task=%s error=%s", agent, task[:80], exc)
@@ -2167,6 +2359,45 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
             "error": f"Agent '{agent}' reported an error: {content[:500]}",
             "_error_type": error_type,  # For downstream root cause diagnosis
         }
+    # ── File sharing: ensure agent outputs are in shared output directory ──
+    _output_dir = str(params.get("output") or params.get("output_dir") or "").strip()
+    if _output_dir and content:
+        try:
+            import shutil, glob as _glob
+            os.makedirs(_output_dir, exist_ok=True)
+            _shared_files = []
+            # Scan task working directory for generated files (SDF, SMI, PNG, PDF, CSV, etc.)
+            _task_dir = ctx.task_instance.working_dir if ctx.task_instance else ""
+            if _task_dir and os.path.isdir(_task_dir):
+                _exts = (".sdf", ".smi", ".csv", ".tsv", ".png", ".jpg", ".pdf", ".json", ".md", ".txt", ".html")
+                for _ext in _exts:
+                    for _fp in _glob.glob(os.path.join(_task_dir, "**", f"*{_ext}"), recursive=True):
+                        if "/gen_results/" in _fp or "/output/" in _fp or "/results/" in _fp or _fp.endswith(".sdf") or _fp.endswith(".smi"):
+                            _dest = os.path.join(_output_dir, os.path.basename(_fp))
+                            if not os.path.exists(_dest):
+                                shutil.copy2(_fp, _dest)
+                            _shared_files.append(_dest)
+                # Also copy entire gen_results directory if it exists
+                _gen_dir = os.path.join(_task_dir, "gen_results")
+                if os.path.isdir(_gen_dir):
+                    _gen_dest = os.path.join(_output_dir, "gen_results")
+                    if not os.path.exists(_gen_dest):
+                        shutil.copytree(_gen_dir, _gen_dest, dirs_exist_ok=True)
+                    _shared_files.append(_gen_dest)
+            if _shared_files:
+                _file_list = "\n".join(f"  {f}" for f in _shared_files[:10])
+                content = content + f"\n\n【共享输出目录】{_output_dir}\n{_file_list}"
+                if len(_shared_files) > 10:
+                    content += f"\n  ... 共 {len(_shared_files)} 个文件"
+                logger.info("[HARNESS] shared %d files from agent '%s' to %s", len(_shared_files), agent, _output_dir)
+                if ctx.task_instance:
+                    ctx.task_instance.append_log("agent_output_shared", {
+                        "agent": agent,
+                        "output_dir": _output_dir,
+                        "file_count": len(_shared_files),
+                    })
+        except Exception as _share_exc:
+            logger.debug("[HARNESS] file sharing failed for agent '%s': %s", agent, _share_exc)
     return {
         "ok": True,
         "agent": agent,
@@ -3541,6 +3772,9 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
     agent_params = {k: v for k, v in params.items() if k not in ("agent", "task", "query", "user_request", "allow_web", "prompt", "instruction")}
 
     try:
+        import time as _ws_time
+        _ws_start = _ws_time.time()
+        logger.info("[WEB_SEARCH] 开始搜索: %s", task[:80])
         from ..skills.external_agent_skills import execute_agent_task
         result = await execute_agent_task(
             workspace=ctx.workspace,
@@ -3549,7 +3783,14 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
             task_instance=ctx.task_instance,
             allow_web=bool(params.get("allow_web", event_name == "web_search")),
             agent_params=agent_params,
+            progress_callback=ctx.progress_callback,
         )
+
+        _ws_elapsed = _ws_time.time() - _ws_start
+        if result.ok:
+            logger.info("[WEB_SEARCH] 完成: %.2fs, query=%s", _ws_elapsed, task[:60])
+        else:
+            logger.warning("[WEB_SEARCH] 失败 (%.2fs): %s - error: %s", _ws_elapsed, task[:60], result.error)
 
         if not result.ok:
             # ── web_search failure: record habit + auto-fallback to generate_code ──
@@ -3567,6 +3808,7 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
                 task = "写一个 Python 脚本完成以下任务（不要搜索，直接编程）：\n" + task
                 agent_params["prompt"] = task
                 try:
+                    _gc_start = _ws_time.time()
                     from ..skills.external_agent_skills import execute_agent_task
                     result = await execute_agent_task(
                         workspace=ctx.workspace,
@@ -3575,11 +3817,17 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
                         task_instance=ctx.task_instance,
                         allow_web=False,
                         agent_params=agent_params,
-                    )
+                        progress_callback=ctx.progress_callback,
+                                )
                 except Exception as _fe:
                     logger.warning("[HARNESS] generate_code fallback also failed: %s", _fe)
                     return {"ok": False, "skill": agent_name,
                             "error": f"web_search failed, generate_code fallback also failed: {_fe}"}
+                _gc_elapsed = _ws_time.time() - _gc_start
+                if result.ok:
+                    logger.info("[WEB_SEARCH] generate_code fallback OK: %.2fs, query=%s", _gc_elapsed, task[:60])
+                else:
+                    logger.warning("[WEB_SEARCH] generate_code fallback 失败 (%.2fs): %s - error: %s", _gc_elapsed, task[:60], result.error)
                 if not result.ok:
                     return {"ok": False, "skill": agent_name,
                             "error": f"web_search failed, generate_code fallback: {result.error}"}
@@ -4134,6 +4382,43 @@ def default_registry() -> EventRegistry:
     registry.register(HarnessEventSpec("create_diagram", "atomic", "生成图表/流程图/架构图。参数: task, diagram_type, description。生成的Python绘图代码必须包含中文字体设置：import matplotlib; matplotlib.rcParams['font.sans-serif']=['WenQuanYi Zen Hei','SimHei','DejaVu Sans']; matplotlib.rcParams['axes.unicode_minus']=False", _agent_event_handler, external_call=True, execution_method="agent"))
 
     # Execution & Operations
+    
+    # execute_code — run Python code directly (replaces agent calls for computation)
+    def _local_execute_code(ctx: HarnessContext, params: JsonDict) -> JsonDict:
+        """Execute Python code in a subprocess. Saves code to temp file, runs it, returns output."""
+        import tempfile, subprocess as sp, os as _os
+        code = params.get("code", "") or params.get("task", "")
+        if not code:
+            return {"ok": False, "error": "No code provided"}
+        
+        workdir = params.get("workdir", "") or ctx.working_dir or "/tmp"
+        _os.makedirs(workdir, exist_ok=True)
+        
+        # Write code to temp file
+        script_path = _os.path.join(workdir, "_execute_code.py")
+        with open(script_path, "w") as f:
+            f.write(code)
+        
+        try:
+            r = sp.run(["python3", script_path], capture_output=True, text=True, 
+                       timeout=params.get("timeout", 300), cwd=workdir)
+            ok = r.returncode == 0
+            return {
+                "ok": ok,
+                "stdout": r.stdout[-5000:] if r.stdout else "",
+                "stderr": r.stderr[-2000:] if r.stderr else "",
+                "exit_code": r.returncode,
+                "script_path": script_path,
+            }
+        except sp.TimeoutExpired:
+            return {"ok": False, "error": "Code execution timed out"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    
+    registry.register(HarnessEventSpec("execute_code", "atomic", 
+        "执行 Python 代码并返回结果。参数: code (Python源码), timeout, workdir。用于分子生成、性质计算、数据分析等可直接用Python完成的科学计算任务。优先于 call_agent_skill 使用。",
+        _local_execute_code, execution_method="local"))
+    
     registry.register(HarnessEventSpec("run_command", "atomic", "执行系统命令或脚本。参数: command, timeout, workdir", _local_run_command, execution_method="local"))
     registry.register(HarnessEventSpec("send_email", "atomic", "发送邮件（占位，需配置 SMTP）。参数: to, subject, body", _llm_event_handler, execution_method="local"))
     registry.register(HarnessEventSpec("post_message", "atomic", "发送消息到指定渠道。参数: channel, message", _llm_event_handler, execution_method="local"))
@@ -4152,6 +4437,25 @@ def default_registry() -> EventRegistry:
     registry.register(HarnessEventSpec("check_quality", "atomic", "用 LLM 检查内容质量。参数: content, criteria", _llm_event_handler, execution_method="llm"))
     registry.register(HarnessEventSpec("audit", "atomic", "审计执行过程完整性和合规性。参数: data, logs", _llm_event_handler, execution_method="llm"))
     registry.register(HarnessEventSpec("compare", "atomic", "对比两个数据源或文件。参数: source_a, source_b, aspects", _llm_event_handler, execution_method="llm"))
+
+    # ── Partner v2.0 — 52 个扩展 Event ──
+    # 感知/操控/浏览器/多媒体/视频/多模态/外循环/滚动规划/Loop Engineering
+    try:
+        from ..v2 import get_all_events as _v2_get_all_events
+        for _v2_name, _v2_desc, _v2_exec, _v2_handler, _v2_kw in _v2_get_all_events():
+            registry.register(HarnessEventSpec(
+                name=_v2_name,
+                kind="atomic",
+                description=_v2_desc,
+                handler=_v2_handler,
+                execution_method=_v2_exec,
+                **_v2_kw,
+            ))
+        logger.info("[V2] Registered 52 Partner v2.0 events")
+    except ImportError as _v2_ie:
+        logger.warning("[V2] Partner v2.0 module not available: %s", _v2_ie)
+    except Exception as _v2_e:
+        logger.error("[V2] Failed to register v2 events: %s", _v2_e)
 
     _DEFAULT_REGISTRY = registry
     return registry

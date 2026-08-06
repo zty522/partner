@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pcangsd",
+  "description": "PCA for NGS data with population structure",
+  "version": "latest",
+  "category": "population_genetics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y pcangsd",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "pcangsd --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pcangsd",
+      "analyze_with_pcangsd"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

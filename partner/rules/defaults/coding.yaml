@@ -1,0 +1,68 @@
+# Partner Global Default Rules
+# These apply to ALL Partner instances unless overridden by project or personal rules.
+# Format: YAML list of rule objects
+#
+# Rule fields:
+#   id: unique identifier
+#   category: constraint | preference | convention | prohibition
+#   statement: human-readable rule text
+#   applies_to: list of tools/modules (empty = all)
+#   priority: 1 (highest) to 10 (lowest)
+#   enabled: true | false
+
+rules:
+  - id: "global-safety-01"
+    category: prohibition
+    statement: NEVER execute 'rm -rf' without explicit user confirmation
+    applies_to: ["terminal"]
+    priority: 1
+    enabled: true
+
+  - id: "global-safety-02"
+    category: prohibition
+    statement: NEVER modify files outside the workspace or project directories
+    applies_to: ["file_write", "file_patch"]
+    priority: 1
+    enabled: true
+
+  - id: "global-code-01"
+    category: constraint
+    statement: All Python code must pass syntax check (py_compile) before being considered complete
+    applies_to: ["code_execution"]
+    priority: 2
+    enabled: true
+
+  - id: "global-code-02"
+    category: convention
+    statement: Use type hints in all new Python functions and methods
+    applies_to: ["code_generation"]
+    priority: 7
+    enabled: true
+
+  - id: "global-research-01"
+    category: constraint
+    statement: Verify external tool outputs with at least one secondary check before presenting results to the user
+    applies_to: ["research", "data_analysis"]
+    priority: 3
+    enabled: true
+
+  - id: "global-research-02"
+    category: preference
+    statement: Prefer real execution evidence (command outputs, file sizes) over summary reports
+    applies_to: ["report_generation"]
+    priority: 4
+    enabled: true
+
+  - id: "global-evolution-01"
+    category: convention
+    statement: After any non-trivial fix or workflow discovery, save the approach as a skill
+    applies_to: ["self_evolution"]
+    priority: 5
+    enabled: true
+
+  - id: "global-evolution-02"
+    category: constraint
+    statement: Fast-path evolution (skills, memory, prompts) must be attempted before escalating to slow-path (model fine-tuning)
+    applies_to: ["evolution_carrier"]
+    priority: 3
+    enabled: true

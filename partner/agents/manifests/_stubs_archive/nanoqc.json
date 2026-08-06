@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "nanoqc",
+  "description": "Quality control for long-read sequencing",
+  "version": "latest",
+  "category": "quality_control",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y nanoqc",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "nanoqc --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_nanoqc",
+      "analyze_with_nanoqc"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

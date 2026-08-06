@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "soapdenovo2",
+  "description": "De novo short-read assembler",
+  "version": "latest",
+  "category": "assembly",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y soapdenovo2",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "SOAPdenovo-63mer 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_soapdenovo2",
+      "analyze_with_soapdenovo2"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "raxml_ng",
+  "description": "Maximum-likelihood phylogenetic inference",
+  "version": "latest",
+  "category": "phylogeny",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y raxml-ng",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "raxml-ng --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_raxml_ng",
+      "analyze_with_raxml_ng"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

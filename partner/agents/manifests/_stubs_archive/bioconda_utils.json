@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "bioconda_utils",
+  "description": "Bioconda utility for package management",
+  "version": "latest",
+  "category": "general",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y bioconda-utils",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "bioconda-utils --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_bioconda_utils",
+      "analyze_with_bioconda_utils"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

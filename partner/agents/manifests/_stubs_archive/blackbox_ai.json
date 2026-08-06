@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "blackbox_ai",
+  "description": "Blackbox AI code agent",
+  "version": "latest",
+  "category": "code_agents",
+  "domains": [
+    "ai_agents",
+    "code agents"
+  ],
+  "install": {
+    "command": "pip install blackbox",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import blackbox; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_blackbox_ai",
+      "deploy_blackbox_ai"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

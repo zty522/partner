@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "fastq_quality_filter",
+  "description": "FASTQ quality filtering",
+  "version": "latest",
+  "category": "quality_control",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y fastx_toolkit",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "fastq_quality_filter --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_fastq_quality_filter",
+      "analyze_with_fastq_quality_filter"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

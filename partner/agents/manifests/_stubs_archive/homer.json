@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "homer",
+  "description": "ChIP-seq peak finding and motif discovery",
+  "version": "latest",
+  "category": "epigenetics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y homer",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "findPeaks --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_homer",
+      "analyze_with_homer"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

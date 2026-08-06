@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "lra",
+  "description": "Long-read aligner for third-generation sequencing",
+  "version": "latest",
+  "category": "alignment",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y lra",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "lra 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_lra",
+      "analyze_with_lra"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

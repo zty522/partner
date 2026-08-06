@@ -1,0 +1,15 @@
+{
+  "name": "bionemo",
+  "version": "1.0.0",
+  "description": "NVIDIA BioNeMo \u79d1\u5b66\u80fd\u529b\u5e73\u53f0 (stub)",
+  "endpoint_type": "python",
+  "capabilities": [
+    "molecular_generation",
+    "protein_structure"
+  ],
+  "endpoint_config": {
+    "module": "partner.bioscience.bionemo_stub",
+    "function": "execute",
+    "category": "specialized"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pfam_scan",
+  "description": "Pfam domain annotation",
+  "version": "latest",
+  "category": "annotation",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y pfam_scan",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "pfam_scan.pl --help 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_pfam_scan",
+      "analyze_with_pfam_scan"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

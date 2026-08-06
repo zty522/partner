@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "hr_agent",
+  "description": "HR recruitment and onboarding agent",
+  "version": "latest",
+  "category": "domain_agents",
+  "domains": [
+    "ai_agents",
+    "domain agents"
+  ],
+  "install": {
+    "command": "pip install",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_hr_agent",
+      "deploy_hr_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

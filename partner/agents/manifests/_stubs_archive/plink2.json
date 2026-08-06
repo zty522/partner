@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "plink2",
+  "description": "Whole genome association analysis tool",
+  "version": "latest",
+  "category": "population_genetics",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y plink2",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "plink2 --help 2>&1 | head -5",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_plink2",
+      "analyze_with_plink2"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

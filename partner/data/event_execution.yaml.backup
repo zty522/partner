@@ -1,0 +1,34 @@
+# Event execution method configuration
+# Methods: agent, llm, local
+events:
+  web_fetch: local
+  web_search: agent
+  read_file: local
+  query_api: local
+  list_directory: local
+  extract: llm
+  summarize: agent
+  analyze: agent
+  transform: local
+  filter: local
+  sort: local
+  generate_text: agent
+  generate_code: agent
+  write_report: agent
+  create_diagram: agent
+  run_command: local
+  send_email: local
+  post_message: local
+  create_file: local
+  download_file: local
+  if_condition: llm
+  switch: llm
+  loop: llm
+  wait: local
+  retry: local
+  validate: llm
+  check_quality: llm
+  audit: llm
+  compare: llm
+  call_agent_skill: agent
+  smart_llm_structured_action: llm

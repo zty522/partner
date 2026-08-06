@@ -1,0 +1,51 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "pulumi_agent",
+  "description": "Pulumi cloud infrastructure agent",
+  "version": "latest",
+  "category": "automation",
+  "domains": [
+    "ai_agents",
+    "automation"
+  ],
+  "install": {
+    "command": "pip install pulumi",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "python -c 'import pulumi; print(\"OK\")'",
+    "expected_output": "OK"
+  },
+  "capabilities": {
+    "actions": [
+      "run_pulumi_agent",
+      "deploy_pulumi_agent"
+    ],
+    "input_formats": [
+      "text",
+      "json",
+      "yaml"
+    ],
+    "output_formats": [
+      "text",
+      "json",
+      "markdown"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 300,
+    "memory_gb": 2
+  },
+  "config": {
+    "model": {
+      "type": "str",
+      "default": "gpt-4o"
+    },
+    "temperature": {
+      "type": "float",
+      "default": 0.7
+    }
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "manifest_version": "1.0.0",
+  "name": "vardict",
+  "description": "Variant detection in targeted sequencing",
+  "version": "latest",
+  "category": "variant_calling",
+  "domains": [
+    "bioinformatics"
+  ],
+  "install": {
+    "command": "conda install -y vardict",
+    "requires_sudo": false,
+    "dependencies": []
+  },
+  "test": {
+    "command": "VarDict 2>&1 | head -3",
+    "expected_output": null
+  },
+  "capabilities": {
+    "actions": [
+      "run_vardict",
+      "analyze_with_vardict"
+    ],
+    "input_formats": [
+      "fasta",
+      "fastq",
+      "bam",
+      "vcf",
+      "gff"
+    ],
+    "output_formats": [
+      "tsv",
+      "csv",
+      "json",
+      "html"
+    ]
+  },
+  "execution": {
+    "parallel_safe": true,
+    "timeout": 3600,
+    "memory_gb": 4
+  },
+  "config": {
+    "threads": {
+      "type": "int",
+      "default": 4
+    },
+    "verbose": {
+      "type": "bool",
+      "default": false
+    }
+  }
+}

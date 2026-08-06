@@ -30,7 +30,7 @@ from ..dialogue.conversation import ConversationEngine
 
 from ..mind import (
     init_executor,
-    report, cron_tick,
+    report,
 )
 
 
@@ -164,7 +164,7 @@ class Partner:
             print("⚠️  Detected previous crash. Recovering...")
             self._recover()
 
-        self.state.heartbeat(status="idle")
+        self.state.heartbeat(status="")
         save_partner_config_data(self.workspace, asdict(self.config))
         print("✅ Partner is running.")
 
@@ -179,7 +179,7 @@ class Partner:
                 except Exception:
                     pass
 
-        self._current_status = "idle"
+        self._current_status = ""
         t = threading.Thread(target=_background_heartbeat, daemon=True)
         t.start()
 
@@ -205,8 +205,8 @@ class Partner:
         except Exception:
             pass
 
-        self.state.heartbeat(status="idle")
-        self._current_status = "idle"
+        self.state.heartbeat(status="")
+        self._current_status = ""
         return result
 
     def chat(self, message: str) -> str:
