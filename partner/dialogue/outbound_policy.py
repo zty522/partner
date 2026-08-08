@@ -1,77 +1,76 @@
-"""Shared policy for user-visible fallback text."""
+"""Shared policy for user-visible QQ Bot messages."""
 
-import json
-import os
-import time
-import re
+import json, os, time, re
 
-THINKING_NOTICE = "[进度] 正在思考..."
+THINKING_NOTICE = "⏳ 正在处理..."
 UNAVAILABLE_NOTICE = "当前实例或 LLM 暂时没有响应，请稍后再试。"
 
 TEMPLATES = {
-    "progress": "[进度] 正在 {current}/{total}：{description}",
-    "progress_done": "[进度] 已完成 {current}/{total}：{description}{summary}",
-    "parallel": "[进度] 将并行执行：{items}",
-    "plan_ready": "[进度] 已设计 {total} 步，即将开始执行。",
-    "iteration_start": "[进度] 第 {iteration} 轮开始：{goal}",
-    "iteration_end": "[进度] 第 {iteration} 轮完成，仍需补充：{missing_summary}",
-    "check_passed": "[完成] 当前产物已满足交付要求。",
-    "check_failed": "[进度] 仍需补充：{missing_summary}",
-    "reflect": "[进度] 需要补齐：{missing_summary}。下一步：{next_focus}",
-    "curiosity": "[进度] 已生成补充计划：{total} 步。方向：{focus}",
-    "delivery_success": "[完成] 任务完成，报告已保存：{file_path}",
-    "delivery_failure": "[错误] 任务失败：{reason}",
-    # ── Phase-level summary (compact, human-readable) ────────────────
+    # ── Progress (internal, not shown to user unless critical) ──
+    "progress": "⏳ {current}/{total} {description}",
+    "progress_done": "✅ {current}/{total} {description}",
+    "plan_ready": "📋 已规划 {total} 步，开始执行",
+
+    # ── Task acknowledgment (shown before plan) ──
+    "task_ack": "📨 {title}\n🎯 {goal}\n📋 已规划 {total} 步",
+    "task_ack_short": "📨 {title}\n📋 已规划 {total} 步",
+
+    # ── Task result (visible to user) ──
+    "task_complete": (
+        "Partner ─ {task_title}\n"
+        "📋 {description}\n"
+        "🎯 {goal}\n"
+        "📊 执行 {completed}/{total} 步\n"
+        "✅ {result_summary}\n"
+        "📎 {files}\n"
+        "➡️ {next_step}"
+    ),
+    "task_failed": (
+        "Partner ─ {task_title}\n"
+        "📋 {description}\n"
+        "🎯 {goal}\n"
+        "📊 执行到 {failed_at}/{total} 步\n"
+        "❌ {error}\n"
+        "📎 {files}\n"
+        "➡️ {next_step}"
+    ),
+    "task_empty": (
+        "Partner ─ {task_title}\n"
+        "📋 未生成有效产出\n"
+        "❌ {reason}"
+    ),
+
+    # ── Phase summary ──
     "phase_summary": (
-        "═══ 阶段概览 ═══\n"
-        "轮次：第 {iteration}/{max_iterations} 轮\n"
-        "阶段：{phase}  {phase_detail}\n"
-        "进度：{completed}/{total} 步骤完成\n"
-        "最近发现：{latest_findings}\n"
-        "当前缺口：{gaps}\n"
-        "下一步：{next_step}"
+        "📊 第 {iteration}/{max_iterations} 轮\n"
+        "{phase_detail}\n"
+        "✅ {completed}/{total} 已完成"
     ),
-    "harness_plan": (
-        "═══ 计划 ═══\n"
-        "目标：{goal}\n"
-        "步骤数：{total}\n"
-        "关键步骤：{key_steps}\n"
-        "期望产物：{expected}"
-    ),
-    "harness_check": (
-        "═══ 检查 ═══\n"
-        "结果：{verdict}\n"
-        "已有：{found_summary}\n"
-        "缺失：{missing_summary}\n"
-        "下一轮重点：{next_focus}"
-    ),
+
+    # ── Internal check ──
+    "check_failed": "⚠️ 仍需补充：{missing_summary}",
+    "reflect": "🔍 需要补齐：{missing_summary} → {next_focus}",
+    "curiosity": "💡 补充计划 {total} 步：{focus}",
 }
 
-# Internal patterns that must never appear in user-facing messages
+# Internal patterns stripped from user messages
 _INTERNAL_PATTERNS = (
     (r"atomic_[a-z_]+", "[内部操作]"),
     (r"smart_llm_structured_action", "[智能分析]"),
     (r"task_instance\.json", "任务配置"),
     (r"_step_\d+\.result\.json", "[步骤结果]"),
-    (r"_step_[A-Za-z0-9_.-]+\.result\.json", "[步骤结果]"),
     (r"\bstep_\d+\b", "步骤"),
 )
 
 
 def _template_clean(value: object, max_len: int = 240) -> str:
     text = str(value or "").strip()
-    text = re.sub(r"(?m)^@@.*$|^diff --git .*|^--- [ab]/.*|^\+{3} [ab]/.*", "", text)
+    text = re.sub(r"(?m)^@@.*$|^diff --git .*|^--- [ab]/.*|^\+\+\+ [ab]/.*", "", text)
     text = re.sub(r"[/\\][^\s，。；;]+(?:\.py|\.json|\.md|\.txt|\.pdf)(?::\d+)?", "[内部文件]", text)
     text = re.sub(r"_step_[A-Za-z0-9_.-]+\.result\.json", "[步骤结果]", text)
-    # Strip Hermes model normalization warning (anywhere in the text, any encoding)
     text = re.sub(r"(?i)\s*Normalized model\s+.*?to\s+.*?for\s+.*?(?:\s|$)", "", text)
     text = re.sub(r"(?i)[\u26a0\U000026a0\ufe0f]\s*Normalized model\s+.*?to\s+.*?for\s+.*?(?:\s|$)", "", text)
-    # Clean up leftover emoji/separator artifacts from stripped warnings
     text = re.sub(r"\s*[\u26a0\ufe0f\U000026a0]\s*[\u250a\u2502]\s*", "", text)
-    text = re.sub(r"\s*[\u26a0\ufe0f\U000026a0]\s*(?:Normalized|┊|∥)\s*", "", text)
-    # Remove bare ⚠ that's not part of actual content (followed by ASCII/common chars)
-    text = re.sub(r"[\u26a0\ufe0f\U000026a0](?=\s*[a-zA-Z0-9_\-\.\,\:\;\/\\\(\)\[\]\{\}])", "", text)
-    # Filter out internal event/pattern names from user-visible text
     for pattern, replacement in _INTERNAL_PATTERNS:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip()
@@ -80,35 +79,66 @@ def _template_clean(value: object, max_len: int = 240) -> str:
 
 def send_template(template: str, **kwargs: object) -> str:
     raw = TEMPLATES.get(str(template or ""), str(template or ""))
-    cleaned = {key: _template_clean(value, max_len=500 if key in {"items", "missing_summary", "focus"} else 240) for key, value in kwargs.items()}
+    cleaned = {key: _template_clean(value, max_len=500 if key in {"files", "error", "result_summary"} else 240)
+               for key, value in kwargs.items()}
     try:
         return raw.format(**cleaned).strip()
     except Exception:
         return raw.strip()
 
+
+def format_task_result(*, ok: bool, task_title: str = "", description: str = "",
+                       goal: str = "", completed: int = 0, total: int = 0,
+                       result_summary: str = "", files: str = "",
+                       next_step: str = "无", error: str = "",
+                       failed_at: int = 0) -> str:
+    """Generate a user-facing task result message."""
+    # Clean up display noise
+    for prefix in ("【任务指令】", "【任务】", "Task:"):
+        task_title = task_title.replace(prefix, "").strip()
+        description = description.replace(prefix, "").strip()
+        goal = goal.replace(prefix, "").strip()
+    task_title = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", task_title).strip()
+    description = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", description).strip()
+    goal = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", goal).strip()
+    if not task_title:
+        task_title = "任务"
+    if not description:
+        description = task_title
+    if not goal:
+        goal = "-"
+    if not result_summary and ok:
+        result_summary = "完成"
+    if not files:
+        files = "无"
+
+    if ok:
+        if completed == 0 and total == 0:
+            return send_template("task_empty", task_title=task_title, reason=error or "无产出")
+        return send_template("task_complete",
+                            task_title=task_title, description=description,
+                            goal=goal, completed=completed, total=max(total, 1),
+                            result_summary=result_summary, files=files,
+                            next_step=next_step)
+    else:
+        return send_template("task_failed",
+                            task_title=task_title, description=description,
+                            goal=goal, failed_at=failed_at or completed, total=max(total, 1),
+                            error=error, files=files, next_step=next_step)
+
+
 EVENT_VISIBLE_LABELS = {
-    "direct_reply": "直接回复",
-    "direct_task": "直接交付",
-    "literature_review": "搜索文献",
-    "data_fetch": "数据获取",
-    "data_analysis": "数据分析",
-    "visualization": "可视化",
-    "evidence_audit": "证据审计",
-    "artifact_build": "构建产物",
-    "pdf_report": "PDF报告",
-    "email_delivery": "邮件交付",
-    "web_search": "网络搜索",
-    "web_capture": "网页捕获",
-    "project_think": "项目思考",
-    "objective_review": "目标对齐",
-    "curiosity_explore": "好奇探索",
-    "habit_update": "经验成长",
-    "ollama_status": "Ollama状态",
-    "project": "项目推进",
-    "content_digest": "内容消化",
-    "reflection": "反思整理",
-    "memory_consolidate": "记忆整理",
-    "report": "主动汇报",
+    "direct_reply": "直接回复", "direct_task": "直接交付",
+    "literature_review": "搜索文献", "data_fetch": "数据获取",
+    "data_analysis": "数据分析", "visualization": "可视化",
+    "evidence_audit": "证据审计", "artifact_build": "构建产物",
+    "pdf_report": "PDF报告", "email_delivery": "邮件交付",
+    "web_search": "网络搜索", "web_capture": "网页捕获",
+    "project_think": "项目思考", "objective_review": "目标对齐",
+    "curiosity_explore": "好奇探索", "habit_update": "经验成长",
+    "ollama_status": "Ollama状态", "project": "项目推进",
+    "content_digest": "内容消化", "reflection": "反思整理",
+    "memory_consolidate": "记忆整理", "report": "主动汇报",
     "stop_project": "结束执行",
 }
 
@@ -167,7 +197,6 @@ def _configured_backend(workspace: str) -> str:
 
 
 def llm_source_label(workspace: str) -> str:
-    """Return the user-visible agent/model source of the most recent real LLM call."""
     row = _last_agent_run(workspace)
     backend = str(row.get("backend") or "").strip().lower() or _configured_backend(workspace)
     provider = str(row.get("provider") or "").strip().lower()
@@ -209,10 +238,6 @@ def prefix_event_notice(text: str, event_type: str, *, event_kind: str = "", wor
     if not body:
         return ""
     model = _model_prefix(workspace)
-    # Normalize any existing Partner headers before adding the current one.
-    # Reports can pass through both _enqueue_visible_report and _handle_report;
-    # stripping leading headers here makes prefixing idempotent and prevents
-    # duplicated lines such as 【Hermes｜x｜y】\n【Hermes｜x｜y】.
     while body.startswith("【") and "】" in body.splitlines()[0]:
         body = body.partition("】")[2].lstrip()
     if not body:
@@ -232,13 +257,8 @@ def prefix_event_notice(text: str, event_type: str, *, event_kind: str = "", wor
     kind = str(event_kind or "").strip()
     if str(event_type or "") in {"direct_reply", "interaction_reply"}:
         kind = "direct"
-    elif (
-        kind.startswith("selector_")
-        or kind.startswith("routing_prefer_")
-        or kind.startswith("failure_")
-        or kind in {"action_failure_objective_review", "one_shot_complete"}
-    ):
+    elif (kind.startswith("selector_") or kind.startswith("routing_prefer_")
+          or kind.startswith("failure_")
+          or kind in {"action_failure_objective_review", "one_shot_complete"}):
         kind = ""
-    project = _clean_header_part(kind)
-    event_head = _clean_header_part(label) or event_visible_label(event_type)
     return body

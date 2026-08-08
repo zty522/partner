@@ -4386,7 +4386,7 @@ def default_registry() -> EventRegistry:
     # execute_code — run Python code directly (replaces agent calls for computation)
     def _local_execute_code(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         """Execute Python code in a subprocess. Saves code to temp file, runs it, returns output."""
-        import tempfile, subprocess as sp, os as _os
+        import sys, tempfile, subprocess as sp, os as _os
         code = params.get("code", "") or params.get("task", "")
         if not code:
             return {"ok": False, "error": "No code provided"}
@@ -4394,13 +4394,16 @@ def default_registry() -> EventRegistry:
         workdir = params.get("workdir", "") or ctx.working_dir or "/tmp"
         _os.makedirs(workdir, exist_ok=True)
         
+        # Inject partner path so subprocess can import partner modules
+        code = "import sys; sys.path.insert(0, '/mnt/e/work/partner')\n" + code
+        
         # Write code to temp file
         script_path = _os.path.join(workdir, "_execute_code.py")
         with open(script_path, "w") as f:
             f.write(code)
         
         try:
-            r = sp.run(["python3", script_path], capture_output=True, text=True, 
+            r = sp.run([sys.executable, script_path], capture_output=True, text=True, 
                        timeout=params.get("timeout", 300), cwd=workdir)
             ok = r.returncode == 0
             return {
@@ -4420,6 +4423,88 @@ def default_registry() -> EventRegistry:
         _local_execute_code, execution_method="local"))
     
     registry.register(HarnessEventSpec("run_command", "atomic", "执行系统命令或脚本。参数: command, timeout, workdir", _local_run_command, execution_method="local"))
+
+    def _local_web_capture(ctx: HarnessContext, params: JsonDict) -> JsonDict:
+        """Capture a webpage screenshot using Edge headless via .ps1 script. Params: url, output (path)."""
+        import subprocess as sp, os as _os, time as _time, logging
+        url = params.get("url", "")
+        if not url:
+            return {"ok": False, "error": "No URL provided"}
+        output = params.get("output", "") or params.get("path", "")
+
+        logger = logging.getLogger(__name__)
+        pid_str = str(_os.getpid())
+        win_out = "C:\\temp\\edge_cap_" + pid_str + ".png"
+        wsl_src = "/mnt/c/temp/edge_cap_" + pid_str + ".png"
+
+        # Determine Edge path
+        edge = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+        if not _os.path.exists("/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"):
+            edge = "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+
+        # Write .ps1 script to Windows-accessible path (PowerShell can't read WSL paths)
+        ps_script_wsl = "/mnt/c/temp/_edge_cap_" + pid_str + ".ps1"
+        ps_script_win = "C:\\temp\\_edge_cap_" + pid_str + ".ps1"
+        ps_lines = [
+            '$edge = "' + edge + '"',
+            '$url = "' + url + '"',
+            '$out = "' + win_out + '"',
+            'Start-Process $edge -ArgumentList "--headless=new --disable-gpu --window-size=1280,900 --screenshot=$out --virtual-time-budget=30000 $url" -Wait -NoNewWindow',
+            'if (Test-Path $out) { Write-Host ("OK " + (Get-Item $out).Length) } else { Write-Host "FAIL" }',
+        ]
+        with open(ps_script_wsl, "w") as f:
+            f.write("\n".join(ps_lines))
+
+        logger.info("[web_capture] Edge .ps1: %s url=%s", ps_script_win, url)
+
+        try:
+            r = sp.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script_win],
+                       capture_output=True, text=True, timeout=params.get("timeout", 60))
+            try: _os.remove(ps_script_wsl)
+            except: pass
+
+            if not _os.path.exists(wsl_src) or _os.path.getsize(wsl_src) < 1000:
+                return {"ok": False, "error": r.stdout.strip()[:200] or "Screenshot failed"}
+
+            sz = _os.path.getsize(wsl_src)
+
+            if not output:
+                try:
+                    from partner.utils.workspace import get_screenshots_dir
+                    output = _os.path.join(get_screenshots_dir(), f"web_capture_{int(_time.time())}.jpg")
+                except Exception:
+                    output = _os.path.join(ctx.working_dir or "/tmp", "web_capture.jpg")
+            _os.makedirs(_os.path.dirname(output) or ".", exist_ok=True)
+
+            # Compress to JPEG
+            try:
+                from PIL import Image
+                img = Image.open(wsl_src)
+                w, h = img.width, img.height
+                ratio = min(1600 / w, 1.0) if w > 1600 else 1.0
+                if ratio < 1.0:
+                    img = img.resize((int(w * ratio), int(h * ratio)))
+                jpg_out = output if output.endswith('.jpg') else output.rsplit('.', 1)[0] + '.jpg'
+                img.convert('RGB').save(jpg_out, 'JPEG', quality=80)
+                _os.remove(wsl_src)
+                logger.info("[web_capture] OK %dx%d %d bytes", img.width, img.height, _os.path.getsize(jpg_out))
+                return {"ok": True, "path": jpg_out, "size": _os.path.getsize(jpg_out),
+                        "width": img.width, "height": img.height}
+            except Exception as e:
+                logger.warning("[web_capture] PIL failed: %s", e)
+                _os.rename(wsl_src, output)
+                return {"ok": True, "path": output, "size": sz}
+
+        except sp.TimeoutExpired:
+            return {"ok": False, "error": "Web capture timed out"}
+        except Exception as e:
+            logger.error("[web_capture] error: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    registry.register(HarnessEventSpec("web_capture", "atomic",
+        "截取网页截图。参数: url, output(路径)。使用 Edge headless (Chromium) 渲染。",
+        _local_web_capture, execution_method="local", produces_artifact=True))
+
     registry.register(HarnessEventSpec("send_email", "atomic", "发送邮件（占位，需配置 SMTP）。参数: to, subject, body", _llm_event_handler, execution_method="local"))
     registry.register(HarnessEventSpec("post_message", "atomic", "发送消息到指定渠道。参数: channel, message", _llm_event_handler, execution_method="local"))
     registry.register(HarnessEventSpec("create_file", "atomic", "创建文件（自动识别格式）。参数: path, content, format", _local_create_file, produces_artifact=True, execution_method="local"))

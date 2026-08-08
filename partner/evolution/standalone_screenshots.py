@@ -13,7 +13,22 @@ import time
 import socket
 from pathlib import Path
 
-SCREENSHOTS_DIR = "/mnt/e/work/partner_workspace/instances/03/partner_data/screenshots"
+
+def _get_screenshots_dir() -> str:
+    """Resolve canonical screenshots directory."""
+    try:
+        from partner.utils.workspace import get_screenshots_dir
+        return get_screenshots_dir()
+    except Exception:
+        d = os.path.join(
+            os.environ.get("PARTNER_DATA_DIR", os.path.join(os.getcwd(), "partner_data")),
+            "screenshots",
+        )
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+SCREENSHOTS_DIR = _get_screenshots_dir()
 HERMES_DIR = "/mnt/e/work/partner_workspace/external_repos/hermes/out/renderer"
 OPENCLAW_DIR = "/mnt/e/work/partner_workspace/external_repos/openclaw/dist"
 

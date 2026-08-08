@@ -92,22 +92,17 @@ def get_learning_db_path(workspace: str | None = None) -> str:
     """Path to the shared learning/evolution database."""
     return os.path.join(get_partner_data_dir(workspace), "learning.db")
 
-
 def get_skills_db_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "skills_registry.db")
-
 
 def get_queue_db_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "queue.db")
 
-
 def get_projects_db_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "projects.db")
 
-
 def get_habits_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "habits.json")
-
 
 def get_memory_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "long_term_memory.json")
@@ -118,21 +113,23 @@ def get_memory_path(workspace: str | None = None) -> str:
 def get_agents_dir(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "agents")
 
-
 def get_reports_dir(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "reports")
-
 
 def get_config_dir(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "config")
 
-
 def get_growth_dir(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "growth")
 
-
 def get_learning_dir(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "learning")
+
+def get_screenshots_dir(workspace: str | None = None) -> str:
+    """Canonical screenshots directory under partner_data."""
+    path = os.path.join(get_partner_data_dir(workspace), "screenshots")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 # ── Config file paths ─────────────────────────────────────────────
@@ -141,22 +138,17 @@ def get_config_path(workspace: str | None = None) -> str:
     """Path to main config.json."""
     return os.path.join(get_partner_data_dir(workspace), "config.json")
 
-
 def get_routing_rules_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "routing_rules.yaml")
-
 
 def get_message_filter_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "message_filter.yaml")
 
-
 def get_ollama_config_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "ollama_suitability.yaml")
 
-
 def get_event_execution_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "event_execution.yaml")
-
 
 def get_evolution_external_path(workspace: str | None = None) -> str:
     return os.path.join(get_partner_data_dir(workspace), "config", "evolution_external.yaml")

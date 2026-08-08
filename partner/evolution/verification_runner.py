@@ -193,15 +193,21 @@ def check_duplicate_classes() -> CheckResult:
 def check_screenshots(screenshots_dir: str | None = None) -> CheckResult:
     """Check that real (not synthetic) screenshots exist."""
     if screenshots_dir is None:
-        # Try common paths
-        candidates = [
-            "/mnt/e/work/partner_workspace/instances/03/partner_data/screenshots",
-            "/mnt/e/work/partner_workspace/partner_data/screenshots",
-        ]
-        for c in candidates:
-            if os.path.isdir(c):
-                screenshots_dir = c
-                break
+        # Use canonical path first, fall back to legacy paths
+        try:
+            from partner.utils.workspace import get_screenshots_dir
+            screenshots_dir = get_screenshots_dir()
+        except Exception:
+            pass
+        if not screenshots_dir or not os.path.isdir(screenshots_dir):
+            candidates = [
+                "/mnt/e/work/partner_workspace/partner_data/screenshots",
+                "/mnt/e/work/partner_workspace/instances/03/partner_data/screenshots",
+            ]
+            for c in candidates:
+                if os.path.isdir(c):
+                    screenshots_dir = c
+                    break
 
     if not screenshots_dir or not os.path.isdir(screenshots_dir):
         return CheckResult("screenshots", passed=False, details=f"No screenshots directory found")

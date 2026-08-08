@@ -95,26 +95,40 @@ class ArtifactValidator:
         return False
 
     def _file_matches(self, root: str, pattern: str) -> list[str]:
+        # VERSION: multi-root fix 2026-08-08
         if not pattern:
             return []
         paths = []
         seen: set[str] = set()
+        # Also search the canonical screenshots directory
+        search_roots = [root]
+        try:
+            from partner.utils.workspace import get_screenshots_dir
+            ss_dir = get_screenshots_dir()
+            if os.path.isdir(ss_dir):
+                search_roots.append(ss_dir)
+        except Exception:
+            pass
         # Selector/planner outputs sometimes express alternatives as
         # "*.csv, *.xlsx". Treat those as one requirement with multiple
         # acceptable patterns, not as one literal glob and not as two required
         # artifacts.
         patterns = [p.strip() for p in re.split(r"[,，;；]+", pattern) if p.strip()]
         for item in patterns or [pattern]:
-            full_pattern = item if os.path.isabs(item) else os.path.join(root, item)
-            for path in glob.glob(full_pattern, recursive=True):
-                full = os.path.abspath(path)
-                if not (full == root or full.startswith(root + os.sep)):
-                    continue
-                if self._is_internal_artifact(full):
-                    continue
-                if os.path.isfile(full) and os.path.getsize(full) > 0 and full not in seen:
-                    seen.add(full)
-                    paths.append(full)
+            for sr in search_roots:
+                full_pattern = item if os.path.isabs(item) else os.path.join(sr, item)
+                for path in glob.glob(full_pattern, recursive=True):
+                    try:
+                        full = os.path.abspath(path)
+                        if not (full == sr or full.startswith(sr + os.sep)):
+                            continue
+                        if self._is_internal_artifact(full):
+                            continue
+                        if os.path.isfile(full) and os.path.getsize(full) > 0 and full not in seen:
+                            seen.add(full)
+                            paths.append(full)
+                    except Exception:
+                        pass
         return sorted(paths)
 
     def _is_internal_artifact(self, path: str) -> bool:

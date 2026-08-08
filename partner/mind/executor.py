@@ -274,6 +274,22 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
     # Message deduplication: skip if same hash was sent within DEDUP_WINDOW_SEC
     content_hash = hashlib.md5(str(content or "").encode("utf-8")).hexdigest()
     now = _time.time()
+    # Suppress internal batch_plan progress noise from QQ:
+    # plan_ready, check_failed, reflect, curiosity, iteration_summary — keep only task_ack, task_failed, task_complete
+    _noisy_sources = {
+        "batch_plan:plan_ready", "batch_plan:step_progress", "batch_plan:step_done",
+        "batch_plan:check_failed", "batch_plan:reflect_gap", "batch_plan:curiosity_plan_ready",
+        "batch_plan:iteration_summary", "batch_plan:max_iterations", "batch_plan:acceptance_criteria",
+        "batch_plan:interrupted", "batch_plan:parallel_progress",
+    }
+    if source in _noisy_sources:
+        logger.info("[REPORT] suppressed noisy batch_plan source=%s", source)
+        return
+    # Also suppress check/reflect/curiosity events that are intermediate
+    if isinstance(event_type, EventType):
+        if event_type in {EventType.CHECK, EventType.REFLECT, EventType.CURIOSITY_EXPLORE}:
+            logger.info("[REPORT] suppressed intermediate event=%s source=%s", event_type, source)
+            return
     last_sent = _recent_report_hashes.get(content_hash)
     if last_sent is not None and (now - last_sent) < _DEDUP_WINDOW_SEC:
         logger.debug("[REPORT] dedup skipped duplicate report: hash=%s age=%.2fs", content_hash, now - last_sent)
@@ -3600,16 +3616,19 @@ async def _handle_task_failed(event: MindEvent):
     total_steps = payload.get("total_steps", 0)
     acceptance_report = payload.get("acceptance_report", "")
 
-    lines = [f"❌ 任务失败：{task_title}"]
-    lines.append(f"   失败步骤：{failed_at_step}/{total_steps}")
-    if error:
-        lines.append(f"   错误原因：{error}")
-    if skipped_steps > 0:
-        lines.append(f"   跳过步骤：{skipped_steps}/{total_steps}")
-    if acceptance_report:
-        lines.append(f"   验收诊断：{acceptance_report}")
-
-    summary = "\n".join(lines)
+    from ..dialogue.outbound_policy import format_task_result
+    summary = format_task_result(
+        ok=False,
+        task_title=task_title,
+        description=payload.get("description", task_title),
+        goal=payload.get("goal", "-"),
+        completed=failed_at_step,
+        total=total_steps,
+        error=error[:200] if error else "未知错误",
+        files=payload.get("files", "无"),
+        next_step=payload.get("next_step", "检查错误原因"),
+        failed_at=failed_at_step,
+    )
     logger.info("[TASK_FAILED] %s", summary)
 
     # Deliver via the unified queue
@@ -5900,6 +5919,7 @@ async def _handle_batch_plan_event(event: MindEvent):
             plan_lines.append(f"... 其余 {planned_steps - 6} 步")
         next_event_name = getattr(micro_plan.plan[0], "event_type", "none") if micro_plan.plan else "none"
         if progress_updates:
+            logger.info("[BATCH_PLANNER] progress_updates=True, sending task_ack")
             wm_note = ""
             if isinstance(getattr(task, "metadata", None), dict):
                 wm_note = task.metadata.get("world_model_status", "")
@@ -5907,6 +5927,39 @@ async def _handle_batch_plan_event(event: MindEvent):
             _plan_announced = getattr(task, "_plan_announced", False)
             if not _plan_announced:
                 task._plan_announced = True
+                # First: task acknowledgment
+                task_title = getattr(task, "title", "") or root_request or "任务"
+                task_goal = getattr(task, "description", "") or getattr(task, "goal", "") or root_request or ""
+                if not task_goal or task_goal == task_title:
+                    task_goal = root_request[:120] if root_request else "处理用户请求"
+                # Clean up display: strip task prefixes and imperative suffixes
+                for prefix in ("【任务指令】", "【任务】", "Task:"):
+                    task_title = task_title.replace(prefix, "").strip()
+                    task_goal = task_goal.replace(prefix, "").strip()
+                import re
+                task_title = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", task_title).strip()
+                task_goal = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", task_goal).strip()
+                # Make title concise: first sentence or first 40 chars
+                if len(task_title) > 60:
+                    first_line = task_title.split("\n")[0].strip()
+                    task_title = first_line[:60].rsplit("，", 1)[0].rsplit(",", 1)[0].strip()[:60]
+                if not task_title:
+                    task_title = "任务"
+                # Avoid duplicate title/goal: if goal == title, use short template
+                if task_goal == task_title or task_goal == "-":
+                    ack_msg = send_template("task_ack_short", title=task_title[:80], total=planned_steps)
+                else:
+                    ack_msg = send_template("task_ack", title=task_title[:80], goal=task_goal[:200], total=planned_steps)
+                await _enqueue_visible_report(
+                    ack_msg,
+                    EventType.BATCH_PLAN,
+                    event_kind=visible_kind,
+                    priority=2,
+                    source="batch_plan:task_ack",
+                    parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+                # Then: plan details (brief)
                 plan_msg = send_template("plan_ready", total=planned_steps, next_event=next_event_name)
                 if wm_note:
                     plan_msg += "\n" + wm_note
@@ -6082,7 +6135,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                 for _sid, _sr in result.step_results.items():
                     if isinstance(_sr, dict):
                         _et = str(_sr.get("event_type") or "")
-                        if _et == "call_agent_skill" and not bool(_sr.get("ok", True)):
+                        if _et in ("call_agent_skill", "execute_code", "screen_capture", "web_search", "app_list_windows") and not bool(_sr.get("ok", True)):
                             core_step_failed_across_iterations = True
                             break
             # Persist step_results into task.metadata so the learning pipeline
@@ -9713,6 +9766,21 @@ async def _run_root_cause_diagnosis(task, root_goal: str, check_result: dict, co
     missing_items = [str(x) for x in (check_result.get("missing") or []) if str(x).strip()]
     max_items = max(1, int(reflect_cfg.get("max_missing_items", 10)))
     missing_items = missing_items[:max_items]
+
+    # Filter out QQ/file-delivery noise: if file was pushed, don't ask user about it
+    delivery_noise = re.compile(
+        r"未.*(?:确认|发送|通过).*QQ|无.*(?:法|法自动).*(?:发送|推送)"
+        r"|(?:qq|QQ).*(?:命令|路径|客户端|API|发送|方式|安装|配置)"
+        r"|(?:start|启动|try).*'?qq'?|请.*(?:提供|告知|确认|使用|指定).*[Qq]{2}"
+        r"|需要你的帮助.*[Qq]{2}|任务尚未完成.*[Qq]{2}",
+        re.I,
+    )
+    missing_items = [m for m in missing_items if not delivery_noise.search(m)]
+
+    # If nothing left after filtering, the task is effectively done
+    if not missing_items:
+        logger.info("[REFLECT] missing items filtered to empty, task satisfied task_id=%s", task.task_id)
+        return {"patches": [], "missing_items": [], "reflection": ""}
 
     replacements = {
         "{{root_goal}}": str(root_goal or "")[:2400],

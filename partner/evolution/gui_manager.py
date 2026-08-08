@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path("/mnt/e/work/partner")
 WORKSPACE_ROOT = Path("/mnt/e/work/partner_workspace")
 EXTERNAL_REPOS_DIR = WORKSPACE_ROOT / "external_repos"
-SCREENSHOTS_DIR = WORKSPACE_ROOT / "instances" / "03" / "partner_data" / "screenshots"
 
 # Default external repo configs
 EXTERNAL_APPS: dict[str, dict[str, Any]] = {
@@ -98,8 +97,9 @@ except Exception as e:
 
 
 def _screenshot_dir() -> str:
-    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    return str(SCREENSHOTS_DIR)
+    """Use canonical get_screenshots_dir() from workspace utils."""
+    from partner.utils.workspace import get_screenshots_dir
+    return get_screenshots_dir()
 
 
 def _ts() -> str:

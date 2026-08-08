@@ -715,3 +715,61 @@ def atomic_app_focus(ctx, params):
             "window": {"title": "", "geometry": {}},
             "error": str(exc),
         }
+
+# ── Sprint 7: qq_push_files event ──
+
+def atomic_qq_push_files(ctx, params):
+    """Push all files in deliverables/ to QQ user. Returns {ok, pushed, total}."""
+    try:
+        from partner.tools.qq_push import push_deliverables
+        r = push_deliverables(ctx.get("workspace", ""), ctx.get("title", "deliverable"))
+        logger.info("[QQ-PUSH-EVENT] Pushed %d/%d files", r.get("pushed",0), r.get("total",0))
+        return {"ok": r.get("ok", False), "pushed": r.get("pushed",0), "total": r.get("total",0)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── Sprint 7: push_files event ──
+
+def atomic_push_files(ctx, params):
+    """Push all files in deliverables/ to QQ user."""
+    try:
+        from partner.tools.qq_push import push_deliverables
+        ws = ctx.get("workspace", "")
+        caption = params.get("caption", "") or ctx.get("title", "deliverable")
+        r = push_deliverables(ws, caption)
+        logger.info("[PUSH-EVENT] %d/%d files pushed", r.get("pushed",0), r.get("total",0))
+        return {"ok": True, "pushed": r.get("pushed",0), "total": r.get("total",0)}
+    except Exception as e:
+        logger.exception("push_files failed")
+        return {"ok": False, "error": str(e)}
+
+
+# ── Sprint 7: search_papers event ──
+
+def atomic_search_papers(ctx, params):
+    """Search local literature PDFs by query."""
+    try:
+        from partner.v2.search_events import atomic_search_papers as _search
+        return _search(ctx, params)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── Sprint 7: conda_env + run_in_env events ──
+
+def atomic_conda_env(ctx, params):
+    """Create/manage conda environments."""
+    try:
+        from partner.v2.conda_events import atomic_conda_env as _ce
+        return _ce(ctx, params)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def atomic_run_in_env(ctx, params):
+    """Execute Python code in a specific conda env."""
+    try:
+        from partner.v2.conda_events import atomic_run_in_env as _re
+        return _re(ctx, params)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
