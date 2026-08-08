@@ -281,6 +281,7 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
         "batch_plan:check_failed", "batch_plan:reflect_gap", "batch_plan:curiosity_plan_ready",
         "batch_plan:iteration_summary", "batch_plan:max_iterations", "batch_plan:acceptance_criteria",
         "batch_plan:interrupted", "batch_plan:parallel_progress",
+        "project:backend_timeout_notice",
     }
     if source in _noisy_sources:
         logger.info("[REPORT] suppressed noisy batch_plan source=%s", source)
@@ -8254,6 +8255,16 @@ async def _handle_project(event: MindEvent):
             record_risk_event(_workspace, title, "非结构化结果", hermes_response[:260], severity="medium")
         elif timed_out_or_stalled:
             record_risk_event(_workspace, title, "agent backend stalled or unavailable", hermes_response[:260], severity="high")
+            # Record in OODA CircuitBreaker to prevent infinite restart loop
+            try:
+                from ..core.ooda_engine import get_ooda
+                ooda = get_ooda(_workspace, instance_id="01")
+                ooda.breaker.record_failure(title, {
+                    "error_message": "timed_out_or_stalled",
+                    "step": "batch_plan_handler",
+                })
+            except Exception:
+                pass
             try:
                 await _enqueue_visible_report(
                     (

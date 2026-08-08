@@ -4449,7 +4449,7 @@ def default_registry() -> EventRegistry:
             '$edge = "' + edge + '"',
             '$url = "' + url + '"',
             '$out = "' + win_out + '"',
-            'Start-Process $edge -ArgumentList "--headless=new --disable-gpu --window-size=1280,900 --screenshot=$out --virtual-time-budget=30000 $url" -Wait -NoNewWindow',
+            'Start-Process $edge -ArgumentList "--headless=new --disable-gpu --window-size=1280,900 --screenshot=$out --virtual-time-budget=20000 $url" -Wait -NoNewWindow',
             'if (Test-Path $out) { Write-Host ("OK " + (Get-Item $out).Length) } else { Write-Host "FAIL" }',
         ]
         with open(ps_script_wsl, "w") as f:
