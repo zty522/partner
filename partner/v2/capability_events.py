@@ -191,17 +191,52 @@ def _render_capability_md(inventory, gaps, previous: str) -> str:
     return "\n".join(lines)
 
 
+# 补缺动作库：缺口关键词 → 具体可执行的补缺动作。
+# 优先级：已覆盖的说明覆盖关系；未覆盖的给出工具、安装方式与来源。
+_GAP_REMEDIATION: dict[str, str] = {
+    "基因组注释": "建议集成 prokka（apt install prokka 或 conda -c bioconda prokka；依赖 perl/bioperl 生态，需 sudo）"
+                  "或 bakta（conda -c conda-forge -c bioconda bakta）",
+    "GATK": "变体调用已由 bcftools agent 覆盖（variant_calling/snpcalling），无需再集成重型 GATK（Java+~10GB 依赖）",
+    "DESeq2": "差异表达已由 diffexp agent 覆盖（scanpy Wilcoxon 秩和检验）；若需 DESeq2 特定流程（负二项模型）再集成",
+    "差异表达分析": "已由 diffexp agent 覆盖（h5ad + groupby 列 → Wilcoxon 差异基因表）",
+    "变体调用": "已由 bcftools agent 覆盖（VCF 统计 + QUAL/DP 过滤）",
+    "通路富集分析": "已由 enrichment agent 覆盖（gseapy ORA，Enrichr 基因集库）",
+    "系统发育分析": "已由 iqtree agent 覆盖（IQ-TREE 2 最大似然 + ModelFinder）",
+    "AlphaFold": "蛋白结构预测已由 bionemo agent 部分覆盖（protein_structure）；如需 AlphaFold 级精度需 GPU + 权重",
+    "DiffDock": "分子对接：pocketflow（structure_based_drug_design）覆盖分子生成；若需显式对接可集成 DiffDock（GitHub 源码，需 GPU）",
+    "Scanpy": "单细胞分析已由 cytobridge agent 覆盖（预处理/UMAP/PAGA/DPT/RNA velocity）",
+    "BLAST": "序列搜索已由 bioinformatics agent 覆盖（blast_search）",
+    "Rosetta": "蛋白设计：bionemo（protein_structure）部分覆盖；如需 Rosetta 全套需 conda（bioconda）安装",
+    "CellChat": "细胞通讯：暂未覆盖；可选 R 生态 CellChat 或 Python 替代（cell2cell）",
+    "Seurat": "单细胞分析已由 cytobridge agent 覆盖（scanpy 生态，功能等价）",
+    "GROMACS": "分子动力学：external/amber 已集成但无 agent 声明；可补 wrapper 或集成 OpenMM（pip）",
+    "PLINK": "GWAS 已由 plink agent 覆盖（PLINK 1.9，--assoc --adjust）",
+    "IQ-TREE": "系统发育已由 iqtree agent 覆盖（IQ-TREE 2.4.0）",
+}
+
+
+def _find_remediation(gap) -> str:
+    """按缺口名/描述匹配补缺动作；未命中返回空串。"""
+    haystack = f"{gap.name} {gap.description}"
+    for kw, action in _GAP_REMEDIATION.items():
+        if kw.lower() in haystack.lower():
+            return action
+    return ""
+
+
 def _derive_learn_plan(gaps) -> list[str]:
-    """从缺口推导学习计划（优先级排序）。"""
+    """从缺口推导学习计划（优先级排序），附具体补缺动作。"""
     items: list[str] = []
     for g in gaps:
         prio = g.priority
+        action = _find_remediation(g)
+        suffix = f" → {action}。" if action else " → 建议优先接入或学习对应工具/Agent。"
         if prio == "high":
-            items.append(f"【高优先级】{g.name}：{g.description} → 建议优先接入或学习对应工具/Agent。")
+            items.append(f"【高优先级】{g.name}：{g.description}{suffix}")
         elif prio == "medium":
-            items.append(f"【中优先级】{g.name}：{g.description} → 安排后续学习。")
+            items.append(f"【中优先级】{g.name}：{g.description}{suffix}")
         else:
-            items.append(f"【低优先级】{g.name}：{g.description}")
+            items.append(f"【低优先级】{g.name}：{g.description}{suffix}")
     return items
 
 
