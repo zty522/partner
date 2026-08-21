@@ -23,6 +23,7 @@ JsonDict = dict[str, Any]
 
 # ── Convenience re-exports ──
 from .push_events import atomic_push_files
+from .gap_events import atomic_ensure_tool
 from .perception import (
     atomic_screen_capture,
     atomic_screen_ocr,
@@ -167,6 +168,8 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
         # ── File push to QQ ──
         ("push_files", "发送文件/图片到QQ。用于截图后推送图片文件给用户。参数: source(文件路径), caption(描述文本)", "local",
          atomic_push_files, {"external_call": True}),
+        ("ensure_tool", "确保外部工具可用（检测/自动下载补缺）。参数: tool(plink/iqtree/bcftools/prokka等)", "local",
+         atomic_ensure_tool, {"external_call": False, "produces_artifact": False}),
 
         # ── Browser (9 events) ──
         ("browser_open", "打开浏览器并访问指定URL。参数: url, headless(可选), browser_type(可选)", "local",

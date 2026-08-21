@@ -225,12 +225,17 @@ def _find_remediation(gap) -> str:
 
 
 def _derive_learn_plan(gaps) -> list[str]:
-    """从缺口推导学习计划（优先级排序），附具体补缺动作。"""
+    """从缺口推导学习计划（优先级排序），附具体补缺动作 + 工具就绪状态。"""
     items: list[str] = []
     for g in gaps:
         prio = g.priority
         action = _find_remediation(g)
         suffix = f" → {action}。" if action else " → 建议优先接入或学习对应工具/Agent。"
+        # C3 增强：检测补缺动作涉及的工具是否已就绪
+        if action:
+            tool_state = _detect_action_tools(action)
+            if tool_state:
+                suffix += " " + tool_state
         if prio == "high":
             items.append(f"【高优先级】{g.name}：{g.description}{suffix}")
         elif prio == "medium":
@@ -238,6 +243,25 @@ def _derive_learn_plan(gaps) -> list[str]:
         else:
             items.append(f"【低优先级】{g.name}：{g.description}{suffix}")
     return items
+
+
+_ACTION_TOOL_NAMES = ("prokka", "bakta", "gseapy", "scanpy", "plink", "iqtree", "bcftools",
+                      "samtools", "mafft", "muscle", "seqkit")
+
+
+def _detect_action_tools(action: str) -> str:
+    """检测补缺动作里提到的工具是否已就绪（external/tools/ 或 PATH）。"""
+    try:
+        from ..evolution.gap_filler import detect_tool
+
+        parts = []
+        for t in _ACTION_TOOL_NAMES:
+            if t in action:
+                p = detect_tool(t)
+                parts.append(f"{t}:{'已就绪' if p else '未检测到'}")
+        return "工具状态[" + ", ".join(parts) + "]" if parts else ""
+    except Exception:
+        return ""
 
 
 def _extract_section(md: str, title: str) -> str:
