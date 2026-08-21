@@ -506,13 +506,17 @@ class QQQfficialBot:
         """Get a new access token from QQ Bot platform."""
         try:
             import aiohttp
+            logger.info(f"[TOKEN-DEBUG] requesting token for app_id={self.app_id} secret_len={len(self.app_secret)}")
+            payload = {"appId": self.app_id, "clientSecret": self.app_secret}
             async with aiohttp.ClientSession() as session:
+                logger.info(f"[TOKEN-DEBUG] POST {TOKEN_URL} headers={{'Content-Type': 'application/json'}} body={payload}")
                 async with session.post(
                     TOKEN_URL,
-                    json={"appId": self.app_id, "clientSecret": self.app_secret},
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
                     data = await resp.json()
+                    logger.info(f"[TOKEN-DEBUG] response status={resp.status} body={data}")
                     if "access_token" not in data:
                         raise RuntimeError(f"Token refresh failed: {data}")
                     self._access_token = data["access_token"]
@@ -769,6 +773,9 @@ class QQQfficialBot:
             logger.warning(f"Invalid session, resetting (session_id={self._session_id or 'none'})")
             self._session_id = ""
             self._last_seq = 0
+            # Trigger reconnect — invalid session means we need to re-identify
+            self._can_reconnect = True
+            raise Exception("Server returned invalid session")
 
     async def _ws_identify(self):
         """Send identify/authentication message."""
@@ -786,7 +793,7 @@ class QQQfficialBot:
             },
         }
         await self._send_ws(payload)
-        logger.info("Identify sent")
+        logger.info(f"Identify sent payload: op={payload['op']} d.token={payload['d']['token'][:20]}... d.intents={payload['d']['intents']} d.shard={payload['d']['shard']}")
 
     async def _ws_resume(self):
         """Send resume message for reconnection."""

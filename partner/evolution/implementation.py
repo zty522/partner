@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 # Code root — where the partner Python package lives
-CODE_ROOT = Path(__file__).resolve().parent.parent.parent  # /mnt/e/work/partner/partner
+CODE_ROOT = Path(__file__).resolve().parent.parent  # /mnt/e/work/partner/partner (partner package)
 # Project root — where the partner project root is (contains shells/, partner/, configs/)
 PROJECT_ROOT = CODE_ROOT.parent  # /mnt/e/work/partner
 
@@ -355,7 +355,51 @@ def _resolve_file_path(plan: dict[str, Any]) -> str:
             for root in (PROJECT_ROOT, CODE_ROOT):
                 tm_candidate = os.path.join(str(root), target_module.lstrip("/"))
                 if os.path.exists(tm_candidate):
+                    # If it's a directory, prefer a real module file inside
+                    if os.path.isdir(tm_candidate):
+                        module_py = os.path.join(tm_candidate, f"{target_module}.py")
+                        if os.path.exists(module_py):
+                            return module_py
+                        init_py = os.path.join(tm_candidate, "__init__.py")
+                        if os.path.exists(init_py):
+                            return init_py
+                        try:
+                            py_files = sorted(f for f in os.listdir(tm_candidate) if f.endswith(".py"))
+                            if py_files:
+                                return os.path.join(tm_candidate, py_files[0])
+                        except OSError:
+                            pass
+                        # directory itself only as last resort (skip — let NEW fallback handle)
+                        continue
                     return tm_candidate
+        # NEW: Fallback to the real module file when function_name is a
+        # synthesized symbol (derived from insight text, not a real symbol).
+        # e.g. target_module="core", function_name="core.classes_dict" →
+        # resolve to partner/core/core.py or partner/core/__init__.py.
+        if target_module:
+            # Try module.py (package module file) first
+            for root in (PROJECT_ROOT, CODE_ROOT):
+                base = os.path.join(str(root), target_module.lstrip("/"))
+                if os.path.isdir(base):
+                    module_py = os.path.join(base, f"{target_module}.py")
+                    if os.path.exists(module_py):
+                        return module_py
+                    init_py = os.path.join(base, "__init__.py")
+                    if os.path.exists(init_py):
+                        return init_py
+                    # First .py file in the package (deterministic)
+                    try:
+                        py_files = sorted(f for f in os.listdir(base) if f.endswith(".py"))
+                        if py_files:
+                            return os.path.join(base, py_files[0])
+                    except OSError:
+                        pass
+                    # Last resort: the directory itself (caller must handle)
+                    return base
+                # Also try bare module.py next to partner/
+                bare = os.path.join(str(root), f"{target_module}.py")
+                if os.path.exists(bare):
+                    return bare
         logger.debug("[IMPL] resolved path %s does not exist — marking as unresolvable", py_path)
         return ""
 

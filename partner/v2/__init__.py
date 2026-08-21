@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
 
 # ── Convenience re-exports ──
+from .push_events import atomic_push_files
 from .perception import (
     atomic_screen_capture,
     atomic_screen_ocr,
@@ -94,6 +95,10 @@ from .loop_engine import (
     atomic_pause_resume,
     atomic_outer_learn,
 )
+from .capability_events import (
+    atomic_capability_inventory,
+    atomic_write_design,
+)
 
 
 def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
@@ -158,6 +163,10 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_app_screenshot_window, {"external_call": True, "produces_artifact": True}),
         ("app_list_elements", "列出 Windows 窗口中的 UI 控件。参数: target(窗口标题)", "local",
          atomic_app_list_elements, {"external_call": True}),
+
+        # ── File push to QQ ──
+        ("push_files", "发送文件/图片到QQ。用于截图后推送图片文件给用户。参数: source(文件路径), caption(描述文本)", "local",
+         atomic_push_files, {"external_call": True}),
 
         # ── Browser (9 events) ──
         ("browser_open", "打开浏览器并访问指定URL。参数: url, headless(可选), browser_type(可选)", "local",
@@ -234,5 +243,11 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_pause_resume, {"external_call": False}),
         ("outer_learn", "外循环学习：在检测到缺口时，主动检索并吸收知识。参数: gap_type, gap_description, target", "llm",
          atomic_outer_learn, {"external_call": True}),
+
+        # ── Capability & Design (2 events) ──
+        ("capability_inventory", "盘点自身能力（会什么/不会什么/需学什么），持续更新到共享 capabilities.md。参数: save_path(可选)", "local",
+         atomic_capability_inventory, {"external_call": False, "produces_artifact": True}),
+        ("write_design", "为当前任务生成软件项目式总设计文档，写入项目目录 design.md。参数: goal(可选), save_path(可选)", "llm",
+         atomic_write_design, {"external_call": True, "produces_artifact": True}),
     ]
     return events

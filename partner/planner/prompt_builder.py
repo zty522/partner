@@ -426,6 +426,8 @@ def build_prompt(
     event_type: str = "",
     available_agents: str = "",
     workspace_root: str = "",
+    probe_results: dict | None = None,
+    step_failures: dict[str, str] | None = None,
 ) -> str:
     """Build a dynamic planner prompt with experience/habits/growth/evolution context."""
     if habits is None:
@@ -443,6 +445,32 @@ def build_prompt(
     layered_rules = load_layered_rules(workspace_root)
 
     arts = json.dumps(expected_artifacts or [], ensure_ascii=False)
+
+    # ── Probe results (project structure auto-detection) ──
+    probe_block = ""
+    if probe_results and probe_results.get("project_type_hint"):
+        pr = probe_results
+        lines = ["### 项目自动探测结果（事实，非假设）",
+                 f"- 目录文件 ({len(pr.get('root_files',[]))} 个): {', '.join(pr.get('root_files',[])[:25])}"]
+        if pr.get("dep_files"):
+            lines.append(f"- 依赖文件: {', '.join(f'{f}({t})' for f,t in pr['dep_files'])}")
+        else:
+            lines.append("- 依赖文件: 无标准依赖文件（不要假设 requirements.txt/setup.py 存在）")
+        if pr.get("doc_files"):
+            lines.append(f"- 文档: {', '.join(pr['doc_files'][:5])}")
+        if pr.get("source_dirs"):
+            lines.append(f"- 源码目录: {', '.join(pr['source_dirs'][:5])}")
+        lines.append(f"- 建议第一步: {'; '.join(pr.get('suggested_first_steps',[])[:4])}")
+        lines.append(f"- 项目类型: {pr.get('project_type_hint','')}")
+        if pr.get("available_packages"):
+            lines.append(f"- 已可用包: {', '.join(pr['available_packages'][:8])}")
+            lines.append("- ⚠️ 策略：先尝试直接运行代码（import 可能成功），只用 run_command 执行单个 Python 脚本；不要规划完整环境安装（conda env create 太慢）")
+        probe_block = "\n".join(lines)
+    # ── Step failures (for replanning) ──
+    failure_block = ""
+    if step_failures:
+        fl = [f"- {sid}: {err[:200]}" for sid, err in step_failures.items()]
+        failure_block = "### 上轮失败步骤（避免重复）\n" + "\n".join(fl)
 
     context_blocks = []
     _debug_ctx = []
@@ -469,6 +497,12 @@ def build_prompt(
     if growth and growth.strip():
         context_blocks.append(f"### 成长记录\n{growth}")
         _debug_ctx.append("growth")
+    if probe_block:
+        context_blocks.append(probe_block)
+        _debug_ctx.append("probe")
+    if failure_block:
+        context_blocks.append(failure_block)
+        _debug_ctx.append("failures")
     # RL Experience context (from learning.db)
     try:
         from ..evolution.rl_engine import get_rl_loop
@@ -625,9 +659,10 @@ def build_prompt(
 - 字符串必须用双引号，不能用单引号
 - 最后一个元素后面不能有尾部逗号
 - 不要包含任何注释
-- 只输出JSON，不要额外文本
-
-输出格式（严格遵循此结构）：
+- - 【强制】如果用户目标包含"产出"、"报告"、"benchmark"、"分析"、"写"等词，必须在计划最后包含 atomic_write_artifact 步骤写入文件到 working_dir。
+- 【强制】每轮计划必须以 atomic_write_artifact 或 atomic_compose_structured_result 结束，确保有文件产出。
+- 【强制】不要只做搜索/读取/安装而不产出文件——每个计划必须有可交付的文件（.md/.pdf/.csv 等）。
+- 不要输出解释，只输出 JSON 对象
 {{"plan": [{{"id": "step1", "event_type": "...", "parameters": {{...}}, "depends_on": []}}], "expected_artifacts": []}}
 
 最终输出的 JSON 必须能被 Python `json.loads()` 正确解析。"""

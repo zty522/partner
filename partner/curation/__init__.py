@@ -299,17 +299,20 @@ class DailyRecommender:
     # ------------------------------------------------------------------
 
     def _topic_match(self, paper: PaperCandidate, profile: ResearchProfile) -> float:
-        """Weighted topic overlap between paper and profile."""
+        """Weighted topic overlap between paper and profile.
+
+        Normalize against expected-max overlap (~top 4 topics) instead of
+        total-topic-sum to avoid dilution when many niche topics are present.
+        """
         text = (paper.title + " " + paper.abstract).lower()
-        total_weight = 0.0
         matched_weight = 0.0
         for topic, weight in profile.topic_weights.items():
-            total_weight += weight
             if topic.lower() in text:
                 matched_weight += weight
-        if total_weight == 0:
+        if matched_weight == 0:
             return 0.0
-        return matched_weight / total_weight
+        # Cap: highest-4 topic weights sum typically ~3.0, so >=3.0 → 1.0
+        return min(matched_weight / 3.0, 1.0)
 
     def _author_prior(self, paper: PaperCandidate, profile: ResearchProfile) -> float:
         """Boost papers by favorite authors or institutions."""

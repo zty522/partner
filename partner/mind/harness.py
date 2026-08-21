@@ -72,6 +72,61 @@ class MicroPlan:
 
 
 @dataclass
+
+
+class ProjectProber:
+    """Auto-detect project structure before planning."""
+
+    _DEP_PATTERNS = [
+        ("requirements.txt", "pip"), ("requirements-dev.txt", "pip"),
+        ("environment.yaml", "conda"), ("environment.yml", "conda"),
+        ("setup.py", "pip (setuptools)"), ("setup.cfg", "pip (setuptools)"),
+        ("pyproject.toml", "pip/poetry/hatch"), ("Pipfile", "pipenv"),
+        ("Makefile", "make"), ("CMakeLists.txt", "cmake"),
+        ("package.json", "npm"), ("Cargo.toml", "cargo"),
+    ]
+    _DOC_PATTERNS = ["README.md", "README.rst", "README.txt", "README"]
+
+    @staticmethod
+    def probe(project_dir: str) -> dict:
+        import os as _os
+        if not _os.path.isdir(project_dir):
+            return {"root_files": [], "dep_files": [], "doc_files": [],
+                    "source_dirs": [], "has_notebooks": False, "has_tests": False,
+                    "suggested_first_steps": ["dir not found"],
+                    "project_type_hint": "unknown", "available_packages": []}
+        root_files = sorted(_os.listdir(project_dir))
+        dep_files = [(p, t) for p, t in ProjectProber._DEP_PATTERNS if p in root_files]
+        doc_files = [f for f in root_files if f in ProjectProber._DOC_PATTERNS or f.endswith('.md')]
+        source_dirs = [d for d in root_files if _os.path.isdir(_os.path.join(project_dir, d))
+                       and not d.startswith('.') and not d.startswith('_')
+                       and d not in ('tests', 'test', 'docs', 'doc', 'assets', 'data', 'datasets',
+                                     'notebooks', 'scripts', 'examples', '__pycache__', '.git')]
+        has_notebooks = any(f.endswith('.ipynb') for f in root_files) or 'notebooks' in root_files
+        has_tests = 'tests' in root_files or any(f.startswith('test_') and f.endswith('.py') for f in root_files)
+        suggestions = []
+        if doc_files: suggestions.append(f"Read doc: {doc_files[0]}")
+        if dep_files: suggestions.append(f"Deps: {', '.join(f+'( '+t+')' for f,t in dep_files)}")
+        else: suggestions.append("No standard dep file — check imports")
+        if source_dirs: suggestions.append(f"Source: {', '.join(source_dirs[:5])}")
+        _available = []
+        for _pkg in ["torch", "numpy", "scipy", "pandas", "matplotlib", "sklearn", "rdkit"]:
+            try: __import__(_pkg); _available.append(_pkg)
+            except ImportError: pass
+        if _available:
+            suggestions.insert(0, f"Packages available: {', '.join(_available)} — try running directly")
+        dep_types = {t for _, t in dep_files}
+        proj_type = f"has deps ({', '.join(sorted(dep_types)[:3])})" if dep_files else "unknown"
+        if source_dirs: proj_type += f", source: {', '.join(source_dirs[:3])}"
+        if has_notebooks: proj_type += ", has notebooks"
+        if _available: proj_type += f", pkgs: {', '.join(_available[:5])}"
+        return {"root_files": root_files[:50], "dep_files": dep_files,
+                "doc_files": doc_files, "source_dirs": source_dirs,
+                "has_notebooks": has_notebooks, "has_tests": has_tests,
+                "suggested_first_steps": suggestions, "project_type_hint": proj_type,
+                "available_packages": _available}
+
+@dataclass
 class HarnessResult:
     ok: bool
     parsed: JsonDict
@@ -80,6 +135,7 @@ class HarnessResult:
     reason: str = ""
     llm_calls: int = 0
     stalled_steps: int = 0
+    step_failures: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -893,11 +949,12 @@ class PlanExecutor:
         self.registry = registry
         self.store = store
 
-    async def execute(self, ctx: HarnessContext, plan: list[HarnessStep]) -> tuple[dict[str, JsonDict], int, int]:
+    async def execute(self, ctx: HarnessContext, plan: list[HarnessStep]) -> tuple[dict[str, JsonDict], int, int, dict[str, str]]:
         pending = {step.id: step for step in plan}
         total_steps = len(plan)
         step_ordinals = {step.id: idx for idx, step in enumerate(plan, start=1)}
         results: dict[str, JsonDict] = {}
+        step_failures: dict[str, str] = {}
         llm_calls = 0
         stalled = 0
         while pending:
@@ -966,6 +1023,8 @@ class PlanExecutor:
                 pending.pop(step.id, None)
                 llm_calls += 1 if kind == "smart" else 0
                 stalled = stalled + 1 if _progress_score(result) == 0 else 0
+                if not result.get("ok", True):
+                    step_failures[step.id] = str(result.get("error", "") or result.get("content", "") or "unknown")[:300]
                 self.store.append({
                     "event": "harness_step",
                     "title": ctx.title,
@@ -976,7 +1035,7 @@ class PlanExecutor:
                     "progress_score": _progress_score(result),
                     "result_preview": _clip(result, 500),
                 })
-        return results, llm_calls, stalled
+        return results, llm_calls, stalled, step_failures
 
     async def _emit_progress(self, ctx: HarnessContext, payload: JsonDict) -> None:
         if not ctx.progress_callback:
@@ -1207,7 +1266,19 @@ class PlanExecutor:
                                 logger.debug("[SANDBOX] Step %s 沙箱预检异常: %s", step.id, _sbx_e)
                     # ── [SANDBOX] 结束 ──
 
-                    result = await _maybe_await(spec.handler(ctx, params))
+                    _handler_fn = spec.handler
+                    if inspect.iscoroutinefunction(_handler_fn):
+                        result = await _handler_fn(ctx, params)
+                    else:
+                        # sync handler（如 Playwright Sync API）在独立线程跑，
+                        # 避免 Sync API 在 asyncio 事件循环里报错
+                        result = await asyncio.to_thread(_handler_fn, ctx, params)
+                    # ── 兼容 v2 事件返回 "status" 字段（browser.py 等）──
+                    # 统一转成 harness 约定的 "ok" 字段，避免失败被 setdefault("ok", True) 掩盖
+                    if isinstance(result, dict) and "status" in result and "ok" not in result:
+                        result["ok"] = (str(result.get("status")) == "ok")
+                        if not result["ok"] and result.get("error"):
+                            result["content"] = str(result.get("error"))
                     if isinstance(result, dict) and result.get("ok") is False and attempt < MAX_STEP_RETRIES:
                         # Retry ALL step failures (up to MAX_STEP_RETRIES retries)
                         error_str = str(result.get("error", ""))
@@ -1239,6 +1310,7 @@ class PlanExecutor:
                     break
                 except Exception as exc:
                     last_exc = str(exc)
+                    result = {"ok": False, "error": str(exc)}
                     break
             # --- End retry logic ---
         except Exception as exc:
@@ -1583,7 +1655,7 @@ async def run_harness(
             })
             if validation.ok:
                 task.mark("done", {"llm_calls": total_llm_calls})
-                return HarnessResult(True, parsed, plan, results, llm_calls=total_llm_calls, stalled_steps=stalled)
+                return HarnessResult(True, parsed, plan, results, llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
             replan_without_artifact += 1
             last_reason = "expected artifacts missing"
             if stalled >= 3:
@@ -1597,7 +1669,7 @@ async def run_harness(
                     reason="loop_guard_or_artifact_validation",
                 )
                 parsed = _parsed_from_remediation(ctx, parsed, remedied)
-                return HarnessResult(bool(remedied.get("ok")), parsed, plan, results, reason=last_reason, llm_calls=total_llm_calls, stalled_steps=stalled)
+                return HarnessResult(bool(remedied.get("ok")), parsed, plan, results, reason=last_reason, llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
             if attempt < max_attempts - 1:
                 last_reason = "three consecutive steps made no progress"
                 continue
@@ -1609,7 +1681,7 @@ async def run_harness(
                 reason="artifact_validation_after_plan",
             )
             parsed = _parsed_from_remediation(ctx, parsed, remedied)
-            return HarnessResult(bool(remedied.get("ok")), parsed, plan, results, reason=last_reason, llm_calls=total_llm_calls, stalled_steps=stalled)
+            return HarnessResult(bool(remedied.get("ok")), parsed, plan, results, reason=last_reason, llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
         except Exception as exc:
             last_reason = str(exc)
             failures_without_progress += 1
@@ -1716,7 +1788,7 @@ async def run_harness_plan(
             plan=_validate_plan_against_registry(registry, micro_plan.plan, "run_harness_plan"),
             expected_artifacts=micro_plan.expected_artifacts,
         )
-        results, exec_llm_calls, stalled = await executor.execute(ctx, micro_plan.plan)
+        results, exec_llm_calls, stalled, step_failures = await executor.execute(ctx, micro_plan.plan)
         total_llm_calls += exec_llm_calls
         fallback_paths = _collect_fallback_paths(results)
         parsed = _latest_structured_result(results) or _compose_parsed_from_results(ctx, results)
@@ -1737,7 +1809,7 @@ async def run_harness_plan(
                     return HarnessResult(False, {
                         "action": "timeout", "step_done": "执行超时",
                         "findings": [f"总执行时间超过 {max_timeout}s"],
-                    }, micro_plan.plan, results, reason=f"timeout after {elapsed:.0f}s", llm_calls=total_llm_calls, stalled_steps=stalled)
+                    }, micro_plan.plan, results, reason=f"timeout after {elapsed:.0f}s", llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
         except Exception as _ge:
             logger.debug("[HARNESS] goal check failed: %s", _ge)
         
@@ -1760,7 +1832,7 @@ async def run_harness_plan(
         })
         if validation.ok:
             task.mark("done", {"llm_calls": total_llm_calls, "source": "batch_plan"})
-            return HarnessResult(True, parsed, micro_plan.plan, results, llm_calls=total_llm_calls, stalled_steps=stalled)
+            return HarnessResult(True, parsed, micro_plan.plan, results, llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
         remedied = remediation.remediate(
             task=task,
             missing=validation.missing,
@@ -1772,7 +1844,7 @@ async def run_harness_plan(
         # Extract specific step error for the reason, e.g. "file_not_found: /data/pancreas.h5ad"
         step_error = _collect_failure_reasons(results)
         fail_reason = step_error or "expected artifacts missing"
-        return HarnessResult(bool(remedied.get("ok")), parsed, micro_plan.plan, results, reason=fail_reason, llm_calls=total_llm_calls, stalled_steps=stalled)
+        return HarnessResult(bool(remedied.get("ok")), parsed, micro_plan.plan, results, reason=fail_reason, llm_calls=total_llm_calls, stalled_steps=stalled, step_failures=step_failures)
     except Exception as exc:
         task.append_log("harness_batch_plan_failed", {"error": str(exc)})
         remedied = remediation.remediate(
@@ -4406,9 +4478,11 @@ def default_registry() -> EventRegistry:
             r = sp.run([sys.executable, script_path], capture_output=True, text=True, 
                        timeout=params.get("timeout", 300), cwd=workdir)
             ok = r.returncode == 0
+            stdout = (r.stdout or "").strip()
             return {
                 "ok": ok,
-                "stdout": r.stdout[-5000:] if r.stdout else "",
+                "stdout": stdout[-5000:],
+                "content": stdout[-5000:],   # 让 $step_X.result.content 能引用到真实 stdout
                 "stderr": r.stderr[-2000:] if r.stderr else "",
                 "exit_code": r.returncode,
                 "script_path": script_path,

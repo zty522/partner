@@ -301,22 +301,6 @@ def _run_instance_mode(argv: list[str]):
     if os.path.exists(cfg) and QQQfficialBridge is not None:
         _qq_bridge = QQQfficialBridge(workspace)
         _qq_bridge.load_config_from_file(cfg)
-        # Start OODA engine in background thread
-        import threading
-        def _ooda_background():
-            logger_ooda = logging.getLogger("partner.ooda_bg")
-            logger_ooda.info("[OODA-BG] Background OODA thread started for instance %s", args.instance_id)
-            while True:
-                time.sleep(60)
-                try:
-                    from partner.core.ooda_engine import ooda_continue
-                    injected = ooda_continue(workspace, args.instance_id)
-                    if injected:
-                        logger_ooda.info("[OODA-BG] Generated new research task")
-                except Exception as e:
-                    logger_ooda.debug("[OODA-BG] check: %s", e)
-        threading.Thread(target=_ooda_background, daemon=True, name="ooda-background").start()
-        print(f"OODA background thread started for instance {args.instance_id}", flush=True)
         try:
             _qq_bridge.start()
         except KeyboardInterrupt:

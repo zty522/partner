@@ -60,44 +60,51 @@ DEFAULT_ROUTING_RULES = {
 
 # ── LLM-based direct reply routing (replaces hardcoded regex patterns) ──
 
-_DRECT_REPLY_CLASSIFICATION_PROMPT = """你是一个消息分类器。判断用户消息：
+_DRECT_REPLY_CLASSIFICATION_PROMPT = """你是一个消息分类器。只判断用户消息的类型，不要生成回复内容。
 
-1. 如果消息是简单的问候、感谢、再见、简单定义查询、天气/时间/汇率查询等，不需要多步执行就能回答，则输出 {"type": "direct_reply", "reply": "你的直接回复"}
+判断规则：
+- 如果用户只是简单聊天（问候、感谢、告别、闲聊），输出 {"type": "direct_reply"}
+- 如果用户需要执行任何操作（截图、搜索、分析、文件操作、代码执行、发送消息、调用工具等），输出 {"type": "complex_task"}
 
-2. 如果消息是需要多步执行的任务（数据分析、代码生成、文件操作、研究分析、项目推进、文件路径操作、调用特定工具/agent等），则输出 {"type": "complex_task"}
+关键判断标准：
+- 用户提到任何具体动作（截图、搜索、分析、下载、发送、执行、创建、运行等）→ complex_task
+- 用户提供了 URL、文件路径、工具名称 → complex_task  
+- 用户消息中包含"帮我"、"请"、"做"等请求动词 + 具体目标 → complex_task
+- 只有"你好""谢谢""再见""在吗"这类纯粹社交用语才是 direct_reply
+- 任何不确定的情况 → complex_task
 
-重要规则：
-- 包含文件路径（如 /data/xxx.h5ad、/mnt/xxx 等）的消息一定是 complex_task
-- 包含工具/agent/模型名称（如 cytobridge、pancreas.h5ad、单细胞、轨迹推断等专业术语）的消息一定是 complex_task
-- 包含具体数据分析操作（如轨迹推断、差异分析、聚类、降维等）的消息一定是 complex_task
-- 只有纯粹的问候（你好、嗨、在吗）、感谢（谢谢）、告别（再见）才可能是 direct_reply
-- 不确定时优先分类为 complex_task
+只输出 JSON：{"type": "direct_reply"} 或 {"type": "complex_task"}
+不要输出 reply 字段，不要额外文字。
 
-仅输出 JSON，不要多余内容。用户消息："""
+用户消息："""
 
 def _classify_for_direct_reply(adapter, text: str) -> dict | None:
     """Use LLM to classify whether a message should get a direct reply or complex task execution.
 
     Returns None if classification fails (caller falls through to batch_plan).
+    The LLM only classifies — it does NOT generate reply text. Replies are generated
+    by _handle_direct_reply separately, preventing hallucination.
     """
     if not adapter or not (text or "").strip():
         return None
     try:
         prompt = _DRECT_REPLY_CLASSIFICATION_PROMPT + text
-        reply = adapter.chat(prompt, purpose="direct_reply_classify")
-        if not reply or not reply.strip():
+        response = adapter.chat(prompt, purpose="direct_reply_classify")
+        if not response or not response.strip():
             return None
-        # Clean up common LLM wrapping
-        cleaned = reply.strip()
+        cleaned = response.strip()
         if cleaned.startswith("```"):
-            # Remove code fences
             cleaned = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned
             if cleaned.startswith("json"):
                 cleaned = cleaned[4:].strip()
         cleaned = cleaned.strip()
         result = json.loads(cleaned)
         if isinstance(result, dict):
-            return result
+            msg_type = result.get("type", "")
+            if msg_type in ("direct_reply", "complex_task"):
+                # Strip any hallucinated reply — classification only
+                result.pop("reply", None)
+                return result
         return None
     except (json.JSONDecodeError, Exception) as exc:
         logger.debug("[DIRECT_REPLY_CLASSIFY] LLM classification failed: %s", exc)
@@ -346,6 +353,24 @@ def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision
                 priority=3,
             )
 
+    # ── Pre-check: message contains tool/event names → batch_plan ──
+    # Static list of harness event names that indicate task execution intent.
+    # These are the actual registered events; kept here to avoid circular imports.
+    _TASK_EVENT_NAMES = [
+        "web_capture", "push_files", "post_message", "screen_capture",
+        "execute_code", "call_agent_skill", "web_search", "web_fetch",
+        "create_file", "download_file", "write_report", "generate_code",
+        "list_directory", "read_file", "run_command", "generate_text",
+        "summarize", "analyze", "transform", "create_diagram",
+        "app_list_windows", "app_screenshot_window", "atomic_inspect_file",
+        "atomic_convert_md_to_pdf", "literature_review", "data_analysis",
+    ]
+    _text_lower = text.lower()
+    for _name in _TASK_EVENT_NAMES:
+        if _name in _text_lower:
+            logger.info("[ROUTING] message mentions '%s' → batch_plan (skip LLM)", _name)
+            return None
+    
     # ── Step 1: 3-path routing classifier via prompts/intent_classifier.txt ──
     # Classifies into: direct_reply (simple chat), batch_plan (multi-step task),
     # self_evolution (user wants Partner to learn/improve itself)
@@ -353,6 +378,13 @@ def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision
     if not adapter:
         return None
 
+    # Step 1a: Simple binary classify first (faster, less prone to hallucination)
+    simple = _classify_for_direct_reply(adapter, text)
+    if simple and simple.get("type") == "complex_task":
+        logger.info("[ROUTING] simple classify → complex_task → batch_plan")
+        return None
+    
+    # Step 1b: Full 4-path routing classifier
     routing = _classify_routing_intent(adapter, text)
     if not routing:
         logger.debug("[ROUTING] 3-path routing classification failed → fall through to batch_plan")
@@ -366,12 +398,28 @@ def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision
     )
 
     if intent == "direct_reply":
+        # Low confidence → treat as complex_task to be safe
+        if confidence < 0.7:
+            logger.info("[ROUTING] direct_reply confidence=%.2f too low → batch_plan", confidence)
+            return None
         # Generate a simple reply using the adapter directly
-        simple_prompt = f"用户说：{text}\n\n请用中文简短回复，不超过50字。"
+        simple_prompt = f"用户说：{text}\n\n请用中文简短回复，不超过50字。不要编造你做了任何操作（截图、搜索、分析等），你只能做文字回复。"
         reply_text = adapter.chat(simple_prompt, purpose="simple_reply")
         sanitized = self._sanitize_reply_to_user(reply_text or "")
         if not sanitized:
             return None
+        # Validate: if reply hallucinates actions (screenshot, file sizes, URLs), override to batch_plan
+        import re as _re
+        _hallucination_patterns = [
+            r'已截图', r'已生成', r'已发送', r'已下载', r'已执行',
+            r'\d+\s*[KMG]B',  # file sizes like 17.2MB
+            r'screenshot', r'capture', r'web_capture',
+            r'截图.*已', r'文件.*已',
+        ]
+        for _pat in _hallucination_patterns:
+            if _re.search(_pat, sanitized, _re.I):
+                logger.info("[ROUTING] direct_reply hallucinated action → batch_plan: %s", sanitized[:80])
+                return None
         # NOTE: The USER_MESSAGE handler in executor.py creates the DIRECT_REPLY event
         return InteractionDecision(
             reply_to_user=sanitized,

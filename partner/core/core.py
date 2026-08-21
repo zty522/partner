@@ -241,3 +241,7 @@ class Partner:
                 print(f"❌ Failed to recover from checkpoint: {latest_cp}")
         else:
             print("ℹ️  No checkpoint found. Starting fresh.")
+
+
+# ── Auto-evolution addition ──
+# test improvement

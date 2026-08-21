@@ -2,7 +2,7 @@
 
 Loads rules from three layers in priority order (highest first):
   1. Personal  (~/.partner/rules/ or workspace state/user/rules/)
-  2. Project   (workspace shared_projects/<project>/rules/)
+  2. Project   (workspace share/projects/<project>/rules/)
   3. Global    (workspace config/rules/ or partner/rules/defaults/)
 
 Personal rules override Project, Project overrides Global.
@@ -131,7 +131,7 @@ class RuleLoader:
         if not self._workspace_root or not self._project_name:
             return []
         proj_rules = os.path.join(
-            self._workspace_root, "shared_projects", self._project_name, "rules"
+            self._workspace_root, "share", "projects", self._project_name, "rules"
         )
         if os.path.isdir(proj_rules):
             return self._load_dir(proj_rules, RuleScope.PROJECT, f"project:{self._project_name}")

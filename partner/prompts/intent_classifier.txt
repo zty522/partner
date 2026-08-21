@@ -23,6 +23,8 @@
    - 包括：数据分析、文件操作、代码开发、研究分析、文献检索、工具/Agent 调用
    - 也包括：查询实时信息并整理（如查天气+整理成表格）
    - 当不确定时，优先分类为 batch_plan
+- **特别注意**：包含 URL（http/https）、工具名称、截图、文件操作等关键词的消息，即使看起来简单，也必须分类为 batch_plan
+- 用户要求"发 QQ"、"推送"、"发送"等涉及外部渠道的消息 → batch_plan
 
 输出格式（仅 JSON，不要多余内容）：
 {"intent": "direct_reply" | "batch_plan" | "self_evolution" | "correction", "reason": "中文分类理由", "confidence": 0.0-1.0}

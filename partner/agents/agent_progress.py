@@ -72,7 +72,7 @@ class ProgressReader:
         msg = latest.get("message") or latest.get("msg", "") or step
         eta = latest.get("eta_seconds")
         elapsed = latest.get("elapsed_seconds", 0)
-        parts = [f"[进度] {msg}"]
+        parts = [f"⏳ {msg}"]
         if pct > 0:
             bar_len = 10
             filled = int(pct / 100 * bar_len)

@@ -90,6 +90,70 @@ def _is_unavailable_sentinel(text: str) -> bool:
     ))
 
 
+def _ensure_write_artifact(micro_plan, working_dir: str, user_message: str = ""):
+    """If expected_artifacts require files but plan has no write step, add one.
+    
+    If the plan also lacks an LLM analysis step, add both analysis + write."""
+    artifacts = getattr(micro_plan, 'expected_artifacts', None) or []
+    # If no file artifacts but user message contains output keywords, add a default
+    if not artifacts:
+        user_msg = user_message
+        if any(kw in user_msg for kw in ['产出', '报告', 'benchmark', '分析', 'catalog', '写', '.md', '.csv', '.pdf']):
+            artifacts = [{"type": "file", "pattern": "*.md", "description": "分析报告", "required": True}]
+            micro_plan.expected_artifacts = artifacts
+    file_artifacts = [a for a in artifacts if a.get("type") == "file" or a.get("pattern")]
+    if not file_artifacts:
+        return micro_plan
+    steps = micro_plan.plan
+    has_write = any(
+        getattr(s, 'event_type', '') in ("atomic_write_artifact", "atomic_compose_structured_result",
+                         "atomic_json_table_artifact", "push_files")
+        for s in steps
+    )
+    import logging
+    print(f"[ENSURE_WRITE] steps={len(steps)} file_artifacts={len(file_artifacts)} has_write={has_write}", flush=True)
+    if has_write:
+        print("[ENSURE_WRITE] already has write step, skipping", flush=True)
+        return micro_plan
+    import types
+    # Collect all data-producing step IDs for dependency
+    data_steps = [s for s in steps if getattr(s, 'event_type', '') in 
+                  ("read_file", "list_directory", "run_command", "execute_code",
+                   "smart_llm_structured_action", "web_search", "github_search")]
+    dep_ids = [s.id for s in data_steps[-4:]] if data_steps else [steps[-1].id]
+    
+    pattern = file_artifacts[0].get("pattern", "*.md")
+    fname = pattern.replace("*", "report")
+    n = len(steps)
+    
+    # Check if we need an LLM analysis step
+    has_llm = any(getattr(s, 'event_type', '') == "smart_llm_structured_action" for s in steps)
+    llm_step_id = None
+    if not has_llm and data_steps:
+        llm_step_id = f"step_{n+1}"
+        llm_step = types.SimpleNamespace(
+            id=llm_step_id,
+            event_type="smart_llm_structured_action",
+            parameters={"instruction": f"基于以上收集的信息，生成一份完整的分析报告（中文）"},
+            depends_on=dep_ids,
+        )
+        steps.append(llm_step)
+        n += 1
+        dep_ids = [llm_step_id]
+    
+    write_id = f"step_{n+1}"
+    content_ref = f"${llm_step_id}.result.content" if llm_step_id else f"${dep_ids[-1]}.result.content"
+    write_step = types.SimpleNamespace(
+        id=write_id,
+        event_type="atomic_write_artifact",
+        parameters={"path": fname, "content": content_ref},
+        depends_on=dep_ids,
+    )
+    steps.append(write_step)
+    print(f"[ENSURE_WRITE] added steps: analysis={bool(llm_step_id)} write={write_id} total={len(steps)}", flush=True)
+    return micro_plan
+
+
 @dataclass
 class BatchPlanner:
     workspace: str
@@ -107,6 +171,7 @@ class BatchPlanner:
             "prompt_template": "prompts/batch_planner.txt",
             "unavailable_retries": 1,
             "unavailable_retry_delay_sec": 1,
+            "force_design": True,  # 每个任务执行前强制先写总设计文档（design.md）
         }
         config = _load_yaml_config(workspace, "batch_planner.yaml", defaults)
 
@@ -146,6 +211,8 @@ class BatchPlanner:
         relevant_experiences: str = "",
         growth_context: str = "",
         event_type: str = "",
+        probe_results: dict | None = None,
+        step_failures: dict[str, str] | None = None,
     ) -> tuple[MicroPlan, int]:
         if not adapter:
             raise RuntimeError("BatchPlanner requires an LLM adapter")
@@ -174,6 +241,8 @@ class BatchPlanner:
                 min_steps=min_steps,
                 max_steps=max_steps,
                 event_type=event_type,
+                probe_results=probe_results,
+                step_failures=step_failures,
             )
         except Exception as e:
             logger.error("[BATCH_PLANNER] failed to build prompt: %s", e)
@@ -211,6 +280,9 @@ class BatchPlanner:
         # Parse JSON
         try:
             micro_plan = _normalize_micro_plan(_json_from_llm(raw), max_steps=max_steps)
+            print(f"[PLAN-DEBUG] before ensure: {len(micro_plan.plan)} steps, artifacts={micro_plan.expected_artifacts}", flush=True)
+            micro_plan = _ensure_write_artifact(micro_plan, task_instance.working_dir, str(user_message))
+            print(f"[PLAN-DEBUG] after ensure: {len(micro_plan.plan)} steps", flush=True)
         except Exception as exc:
             # Extract error position from JSONDecodeError if applicable
             error_pos = getattr(exc, 'pos', 'unknown')
@@ -263,6 +335,7 @@ class BatchPlanner:
                     if not _is_unavailable_sentinel(raw2):
                         try:
                             micro_plan = _normalize_micro_plan(_json_from_llm(raw2), max_steps=max_steps)
+                            micro_plan = _ensure_write_artifact(micro_plan, task_instance.working_dir, str(user_message))
                             logger.info("[BATCH_PLANNER] retry %d succeeded", _retry_count)
                             break
                         except Exception as retry_exc:
@@ -372,6 +445,39 @@ class BatchPlanner:
                 logger.info("[BATCH_PLANNER] injected atomic_convert_md_to_pdf step after cytobridge")
             micro_plan = MicroPlan(plan=filtered, expected_artifacts=micro_plan.expected_artifacts)
             filtered = micro_plan.plan
+
+        # ── 强制写总设计：每个任务执行前先产出软件项目式设计文档 ──
+        # 只在第一轮写；research loop 后续轮次（title 带 _rN）已有设计文档，跳过。
+        # 否则每轮重复写"总设计→目标→现状"固定框架，迭代退化成重复生成相同内容
+        # （实测 03 的 r1=r2=r3 报告 md5 完全相同）。
+        try:
+            _task_meta = getattr(task_instance, "metadata", None) or {}
+            _task_title = str(
+                _task_meta.get("title", "") or getattr(task_instance, "title", "") or ""
+            )
+            if self.config.get("force_design", True) and not re.search(r"_r\d+", _task_title):
+                _design_step_id = "step_design"
+                _design_step = HarnessStep(
+                    id=_design_step_id,
+                    event_type="write_design",
+                    parameters={"goal": str(user_message)[:2000]},
+                    depends_on=[],
+                )
+                _new_plan = [_design_step]
+                for _s in micro_plan.plan:
+                    _deps = list(_s.depends_on) if _s.depends_on else []
+                    if _design_step_id not in _deps:
+                        _deps.append(_design_step_id)
+                    _new_plan.append(HarnessStep(
+                        id=_s.id,
+                        event_type=_s.event_type,
+                        parameters=_s.parameters,
+                        depends_on=_deps,
+                    ))
+                micro_plan = MicroPlan(plan=_new_plan, expected_artifacts=micro_plan.expected_artifacts)
+                logger.info("[BATCH_PLANNER] 已注入写总设计步骤 (force_design), 共 %d 步", len(_new_plan))
+        except Exception as _design_exc:
+            logger.debug("[BATCH_PLANNER] design step injection failed (non-fatal): %s", _design_exc)
 
         # ── Habit auto-application: apply user preferences from habits ──
         try:

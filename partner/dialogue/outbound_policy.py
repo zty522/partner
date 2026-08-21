@@ -65,6 +65,8 @@ _INTERNAL_PATTERNS = (
 
 def _template_clean(value: object, max_len: int = 240) -> str:
     text = str(value or "").strip()
+    # Strip HTML <img> tags that may leak from web_capture results
+    text = re.sub(r"<img\s+[^>]*/?>", "", text)
     text = re.sub(r"(?m)^@@.*$|^diff --git .*|^--- [ab]/.*|^\+\+\+ [ab]/.*", "", text)
     text = re.sub(r"[/\\][^\s，。；;]+(?:\.py|\.json|\.md|\.txt|\.pdf)(?::\d+)?", "[内部文件]", text)
     text = re.sub(r"_step_[A-Za-z0-9_.-]+\.result\.json", "[步骤结果]", text)

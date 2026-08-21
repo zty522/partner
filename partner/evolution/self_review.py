@@ -175,9 +175,28 @@ class SelfReview:
         return agents
 
     def _count_skills(self) -> int:
-        """Count registered skills via SkillRegistry."""
+        """Count registered skills via skills_registry.db, fall back to in-memory SkillRegistry."""
+        # 优先查持久化技能注册表（skills_registry.db）
         try:
-            # Lazy import to avoid circular dependency
+            import sqlite3
+
+            from partner.utils.workspace import get_skills_db_path  # type: ignore
+            from partner.workspace.workspace_layout import workspace_root_from_instance  # type: ignore
+
+            root = workspace_root_from_instance(self._workspace)
+            db_path = get_skills_db_path(root)
+            if os.path.isfile(db_path):
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute("SELECT COUNT(*) FROM skills").fetchone()
+                    if row and row[0]:
+                        return int(row[0])
+                finally:
+                    conn.close()
+        except Exception as exc:
+            logger.debug("[SELF_REVIEW] skill db count failed: %s", exc)
+        # 回退：内存 SkillRegistry
+        try:
             from partner.skills import SkillRegistry  # type: ignore
 
             registry = SkillRegistry.from_workspace(self._workspace)
@@ -188,18 +207,13 @@ class SelfReview:
             return 0
 
     def _collect_event_types(self) -> list[str]:
-        """Collect harness event types from EventRegistry if available."""
+        """Collect harness event types from the default EventRegistry."""
         try:
-            from partner.harness.event_registry import EventRegistry  # type: ignore
+            from partner.mind.harness import default_registry  # type: ignore
 
-            registry = EventRegistry()
-            if hasattr(registry, "list_event_types"):
-                return registry.list_event_types()
+            registry = default_registry()
             if hasattr(registry, "_events"):
-                return list(registry._events.keys())
-            return []
-        except ImportError:
-            # EventRegistry may not exist in all deployments
+                return sorted(registry._events.keys())
             return []
         except Exception as exc:
             logger.debug("[SELF_REVIEW] event type collection failed: %s", exc)

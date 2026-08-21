@@ -359,6 +359,40 @@ def _ensure_shell_api_key(env: dict) -> None:
         pass
 
 
+def _workspace_root_from_path(workspace: str) -> str:
+    """instances/<id> 目录 -> workspace 根（与 agent_config_sync 同逻辑）。"""
+    path = os.path.abspath(workspace or os.getcwd())
+    parts = path.split(os.sep)
+    if "instances" in parts:
+        idx = len(parts) - 1 - list(reversed(parts)).index("instances")
+        return os.sep.join(parts[:idx]) or os.sep
+    return path
+
+
+def _load_qwen_vision_cfg(workspace: str) -> dict:
+    """从 workspace config/api.json 读取 qwen 视觉配置。
+
+    返回 {"api_key", "base_url", "model"}；vision_model 字段优先，回退 model。
+    未配置/解析失败返回空 dict。
+    """
+    try:
+        ws_root = _workspace_root_from_path(workspace)
+        api_path = os.path.join(ws_root, "config", "api.json")
+        if not os.path.exists(api_path):
+            return {}
+        with open(api_path, encoding="utf-8") as f:
+            data = json.load(f)
+        qw = data.get("apis", {}).get("qwen", {}) or {}
+        key = str(qw.get("api_key") or "").strip()
+        if not key:
+            return {}
+        base = str(qw.get("base_url") or "").strip().rstrip("/")
+        model = str(qw.get("vision_model") or qw.get("model") or "").strip()
+        return {"api_key": key, "base_url": base, "model": model}
+    except Exception:
+        return {}
+
+
 class HermesAdapter(AgentAdapter):
     """Adapter for Hermes Agent via cronjob/subprocess."""
 
@@ -1299,7 +1333,7 @@ class HermesAdapter(AgentAdapter):
         max_tokens: int = None,
         purpose: str = "vision",
     ) -> str:
-        """Use Hermes CLI multimodal support (`hermes chat --image`)."""
+        """图片分析：优先直连 qwen VL（workspace config/api.json），失败回退 Hermes CLI 多模态。"""
         import subprocess
         import time
 
@@ -1310,6 +1344,20 @@ class HermesAdapter(AgentAdapter):
         max_images = 8
         selected = valid[:max_images]
         outputs: list[str] = []
+
+        # 优先 qwen VL 直连（用户在 api.json 中管理的图片模型）
+        qwen_cfg = _load_qwen_vision_cfg(self.workspace)
+        if qwen_cfg.get("api_key") and qwen_cfg.get("model"):
+            try:
+                outputs = self._chat_with_images_qwen(message, selected, qwen_cfg, max_tokens)
+            except Exception as exc:
+                logger.warning(f"[VISION] qwen vision backend failed: {exc}")
+                outputs = []
+            if outputs:
+                return "\n\n".join(outputs).strip()
+            logger.warning("[VISION] qwen vision returned nothing, falling back to hermes CLI")
+
+        outputs = []
         for idx, image_path in enumerate(selected, start=1):
             prompt = (
                 f"{message}\n\n"
@@ -1383,6 +1431,141 @@ class HermesAdapter(AgentAdapter):
                     "image_path": image_path,
                 })
         return "\n\n".join(outputs).strip() or USER_FRIENDLY_PROGRESS_REPLY
+
+
+    def _chat_with_images_qwen(
+        self,
+        message: str,
+        selected: list[str],
+        cfg: dict,
+        max_tokens: int = None,
+    ) -> list[str]:
+        """直连阿里云百炼 qwen VL（OpenAI 兼容端点），逐张分析图片。
+
+        单张失败即返回空列表，由调用方整体回退到 Hermes CLI 多模态。
+        """
+        import urllib.error
+        import urllib.request
+        import io
+        from PIL import Image
+
+        outputs: list[str] = []
+        base = (cfg.get("base_url") or "").rstrip("/")
+        model = cfg.get("model") or ""
+        headers = {
+            "Authorization": f"Bearer {cfg['api_key']}",
+            "Content-Type": "application/json",
+        }
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        for idx, image_path in enumerate(selected, start=1):
+            try:
+                # 统一缩放到 1200 内（dashscope 限制 ≤8000x8000，实测 1200 宽稳定）
+                im = Image.open(image_path)
+                w, h = im.size
+                scale = min(1.0, 1200 / max(w, h))
+                if scale < 1.0:
+                    im = im.resize((int(w * scale), int(h * scale)))
+                buf = io.BytesIO()
+                im.convert("RGB").save(buf, format="JPEG", quality=85)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+            except Exception as exc:
+                logger.warning(f"[VISION] qwen image prepare failed for {image_path}: {exc}")
+                return []
+            prompt = (
+                f"{message}\n\n"
+                f"这是第 {idx}/{len(selected)} 张图片或长截图切片。请读取图片中的文字和视觉信息，"
+                "不要编造看不见的内容。"
+            )
+            payload = {
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                "max_tokens": max_tokens or 2048,
+                "temperature": 0.1,
+                "stream": False,
+            }
+            started_at = time.time()
+            try:
+                req = urllib.request.Request(
+                    f"{base}/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                resp = opener.open(req, timeout=120)
+                data = json.loads(resp.read().decode("utf-8"))
+                content = str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+                elapsed_ms = int((time.time() - started_at) * 1000)
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": 1,
+                    "purpose": "vision",
+                    "timeout_sec": 120,
+                    "elapsed_ms": elapsed_ms,
+                    "returncode": 200,
+                    "status": "ok" if content else "failed",
+                    "model": model,
+                    "provider": "qwen",
+                    "message_chars": len(prompt),
+                    "prompt_tokens_est": self._estimate_tokens(prompt),
+                    "completion_tokens_est": self._estimate_tokens(content),
+                    "total_tokens_est": self._estimate_tokens(prompt) + self._estimate_tokens(content),
+                    "stdout_preview": content[:500],
+                    "stderr_preview": "",
+                    "message_preview": prompt[:500],
+                    "image_path": image_path,
+                })
+                if content:
+                    outputs.append(f"## 图片{idx}\n{content}")
+                    try:
+                        from ..api_log import append_api_call
+                        append_api_call("qwen", model=model, base_url=base, purpose="vision",
+                                        status="ok", elapsed_ms=elapsed_ms,
+                                        prompt_chars=len(prompt), response_chars=len(content),
+                                        workspace_root=_workspace_root_from_path(self.workspace),
+                                        instance=os.path.basename(self.workspace.rstrip("/")))
+                    except Exception:
+                        pass
+                else:
+                    return []
+            except Exception as exc:
+                self._log_chat_attempt({
+                    "ts": datetime.now().isoformat(),
+                    "attempt": 1,
+                    "purpose": "vision",
+                    "timeout_sec": 120,
+                    "elapsed_ms": int((time.time() - started_at) * 1000),
+                    "returncode": None,
+                    "status": "failed",
+                    "model": model,
+                    "provider": "qwen",
+                    "message_chars": len(prompt),
+                    "prompt_tokens_est": self._estimate_tokens(prompt),
+                    "completion_tokens_est": 0,
+                    "total_tokens_est": self._estimate_tokens(prompt),
+                    "error": str(exc),
+                    "message_preview": prompt[:500],
+                    "image_path": image_path,
+                })
+                logger.warning(f"[VISION] qwen image {idx} failed: {exc}")
+                try:
+                    from ..api_log import append_api_call
+                    append_api_call("qwen", model=model, base_url=base, purpose="vision",
+                                    status="failed", error=str(exc),
+                                    elapsed_ms=int((time.time() - started_at) * 1000),
+                                    prompt_chars=len(prompt),
+                                    workspace_root=_workspace_root_from_path(self.workspace),
+                                    instance=os.path.basename(self.workspace.rstrip("/")))
+                except Exception:
+                    pass
+                return []
+        return outputs
+
 
 
 class CustomEndpointHermesAdapter(HermesAdapter):

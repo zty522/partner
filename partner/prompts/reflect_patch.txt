@@ -3,6 +3,7 @@
 当前计划步骤列表（JSON 格式）：{current_plan_steps}
 已完成步骤历史：{history}
 当前已尝试执行次数：{attempt_count}
+当前页面实际内容（网页操作任务时提供，为空表示无页面可用）：{page_content}
 
 ## 规则
 
@@ -26,6 +27,10 @@
 
 ### 输出类型 3: report_failure（报告失败）—— 当所有路径都尝试过且无法解决时
 输出 {"action": "report_failure", "summary": "用中文向用户总结已完成的工作和失败原因", "root_causes": ["根因列表"], "suggestions": ["用户可以尝试的解决方向"]}
+
+### 网页操作 selector 规则
+- 若缺失项涉及网页操作（如 selector 找不到、元素未定位、Timeout、未完成登录），必须基于「当前页面实际内容」中的真实页面文本/DOM 生成正确的 CSS selector 或调整操作顺序（例如先点击登录按钮再填写手机号），禁止凭空猜测 selector。
+- 若页面实际内容为空，说明页面未打开或不可用，应补一个 browser_open 步骤。
 
 ### 重试次数规则
 - 如果 attempt_count >= 2（已经尝试了 2 次或更多），且每次都全部失败，禁止再输出补丁

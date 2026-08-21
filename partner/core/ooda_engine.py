@@ -65,13 +65,13 @@ class CircuitBreaker:
 class OODAEngine:
     """Perpetual research engine - completely domain-agnostic."""
 
-    def __init__(self, workspace: str, project: str = "molgen_exploration",
+    def __init__(self, workspace: str, project: str = "",
                  instance_id: str = "", adapter=None):
         self.workspace = workspace
         self.instance_id = instance_id
         self.adapter = adapter
-        ws_root = os.path.dirname(os.path.dirname(workspace))
-        self.project_dir = os.path.join(ws_root, "shared_projects", project)
+        # Sprint 7: Read config from instance workspace, not share/projects
+        self.project_dir = os.path.join(workspace, "config")
         self.data_dir = os.path.join(self.project_dir, "data")
         self.breaker = CircuitBreaker()
         self._ensure_dirs()
@@ -84,6 +84,8 @@ class OODAEngine:
 
     def _load_config(self) -> dict:
         config_path = os.path.join(self.project_dir, "config.yaml")
+        if not os.path.exists(config_path):
+            config_path = os.path.join(self.workspace, "config", "config.yaml")
         if os.path.exists(config_path):
             try:
                 import yaml
@@ -523,7 +525,7 @@ class OODAEngine:
                 )
                 self._send_qq_notification(msg)
                 self._save_paused_state(current_phase, decision)
-                return None
+            return None
 
             action = decision.get("suggested_action", "retry")
             if action == "skip":
@@ -595,6 +597,27 @@ class OODAEngine:
         text = decision.get("raw_task", "")
         phase = decision.get("phase", "unknown")
         round_n = decision.get("round_num", 0)
+        
+        # Anti-dead-loop: check if there's already an active plan for this project
+        try:
+            active_plan_path = os.path.join(self.workspace, "state", "active_plan.json")
+            if os.path.exists(active_plan_path):
+                with open(active_plan_path) as f:
+                    ap = json.load(f)
+                if ap.get("status") == "active" and ap.get("phases"):
+                    last_hb = ap.get("last_heartbeat", "")
+                    if last_hb:
+                        import time as _time
+                        try:
+                            hb_dt = datetime.fromisoformat(last_hb)
+                            age_sec = (_time.time() - hb_dt.timestamp())
+                            if age_sec < 120:
+                                logger.info("[OODA-v4] active plan exists (age=%.0fs), skipping inject", age_sec)
+                                return False
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         
         # Try direct enqueue first (bypasses inbox for immediate processing)
         try:
@@ -706,19 +729,37 @@ _ooda_engines: dict = {}
 def get_ooda(workspace: str, instance_id: str = "", adapter=None) -> OODAEngine:
     global _ooda_engines
     key = workspace
-    if key not in _ooda_engines:
+    if key in _ooda_engines:
+        # Reload config on each get — picks up hot-updates
+        _ooda_engines[key]._config = _ooda_engines[key]._load_config()
+    else:
         _ooda_engines[key] = OODAEngine(workspace, instance_id=instance_id, adapter=adapter)
-    elif adapter is not None:
+    if adapter is not None:
         _ooda_engines[key].adapter = adapter
     return _ooda_engines[key]
 
 
+# Per-instance cooldown tracking for ooda_continue
+_ooda_last_cycle: dict[str, float] = {}
+_OODA_CYCLE_COOLDOWN_SEC = 600  # 10 minutes between OODA auto-cycles
+_ooda_last_task_hash: dict[str, str] = {}  # instance -> md5(last task text) for dedup
+_OODA_MAX_SAME_TASK = 3  # max times same task can be injected before force-skip
+
 def ooda_continue(workspace: str, instance_id: str = "") -> bool:
-    if instance_id == "05":
-        return False
+    import time as _time
     engine = get_ooda(workspace, instance_id=instance_id)
     import logging as _logging
     _logging.getLogger("partner.ooda").info("[OODA-CONTINUE] called for instance %s", instance_id)
+    
+    # Cooldown: don't cycle more than once every 10 minutes
+    now = _time.time()
+    key = instance_id or workspace
+    last = _ooda_last_cycle.get(key, 0)
+    if now - last < _OODA_CYCLE_COOLDOWN_SEC:
+        _logging.getLogger("partner.ooda").debug(
+            "[OODA-CONTINUE] cooldown active for %s (%.0fs since last cycle)", key, now - last)
+        return False
+    
     ip = os.path.join(workspace, "state", "desktop_inbox.jsonl")
     try:
         if os.path.exists(ip):
@@ -731,5 +772,23 @@ def ooda_continue(workspace: str, instance_id: str = "") -> bool:
     except:
         pass
     dec = engine.cycle()
+    if dec is not None:
+        _ooda_last_cycle[key] = now
+        # Content dedup: hash the task text, skip if same task injected too many times
+        import hashlib as _hashlib
+        task_text = dec.get("raw_task", "") or dec.get("title", "")
+        task_hash = _hashlib.md5(task_text.encode()).hexdigest()
+        prev_hash = _ooda_last_task_hash.get(key, "")
+        same_count = _ooda_last_task_hash.get(key + "_count", 0)
+        if task_hash == prev_hash:
+            same_count += 1
+            _ooda_last_task_hash[key + "_count"] = same_count
+            if same_count >= _OODA_MAX_SAME_TASK:
+                _logging.getLogger("partner.ooda").warning(
+                    "[OODA-CONTINUE] same task injected %d times, force-skipping for %s", same_count, key)
+                return False
+        else:
+            _ooda_last_task_hash[key] = task_hash
+            _ooda_last_task_hash[key + "_count"] = 1
     _logging.getLogger("partner.ooda").info("[OODA-CONTINUE] cycle result: %s", "task" if dec else "None")
     return dec is not None

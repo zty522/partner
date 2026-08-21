@@ -11,6 +11,7 @@ import json
 import logging
 import mimetypes
 import os
+import uuid
 import re
 import smtplib
 import threading
@@ -268,9 +269,23 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
         return
     # Also skip THINKING_NOTICE ("[进度] 正在思考...") — these come from task_queue lifeline,
     # not from progress events. The first one is already delivered as reply_to_user.
-    if plain.rstrip(".") == "[进度] 正在思考":
-        logger.debug("[REPORT] skipped THINKING_NOTICE duplicate")
+    _stripped_plain = plain.rstrip(".").replace(" ", "")
+    if _stripped_plain in ("[进度]正在思考", "[进度]thinking"):
+        logger.debug("[REPORT] skipped THINKING_NOTICE duplicate: plain=%r", plain[:60])
         return
+    # Skip any "[进度]" messages if the active plan has already completed/stopped
+    if plain.startswith("[进度]"):
+        try:
+            _ap_path = os.path.join(_workspace, "state", "active_plan.json")
+            if os.path.exists(_ap_path):
+                import json as _json_ap
+                with open(_ap_path, "r") as _f:
+                    _ap = _json_ap.load(_f)
+                if str(_ap.get("status") or "").lower() in ("waiting", "completed", "stopped"):
+                    logger.debug("[REPORT] skipped progress message after plan stop: %s", plain[:60])
+                    return
+        except Exception:
+            pass
     # Message deduplication: skip if same hash was sent within DEDUP_WINDOW_SEC
     content_hash = hashlib.md5(str(content or "").encode("utf-8")).hexdigest()
     now = _time.time()
@@ -282,6 +297,7 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
         "batch_plan:iteration_summary", "batch_plan:max_iterations", "batch_plan:acceptance_criteria",
         "batch_plan:interrupted", "batch_plan:parallel_progress",
         "project:backend_timeout_notice",
+        "batch_plan:summary",
     }
     if source in _noisy_sources:
         logger.info("[REPORT] suppressed noisy batch_plan source=%s", source)
@@ -404,7 +420,11 @@ def _extract_content_report_from_parsed(parsed: dict) -> str:
     if findings:
         lines.append(f"关键判断：{_clip('；'.join(findings[:2]), 150)}")
     if next_action:
-        lines.append(f"下一步：{_clip(next_action, 120)}")
+        # Map internal event names to human-readable equivalents
+        _display_next = next_action
+        if next_action.strip().lower() == "stop_project":
+            _display_next = "已完成，等待用户指令"
+        lines.append(f"下一步：{_clip(_display_next, 120)}")
     text = _sanitize_user_report_text("\n".join(lines).strip())
     if _is_blank_user_visible_text(text):
         return ""
@@ -480,6 +500,8 @@ def _sanitize_user_report_text(text: str) -> str:
     """Remove internal agent/runtime noise before user-facing delivery."""
     if not text:
         return ""
+    # Strip HTML <img> tags that may leak from web_capture results
+    text = re.sub(r"<img\s+[^>]*/?>", "", str(text or ""))
     stripped_text = (text or "").strip()
     if stripped_text.startswith("{") and stripped_text.endswith("}"):
         try:
@@ -488,6 +510,19 @@ def _sanitize_user_report_text(text: str) -> str:
                 text = data["message"]
         except Exception:
             pass
+    # Collapse verbose LLM-generated timeout messages into one line
+    if "后台执行超过单步时间限制" in text or "已停止等待当前子步骤" in text:
+        # Extract project/task name if present
+        _m = re.search(r"「([^」]+)」", text)
+        _task = _m.group(1) if _m else "任务"
+        text = f"⏳ 任务「{_task}」执行超时，正在重试"
+
+    # Collapse verbose LLM-generated timeout messages into one line
+    if "后台执行超过单步时间限制" in text or "已停止等待当前子步骤" in text:
+        _m = re.search(r"「([^」]+)」", text)
+        _task = _m.group(1) if _m else "任务"
+        text = f"⏳ 任务「{_task}」执行超时，正在重试"
+
     text = strip_internal_diff(text)
     if not text or has_internal_diff(text):
         return ""
@@ -2988,25 +3023,12 @@ def _event_completion_receipt(title: str, event_type: EventType | str, parsed: d
                               *, next_event: str = "", next_reason: str = "",
                               files: list[str] | None = None,
                               files_pushed: bool | None = None) -> str:
-    parsed = parsed or {}
-    llm_text = _format_event_completion_receipt_with_llm(
-        title,
-        event_type,
-        parsed,
-        next_event=next_event,
-        next_reason=next_reason,
-        files=files,
-        files_pushed=files_pushed,
+    """Clean deterministic receipt — no LLM call."""
+    return _event_completion_receipt_local(
+        title, event_type, parsed,
+        next_event=next_event, next_reason=next_reason,
+        files=files, files_pushed=files_pushed,
     )
-    if llm_text:
-        return llm_text
-    logger.warning(
-        "[REPORT] LLM receipt formatter unavailable; refusing code-generated completion receipt "
-        "for event_type=%s title=%s",
-        event_type.value if isinstance(event_type, EventType) else str(event_type or ""),
-        title,
-    )
-    return UNAVAILABLE_NOTICE
 
 
 def _event_completion_receipt_local(title: str, event_type: EventType | str, parsed: dict | None,
@@ -3016,6 +3038,7 @@ def _event_completion_receipt_local(title: str, event_type: EventType | str, par
     """Deterministic receipt used by Harness to avoid an extra formatter LLM call."""
     parsed = parsed or {}
     done = _clip(str(parsed.get("step_done") or "本轮事件已完成"), 220)
+    done = _sanitize_user_report_text(done) or done
     findings = parsed.get("findings") or []
     if isinstance(findings, str):
         findings = [findings]
@@ -3029,6 +3052,8 @@ def _event_completion_receipt_local(title: str, event_type: EventType | str, par
         lines.append(f"文件{status}：{'; '.join(file_names[:4])}")
     if next_event:
         event_label = next_event or "none"
+        if event_label.strip().lower() == "stop_project":
+            event_label = "已完成，等待用户指令"
         lines.append(f"下一步：{event_label}")
     return "\n".join(line for line in lines if line).strip() or UNAVAILABLE_NOTICE
 
@@ -3330,7 +3355,8 @@ async def _event_loop():
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.error(f"[EVENT_LOOP] error: {exc}")
+            import traceback
+            logger.error(f"[EVENT_LOOP] error: {exc}\n{traceback.format_exc()}")
 
 
 def start_event_loop():
@@ -3690,6 +3716,14 @@ async def _handle_user_message(event: MindEvent):
     message_id = str(payload.get("message_id") or "").strip()
     source = str(payload.get("source") or "desktop_gui").strip()
 
+    # Reset research loop on new user message
+    try:
+        _instance_id = os.path.basename(_workspace.rstrip("/")) if _workspace else ""
+        from .research_loop import reset as _reset_loop
+        _reset_loop(_instance_id)
+    except Exception:
+        pass
+
     if not text:
         logger.info("[USER_MESSAGE] empty text; skipped %s", event.id[:8])
         return
@@ -3715,6 +3749,15 @@ async def _handle_user_message(event: MindEvent):
         "text": text[:100],
         "sender_id": sender_id,
     })
+
+    # ── Acknowledgment: send "收到指令xxx，正在思考..." ──
+    _ack = f"收到指令「{text[:60]}{'...' if len(text) > 60 else ''}」，正在思考..."
+    try:
+        if _push_callback is not None:
+            _push_callback(_ack)
+    except Exception:
+        pass
+    # ── End acknowledgment ──
 
     # Call orchestrator to decide routing
     try:
@@ -3803,6 +3846,11 @@ async def _handle_user_message(event: MindEvent):
         reply = str(decision.reply_to_user or "").strip()
         if reply and reply not in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
             _append_assistant_dialog_history(reply, sender_id=sender_id, sender_name="Partner", message_id=message_id, source=source)
+            try:
+                if _push_callback is not None:
+                    _push_callback(reply)
+            except Exception:
+                pass
 
         _append_event_pipeline(event.id, "user_message", "completed", {
             "reply": (reply or "")[:200],
@@ -3815,6 +3863,11 @@ async def _handle_user_message(event: MindEvent):
             "抱歉，处理消息时出现错误",
             sender_id=sender_id, sender_name="Partner", message_id=message_id, source=source,
         )
+        try:
+            if _push_callback is not None:
+                _push_callback("抱歉，处理消息时出现错误")
+        except Exception:
+            pass
         _append_event_pipeline(event.id, "user_message", "failed", {
             "error": str(exc)[:200],
         })
@@ -5856,6 +5909,33 @@ async def _handle_batch_plan_event(event: MindEvent):
             growth_context = format_growth_for_prompt(max_events=2)
         except Exception as exc:
             logger.debug("[GROWTH] loading failed: %s", exc)
+        # ── Auto-probe project structure before planning ──
+        _probe_results = None
+        try:
+            import os as _osp, re as _re_probe
+            _probe_dir = ""
+            # Try to extract path from user message
+            _msg = root_request or str(payload.get("user_request") or title)
+            # Match paths containing /external/ or starting with /mnt/ (project directories)
+            _path_match = _re_probe.search(r'(/mnt/[^\s]+)', _msg)
+            if _path_match:
+                _candidate = _path_match.group(1)
+                # Progressive fallback: try shorter paths until we find an existing dir
+                while _candidate and not _osp.path.isdir(_candidate):
+                    _candidate = _osp.path.dirname(_candidate)
+                if _candidate and _osp.path.isdir(_candidate):
+                    _probe_dir = _candidate
+            # Fallback: use explicit project_dir if it contains external code
+            if not _probe_dir and project_dir:
+                if _osp.path.isdir(project_dir) and _osp.listdir(project_dir):
+                    _probe_dir = project_dir
+            if _probe_dir:
+                from ..mind.harness import ProjectProber
+                _probe_results = ProjectProber.probe(_probe_dir)
+                logger.info("[PROBE] dir=%s type=%s", _probe_dir, _probe_results.get("project_type_hint", "unknown"))
+        except Exception as _exc:
+            logger.debug("[PROBE] failed: %s", _exc)
+
         micro_plan, planner_calls = await batch_planner.plan(
             adapter=_adapter,
             user_message=root_request or str(payload.get("user_request") or title),
@@ -5865,6 +5945,7 @@ async def _handle_batch_plan_event(event: MindEvent):
             relevant_experiences=relevant_experiences,
             growth_context=growth_context,
             event_type=event.type.value,
+            probe_results=_probe_results,
         )
         if not _user_prefers_pdf():
             micro_plan.expected_artifacts = _normalize_batch_expected_artifacts_for_request(
@@ -5873,7 +5954,22 @@ async def _handle_batch_plan_event(event: MindEvent):
             )
             # Also filter out PDF-conversion plan steps when user doesn't prefer PDF
             micro_plan.plan = [s for s in micro_plan.plan if s.event_type not in ("atomic_convert_md_to_pdf",)]
+        # Sync corrected expected_artifacts back to task for validation
+        task.update_expected_artifacts(micro_plan.expected_artifacts or [])
         pending_plan = micro_plan
+        # Normalize write_artifact paths: ensure they write to task_dir, not external paths
+        for step in pending_plan.plan:
+            if hasattr(step, 'event_type') and step.event_type == "atomic_write_artifact":
+                params = step.parameters if hasattr(step, 'parameters') else getattr(step, 'params', {})
+                if isinstance(params, dict):
+                    fp = params.get("path") or params.get("file_path") or ""
+                    if fp and os.path.isabs(fp) and not fp.startswith(task.working_dir):
+                        new_fp = os.path.join(task.working_dir, os.path.basename(fp))
+                        logger.info("[PATH_FIX] %s → %s", fp, new_fp)
+                        if "path" in params:
+                            params["path"] = new_fp
+                        if "file_path" in params:
+                            params["file_path"] = new_fp
         pending_plan_calls = planner_calls
         planned_steps = len(micro_plan.plan)
         aggregate_planned_steps = planned_steps
@@ -6277,6 +6373,13 @@ async def _handle_batch_plan_event(event: MindEvent):
                         parent_id=event.id,
                         bypass_rate_limit=True,
                     )
+                # ── 修复：reflect 判定需询问用户后，仍需触发 stop_project → research loop ──
+                # 否则 batch_plan 完成后不 enqueue stop_project，研究循环（on_task_done）不跑，
+                # 实例"跑一会就停"。研究类任务应继续自主迭代，而非完全停在 ask_user。
+                try:
+                    await _enqueue_stop_project_event(event, title, "reflect 判定需询问用户（研究循环继续）", payload)
+                except Exception:
+                    pass
                 break
             if not gap or (not patches and not missing_items):
                 logger.info("[REFLECT] no actionable gap; stopping iteration task_id=%s", task.task_id)
@@ -6877,18 +6980,6 @@ async def _handle_batch_plan_event(event: MindEvent):
         if completed_with_delivery
         else f"{progress_text} 下一步：{next_step_text}"
     )
-    # Generate final summary for delivery message (config-driven via llm_check.yaml)
-    final_summary_text = ""
-    if completed_with_delivery and task:
-        try:
-            final_summary_text = await _generate_final_summary(
-                task_instance=task,
-                check_result=check_result or {},
-                file_list=files or [],
-                user_message=root_request or title,
-            )
-        except Exception as exc:
-            logger.debug("[FINAL_SUMMARY] generation failed (non-fatal): %s", exc)
     receipt_text = _event_completion_receipt_local(
         title,
         event.type,
@@ -6898,8 +6989,6 @@ async def _handle_batch_plan_event(event: MindEvent):
         files=files,
         files_pushed=pushed,
     )
-    if final_summary_text:
-        receipt_text = f"{receipt_text}\n\n{final_summary_text}"
     await _enqueue_visible_report(
         receipt_text,
         event.type,
@@ -8255,22 +8344,10 @@ async def _handle_project(event: MindEvent):
             record_risk_event(_workspace, title, "非结构化结果", hermes_response[:260], severity="medium")
         elif timed_out_or_stalled:
             record_risk_event(_workspace, title, "agent backend stalled or unavailable", hermes_response[:260], severity="high")
-            # Record in OODA CircuitBreaker to prevent infinite restart loop
-            try:
-                from ..core.ooda_engine import get_ooda
-                ooda = get_ooda(_workspace, instance_id="01")
-                ooda.breaker.record_failure(title, {
-                    "error_message": "timed_out_or_stalled",
-                    "step": "batch_plan_handler",
-                })
-            except Exception:
-                pass
             try:
                 await _enqueue_visible_report(
                     (
-                        f"「{title}」这一轮后台执行超过单步时间限制，已停止等待当前子步骤。\n\n"
-                        "本轮不会编造结果；接下来会把目标拆成更小的可验证动作继续推进。"
-                        "如果已经生成了中间文件，会在下一轮先检查文件并汇报。"
+                        f"⏳ 任务「{title}」执行超时，正在重试"
                     ),
                     event.type,
                     event_kind=str(event.payload.get("event_kind") or event.type.value),
@@ -8610,6 +8687,63 @@ async def _handle_stop_project(event: MindEvent):
         logger.warning(f"[STOP_PROJECT] failed to stop project {title}: {exc}")
     logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
 
+    # ── Research Loop: 自主研究循环 ──
+    try:
+        from .research_loop import on_task_done
+        _instance_id = os.path.basename(_workspace.rstrip("/")) if _workspace else ""
+        _user_request = str(payload.get("user_request") or payload.get("root_user_request") or title)
+
+        async def _enqueue_fn(t: str, ur: str, pr: str):
+            """Enqueue a new BATCH_PLAN event directly into the event queue."""
+            new_payload: JsonDict = {
+                "title": t,
+                "user_request": ur,
+                "root_user_request": pr or ur,
+                "parent_user_request": pr or ur,
+                "original_user_request": _user_request,
+                "source": "research_loop",
+            }
+            new_event = MindEvent(
+                type=EventType.BATCH_PLAN,
+                payload=new_payload,
+                parent_id=event.id,
+                source="research_loop",
+            )
+            await _event_queue.put(new_event)
+            logger.info("[RESEARCH_LOOP] enqueued BATCH_PLAN: %s", t[:60])
+
+        async def _notify_fn(msg: str):
+            await _enqueue_visible_report(msg, EventType.STOP_PROJECT, priority=3,
+                                          source="research_loop:summary", bypass_rate_limit=True)
+
+        # Extract output files from task dirs for streak detection
+        _files = []
+        try:
+            _tasks_dir = os.path.join(_workspace, "state", "tasks")
+            if os.path.isdir(_tasks_dir):
+                for _td in sorted(os.listdir(_tasks_dir), key=lambda x: os.path.getmtime(os.path.join(_tasks_dir, x)), reverse=True)[:3]:
+                    _tp = os.path.join(_tasks_dir, _td)
+                    for _f in os.listdir(_tp):
+                        if _f.endswith(('.md','.png','.jpg','.csv','.pdf')) and not _f.startswith('_error'):
+                            _files.append(_f)
+                _files = list(set(_files))
+        except Exception:
+            pass
+
+        await on_task_done(
+            instance_id=_instance_id,
+            title=title,
+            user_request=_user_request,
+            workspace=_workspace,
+            parsed=None,
+            files=_files,
+            event_types=[],
+            enqueue_fn=_enqueue_fn,
+            notify_fn=_notify_fn,
+            adapter=_adapter,
+        )
+    except Exception as _exc:
+        logger.warning("[RESEARCH_LOOP] integration failed: %s", _exc, exc_info=True)
 
 async def _handle_report(event: MindEvent):
     """汇报念头：直接推送到 QQ（如果有活跃的 bot 连接），含去重。
@@ -9236,6 +9370,22 @@ async def _run_comprehensive_evaluation(task, root_goal: str, config: dict) -> d
                     parsed = _json_from_llm(raw)
                 except Exception:
                     parsed = None
+                # ── Delivery override: if any delivery step pushed successfully, mark satisfied ──
+                _delivery_events = {"push_files", "post_message", "send_file_proactive", "send_message_proactive"}
+                try:
+                    _step_results = getattr(task, 'metadata', {}).get('step_results') or {}
+                    for _sr in (_step_results.values() if isinstance(_step_results, dict) else []):
+                        if isinstance(_sr, dict) and _sr.get('event_type') in _delivery_events:
+                            if _sr.get('pushed') or _sr.get('ok'):
+                                logger.info("[LLM_CHECK] delivery override: step '%s' pushed=%s → satisfied=True",
+                                           _sr.get('event_type'), _sr.get('pushed'))
+                                result = {"satisfied": True, "missing": [], "reason": "delivery step succeeded",
+                                          "_source": "delivery_override"}
+                                task.append_log("iteration_llm_check", result)
+                                return result
+                except Exception:
+                    pass
+                # ── End delivery override ──
                 if isinstance(parsed, dict):
                     satisfied = bool(parsed.get("satisfied", False))
                     missing_raw = parsed.get("missing") or parsed.get("missing_items") or []
@@ -9793,12 +9943,42 @@ async def _run_root_cause_diagnosis(task, root_goal: str, check_result: dict, co
         logger.info("[REFLECT] missing items filtered to empty, task satisfied task_id=%s", task.task_id)
         return {"patches": [], "missing_items": [], "reflection": ""}
 
+    # ── browser selector 盲猜修复：browser 步骤失败时 extract 当前页面 DOM 注入 prompt ──
+    page_content = ""
+    try:
+        _browser_failed = False
+        if task and task.working_dir:
+            import glob as _g
+            for _rf in sorted(_g.glob(os.path.join(task.working_dir, "_step_*.result.json"))):
+                try:
+                    _sr = json.load(open(_rf))
+                except Exception:
+                    continue
+                _ev = str(_sr.get("event_type", ""))
+                _err = str(_sr.get("result", {}).get("error", ""))
+                if _ev.startswith("browser_") and any(k in _err for k in ("wait_for_selector", "Element not found", "Timeout", "locator")):
+                    _browser_failed = True
+                    break
+        if _browser_failed:
+            from ..v2.browser import atomic_browser_extract
+            class _BCtx:
+                workspace = _workspace
+            _ext = await asyncio.to_thread(atomic_browser_extract, _BCtx(), {"selector": "body", "format": "text"})
+            if _ext.get("status") == "ok":
+                page_content = str(_ext.get("content", ""))[:3000]
+                logger.info("[REFLECT] injected page content (%d chars) for browser selector fix", len(page_content))
+            else:
+                logger.info("[REFLECT] page extract failed: %s", str(_ext.get("error", ""))[:120])
+    except Exception as _e:
+        logger.debug("[REFLECT] browser page extract skipped: %s", _e)
+
     replacements = {
         "{{root_goal}}": str(root_goal or "")[:2400],
         "{{missing_items}}": json.dumps(missing_items, ensure_ascii=False)[:2000],
         "{{current_plan_steps}}": json.dumps(current_plan_steps[:20], ensure_ascii=False)[:2000],
         "{{history}}": json.dumps(history[:20], ensure_ascii=False)[:2000],
         "{{attempt_count}}": str(attempt_count),
+        "{{page_content}}": page_content,
     }
     for key, value in replacements.items():
         prompt = prompt.replace(key, value)
@@ -9811,6 +9991,7 @@ async def _run_root_cause_diagnosis(task, root_goal: str, check_result: dict, co
             "{current_plan_steps}": json.dumps(current_plan_steps[:20], ensure_ascii=False)[:2000],
             "{history}": json.dumps(history[:20], ensure_ascii=False)[:2000],
             "{attempt_count}": str(attempt_count),
+            "{page_content}": page_content,
         }.items():
             prompt = prompt.replace(key, value)
 

@@ -397,91 +397,9 @@ class QQQfficialBridge:
                 source="qq",
             )
 
-            # Poll for reply in qq_chat_history.jsonl (same pattern as TUI)
-            reply = None
-            state_dir = os.path.join(self.workspace, "state")
-            qq_hist = os.path.join(state_dir, "qq_chat_history.jsonl")
-            poll_start = time.time()
-            last_pos = 0
-            if os.path.exists(qq_hist):
-                last_pos = os.path.getsize(qq_hist)
-
-            while time.time() - poll_start < 30:  # 30s timeout
-                time.sleep(1)
-                if os.path.exists(qq_hist):
-                    try:
-                        with open(qq_hist, "r", encoding="utf-8") as f:
-                            f.seek(last_pos)
-                            for line in f:
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                try:
-                                    entry = json.loads(line)
-                                    if entry.get("role") == "assistant" and entry.get("content"):
-                                        reply = entry["content"]
-                                        last_pos = f.tell()
-                                except json.JSONDecodeError:
-                                    pass
-                            last_pos = f.tell()
-                    except Exception:
-                        pass
-                if reply:
-                    break
-
-            if reply:
-                self._send_reply_once(msg, reply, sub_key="event_reply")
-            else:
-                # Check if a task is still in progress — if so, don't send a timeout error
-                timeout_msg = ""
-                try:
-                    plan_path = os.path.join(self.workspace, "state", "active_plan.json")
-                    queue_path = os.path.join(self.workspace, "state", "task_queue.json")
-                    if os.path.exists(plan_path):
-                        with open(plan_path, "r") as f:
-                            plan = json.load(f)
-                        ps = plan.get("status", "")
-                        pt = plan.get("title", "")
-                        if ps in ("active", "running"):
-                            timeout_msg = f"任务仍在执行中（当前状态: {ps}），完成后会自动通知你"
-                        elif ps == "idle" and os.path.exists(queue_path):
-                            with open(queue_path, "r") as f:
-                                tasks = json.load(f)
-                            pending = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "pending")
-                            if pending > 0:
-                                timeout_msg = f"当前有 {pending} 个任务在队列中等待处理，前面的任务完成后会自动执行你的请求"
-                    # Fallback: send a generic continuing message instead of an error
-                    if not timeout_msg:
-                        timeout_msg = "任务正在处理中，请稍候..."
-                except Exception:
-                    timeout_msg = "任务正在处理中，请稍候..."
-                # Only send a timeout message if genuinely nothing is active
-                try:
-                    plan_path = os.path.join(self.workspace, "state", "active_plan.json")
-                    has_active = os.path.exists(plan_path) and json.load(open(plan_path)).get("status") in ("active", "running")
-                except Exception:
-                    has_active = False
-                if has_active:
-                    # There's an active task — silently return; the event pipeline will deliver the result
-                    logger.info("[QQ Bridge] poll timeout but task is active — waiting for async delivery")
-                else:
-                    self._send_reply_once(msg, timeout_msg, sub_key="timeout")
         except Exception as e:
             logger.error(f"Message handling error: {e}", exc_info=True)
             self._stats["errors"] += 1
-            # Try to send error notification
-            try:
-                error_text = self._unavailable_notice()
-                asyncio.run_coroutine_threadsafe(
-                    self._bot.send_message(
-                        msg.sender_id if msg.message_type == QQMessageType.PRIVATE else msg.group_id,
-                        error_text,
-                        msg.message_type,
-                    ),
-                    self._bot._loop if self._bot else None,
-                )
-            except Exception:
-                pass
 
     @staticmethod
     def _looks_like_external_content_share(text: str) -> bool:
@@ -1418,9 +1336,13 @@ class QQQfficialBridge:
             self._bot.get_event_loop(),
         )
         try:
-            return future.result(timeout=30)
+            result = future.result(timeout=30)
+            logger.info(f"[BRIDGE-DEBUG] send_file_proactive result={result} file={file_name}")
+            return result
         except Exception as e:
-            logger.error(f"Proactive file send failed: {e}")
+            logger.error(f"[BRIDGE-DEBUG] Proactive file send failed: {e} file={file_name}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
 
     def reply_with_file(self, msg: QQMessage, file_data: bytes,

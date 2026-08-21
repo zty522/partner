@@ -85,3 +85,7 @@ run_cycle.py
 demo.py
 .pytest_cache/
 release_v0.4.0.md
+
+# Editor/backup files
+*.bak
+*.fixed
