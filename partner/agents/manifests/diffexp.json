@@ -1,0 +1,46 @@
+{
+  "name": "diffexp",
+  "version": "1.0.0",
+  "description": "差异表达分析 Agent —— scanpy rank_genes_groups（Wilcoxon）驱动。输入 h5ad + 分组列，输出每组差异基因报告与全量 CSV。",
+  "capabilities": [
+    "differential_expression",
+    "deg",
+    "wilcoxon",
+    "marker_genes"
+  ],
+  "input_formats": [
+    "h5ad"
+  ],
+  "output_formats": [
+    "md",
+    "csv"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【生信】差异表达分析专用Agent（scanpy Wilcoxon）。输入：h5ad 单细胞数据 + obs 分组列（cell_type/condition 等）。输出：differential_expression_report.md（中文报告：每组 Top 差异基因表）+ deg_results.csv（全量）。参数: h5ad=h5ad文件路径, groupby=obs分组列名, output=输出目录, reference=参考组(可选)。预计耗时 5-30 分钟（取决于细胞数）。",
+    "command": "/home/os/miniconda3/envs/cytobridge/bin/python",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/diffexp_wrapper.py",
+      "--output",
+      "{output}"
+    ],
+    "args": [
+      "--h5ad",
+      "{h5ad}",
+      "--groupby",
+      "{groupby}"
+    ],
+    "timeout": 3600,
+    "inject_llm_credentials": false
+  },
+  "timeout": 3600,
+  "health_check_cmd": "/home/os/miniconda3/envs/cytobridge/bin/python -c \"import scanpy; print(scanpy.__version__)\"",
+  "install_info": {
+    "method": "pip",
+    "package": "scanpy",
+    "source": "scanpy>=1.11",
+    "description": "scanpy 已安装于 cytobridge conda 环境。"
+  },
+  "notes": "基于 cytobridge conda 环境的 scanpy 1.11.5，无需额外安装。"
+}

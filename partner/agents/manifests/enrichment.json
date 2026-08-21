@@ -1,0 +1,48 @@
+{
+  "name": "enrichment",
+  "version": "1.0.0",
+  "description": "通路富集分析 Agent —— ORA（过表达分析，Enrichr 基因集库，gseapy 驱动）。输入基因列表，输出显著富集通路报告。",
+  "capabilities": [
+    "pathway_enrichment",
+    "gsea",
+    "ora",
+    "enrichment_analysis"
+  ],
+  "input_formats": [
+    "txt",
+    "csv",
+    "text"
+  ],
+  "output_formats": [
+    "md",
+    "csv"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【生信】通路富集分析专用Agent（ORA/过表达分析）。输入：差异基因列表（文件路径或逗号分隔字符串）+ 基因集库（默认 KEGG_2021_Human）。输出：enrichment_report.md（中文报告：显著通路表）+ enrichment_results.csv（全量）。参数: genes=基因列表文件路径或逗号分隔字符串, gene_set=Enrichr基因集库名, output=输出目录。预计耗时 1-5 分钟（取决于 Enrichr API）。",
+    "command": "/home/os/miniconda3/envs/cytobridge/bin/python",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/enrichment_wrapper.py",
+      "--output",
+      "{output}"
+    ],
+    "args": [
+      "--genes",
+      "{genes}",
+      "--gene-set",
+      "{gene_set}"
+    ],
+    "timeout": 600,
+    "inject_llm_credentials": false
+  },
+  "timeout": 600,
+  "health_check_cmd": "/home/os/miniconda3/envs/cytobridge/bin/python -c \"import gseapy; print(gseapy.__version__)\"",
+  "install_info": {
+    "method": "pip",
+    "package": "gseapy",
+    "source": "gseapy>=1.1",
+    "description": "gseapy 已安装于 cytobridge conda 环境。"
+  },
+  "notes": "基于 cytobridge conda 环境的 gseapy 1.1.13，无需额外安装。"
+}

@@ -1,0 +1,49 @@
+{
+  "name": "plink",
+  "version": "1.0.0",
+  "description": "GWAS 关联分析 Agent —— PLINK 1.9 驱动，病例对照关联检验（--assoc --adjust）。输入 PLINK 格式数据，输出显著位点报告。",
+  "capabilities": [
+    "gwas",
+    "genetics",
+    "association_analysis",
+    "plink"
+  ],
+  "input_formats": [
+    "ped",
+    "map",
+    "bed",
+    "bim",
+    "fam"
+  ],
+  "output_formats": [
+    "md",
+    "assoc",
+    "csv"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【生信】GWAS 关联分析专用Agent（PLINK 1.9）。输入：PLINK 格式数据前缀（--file 的 ped/map 或 --bfile 的 bed/bim/fam，不含扩展名）。输出：gwas_report.md（中文报告：显著位点表）+ gwas.assoc（全量关联表）。参数: prefix=PLINK数据前缀路径, output=输出目录。预计耗时 1-10 分钟（取决于变异数）。",
+    "command": "/home/os/miniconda3/bin/python3",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/plink_wrapper.py",
+      "--output",
+      "{output}"
+    ],
+    "args": [
+      "--prefix",
+      "{prefix}"
+    ],
+    "timeout": 900,
+    "inject_llm_credentials": false
+  },
+  "timeout": 900,
+  "health_check_cmd": "/mnt/e/work/partner_workspace/external/tools/plink/plink --version",
+  "install_info": {
+    "method": "binary",
+    "package": "plink1.9",
+    "source": "https://s3.amazonaws.com/plink1-assets/plink_linux_x86_64_20240818.zip",
+    "description": "PLINK 1.9 官方二进制，位于 workspace external/tools/plink/"
+  },
+  "notes": "PLINK v1.90b7.4 (2024-08-18)，本地二进制，无需 sudo 安装。"
+}

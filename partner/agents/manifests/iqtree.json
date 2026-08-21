@@ -1,0 +1,49 @@
+{
+  "name": "iqtree",
+  "version": "1.0.0",
+  "description": "系统发育分析 Agent —— IQ-TREE 2 最大似然建树，ModelFinder 自动选模，bootstrap 支持。输入多序列比对 FASTA，输出 Newick 树与报告。",
+  "capabilities": [
+    "phylogeny",
+    "phylogenetic_tree",
+    "maximum_likelihood",
+    "iqtree"
+  ],
+  "input_formats": [
+    "fasta",
+    "phylip",
+    "nexus"
+  ],
+  "output_formats": [
+    "treefile",
+    "md",
+    "pdf"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【生信】系统发育树构建专用Agent（IQ-TREE 2 最大似然法）。输入：多序列比对 FASTA 路径。输出：phylogeny_report.md（中文报告）+ tree.treefile（Newick 树）。参数: fasta=多序列比对文件路径, output=输出目录, bootstrap=重抽样次数(默认1000)。预计耗时 1-30 分钟（取决于序列长度与 bootstrap）。",
+    "command": "/home/os/miniconda3/bin/python3",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/iqtree_wrapper.py",
+      "--output",
+      "{output}"
+    ],
+    "args": [
+      "--fasta",
+      "{fasta}",
+      "--bootstrap",
+      "{bootstrap}"
+    ],
+    "timeout": 3600,
+    "inject_llm_credentials": false
+  },
+  "timeout": 3600,
+  "health_check_cmd": "/mnt/e/work/partner_workspace/external/tools/iqtree/iqtree-2.4.0-Linux-intel/bin/iqtree2 --version",
+  "install_info": {
+    "method": "binary",
+    "package": "iqtree2",
+    "source": "https://github.com/iqtree/iqtree2/releases/download/v2.4.0/iqtree-2.4.0-Linux-intel.tar.gz",
+    "description": "IQ-TREE 2.4.0 官方预编译二进制，位于 workspace external/tools/iqtree/"
+  },
+  "notes": "IQ-TREE 2.4.0 (2025-02-07)，本地二进制，无需 sudo 安装。"
+}

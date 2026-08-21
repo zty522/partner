@@ -1,0 +1,48 @@
+{
+  "name": "bcftools",
+  "version": "1.0.0",
+  "description": "变异位点分析 Agent —— bcftools 1.19 驱动，VCF 统计（SNP/Indel/样本）与质量过滤。输入 VCF，输出中文报告 + 过滤后 VCF。",
+  "capabilities": [
+    "variant_calling",
+    "variant_analysis",
+    "vcf",
+    "snpcalling",
+    "genotyping"
+  ],
+  "input_formats": [
+    "vcf",
+    "vcf.gz",
+    "bcf"
+  ],
+  "output_formats": [
+    "md",
+    "vcf",
+    "vcf.gz"
+  ],
+  "endpoint_type": "cli",
+  "endpoint_config": {
+    "category": "specialized",
+    "description_for_planner": "【生信】变异位点分析专用Agent（bcftools 1.19）。输入：VCF 文件路径。输出：variant_report.md（中文报告：样本数/位点数/SNP/Indel 统计）+ filtered.vcf.gz（按 QUAL/DP 过滤后）。参数: vcf=VCF文件路径, output=输出目录, min_qual=最低质量(默认20), min_dp=最低深度(默认10)。预计耗时 1-5 分钟。",
+    "command": "/home/os/miniconda3/bin/python3",
+    "preamble_args": [
+      "/mnt/e/work/partner/partner/agents/wrappers/bcftools_wrapper.py",
+      "--output",
+      "{output}"
+    ],
+    "args": [
+      "--vcf",
+      "{vcf}"
+    ],
+    "timeout": 900,
+    "inject_llm_credentials": false
+  },
+  "timeout": 900,
+  "health_check_cmd": "/mnt/e/work/partner_workspace/external/tools/bcftools/usr/bin/bcftools --version",
+  "install_info": {
+    "method": "apt_local",
+    "package": "bcftools 1.19 + libhts3t64",
+    "source": "apt-get download + dpkg -x（无需 sudo）",
+    "description": "bcftools 1.19 解压于 external/tools/bcftools/，LD_LIBRARY_PATH 指向本地 libhts3t64"
+  },
+  "notes": "bcftools 1.19 (apt noble)，本地解压运行，无需 sudo。"
+}
