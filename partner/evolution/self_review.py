@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -283,8 +284,12 @@ class SelfReview:
         }
 
         for task_type, expected_caps in task_cap_map.items():
+            # 词 token 交集（与 identify_gaps 同口径）："single cell" 与 "single_cell"
+            # 视为同一能力，避免空格/下划线分隔符差异导致误报。
             covered = any(
-                any(ec in ac for ec in expected_caps) for ac in agent_caps
+                bool(self._cap_tokens(ec) & self._cap_tokens(ac))
+                for ec in expected_caps
+                for ac in agent_caps
             )
             if not covered:
                 weaknesses.append(f"缺少 '{task_type}' 相关 Agent 覆盖")
@@ -292,6 +297,11 @@ class SelfReview:
         return weaknesses
 
     # ── Gap Identification ──────────────────────────────────────────
+
+    @staticmethod
+    def _cap_tokens(s: str) -> set[str]:
+        """把能力名/关键词拆成小写词 token 集合（blast_search → {blast, search}）。"""
+        return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t}
 
     def identify_gaps(self, inventory: CapabilityInventory) -> list[CapabilityGap]:
         """Compare current inventory against the reference model to find gaps.
@@ -347,10 +357,13 @@ class SelfReview:
             all_covered_caps.update(caps)
 
         for tool_name, info in known_tools.items():
-            # Check if any agent already handles this tool's capabilities
+            # Check if any agent already handles this tool's capabilities.
+            # 词 token 交集：blast → blast_search、protein → protein_structure、
+            # single cell → single_cell 均视为覆盖（避免复合能力词漏判误报）。
             covered = any(
-                any(ec in all_covered_caps for ec in info["caps"])
+                bool(self._cap_tokens(ec) & self._cap_tokens(cap))
                 for ec in info["caps"]
+                for cap in all_covered_caps
             )
             if not covered:
                 name = f"缺少工具: {tool_name}"

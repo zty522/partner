@@ -8,7 +8,8 @@
     "paga",
     "dpt",
     "rna_velocity",
-    "driver_gene_identification"
+    "driver_gene_identification",
+    "differential_expression"
   ],
   "input_formats": [
     "h5ad"
