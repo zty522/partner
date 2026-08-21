@@ -283,22 +283,26 @@ async def on_task_done(
     # ── Gate 2: 多样性检查 ──
     if not _check_diversity(state):
         logger.info("[RESEARCH_LOOP] %s diversity gate failed, stopping", instance_id)
+        _record_failure_event(instance_id, state, title, "repetitive_loop", "连续多轮同类型事件，陷入重复模式")
         await _stop(state, notify_fn)
         return False
 
-    # ── Gate 3: 产出质量检查 ──
+    # ── Gate 3: 产出质量检查（C1 评估器打分）──
     if instance_id in OUTPUT_REQUIRED_TYPES:
         if not _has_output_this_round(state):
             state.no_output_streak += 1
+            _record_eval(instance_id, workspace, state.round, title, 0, ["无产出文件"], [])
             logger.info("[RESEARCH_LOOP] %s no output streak=%d/2", instance_id, state.no_output_streak)
             if state.no_output_streak >= 2:
                 logger.info("[RESEARCH_LOOP] %s 2 consecutive no-output, stopping", instance_id)
+                _record_failure_event(instance_id, state, title, "no_output", "连续2轮无产出文件，停止循环")
                 await _stop(state, notify_fn)
                 return False
             next_task = _generate_fix_task(state, parsed, user_request)
             logger.info("[RESEARCH_LOOP] %s fix task: %s", instance_id, next_task)
         else:
             state.no_output_streak = 0
+            _record_eval(instance_id, workspace, state.round, title, None, None, files or [])
             archive_outputs(instance_id, workspace, files or [], round_num=state.round)
             next_task = await _generate_next_task(state, parsed, title, user_request, adapter)
     else:
@@ -316,6 +320,61 @@ async def on_task_done(
     logger.info("[RESEARCH_LOOP] %s enqueued: %s", instance_id, next_task.get("title", "")[:60])
     logger.info("[RESEARCH_LOOP] %s returning True", instance_id)
     return True
+
+
+def _round_summary(instance_id: str, workspace: str, max_chars: int = 300) -> str:
+    """取本实例最新归档成果的开头作为技能卡片摘要（不阻断）。"""
+    try:
+        from .research_loop import load_latest_knowledge
+
+        text = load_latest_knowledge(instance_id, workspace, max_chars=max_chars)
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+def _record_failure_event(instance_id: str, state, title: str, ftype: str, reason: str) -> None:
+    """C2：停止路径记录失败反思（不阻断）。"""
+    try:
+        from ..evolution.evaluator import record_failure
+
+        record_failure(instance_id, getattr(state, "workspace", ""),
+                       task_title=title, failure_type=ftype, reason=reason,
+                       round_num=getattr(state, "round", 0))
+    except Exception as exc:
+        logger.debug("[RESEARCH_LOOP] failure record failed (non-fatal): %s", exc)
+
+
+def _record_eval(instance_id: str, workspace: str, round_num: int, title: str,
+                 score: int | None, reasons: list[str] | None, files: list[str]) -> None:
+    """C1/C2：调用质量评估器打分并记录；低分自动沉淀失败反思；失败不阻断主流程。"""
+    try:
+        from ..evolution.evaluator import evaluate_outputs, record_quality_score, record_failure
+
+        if score is None:
+            ev = evaluate_outputs(files)
+            score, reasons = ev["score"], ev["reasons"]
+        record_quality_score(instance_id, workspace, round_num=round_num,
+                             score=score, reasons=reasons, files=files, task_title=title)
+        # C2：低分（<50）自动沉淀失败反思
+        if score < 50:
+            record_failure(instance_id, workspace, task_title=title, round_num=round_num,
+                           failure_type="low_quality", reason="; ".join(reasons or []), score=score)
+        # C4：高分（>=60）且有产出 → 沉淀技能卡片（任务→方法→产出）
+        if score >= 60 and files:
+            try:
+                from ..evolution.evaluator import record_success
+                from ..evolution.evaluator import load_recent_successes  # noqa: F401 (warm import)
+
+                _summary = _round_summary(instance_id, workspace)
+                record_success(instance_id, workspace, task_title=title, round_num=round_num,
+                               summary=_summary, files=files, score=score)
+            except Exception:
+                pass
+        logger.info("[RESEARCH_LOOP] %s round=%s quality=%s/100 (%s)",
+                    instance_id, round_num, score, "; ".join(reasons or []))
+    except Exception as exc:
+        logger.debug("[RESEARCH_LOOP] evaluator failed (non-fatal): %s", exc)
 
 
 def reset(instance_id: str) -> None:
@@ -376,10 +435,35 @@ async def _generate_next_task(
 
     # ── LLM 生成具体的下一步（有增量）──
     if adapter is not None and prior:
+        # C2：注入最近失败反思，避免重蹈覆辙
+        _failure_hint = ""
+        _success_hint = ""
+        try:
+            from ..evolution.evaluator import load_recent_failures, load_recent_successes
+
+            _fails = load_recent_failures(workspace=getattr(state, "workspace", ""),
+                                          instance_id=state.instance_id, limit=3)
+            if _fails:
+                _lines = [f"- [{f.get('failure_type','')}] {f.get('reason','')}"
+                          f"（round={f.get('round')}, 任务: {f.get('task_title','')[:40]}）"
+                          for f in _fails]
+                _failure_hint = "\n\n【最近失败教训（本实例，务必避免重蹈）】\n" + "\n".join(_lines)
+            # C4：注入最近成功技能卡片（可复用的方法）
+            _oks = load_recent_successes(workspace=getattr(state, "workspace", ""),
+                                         instance_id=state.instance_id, limit=2)
+            if _oks:
+                _slines = [f"- [{f.get('task_title','')[:50]}] 产出: {', '.join(f.get('files', []) or [])}"
+                           for f in _oks]
+                _success_hint = "\n\n【可复用的成功经验】\n" + "\n".join(_slines)
+        except Exception:
+            _failure_hint = ""
+            _success_hint = ""
         prompt = (
             "你是自主研究循环的规划者。基于上一轮成果，生成一个具体的、有增量的下一步任务。\n\n"
             f"原始任务：{user_request}\n\n"
             f"【上一轮成果（核心内容）】\n{prior}\n\n"
+            f"{_failure_hint}\n"
+            f"{_success_hint}\n"
             "要求：\n"
             "1. 总结上一轮已完成什么、得出什么结论\n"
             "2. 指出尚未深入、尚未解决、可进一步展开的具体方向\n"
