@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "instance_lease.schema.json",
+  "title": "InstanceLease",
+  "type": "object",
+  "required": ["lease_id", "campaign_id", "work_item_id", "instance_id", "holder", "status", "acquired_at", "expires_at", "heartbeat_at", "released_at"],
+  "properties": {
+    "lease_id": {"type": "string", "minLength": 1},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "work_item_id": {"type": "string", "minLength": 1},
+    "instance_id": {"enum": ["01", "02", "03", "04", "05"]},
+    "holder": {"type": "string", "minLength": 1},
+    "status": {"enum": ["active", "released", "expired"]},
+    "acquired_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "heartbeat_at": {"type": "string", "format": "date-time"},
+    "released_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

@@ -70,4 +70,7 @@ Issues = "https://github.com/zty522/partner/issues"
 include = ["partner*"]
 
 [tool.setuptools.package-data]
-partner = ["assets/*", "assets/icons/*", "agents/manifests/*.json"]
+partner = ["assets/*", "assets/icons/*", "agents/manifests/*.json", "protocols/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -26,7 +26,9 @@ MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 
 def _resolve_api_json() -> dict:
-    """从 workspace config/api.json 读取 deepseek 配置（统一管理入口）。
+    """从 workspace config/api.json 读取 provider 配置（统一管理入口）。
+
+    默认 deepseek；minimax 为 fallback。
 
     解析顺序：~/.partner_workspace 指针 → workspace_root/config/api.json。
     任何失败都返回空 dict，调用方回退到环境变量 / 模块默认值。
@@ -48,17 +50,24 @@ def _resolve_api_json() -> dict:
             return {}
         with open(api_path, encoding="utf-8") as f:
             data = json.load(f)
-        ds = data.get("apis", {}).get("deepseek", {}) or {}
+        # 默认 provider: minimax（用户最新要求切回 MiniMax-M3）；deepseek 作 fallback（中午便宜时用过，保留）
+        primary = (data.get("apis", {}).get("minimax") or {})
+        if not (str(primary.get("api_key") or "").strip() and str(primary.get("base_url") or "").strip()):
+            primary = data.get("apis", {}).get("deepseek", {}) or {}
         out = {}
         for k in ("api_key", "model", "base_url"):
-            v = str(ds.get(k) or "").strip()
+            v = str(primary.get(k) or "").strip()
             if v:
                 out[k] = v
         # base_url 剥掉尾部 /v1：chat() 内部固定拼 /v1/chat/completions，
-        # 用户 api.json 里习惯填 https://api.deepseek.com/v1 会导致双 /v1 404。
+        # 避免双 /v1 404。
         b = out.get("base_url", "")
         if b.endswith("/v1"):
             out["base_url"] = b[:-3]
+        if primary is data.get("apis", {}).get("minimax"):
+            out["_provider"] = "minimax"
+        else:
+            out["_provider"] = "deepseek"
         return out
     except Exception:
         return {}
@@ -85,12 +94,46 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
 
 
 def _log_api_call(**kw):
-    """记录 deepseek API 调用日志；失败不影响主流程。"""
+    """记录 API 调用日志；失败不影响主流程。provider 字段从 cfg._provider 取，缺省 "deepseek" 兼容。"""
     try:
         from ..api_log import append_api_call
-        append_api_call("deepseek", **kw)
+        provider = "deepseek"
+        try:
+            provider = _resolve_api_json().get("_provider", "deepseek")
+        except Exception:
+            pass
+        append_api_call(provider, **kw)
     except Exception:
         pass
+
+
+_LONG_GEN_PURPOSES = ("batch_plan", "action", "report", "focus_extract")
+
+
+def select_model_and_tokens(cfg: dict, purpose: str = "", max_tokens=None) -> tuple[str, int]:
+    """模型与 max_tokens 选择（purpose 分流）。
+
+    默认 provider：minimax（MiniMax-M3，用户最新要求）；deepseek 为 fallback（中午便宜时用过，保留）。
+    长内容生成类 purpose（batch_plan/action/report/focus_extract）用 minimax 长生成模型；
+    max_tokens ≥16000 防输出截断。
+    普通对话（chat/classify/direct_reply 等）保持 api.json 配置模型。
+    api.json 可加 long_gen_model / batch_plan_model 覆盖。
+    """
+    model = cfg.get("model") or os.environ.get("MINIMAX_MODEL") or "MiniMax-M3"
+    mt = max_tokens
+    if purpose in _LONG_GEN_PURPOSES:
+        provider = str(cfg.get("_provider") or "deepseek").lower()
+        provider_default = (
+            cfg.get("model") or os.environ.get("MINIMAX_LONG_GEN_MODEL") or "MiniMax-M3"
+            if provider == "minimax"
+            else os.environ.get("DEEPSEEK_LONG_GEN_MODEL") or "deepseek-chat"
+        )
+        model = (cfg.get("long_gen_model")
+                 or (cfg.get("batch_plan_model") if purpose == "batch_plan" else "")
+                 or provider_default)
+        if mt is None or mt < 16000:
+            mt = 16000
+    return model, mt
 
 
 def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
@@ -101,7 +144,7 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
     """
     cfg = _resolve_api_json()
     api_key = cfg.get("api_key") or API_KEY
-    model = cfg.get("model") or os.environ.get("DEEPSEEK_MODEL") or MODEL
+    model, max_tokens = select_model_and_tokens(cfg, purpose, max_tokens)
     api_base = (cfg.get("base_url") or API_BASE).rstrip("/")
     if not api_key:
         logger.error("[DirectAPI] No DeepSeek API key found")

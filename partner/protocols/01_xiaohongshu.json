@@ -1,0 +1,22 @@
+{
+  "protocol_id": "xiaohongshu_operations",
+  "instance_id": "01",
+  "goal": "可见、可验收、可向用户解释的小红书账户操作",
+  "transitions": {
+    "xiaohongshu_open_publish_editor": {
+      "iteration": 1,
+      "finding": "已证实进入上传图文入口；新缺口是上传控件契约。",
+      "next": {
+        "title_suffix": "_上传要求实证",
+        "event_type": "xiaohongshu_inspect_upload_requirements",
+        "user_request": "【01 项目续跑】直接调用且只调用 xiaohongshu_inspect_upload_requirements，读取真实文件控件 accept/multiple 和页面可见上传要求，输出 JSON/MD；不上传、不发布。"
+      }
+    },
+    "xiaohongshu_inspect_upload_requirements": {
+      "iteration": 2,
+      "finding": "已取得文件控件和页面上传要求证据。",
+      "terminal_status": "completed",
+      "stop_reason": "当前协议阶段完成；真正发布需要内容产物、安全检查和明确授权。"
+    }
+  }
+}

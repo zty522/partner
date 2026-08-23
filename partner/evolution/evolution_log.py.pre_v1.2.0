@@ -1,0 +1,153 @@
+"""自进化机制层日志（workspace 可见 + 实例级 + 全局）
+
+写入 /mnt/e/work/partner_workspace/log/evolution.jsonl（全局聚合） +
+    {workspace}/instances/{instance}/state/logs/evolution.jsonl（实例级）
+
+记录事件类型：
+- identify_gap: identify_gaps() 识别到能力缺口
+- gap_filled: gap_filler 自动补缺成功
+- ensure_tool: atomic_ensure_tool 事件执行
+- failure_reflect: evaluator.record_failure 失败反思入库
+- success_card: evaluator.record_success 成功技能卡片
+- iter_start: atomic_understand_intent / write_plan / next_iteration 启动
+- iter_fail: 迭代事件失败（如 round 参数无对应反思）
+- design_block: design 串写防护拒绝写入
+- provider_fail: minimax/deepseek 调用失败
+- self_heal: 自愈（如 web_capture 不重试直接失败避免卡死）
+
+每条记录：{"ts", "instance", "event", "detail", "task_id"}
+失败不影响主流程。
+
+实例级路径解析（2026-08-22 修复）：
+  当 workspace 为空时，从传入的 instance + WS_ROOT 拼出
+  /mnt/e/work/partner_workspace/instances/{instance}/state/logs/evolution.jsonl
+  之前 fallback 到 WS_ROOT/state/logs/（=共享 state 目录），导致"实例级"与"全局"
+  路径重合，双写退化为单写——所有事件只能从全局读，无法区分实例。
+"""
+import json
+import os
+import re
+import time
+from threading import Lock
+
+_LOCK = Lock()
+
+WS_ROOT = os.environ.get("PARTNER_WS_ROOT") or "/mnt/e/work/partner_workspace"
+GLOBAL_LOG = os.path.join(WS_ROOT, "log", "evolution.jsonl")
+
+# /instances/(\d{2})/ 或 /instances/(instance_id)/  提取实例 ID
+_INSTANCE_RE = re.compile(r"/instances/([A-Za-z0-9_-]+)/")
+
+
+def _resolve_instance(instance: str, detail: dict | None) -> str:
+    """多字段 fallback 提取实例 ID（v1.1.0 / Bug #29.1 fix 2026-08-23）：
+    1. instance 参数（最高优先）
+    2. detail["path"] 的 /instances/XX/ 正则
+    3. detail["working_dir"] 的 /instances/XX/ 正则（harness 路径）
+    4. detail["path_to_file"] 的 /instances/XX/ 正则（pdf_events 用）
+    5. detail["task_instance"].workspace（v2 事件带 task_instance 对象）
+    6. 都没有 → 返回空串（只写全局）
+    """
+    if instance:
+        return instance
+    if not detail:
+        return ""
+    for key in ("path", "working_dir", "path_to_file"):
+        val = str(detail.get(key, "") or "")
+        if not val:
+            continue
+        m = _INSTANCE_RE.search(val)
+        if m:
+            return m.group(1)
+    ti = detail.get("task_instance")
+    if ti is not None:
+        ws = getattr(ti, "workspace", "") or ""
+        if ws:
+            m = _INSTANCE_RE.search(ws)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def _instance_log(instance: str = "", workspace: str = "") -> str:
+    """实例级日志路径：{ws_root}/instances/{instance}/state/logs/evolution.jsonl
+
+    workspace 只在调用方明确传实例workspace时使用；否则用 WS_ROOT + instance。
+    这样即使调用方没传 workspace，只要传了 instance 或 detail["path"] 含实例路径，
+    实例级日志也能正确写入该实例自己的 state/logs。
+    """
+    if not instance:
+        return ""  # 没实例归属就跳过实例级，只写全局
+    base = workspace or WS_ROOT
+    return os.path.join(base, "instances", instance, "state", "logs", "evolution.jsonl")
+
+
+def log_evolution(event: str, instance: str = "", detail: dict | None = None,
+                  task_id: str = "", workspace: str = "") -> None:
+    """写入自进化日志（全局 + 实例级）。失败不影响主流程。
+
+    实例归属判定（2026-08-22）：
+        1. 优先用 instance 参数
+        2. 否则从 detail["path"] 的 /instances/XX/ 提取
+        3. 都找不到 → 只写全局（共享 state）
+    """
+    try:
+        resolved_instance = _resolve_instance(instance, detail)
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "instance": resolved_instance,
+            "event": event,
+            "task_id": task_id,
+            "detail": detail or {},
+        }
+        line = json.dumps(entry, ensure_ascii=False)
+        with _LOCK:
+            # 全局
+            os.makedirs(os.path.dirname(GLOBAL_LOG), exist_ok=True)
+            with open(GLOBAL_LOG, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            # 实例级（只在该实例自己的 state/logs/）
+            inst_path = _instance_log(resolved_instance, workspace)
+            if inst_path:
+                os.makedirs(os.path.dirname(inst_path), exist_ok=True)
+                with open(inst_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def recent_events(instance: str = "", limit: int = 50,
+                  workspace: str = "") -> list[dict]:
+    """读取最近 N 条自进化事件（按时间倒序）。
+
+    当指定 instance 时，同时读全局 + 该实例实例级文件并去重；
+    未指定则只读全局。
+    """
+    out = []
+    paths = [GLOBAL_LOG]
+    if instance:
+        paths.append(_instance_log(instance, workspace))
+    seen = set()
+    for p in paths:
+        if not p or not os.path.exists(p):
+            continue
+        try:
+            for line in open(p, encoding="utf-8", errors="replace"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                key = (e.get("ts"), e.get("instance"), e.get("event"), e.get("task_id"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if instance and e.get("instance") != instance:
+                    continue
+                out.append(e)
+        except OSError:
+            continue
+    out.sort(key=lambda e: e.get("ts", ""), reverse=True)
+    return out[:limit]

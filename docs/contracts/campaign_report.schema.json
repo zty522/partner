@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "campaign_report.schema.json",
+  "title": "CampaignReport",
+  "type": "object",
+  "required": ["report_id", "campaign_id", "report_type", "status", "summary", "metrics", "evidence", "blocked_items", "next_actions", "created_at"],
+  "properties": {
+    "report_id": {"type": "string", "minLength": 1},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "report_type": {"enum": ["checkpoint", "final"]},
+    "status": {"type": "string"},
+    "summary": {"type": "string", "minLength": 1},
+    "metrics": {"type": "object"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "blocked_items": {"type": "array", "items": {"type": "string"}},
+    "next_actions": {"type": "array", "items": {"type": "string"}},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

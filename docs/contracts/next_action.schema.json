@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/next_action.schema.json",
+  "title": "NextAction",
+  "type": "object",
+  "required": ["action_id", "title", "event_type", "status", "created_at"],
+  "properties": {
+    "action_id": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string", "minLength": 1},
+    "params": {"type": "object"},
+    "status": {"enum": ["proposed", "queued", "running", "completed", "blocked", "cancelled"]},
+    "task_id": {"type": "string"},
+    "blocked_reason": {"type": "string"},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

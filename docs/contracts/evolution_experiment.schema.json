@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/evolution_experiment.schema.json",
+  "title": "EvolutionExperiment",
+  "type": "object",
+  "required": ["experiment_id", "issue_id", "hypothesis", "intervention", "baseline", "success_criteria", "status", "created_at"],
+  "properties": {
+    "experiment_id": {"type": "string", "minLength": 1},
+    "issue_id": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string"},
+    "resume_action_id": {"type": "string"},
+    "hypothesis": {"type": "string", "minLength": 1},
+    "intervention": {"type": "string", "minLength": 1},
+    "baseline": {"type": "object"},
+    "result": {"type": "object"},
+    "success_criteria": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "tests": {"type": "array", "items": {"type": "string"}},
+    "status": {"enum": ["candidate", "validating", "promoted", "rejected", "inconclusive"]},
+    "created_at": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

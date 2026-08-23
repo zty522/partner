@@ -260,8 +260,39 @@ def _validate_plan_against_registry(
     Steps with unknown event_types are logged and dropped.  If no steps remain,
     raises ValueError.
     """
+    aliases = {
+        "atomic_write_file": "atomic_write_artifact",
+        "write_file": "atomic_write_artifact",
+    }
     valid: list[HarnessStep] = []
+
+    def has_unresolved_placeholder(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(has_unresolved_placeholder(item) for item in value.values())
+        if isinstance(value, list):
+            return any(has_unresolved_placeholder(item) for item in value)
+        if not isinstance(value, str):
+            return False
+        return bool(re.search(
+            r"<\s*(?:resolved|resolve|path|file|project state|latest receipt|from step)[^>]*>",
+            value,
+            re.I,
+        ))
+
     for step in plan:
+        original_event_type = step.event_type
+        step.event_type = aliases.get(step.event_type, step.event_type)
+        if step.event_type != original_event_type:
+            logger.info(
+                "[PLAN] %s normalized event alias %s -> %s for step %s",
+                context_name, original_event_type, step.event_type, step.id,
+            )
+        if has_unresolved_placeholder(step.parameters):
+            logger.warning(
+                "[PLAN] %s dropping step %s with unresolved placeholder parameters",
+                context_name, step.id,
+            )
+            continue
         if registry.get(step.event_type):
             valid.append(step)
         else:
@@ -273,6 +304,42 @@ def _validate_plan_against_registry(
         raise ValueError(
             f"all steps have unknown event types in {context_name}"
         )
+    # molecular_generation_benchmark owns a fixed artifact contract.  Planner
+    # retries used to call it twice and invent molecules.pdf/molecules.csv,
+    # wasting work and making delivery fail despite valid canonical outputs.
+    molecular_steps = [step for step in valid if step.event_type == "molecular_generation_benchmark"]
+    if molecular_steps:
+        owner = molecular_steps[0]
+        duplicate_ids = {step.id for step in molecular_steps[1:]}
+        valid = [step for step in valid if step.id not in duplicate_ids]
+        for step in valid:
+            step.depends_on = [owner.id if dep in duplicate_ids else dep for dep in step.depends_on]
+            step.depends_on = list(dict.fromkeys(step.depends_on))
+            if step.event_type != "push_files":
+                continue
+            source = str(step.parameters.get("source") or "")
+            lower = source.lower()
+            if lower.endswith(("molecules.pdf", "molecular_generation_report.pdf")):
+                step.parameters["source"] = os.path.join(os.path.dirname(source), "molecular_generation_report.pdf")
+            elif lower.endswith(("molecules.csv", "molecular_candidates.csv")):
+                step.parameters["source"] = os.path.join(os.path.dirname(source), "molecular_candidates.csv")
+            if owner.id not in step.depends_on:
+                step.depends_on.append(owner.id)
+    # One browser worker owns one mutable page. Even if the planner marks
+    # click/extract/screenshot as parallel, preserve their listed order so an
+    # extract cannot race ahead of the click that opens the target UI.
+    browser_events = {
+        "browser_open", "browser_click", "browser_type", "browser_scroll",
+        "browser_extract", "browser_wait", "browser_video",
+        "browser_screenshot", "browser_execute",
+    }
+    previous_browser_step = ""
+    for step in valid:
+        if step.event_type not in browser_events:
+            continue
+        if previous_browser_step and previous_browser_step not in step.depends_on:
+            step.depends_on.append(previous_browser_step)
+        previous_browser_step = step.id
     return valid
 
 
@@ -551,6 +618,7 @@ def _get_fallback_path(step_result: dict) -> str | None:
 
 def _resolve_value(value: Any, results: dict[str, JsonDict]) -> Any:
     if isinstance(value, str) and "$" in value:
+        value = re.sub(r"\[(\d+)\]", r".\1", value)
         exact_ref = re.fullmatch(r"\$([A-Za-z0-9_.-]+(?:\.[A-Za-z0-9_$-]+)*)", value.strip())
 
         def resolve_path(path: str) -> Any:
@@ -574,6 +642,11 @@ def _resolve_value(value: Any, results: dict[str, JsonDict]) -> Any:
                         current = current.get("json", {}).get(part)
                     else:
                         return None
+                elif isinstance(current, list) and part.isdigit():
+                    index = int(part)
+                    if index >= len(current):
+                        return None
+                    current = current[index]
                 else:
                     return None
             # ── Fallback: if resolved to None/null and step has fallback file, read it ─
@@ -638,6 +711,62 @@ def _resolve_value(value: Any, results: dict[str, JsonDict]) -> Any:
     if isinstance(value, dict):
         return {k: _resolve_value(v, results) for k, v in value.items()}
     return value
+
+
+def _resolve_runtime_value(value: Any, ctx: HarnessContext) -> Any:
+    """Resolve reserved runtime variables before step-result references.
+
+    Micro planners occasionally emit ``$workdir/report.md`` even though step
+    references use the same ``$`` prefix. Treating ``workdir`` as a step id
+    silently produced ``{}/report.md``. Reserved variables are deliberately
+    few and are resolved first; all other dollar expressions remain available
+    to :func:`_resolve_value`.
+    """
+    if isinstance(value, list):
+        return [_resolve_runtime_value(item, ctx) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_runtime_value(item, ctx) for key, item in value.items()}
+    if not isinstance(value, str) or "$" not in value:
+        return value
+    runtime = {
+        "workdir": str(ctx.working_dir or ""),
+        "workspace": str(ctx.workspace or ""),
+        "project_dir": str(ctx.project_dir or ""),
+    }
+    resolved = value
+    for name, replacement in runtime.items():
+        resolved = resolved.replace(f"${{{name}}}", replacement)
+        resolved = re.sub(rf"\${re.escape(name)}(?=/|\\|$)", lambda _match: replacement, resolved)
+    return resolved
+
+
+def _fallback_user_progress_text(ctx: HarnessContext, step: HarnessStep, results: dict[str, JsonDict]) -> str:
+    """Build a factual delivery message when a planned result field is absent."""
+    completed: list[str] = []
+    files: list[str] = []
+    for dep in step.depends_on:
+        result = results.get(dep) or {}
+        if result.get("ok") is False:
+            continue
+        event_type = str(result.get("event_type") or dep)
+        status = str(result.get("status") or "已执行")
+        completed.append(f"{event_type}（{status}）")
+        candidates = result.get("files") or []
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        path = result.get("path")
+        if isinstance(path, str):
+            candidates = list(candidates) + [path]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                files.append(os.path.basename(candidate))
+    progress = "、".join(completed[:4]) or "当前计划未产生可确认的成功依赖步骤"
+    artifact_note = f"；当前任务产物：{', '.join(dict.fromkeys(files))}" if files else ""
+    return (
+        f"任务“{ctx.title}”本轮进度：{progress}{artifact_note}。"
+        "原计划引用的摘要字段不存在，以上为执行器根据真实步骤结果生成的降级说明；"
+        "是否完成仍以最终验收结果为准。"
+    )
 
 
 def _resolve_reference(value: Any, results: dict[str, JsonDict]) -> Any:
@@ -1141,7 +1270,58 @@ class PlanExecutor:
                 })
             # Fall through — _resolve_value will return None for missing content,
             # and _dependency_content fallback (below) will still collect available data.
-        params = _normalize_step_params(step.event_type, _resolve_value(step.parameters, results), results)
+        runtime_parameters = _resolve_runtime_value(step.parameters, ctx)
+        params = _normalize_step_params(step.event_type, _resolve_value(runtime_parameters, results), results)
+        if isinstance(params, dict) and step.event_type == "atomic_send_user_text":
+            if not str(params.get("text") or "").strip():
+                params = dict(params)
+                params["text"] = _fallback_user_progress_text(ctx, step, results)
+                if ctx.task_instance:
+                    ctx.task_instance.append_log("user_text_filled_from_execution_evidence", {
+                        "step_id": step.id,
+                        "depends_on": step.depends_on,
+                        "text_length": len(params["text"]),
+                    })
+        if isinstance(params, dict) and step.event_type == "atomic_push_files":
+            source = params.get("source")
+            if source is None or (isinstance(source, str) and not source.strip()):
+                params = dict(params)
+                params.pop("source", None)
+                if ctx.task_instance:
+                    ctx.task_instance.append_log("push_source_fell_back_to_current_task", {
+                        "step_id": step.id,
+                        "depends_on": step.depends_on,
+                    })
+        if isinstance(params, dict) and step.event_type != "select_context":
+            try:
+                from ..governance.context_selector import select_context
+                from ..governance.storage import instance_id as _governance_instance_id
+
+                _context_query = f"{ctx.title}\nstep={step.event_type}\ndescription={description}"
+                _context_workspace = str(getattr(ctx, "workspace", "") or getattr(ctx.task_instance, "workspace", "") or "")
+                if not _context_workspace:
+                    raise ValueError("workspace unavailable for governed context")
+                _selection, _bundle = select_context(
+                    _context_workspace,
+                    _context_query,
+                    instance_id=_governance_instance_id(str(getattr(ctx, "workspace", "") or "")),
+                    project_id=str(params.get("project_id") or ""),
+                    budget_chars=6000,
+                    semantic_selector=None,
+                )
+                params = dict(params)
+                params["_governed_context"] = _bundle
+                params["_context_selection_id"] = _selection.selection_id
+                if ctx.task_instance:
+                    ctx.task_instance.append_log("step_context_selected", {
+                        "step_id": step.id,
+                        "selection_id": _selection.selection_id,
+                        "documents": [item["document_id"] for item in _selection.selected],
+                        "used_chars": _selection.used_chars,
+                    })
+            except Exception as exc:
+                logger.warning("[STEP %s/%s] governed context selection failed: %s",
+                               ordinal or "?", total_steps, exc)
         if step.event_type in ("atomic_convert_md_to_pdf", "atomic_write_artifact") and isinstance(params, dict):
             if step.event_type == "atomic_convert_md_to_pdf":
                 source = str(params.get("source") or params.get("path") or "").strip()
@@ -1279,7 +1459,9 @@ class PlanExecutor:
                         result["ok"] = (str(result.get("status")) == "ok")
                         if not result["ok"] and result.get("error"):
                             result["content"] = str(result.get("error"))
-                    if isinstance(result, dict) and result.get("ok") is False and attempt < MAX_STEP_RETRIES:
+                    if (isinstance(result, dict) and result.get("ok") is False
+                            and result.get("retryable", True) is not False
+                            and attempt < MAX_STEP_RETRIES):
                         # Retry ALL step failures (up to MAX_STEP_RETRIES retries)
                         error_str = str(result.get("error", ""))
                         attempt += 1
@@ -1821,6 +2003,14 @@ async def run_harness_plan(
             validation.ok = False
             if not validation.missing:
                 validation.missing = [e.get("error", "file_not_found") for e in step_errors if "file_not_found" in (e.get("error") or "")]
+        # ── A hook: plan 失败自动修复（基于已有产物重写 plan，避免死循环依赖） ──
+        if not validation.ok:
+            try:
+                from partner.v2.repair_events import atomic_auto_repair_plan
+                await asyncio.to_thread(atomic_auto_repair_plan, ctx, {})
+                logger.info("[HARNESS] A auto-repair triggered: missing=%d", len(validation.missing))
+            except Exception as _exc_a:
+                logger.warning("[HARNESS] A auto-repair failed: %s", _exc_a)
         parsed = _merge_result_files(parsed, results, validation)
         store.update_snapshot({
             "last_title": title,
@@ -2675,10 +2865,24 @@ def _is_placeholder_content(content: str, output_path: str = "") -> bool:
     # Truncation marker: "..." near end of content, with no substantial content after it
     stripped = content.strip()
     if stripped.rstrip(".").endswith("...") and len(stripped) < 500:
-        # Check if the "..." is within the last 20% of content
         idx = stripped.rfind("...")
         if idx >= len(stripped) * 0.8:
             return True
+
+    # ── NEW: 包装的设计文档（<think>...总设计...）──────
+    # LLM 偶发把"思考过程+设计模板"写到目标文件，绕过 # 总设计 前缀检测
+    if content.lstrip().startswith("<think>") or content.lstrip().startswith("<thinking>"):
+        return True
+    # 真伪判断：多个设计模板特征关键词同时出现 → 视为伪设计
+    head = content[:800]
+    design_indicators = (
+        "## 1. 目标", "## 2. 现状", "## 3. 方案", "## 4. 交付",
+        "## 7. 验收", "任务定位", "为什么做", "交付物清单", "不验收事项",
+        "为什么做这个任务", "可调参",
+    )
+    matches = sum(1 for k in design_indicators if k in head)
+    if matches >= 3 and ("总设计" in head[:200] or "设计文档" in head[:200]):
+        return True
 
     return False
 
@@ -2809,6 +3013,9 @@ def _resolve_write_content_from_deps(ctx, content: str) -> str | None:
                         with open(line, "r", encoding="utf-8") as rf:
                             md_content = rf.read()
                         if len(md_content) > 500:
+                            # 反模式 #9 防护：deps 读到 design 模板（无意义循环）→ 拒绝
+                            if _is_placeholder_content(md_content, line):
+                                continue
                             return md_content
             # Also check result.files array for .md files
             result_files = result.get("files") or []
@@ -2818,6 +3025,8 @@ def _resolve_write_content_from_deps(ctx, content: str) -> str | None:
                         with open(rf_path, "r", encoding="utf-8") as rf:
                             md_content = rf.read()
                         if len(md_content) > 500:
+                            if _is_placeholder_content(md_content, rf_path):
+                                continue
                             return md_content
         except Exception:
             continue
@@ -2857,6 +3066,23 @@ def _atomic_write_artifact(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         return {"ok": True, "path": "", "content": "", "files": []}
     path = _safe_project_path(ctx, str(params.get("path") or params.get("filename") or params.get("file_name") or ctx.artifact_path))
     # Quality check: reject placeholder/redirect content
+    # ── D hook: 在拒绝前尝试用真实步骤数据 fallback 生成 PDF（self-evolution 机制） ──
+    if _is_placeholder_content(content, path):
+        ext_d = os.path.splitext(path)[1].lower()
+        # A PDF fallback may only satisfy a PDF target. Copying PDF bytes to a
+        # .md filename creates a corrupt artifact which used to fool glob-only
+        # validation.
+        if ext_d == ".pdf":
+            try:
+                from partner.v2.repair_events import atomic_write_artifact_fallback
+                fb = atomic_write_artifact_fallback(ctx, {})
+                if fb.get("ok") and fb.get("path") and os.path.exists(fb["path"]):
+                    import shutil as _shutil_d
+                    _shutil_d.copyfile(fb["path"], path)
+                    logger.info("[HARNESS] D fallback: %s -> %s", fb["path"], path)
+                    return {"ok": True, "path": path, "content": "[fallback generated]", "files": [path], "fallback_used": True}
+            except Exception as _exc_d:
+                logger.warning("[HARNESS] D fallback failed: %s", _exc_d)
     if _is_placeholder_content(content, path):
         logger.warning("[HARNESS] rejecting placeholder content for artifact: %s (len=%d, first_100=%s)",
                        path, len(content), content[:100].replace("\n", " "))
@@ -2867,6 +3093,40 @@ def _atomic_write_artifact(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         else:
             return {"ok": False, "error": "placeholder/rejected content: content is a redirect or plan template", "path": path, "content": content[:200], "files": []}
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # ── Magic-number 校验（防止 LLM 把 thinking 文本写入图片/PDF/JSON 等结构化文件）──────
+    # 反模式 #9 实证：02 实例 6h 内 5 次 .md + 1 次 .pdf 把 <think>... 当文件正文写入
+    _ext_mn = os.path.splitext(path)[1].lower()
+    _SNIFF_BYTES = 64
+    try:
+        _head_bytes = content.encode("utf-8", errors="replace")[:_SNIFF_BYTES]
+    except Exception:
+        _head_bytes = b""
+    _MAGIC_MAP = {
+        ".pdf": b"%PDF",
+        ".png": b"\x89PNG",
+        ".jpg": b"\xff\xd8\xff",
+        ".jpeg": b"\xff\xd8\xff",
+        ".gif": b"GIF8",
+        ".svg": b"<svg",
+        ".json": b"{",  # JSON 宽松：必须以 { 或 [ 开头，否则可能是 thinking
+    }
+    if _ext_mn in _MAGIC_MAP:
+        _expected = _MAGIC_MAP[_ext_mn]
+        if _ext_mn == ".json":
+            _head_ok = (_head_bytes.lstrip().startswith(b"{") or _head_bytes.lstrip().startswith(b"["))
+        else:
+            _head_ok = _head_bytes.lstrip().startswith(_expected)
+        if not _head_ok:
+            try:
+                from partner.evolution.evolution_log import log_evolution as _lev_mn
+                _lev_mn("magic_block", detail={
+                    "path": str(path), "ext": _ext_mn,
+                    "content_head": content[:60],
+                    "reason": "think_or_text_in_binary",
+                })
+            except Exception:
+                pass
+            return {"ok": False, "error": f"{_ext_mn.upper().lstrip('.')} 魔数校验失败：内容不是有效 {_ext_mn}（可能写入 LLM 思考文本或文本块）。", "path": path, "content": "", "files": []}
     # ── Guard: if file already exists from step side-effect and is larger, keep it ──
     if os.path.exists(path):
         existing_size = os.path.getsize(path)
@@ -2922,7 +3182,78 @@ def _atomic_write_artifact(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         f.write(content)
         if not content.endswith("\n"):
             f.write("\n")
+    try:
+        _maybe_trigger_self_reflect_after_write(ctx, path, content)
+    except Exception:
+        pass
     return {"ok": True, "path": path, "files": [path], "content": content[:1000]}
+
+def _maybe_trigger_self_reflect_after_write(ctx, path: str, content: str) -> None:
+    """Record report creation without recursively creating reflection tasks.
+
+    Reflection belongs at task completion where the complete step evidence is
+    available.  Triggering it during every file write caused reflection reports
+    to reflect on themselves and produced an unbounded task storm.
+    """
+    import json as _json
+    import re as _re
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".pdf", ".md", ".html", ".txt", ".json", ".csv"):
+        return
+    try:
+        from partner.evolution.evolution_log import log_evolution
+        log_evolution("report_delivered", detail={"path": str(path), "ext": ext, "content_len": len(content)})
+    except Exception:
+        pass
+    return
+    # 优先从 path 推导 ws（最可靠，path 必有 /instances/{id}/）
+    ws = ""
+    m = _re.search(r"^(/.+/instances/[^/]+)/state/", path)
+    if m:
+        ws = m.group(1)
+    if not ws:
+        ti = getattr(ctx, "task_instance", None)
+        if ti is not None:
+            ws = getattr(ti, "workspace", "") or ""
+    if not ws:
+        ws = getattr(ctx, "workspace", "") or ""
+    if not ws:
+        # 兜底：path 里有 /instances/02/，推 ws 到 /instances/02 父级
+        m2 = _re.search(r"/instances/(\d{2})/", path)
+        if m2:
+            ws = path[:m2.end()]
+    if not ws:
+        return
+    # 从 ws 推 instance id
+    instance = ""
+    m3 = _re.search(r"/instances/(\d{2})(?:/|$)", ws)
+    if m3:
+        instance = m3.group(1)
+    else:
+        m4 = _re.search(r"/instances/(\w+)(?:/|$)", ws)
+        if m4:
+            instance = m4.group(1)
+    if not instance:
+        return
+    # inbox 路径：用 ws 根（/instances/02 之前的）
+    # ws = "/mnt/e/work/partner_workspace/instances/02" → 取父级
+    inbox = os.path.join(ws, "state", "desktop_inbox.jsonl")
+    if not os.path.exists(os.path.dirname(inbox)):
+        return
+    parent = os.path.dirname(inbox)
+    if not os.path.exists(parent):
+        return
+    msg = {
+        "id": f"self_reflect_{int(os.path.getmtime(path))}_{instance}",
+        "role": "user",
+        "content": f"[自动反思触发] 任务刚交付报告 {os.path.basename(path)}（{len(content)}字符）。请调用 atomic_strict_reflect 事件对刚刚完成的工作做严格反思（基于真实证据），发现真实问题与改进点，输出反思结论与下一轮方向。完成后调用 atomic_next_iteration 启动下一轮。",
+        "source": "self_evolution_trigger",
+    }
+    try:
+        with open(inbox, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(msg, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _path_tokens(path: str) -> list[str]:

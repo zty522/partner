@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receipt_correction.schema.json",
+  "title": "ReceiptCorrection",
+  "type": "object",
+  "required": ["receipt_id", "project_id", "action", "reason", "evidence", "created_at"],
+  "properties": {
+    "receipt_id": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "action": {"enum": ["invalidate", "reinstate"]},
+    "reason": {"type": "string", "minLength": 1},
+    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "created_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

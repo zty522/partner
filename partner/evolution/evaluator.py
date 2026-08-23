@@ -94,7 +94,7 @@ def record_quality_score(
     try:
         from ..api_log import workspace_root_from_pointer
 
-        root = workspace_root_from_pointer()
+        root = workspace or workspace_root_from_pointer() or ""
         if not root:
             return ""
         log_dir = os.path.join(root, "state", "logs")
@@ -136,7 +136,7 @@ def record_failure(
     try:
         from ..api_log import workspace_root_from_pointer
 
-        root = workspace_root_from_pointer()
+        root = workspace or workspace_root_from_pointer() or ""
         if not root:
             return ""
         log_dir = os.path.join(root, "state", "logs")
@@ -164,7 +164,7 @@ def load_recent_failures(workspace: str = "", instance_id: str = "", limit: int 
     try:
         from ..api_log import workspace_root_from_pointer
 
-        root = workspace_root_from_pointer()
+        root = workspace or workspace_root_from_pointer() or ""
         if not root:
             return []
         path = os.path.join(root, "state", "logs", _FAILURE_LOG)
@@ -210,7 +210,8 @@ def record_success(
     try:
         from ..api_log import workspace_root_from_pointer
 
-        root = workspace_root_from_pointer()
+        # C4 技能卡片跨实例共享：固定写根级 share/mind（不随传入的实例 workspace 隔离）
+        root = workspace_root_from_pointer() or ""
         if not root:
             return ""
         mind_dir = os.path.join(root, "share", "mind")
@@ -238,7 +239,8 @@ def load_recent_successes(workspace: str = "", instance_id: str = "", limit: int
     try:
         from ..api_log import workspace_root_from_pointer
 
-        root = workspace_root_from_pointer()
+        # C4 技能卡片跨实例共享：固定读根级 share/mind
+        root = workspace_root_from_pointer() or ""
         if not root:
             return []
         path = os.path.join(root, "share", "mind", _SUCCESS_LOG)

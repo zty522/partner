@@ -93,6 +93,8 @@ _state_manager = None
 # 推送回调：msg(str) -> None
 _push_callback = None
 _file_push_callback = None
+_acknowledged_text_deliveries: dict[str, float] = {}
+_acknowledged_file_deliveries: dict[tuple[str, int, int], float] = {}
 
 # 规划循环检测：{project_title: consecutive_plan_only_count}
 _plan_loop_counter: dict = {}
@@ -2947,8 +2949,12 @@ def _push_one_shot_output_files(project_dir: str, parsed: dict | None,
     if _file_push_callback is None:
         logger.warning("[REPORT] one-shot file push skipped: no file push callback registered")
         return False, files
+    pending_files = [path for path in files if not _file_was_recently_delivered(path)]
+    if not pending_files:
+        logger.info("[REPORT] one-shot file push skipped: all candidates were acknowledged in the last 5 minutes")
+        return True, files
     sent = False
-    for path in files:
+    for path in pending_files:
         for _retry in range(3):
             try:
                 with open(path, "rb") as f:
@@ -2957,6 +2963,7 @@ def _push_one_shot_output_files(project_dir: str, parsed: dict | None,
                 ok = _file_push_callback(data, os.path.basename(path), label)
                 logger.info("[REPORT] one-shot file push result: %s ok=%s (attempt %d/3)", os.path.basename(path), ok, _retry + 1)
                 if ok:
+                    _mark_file_delivered(path)
                     sent = True
                     break
                 if _retry < 2:
@@ -3251,6 +3258,98 @@ def set_file_push_callback(callback):
     """设置文件推送回调。callback(file_bytes, filename, caption) -> bool"""
     global _file_push_callback
     _file_push_callback = callback
+
+
+def _file_delivery_signature(path: str) -> tuple[str, int, int] | None:
+    try:
+        stat = os.stat(path)
+        return (os.path.realpath(path), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _mark_file_delivered(path: str) -> None:
+    signature = _file_delivery_signature(path)
+    if signature is None:
+        return
+    import time as _time
+    now = _time.time()
+    _acknowledged_file_deliveries[signature] = now
+    for old_signature, timestamp in list(_acknowledged_file_deliveries.items()):
+        if now - timestamp > 300:
+            _acknowledged_file_deliveries.pop(old_signature, None)
+
+
+def _file_was_recently_delivered(path: str) -> bool:
+    signature = _file_delivery_signature(path)
+    if signature is None:
+        return False
+    import time as _time
+    return _time.time() - _acknowledged_file_deliveries.get(signature, 0) <= 300
+
+
+def push_text_now(text: str) -> dict:
+    """Send text through the active user channel and require its acknowledgement.
+
+    Writing a local inbox/history entry is not delivery.  This helper mirrors
+    :func:`push_file_now` so local events cannot report success unless the
+    runtime channel callback confirms the send.
+    """
+    content = str(text or "").strip()
+    if not content:
+        return {"ok": False, "delivered": False, "status": "invalid", "error": "text is empty"}
+    import hashlib as _hashlib
+    import time as _time
+    signature = _hashlib.sha256(content.encode("utf-8")).hexdigest()
+    now = _time.time()
+    previous = _acknowledged_text_deliveries.get(signature, 0)
+    if now - previous <= 300:
+        return {
+            "ok": True,
+            "delivered": True,
+            "status": "already_sent",
+            "deduplicated": True,
+            "text_len": len(content),
+        }
+    if _push_callback is None:
+        return {"ok": False, "delivered": False, "status": "unavailable", "error": "text push callback is not registered"}
+    try:
+        acknowledged = bool(_push_callback(content))
+        if not acknowledged:
+            return {"ok": False, "delivered": False, "status": "failed", "error": "active channel did not acknowledge delivery"}
+        _acknowledged_text_deliveries[signature] = now
+        for old_signature, timestamp in list(_acknowledged_text_deliveries.items()):
+            if now - timestamp > 300:
+                _acknowledged_text_deliveries.pop(old_signature, None)
+        return {"ok": True, "delivered": True, "status": "sent", "text_len": len(content)}
+    except Exception as exc:
+        logger.warning("[TEXT-PUSH] delivery failed: %s", exc)
+        return {"ok": False, "delivered": False, "status": "failed", "error": str(exc)}
+
+
+def push_file_now(path: str, caption: str = "") -> dict:
+    """Send one existing file through the configured user channel.
+
+    A local history write is not delivery. ``delivered`` is true only when the
+    active channel callback acknowledges the file.
+    """
+    if not path or not os.path.isfile(path):
+        return {"ok": False, "delivered": False, "status": "missing", "error": f"file not found: {path}"}
+    if _file_push_callback is None:
+        return {"ok": False, "delivered": False, "status": "unavailable", "error": "file push callback is not registered"}
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        if not data:
+            return {"ok": False, "delivered": False, "status": "invalid", "error": "file is empty"}
+        acknowledged = bool(_file_push_callback(data, os.path.basename(path), caption or os.path.basename(path)))
+        if not acknowledged:
+            return {"ok": False, "delivered": False, "status": "failed", "error": "active channel did not acknowledge delivery"}
+        _mark_file_delivered(path)
+        return {"ok": True, "delivered": True, "status": "sent", "size": len(data), "path": path}
+    except Exception as exc:
+        logger.warning("[FILE-PUSH] delivery failed for %s: %s", path, exc)
+        return {"ok": False, "delivered": False, "status": "failed", "error": str(exc)}
     logger.info(f"[MIND] File push callback registered: {callback}")
 
 
@@ -3459,6 +3558,26 @@ def _start_desktop_inbox_poller(workspace: str):
                         sender_id = entry.get("sender_id", "desktop_gui")
                         sender_name = entry.get("sender_name", "用户")
                         source = entry.get("source", "desktop_gui")
+
+                        # Health probes must stay transport-only while a
+                        # persistent Campaign owns the instance.  Previously a
+                        # literal ``ping`` became a normal deep-dive project,
+                        # pre-empted Campaign work and sent write_design/pong
+                        # noise to QQ.
+                        if str(text).strip().lower() == "ping" and (
+                            str(source) == "cron_probe" or str(sender_name).lower() == "cron"
+                        ):
+                            try:
+                                from ..governance.campaign_storage import active_campaign_id, load_campaign
+                                active_id = active_campaign_id(workspace)
+                                active = load_campaign(workspace, active_id) if active_id else None
+                                if active and active.status in {"running", "paused", "blocked"}:
+                                    logger.info("[DESKTOP_INBOX] campaign active; consumed cron ping without task creation")
+                                    _global_desktop_seen_ids.add(msg_id)
+                                    dirty = True
+                                    continue
+                            except Exception as exc:
+                                logger.debug("[DESKTOP_INBOX] campaign probe suppression check failed: %s", exc)
 
                         # Dedup: skip if the same text from the same source is
                         # already pending in the event queue
@@ -3728,6 +3847,29 @@ async def _handle_user_message(event: MindEvent):
         logger.info("[USER_MESSAGE] empty text; skipped %s", event.id[:8])
         return
 
+    # Login confirmation is a protocol message, not a new generic project.
+    # Verify the live browser session and continue the suspended workflow.
+    normalized_login = re.sub(r"[\s，。！!？?]", "", text).lower()
+    if normalized_login in {"已登录", "登录完成", "已经登录", "loggedin", "logincomplete"}:
+        try:
+            from types import SimpleNamespace
+            from partner.v2.repair_events import atomic_verify_login_and_continue
+            login_ctx = SimpleNamespace(workspace=_workspace)
+            result = await asyncio.to_thread(atomic_verify_login_and_continue, login_ctx, {})
+            _append_event_pipeline(event.id, "user_message", "login_confirmation", {
+                "verified": bool(result.get("verified")),
+                "status": str(result.get("status") or ""),
+                "next_task_queued": bool(result.get("next_task_queued")),
+            })
+            logger.info("[LOGIN-CONFIRM] verified=%s queued=%s status=%s",
+                        result.get("verified"), result.get("next_task_queued"), result.get("status"))
+            return
+        except Exception as exc:
+            logger.warning("[LOGIN-CONFIRM] verification handler failed: %s", exc)
+            if _push_callback is not None:
+                _push_callback(f"⚠️ 收到登录确认，但自动核验失败：{str(exc)[:120]}。我没有把它误报为登录成功。")
+            return
+
     # Message-level dedup: skip if same text was processed within the last 30s
     _text_hash = str(hash(text))
     _now = _time.time()
@@ -3750,13 +3892,17 @@ async def _handle_user_message(event: MindEvent):
         "sender_id": sender_id,
     })
 
-    # ── Acknowledgment: send "收到指令xxx，正在思考..." ──
-    _ack = f"收到指令「{text[:60]}{'...' if len(text) > 60 else ''}」，正在思考..."
-    try:
-        if _push_callback is not None:
-            _push_callback(_ack)
-    except Exception:
-        pass
+    # Campaign control messages are machine-to-machine protocol traffic.  Their
+    # deterministic handlers send concrete step receipts, so exposing this
+    # generic acknowledgment only creates confusing QQ noise for the user.
+    _is_campaign_control = sender_id == "campaign_controller" and "[PARTNER_CAMPAIGN " in text
+    if not _is_campaign_control:
+        _ack = f"收到指令「{text[:60]}{'...' if len(text) > 60 else ''}」，正在思考..."
+        try:
+            if _push_callback is not None:
+                _push_callback(_ack)
+        except Exception:
+            pass
     # ── End acknowledgment ──
 
     # Call orchestrator to decide routing
@@ -5111,6 +5257,8 @@ async def _enqueue_stop_project_event(event: MindEvent, title: str, reason: str,
             "user_request": str(payload.get("user_request") or "")[:1600],
             "previous_event_type": event.type.value,
             "previous_event_kind": str(payload.get("event_kind") or "")[:120],
+            "completed_files": list(payload.get("completed_files") or []),
+            "completed_event_types": list(payload.get("completed_event_types") or []),
         },
         source=f"{event.type.value}:selector_stop_project",
         parent_id=event.id,
@@ -5756,7 +5904,8 @@ async def _handle_batch_plan_event(event: MindEvent):
     # from dual USER_MESSAGE sources (QQ + desktop_inbox).
     root_request = _root_user_request(event.payload or {}) or str((event.payload or {}).get("user_request") or "")
     title = str((event.payload or {}).get("title") or (event.payload or {}).get("project") or "").strip()
-    dedup_key = title or root_request[:80]
+    campaign_marker = re.search(r"\[PARTNER_CAMPAIGN\s+campaign_id=[^\]]+\]", root_request)
+    dedup_key = campaign_marker.group(0) if campaign_marker else (title or root_request[:80])
     if dedup_key and dedup_key in _batch_plan_recently_completed:
         elapsed = _time.time() - _batch_plan_recently_completed[dedup_key]
         if elapsed < 60:
@@ -5842,6 +5991,360 @@ async def _handle_batch_plan_event(event: MindEvent):
     aggregate_completed_steps = 0
     check_result: dict = {}
     core_step_failed_across_iterations = False  # Tracks if ANY iteration had a core agent failure
+    direct_request = str(payload.get("user_request") or root_request or title)
+
+    def _count_direct_model_calls(value) -> int:
+        """Count concrete model responses embedded in deterministic results."""
+        if isinstance(value, list):
+            return sum(_count_direct_model_calls(item) for item in value)
+        if not isinstance(value, dict):
+            return 0
+        current = int(
+            bool(value.get("model"))
+            and "ok" in value
+            and any(key in value for key in ("description", "text", "content"))
+        )
+        return current + sum(_count_direct_model_calls(item) for item in value.values())
+
+    def _record_direct_campaign_result(result_value: dict, event_type: str, *, accepted: bool) -> None:
+        """Persist deterministic execution evidence for Campaign reconciliation."""
+        direct_model_calls = int((result_value or {}).get("model_calls") or 0)
+        if not direct_model_calls:
+            direct_model_calls = _count_direct_model_calls(result_value or {})
+        if isinstance(task.metadata, dict):
+            task.metadata["step_results"] = {"campaign_direct": dict(result_value or {})}
+            task.save()
+        task.append_log("plan_executor_step_completed", {
+            "step_id": "campaign_direct", "event_type": event_type,
+            "ok": bool(accepted), "llm_calls": direct_model_calls,
+        })
+        task.mark("done" if accepted else "failed", {
+            "source": "campaign_direct", "event_type": event_type,
+            "llm_calls": direct_model_calls,
+            "files": list((result_value or {}).get("files") or []),
+        })
+        task.append_log("iteration_llm_check", {
+            "satisfied": bool(accepted),
+            "source": "deterministic_campaign_acceptance",
+            "feedback": "deterministic event contract passed" if accepted else
+                        str((result_value or {}).get("error") or (result_value or {}).get("status") or "failed"),
+        })
+        if accepted and (result_value or {}).get("blocked"):
+            task.append_log("campaign_work_blocked", {
+                "reason": str((result_value or {}).get("blocked_reason") or "external evidence unavailable"),
+                "resume_event": str((result_value or {}).get("resume_event") or ""),
+            })
+
+    # Campaign reports are deterministic transport work.  Do not spend an LLM
+    # call asking it to read a generated report or emit internal plan chatter.
+    report_path_marker = re.search(r"(/[^\s]+campaign_report_[A-Za-z0-9]+\.md)", direct_request)
+    if campaign_marker and report_path_marker:
+        report_path = report_path_marker.group(1)
+        try:
+            report_text = open(report_path, encoding="utf-8").read() if report_path else ""
+        except OSError as exc:
+            report_text = ""
+            report_error = str(exc)
+        else:
+            report_error = ""
+        heading = "Partner Campaign 最终总结" if "最终报告" in os.path.basename(report_path) or "最终日报" in direct_request else "Partner Campaign 阶段进度"
+        delivery = push_text_now(f"{heading}\n\n{report_text[:3200]}") if report_text else {
+            "ok": False, "delivered": False, "error": report_error or "campaign report missing",
+        }
+        direct = {**delivery, "files": [report_path] if report_path and os.path.isfile(report_path) else []}
+        _record_direct_campaign_result(direct, "campaign_report_delivery", accepted=bool(delivery.get("delivered")))
+        stop_payload = {**payload, "completed_files": direct["files"],
+                        "completed_event_types": ["campaign_report_delivery"]}
+        await _enqueue_stop_project_event(
+            event, title,
+            "campaign report delivered" if delivery.get("delivered") else "campaign report delivery failed",
+            stop_payload,
+        )
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+
+    # Login continuation is a protocol operation, not a creative planning
+    # problem.  Execute its atomic browser transaction directly so a planner
+    # cannot omit the “上传图文” click or accept the empty creator shell.
+    if "xiaohongshu_open_publish_editor" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.browser import atomic_xhs_open_publish_editor
+        direct_ctx = SimpleNamespace(
+            workspace=_workspace, working_dir=task.working_dir,
+            project_dir=project_dir, task_instance=task,
+        )
+        direct = await asyncio.to_thread(atomic_xhs_open_publish_editor, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        if direct.get("ok"):
+            evidence = direct.get("evidence") or {}
+            direct["summary_delivery"] = push_text_now(
+                "✅ 01 本轮安全验证完成\n"
+                "已实际打开小红书创作平台并进入“上传图文”。\n"
+                f"确定性证据：图片上传提示={bool(evidence.get('has_image_prompt'))}，"
+                f"文件上传控件={int(evidence.get('file_input_count') or 0)} 个。\n"
+                "每个关键步骤的截图与视觉模型描述已分别发送；本轮没有上传或发布内容。"
+            )
+            _record_direct_campaign_result(
+                direct, "xiaohongshu_open_publish_editor",
+                accepted=bool(direct["summary_delivery"].get("delivered")),
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["xiaohongshu_open_publish_editor"]}
+            await _enqueue_stop_project_event(event, title, "publish editor entry verified", stop_payload)
+        else:
+            _record_direct_campaign_result(direct, "xiaohongshu_open_publish_editor", accepted=False)
+            await _enqueue_visible_report(
+                "❌ 01 已打开创作平台，但没有核验到“上传图文”的真实上传控件，因此没有继续冒充成功。"
+                f" 原因：{direct.get('error') or direct.get('status')}",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="xiaohongshu:publish_editor_unverified", parent_id=event.id,
+                bypass_rate_limit=True,
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["xiaohongshu_open_publish_editor"]}
+            await _enqueue_stop_project_event(event, title, "publish editor verification failed", stop_payload)
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+    if "xiaohongshu_inspect_upload_requirements" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.browser import atomic_xhs_inspect_upload_requirements
+        direct_ctx = SimpleNamespace(workspace=_workspace, working_dir=task.working_dir,
+                                     project_dir=project_dir, task_instance=task)
+        direct = await asyncio.to_thread(atomic_xhs_inspect_upload_requirements, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        evidence = direct.get("evidence") or {}
+        if direct.get("ok"):
+            direct["blocked"] = True
+            direct["blocked_reason"] = "小红书安全验证已完成；继续到素材上传或真实发布需要明确内容产物与用户授权。"
+            direct["resume_event"] = "xiaohongshu_content_and_publish_authorization_available"
+            direct["summary_delivery"] = push_text_now(
+                "✅ 01 本轮上传要求核验完成\n"
+                f"实际执行：读取 {len(evidence.get('inputs') or [])} 个真实文件控件和 "
+                f"{len(evidence.get('requirement_lines') or [])} 条页面要求。\n"
+                "结论：依据当前页面 DOM 和文件控件核验，不猜测尚未出现的标题/正文框。\n"
+                "证据文件已保存；每个关键截图和视觉描述已发送；没有上传或公开发布。\n"
+                "下一步边界：等待明确内容产物与发布授权后恢复，不会机械重复打开页面。"
+            )
+            _record_direct_campaign_result(
+                direct, "xiaohongshu_inspect_upload_requirements",
+                accepted=bool(direct["summary_delivery"].get("delivered")),
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["xiaohongshu_inspect_upload_requirements"]}
+            await _enqueue_stop_project_event(event, title, "upload requirements verified", stop_payload)
+        else:
+            _record_direct_campaign_result(direct, "xiaohongshu_inspect_upload_requirements", accepted=False)
+            await _enqueue_visible_report(
+                f"❌ 01 上传要求核验未通过：{direct.get('error') or direct.get('status')}。没有误报成功。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="xiaohongshu:requirements_unverified", parent_id=event.id,
+                bypass_rate_limit=True,
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["xiaohongshu_inspect_upload_requirements"]}
+            await _enqueue_stop_project_event(event, title, "upload requirements verification failed", stop_payload)
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+    if "molecular_data_readiness_audit" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.molecular_iteration_events import atomic_molecular_data_readiness_audit
+        from partner.v2.push_events import atomic_push_files
+        direct_ctx = SimpleNamespace(workspace=_workspace, working_dir=task.working_dir,
+                                     project_dir=project_dir, task_instance=task)
+        direct = await asyncio.to_thread(atomic_molecular_data_readiness_audit, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        if direct.get("ok"):
+            pdf_path = next((path for path in files if path.endswith(".pdf")), "")
+            direct["file_delivery"] = await asyncio.to_thread(atomic_push_files, direct_ctx, {
+                "source": pdf_path, "caption": "02 第五轮：目标与活性数据接入就绪度审计",
+            })
+            metrics = direct.get("metrics") or {}
+            direct["summary_delivery"] = push_text_now(
+                "02 第五轮数据接入审计已实际完成\n"
+                f"扫描候选数据文件 {metrics.get('candidate_count', 0)} 个；满足最小靶点/活性契约 "
+                f"{metrics.get('usable_dataset_count', 0)} 个。\n"
+                f"当前状态：{'blocked' if direct.get('blocked') else 'ready'}。\n"
+                f"原因：{direct.get('blocked_reason') or '已发现可用数据，可进入下一实验设计。'}\n"
+                f"恢复事件：{direct.get('resume_event') or '无需恢复事件'}。\n"
+                "本轮没有重复 QED/SA 排序；详细 PDF 和机器可读校验结果已生成。"
+            )
+            delivered = bool(
+                direct["file_delivery"].get("ok")
+                and int(direct["file_delivery"].get("pushed") or 0) == 1
+                and direct["summary_delivery"].get("delivered")
+            )
+            _record_direct_campaign_result(
+                direct, "molecular_data_readiness_audit", accepted=delivered,
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["molecular_data_readiness_audit"]}
+            await _enqueue_stop_project_event(
+                event, title,
+                "molecular data unavailable" if direct.get("blocked") else "molecular data ready",
+                stop_payload,
+            )
+        else:
+            _record_direct_campaign_result(direct, "molecular_data_readiness_audit", accepted=False)
+            await _enqueue_visible_report(
+                f"❌ 02 数据接入审计执行失败：{direct.get('error') or direct.get('status')}。没有重复旧排序或冒充完成。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="molecular:data_readiness_failed", parent_id=event.id, bypass_rate_limit=True,
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["molecular_data_readiness_audit"]}
+            await _enqueue_stop_project_event(event, title, "molecular data readiness audit failed", stop_payload)
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+    if "molecular_diversity_benchmark" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.molecular_diversity_events import atomic_molecular_diversity_benchmark
+        from partner.v2.push_events import atomic_push_files
+        direct_ctx = SimpleNamespace(workspace=_workspace, working_dir=task.working_dir,
+                                     project_dir=project_dir, task_instance=task)
+        direct = await asyncio.to_thread(atomic_molecular_diversity_benchmark, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        if direct.get("ok"):
+            pdf_path = next((path for path in files if path.endswith(".pdf")), "")
+            delivery = await asyncio.to_thread(atomic_push_files, direct_ctx, {
+                "source": pdf_path, "caption": "02 第二轮：骨架与指纹多样性实证报告",
+            })
+            metrics = direct.get("metrics") or {}
+            task.mark("done", {"source": "molecular_diversity_evolution", "files": files})
+            await _enqueue_visible_report(
+                "🔁 02 有意义自进化 · 第二轮真实实验\n"
+                f"输入分子：{metrics.get('molecule_count')}；唯一骨架：{metrics.get('unique_scaffold_count')}；"
+                f"平均两两 Tanimoto：{metrics.get('mean_pairwise_tanimoto')}；"
+                f"高相似对占比：{float(metrics.get('fraction_pairs_above_0_7') or 0):.1%}。\n"
+                "行为变化：从字符串唯一率扩展到骨架与指纹多样性，不再重复第一轮报告。\n"
+                f"PDF 真实发送：delivered={bool(delivery.get('ok') and delivery.get('pushed') == 1)}。\n"
+                f"下一改进：{direct.get('next_improvement')}。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=2,
+                source="molecular:diversity_verified", parent_id=event.id,
+                bypass_rate_limit=True,
+            )
+            stop_payload = {**payload, "completed_files": files,
+                            "completed_event_types": ["molecular_diversity_benchmark"]}
+            await _enqueue_stop_project_event(event, title, "diversity benchmark delivered", stop_payload)
+        else:
+            await _enqueue_visible_report(
+                f"❌ 02 第二轮多样性实验失败：{direct.get('error') or direct.get('status')}。没有用文本报告冒充实验。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="molecular:diversity_failed", parent_id=event.id,
+                bypass_rate_limit=True,
+            )
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+    if "molecular_synth_baseline_benchmark" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.molecular_iteration_events import atomic_molecular_synth_baseline_benchmark
+        from partner.v2.push_events import atomic_push_files
+        direct_ctx = SimpleNamespace(workspace=_workspace, working_dir=task.working_dir,
+                                     project_dir=project_dir, task_instance=task)
+        direct = await asyncio.to_thread(atomic_molecular_synth_baseline_benchmark, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        if direct.get("ok"):
+            pdf_path = next((path for path in files if path.endswith(".pdf")), "")
+            delivery = await asyncio.to_thread(atomic_push_files, direct_ctx, {
+                "source": pdf_path, "caption": "02 第三轮：合成可及性与概率基线对照",
+            })
+            metrics = direct.get("metrics") or {}
+            delivered = bool(delivery.get("ok") and delivery.get("pushed") == 1)
+            if delivered:
+                task.mark("done", {"source": "molecular_synth_baseline", "files": files})
+                await _enqueue_visible_report(
+                    "🔁 02 持续迭代 · 第三轮真实实验\n"
+                    f"规则组：唯一率 {float((metrics.get('rule') or {}).get('uniqueness') or 0):.1%}，"
+                    f"平均QED {(metrics.get('rule') or {}).get('mean_qed')}，平均SA {(metrics.get('rule') or {}).get('mean_sa')}。\n"
+                    f"随机组：唯一率 {float((metrics.get('stochastic') or {}).get('uniqueness') or 0):.1%}，"
+                    f"平均QED {(metrics.get('stochastic') or {}).get('mean_qed')}，平均SA {(metrics.get('stochastic') or {}).get('mean_sa')}。\n"
+                    "本轮已执行第二轮报告写出的下一步；PDF delivered=true。\n"
+                    f"已准备继续：{direct.get('next_improvement')}。",
+                    EventType.BATCH_PLAN, event_kind=visible_kind, priority=2,
+                    source="molecular:synth_baseline_verified", parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+                stop_payload = {**payload, "completed_files": files,
+                                "completed_event_types": ["molecular_synth_baseline_benchmark"]}
+                await _enqueue_stop_project_event(event, title, "synth baseline benchmark delivered", stop_payload)
+            else:
+                await _enqueue_visible_report(
+                    "❌ 02 第三轮实验已生成，但 PDF 未获真实发送回执，因此不进入下一轮。",
+                    EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                    source="molecular:synth_delivery_failed", parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+        else:
+            await _enqueue_visible_report(
+                f"❌ 02 第三轮实验失败：{direct.get('error') or direct.get('status')}。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="molecular:synth_failed", parent_id=event.id, bypass_rate_limit=True,
+            )
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+    if "molecular_goal_optimization_benchmark" in direct_request:
+        from types import SimpleNamespace
+        from partner.v2.molecular_iteration_events import atomic_molecular_goal_optimization_benchmark
+        from partner.v2.push_events import atomic_push_files
+        direct_ctx = SimpleNamespace(workspace=_workspace, working_dir=task.working_dir,
+                                     project_dir=project_dir, task_instance=task)
+        direct = await asyncio.to_thread(atomic_molecular_goal_optimization_benchmark, direct_ctx, {})
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        if direct.get("ok"):
+            pdf_path = next((path for path in files if path.endswith(".pdf")), "")
+            csv_path = next((path for path in files if path.endswith(".csv")), "")
+            pdf_delivery = await asyncio.to_thread(atomic_push_files, direct_ctx, {
+                "source": pdf_path, "caption": "02 第四轮：QED/SA 多目标候选选择报告",
+            })
+            csv_delivery = await asyncio.to_thread(atomic_push_files, direct_ctx, {
+                "source": csv_path, "caption": "02 第四轮：前20候选逐行数据",
+            })
+            metrics = direct.get("metrics") or {}
+            delivered = bool(pdf_delivery.get("pushed") == 1 and csv_delivery.get("pushed") == 1)
+            if delivered:
+                task.mark("done", {"source": "molecular_goal_optimization", "files": files})
+                await _enqueue_visible_report(
+                    "🔁 02 持续迭代 · 第四轮真实实验\n"
+                    f"从 {metrics.get('candidate_count')} 条记录选择 {metrics.get('selected_count')} 条；"
+                    f"唯一结构 {metrics.get('selected_unique_count')}，骨架 {metrics.get('selected_scaffold_count')}；"
+                    f"平均QED {metrics.get('selected_mean_qed')}，平均SA {metrics.get('selected_mean_sa')}。\n"
+                    "第三轮报告排队的多目标排序已经实际完成；PDF 与候选CSV均 delivered=true。\n"
+                    f"完成条件：{direct.get('completion')}。",
+                    EventType.BATCH_PLAN, event_kind=visible_kind, priority=2,
+                    source="molecular:optimization_verified", parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+                stop_payload = {**payload, "completed_files": files,
+                                "completed_event_types": ["molecular_goal_optimization_benchmark"]}
+                await _enqueue_stop_project_event(event, title, "goal optimization delivered", stop_payload)
+            else:
+                await _enqueue_visible_report(
+                    "❌ 02 第四轮计算完成但交付未确认，未标记实验链完成。",
+                    EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                    source="molecular:optimization_delivery_failed", parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+        else:
+            await _enqueue_visible_report(
+                f"❌ 02 第四轮实验失败：{direct.get('error') or direct.get('status')}。",
+                EventType.BATCH_PLAN, event_kind=visible_kind, priority=3,
+                source="molecular:optimization_failed", parent_id=event.id, bypass_rate_limit=True,
+            )
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
     try:
         iteration_cfg = _load_yaml_named_config("iteration.yaml", _DEFAULT_ITERATION_CONFIG)
         configured_expected = iteration_cfg.get("expected_artifacts") if isinstance(iteration_cfg.get("expected_artifacts"), list) else []
@@ -5856,7 +6359,10 @@ async def _handle_batch_plan_event(event: MindEvent):
                     merged_expected.append(item)
                     seen_expected.add(key)
             task.update_expected_artifacts(merged_expected)
-        progress_updates = bool(iteration_cfg.get("progress_updates", True))
+        # Campaign users receive business milestones and evidence, not internal
+        # planner step IDs. Browser atomic events still send required visual
+        # receipts directly.
+        progress_updates = bool(iteration_cfg.get("progress_updates", True)) and not bool(campaign_marker)
         max_iterations = max(1, int(iteration_cfg.get("max_iterations") or 3))
         batch_planner = BatchPlanner.from_workspace(_workspace)
         # ── Clean up old deliverable/output dirs that might contain cached results ──
@@ -5947,6 +6453,13 @@ async def _handle_batch_plan_event(event: MindEvent):
             event_type=event.type.value,
             probe_results=_probe_results,
         )
+        # Persist cost evidence before executing the plan.  If the service is
+        # interrupted mid-step, Campaign reconciliation must still account for
+        # the planner calls that already happened.
+        task.append_log("campaign_model_usage_checkpoint", {
+            "planner_llm_calls": int(planner_calls or 0),
+            "phase": "planner_complete",
+        })
         if not _user_prefers_pdf():
             micro_plan.expected_artifacts = _normalize_batch_expected_artifacts_for_request(
                 micro_plan.expected_artifacts,
@@ -6033,7 +6546,6 @@ async def _handle_batch_plan_event(event: MindEvent):
                 for prefix in ("【任务指令】", "【任务】", "Task:"):
                     task_title = task_title.replace(prefix, "").strip()
                     task_goal = task_goal.replace(prefix, "").strip()
-                import re
                 task_title = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", task_title).strip()
                 task_goal = re.sub(r"[，,。]\s*只做这一?件事[。.]?$", "", task_goal).strip()
                 # Make title concise: first sentence or first 40 chars
@@ -6181,9 +6693,15 @@ async def _handle_batch_plan_event(event: MindEvent):
                         if cleaned_files:
                             files_text = "；产出：" + ", ".join(cleaned_files)
                     summary = str(update.get("summary") or "").strip()
+                    step_ok = bool(update.get("ok", True))
+                    err_text = str(update.get("error") or "").strip()[:120]
+                    _icon = "✅" if step_ok else "❌"
+                    if not step_ok and err_text:
+                        summary = (f"；失败：{err_text}" if not summary else f"；{summary}（失败：{err_text}）")
                     await _enqueue_visible_report(
                         send_template(
                             "progress_done",
+                            icon=_icon,
                             current=update.get("ordinal"),
                             total=update.get("total_steps"),
                             description=update.get("description"),
@@ -6452,6 +6970,57 @@ async def _handle_batch_plan_event(event: MindEvent):
     except Exception as exc:
         logger.warning("[BATCH_PLANNER] batch_plan failed for %s: %s", title, exc)
         task.append_log("batch_plan_handler_failed", {"error": str(exc)})
+        if campaign_marker:
+            failed = {"ok": False, "error": str(exc), "files": []}
+            _record_direct_campaign_result(failed, "campaign_batch_plan", accepted=False)
+            stop_payload = {**payload, "completed_files": [],
+                            "completed_event_types": ["campaign_batch_plan"]}
+            await _enqueue_stop_project_event(event, title, "campaign planning/execution failed", stop_payload)
+            _batch_plan_inflight.discard(event.id)
+            if dedup_key:
+                _batch_plan_recently_completed[dedup_key] = _time.time()
+            return
+        # ── B hook: batch_planner 失败后用本地 micro-plan fallback ──
+        try:
+            from partner.v2.repair_events import atomic_batch_plan_fallback
+            from types import SimpleNamespace
+            fallback_ctx = SimpleNamespace(
+                workspace=_workspace,
+                working_dir=task.working_dir,
+                task_instance=task,
+            )
+            if "分子生成基准" in (root_request or title) or "molecular_candidates.csv" in (root_request or title):
+                from partner.v2.molecular_events import atomic_molecular_generation_benchmark
+                fb = await asyncio.to_thread(atomic_molecular_generation_benchmark, fallback_ctx, {"deliver": True})
+            else:
+                fb = await asyncio.to_thread(atomic_batch_plan_fallback, fallback_ctx, {})
+            logger.info("[BATCH_PLANNER_FALLBACK] ok=%s", fb.get("ok"))
+            if fb.get("ok"):
+                fallback_files = [str(path) for path in (fb.get("files") or []) if path]
+                await _enqueue_visible_report(
+                    (
+                        f"✅ {title}\n"
+                        f"规划服务超时后已切换本地确定性执行，任务没有停下。\n"
+                        f"实际结果：{json.dumps(fb.get('metrics') or {}, ensure_ascii=False)}\n"
+                        f"证据文件：{'、'.join(os.path.basename(path) for path in fallback_files)}\n"
+                        f"下一步：{fb.get('next_improvement') or '基于真实结果继续改进'}"
+                    ),
+                    EventType.BATCH_PLAN,
+                    event_kind=visible_kind,
+                    priority=2,
+                    source="batch_plan:deterministic_fallback_success",
+                    parent_id=event.id,
+                    bypass_rate_limit=True,
+                )
+                stop_payload = {
+                    **payload,
+                    "completed_files": fallback_files,
+                    "completed_event_types": ["molecular_generation_benchmark"],
+                }
+                await _enqueue_stop_project_event(event, title, "deliverable file sent successfully", stop_payload)
+                return
+        except Exception as _exc_b:
+            logger.warning("[BATCH_PLANNER_FALLBACK] failed: %s", _exc_b)
         parsed = {
             "action": "batch_plan",
             "action": "batch_plan",
@@ -7001,12 +7570,22 @@ async def _handle_batch_plan_event(event: MindEvent):
     )
     if next_event == EventType.STOP_PROJECT.value:
         try:
-            await _enqueue_stop_project_event(event, title, next_reason, payload)
+            stop_payload = {
+                **payload,
+                "completed_files": list(files or []),
+                "completed_event_types": [
+                    str(getattr(step, "event_type", "") or "")
+                    for step in (getattr(result, "plan", None) or [])
+                    if str(getattr(step, "event_type", "") or "")
+                ],
+            }
+            await _enqueue_stop_project_event(event, title, next_reason, stop_payload)
         except Exception as exc:
             logger.debug("[STOP_PROJECT] enqueue after batch_plan failed: %s", exc)
     # Record completion for content-based dedup and clean up inflight tracking
     _batch_plan_inflight.discard(event.id)
-    dedup_key = title or (root_request or "")[:80]
+    campaign_marker = re.search(r"\[PARTNER_CAMPAIGN\s+campaign_id=[^\]]+\]", root_request or "")
+    dedup_key = campaign_marker.group(0) if campaign_marker else (title or (root_request or "")[:80])
     if dedup_key:
         _batch_plan_recently_completed[dedup_key] = _time.time()
         # Prune entries older than 5 minutes to prevent unbounded growth
@@ -8525,6 +9104,8 @@ async def _handle_stop_project(event: MindEvent):
     payload = event.payload or {}
     title = str(payload.get("title") or "").strip()
     reason = str(payload.get("reason") or "selector chose to stop project execution").strip()
+    root_request = str(payload.get("root_user_request") or payload.get("user_request") or "")
+    is_campaign_control = "[PARTNER_CAMPAIGN " in root_request
     if not title:
         try:
             from ..projects.project_state import get_active
@@ -8595,16 +9176,19 @@ async def _handle_stop_project(event: MindEvent):
 
             if task_instance:
                 learning_data = extract_learning_from_task(task_instance)
-                # Generate LLM-powered lessons if adapter is available
-                try:
-                    from ..meta.learning import generate_lessons_from_task
+                # Campaign acceptance/evolution is handled centrally from the
+                # evidence-backed Receipt.  Do not make a second unbudgeted
+                # lesson-model call from STOP_PROJECT.
+                if not is_campaign_control:
+                    try:
+                        from ..meta.learning import generate_lessons_from_task
 
-                    llm_lessons = generate_lessons_from_task(task_instance, adapter=_adapter)
-                    if llm_lessons:
-                        learning_data["lessons"] = llm_lessons
-                        logger.info("[LEARNING] LLM-generated lessons: %s", llm_lessons[:200])
-                except Exception as exc:
-                    logger.debug("[LEARNING] LLM lesson generation failed: %s", exc)
+                        llm_lessons = generate_lessons_from_task(task_instance, adapter=_adapter)
+                        if llm_lessons:
+                            learning_data["lessons"] = llm_lessons
+                            logger.info("[LEARNING] LLM-generated lessons: %s", llm_lessons[:200])
+                    except Exception as exc:
+                        logger.debug("[LEARNING] LLM lesson generation failed: %s", exc)
             else:
                 learning_data = {}
 
@@ -8674,15 +9258,26 @@ async def _handle_stop_project(event: MindEvent):
         except Exception as exc:
             logger.debug("[LEARNING] record at stop_project failed (non-fatal): %s", exc)
         # ──────────────────────────────────────────────────────────────────
-        await _enqueue_visible_report(
-            f"已停止「{title}」的当前执行链，原因：{_clip(reason, 160)}",
-            EventType.STOP_PROJECT,
-            event_kind=str(payload.get("event_kind") or ""),
-            priority=2,
-            source="stop_project:notice",
-            parent_id=event.id,
-            bypass_rate_limit=True,
-        )
+        successful_stage = reason in {
+            "deliverable file sent successfully", "publish editor entry verified",
+            "upload requirements verified", "diversity benchmark delivered",
+            "synth baseline benchmark delivered", "goal optimization delivered",
+        }
+        if not is_campaign_control:
+            stop_notice = (
+                f"✅ 阶段任务「{title}」已完成真实交付。正在根据本轮证据判断是否需要自动执行下一步。"
+                if successful_stage else
+                f"⏹️ 已停止「{title}」的当前执行链，原因：{_clip(reason, 160)}"
+            )
+            await _enqueue_visible_report(
+                stop_notice,
+                EventType.STOP_PROJECT,
+                event_kind=str(payload.get("event_kind") or ""),
+                priority=2,
+                source="stop_project:notice",
+                parent_id=event.id,
+                bypass_rate_limit=True,
+            )
     except Exception as exc:
         logger.warning(f"[STOP_PROJECT] failed to stop project {title}: {exc}")
     logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
@@ -8711,37 +9306,45 @@ async def _handle_stop_project(event: MindEvent):
             )
             await _event_queue.put(new_event)
             logger.info("[RESEARCH_LOOP] enqueued BATCH_PLAN: %s", t[:60])
+            return {"task_id": new_event.id}
 
         async def _notify_fn(msg: str):
             await _enqueue_visible_report(msg, EventType.STOP_PROJECT, priority=3,
                                           source="research_loop:summary", bypass_rate_limit=True)
 
         # Extract output files from task dirs for streak detection
-        _files = []
+        _files = [
+            os.path.abspath(str(path))
+            for path in (payload.get("completed_files") or [])
+            if path and os.path.isfile(str(path))
+        ]
         try:
+            # Compatibility fallback for older STOP events: inspect only the
+            # newest task, never mix evidence from three unrelated tasks.
             _tasks_dir = os.path.join(_workspace, "state", "tasks")
-            if os.path.isdir(_tasks_dir):
-                for _td in sorted(os.listdir(_tasks_dir), key=lambda x: os.path.getmtime(os.path.join(_tasks_dir, x)), reverse=True)[:3]:
+            if not _files and os.path.isdir(_tasks_dir):
+                for _td in sorted(os.listdir(_tasks_dir), key=lambda x: os.path.getmtime(os.path.join(_tasks_dir, x)), reverse=True)[:1]:
                     _tp = os.path.join(_tasks_dir, _td)
                     for _f in os.listdir(_tp):
                         if _f.endswith(('.md','.png','.jpg','.csv','.pdf')) and not _f.startswith('_error'):
-                            _files.append(_f)
+                            _files.append(os.path.join(_tp, _f))
                 _files = list(set(_files))
         except Exception:
             pass
 
-        await on_task_done(
-            instance_id=_instance_id,
-            title=title,
-            user_request=_user_request,
-            workspace=_workspace,
-            parsed=None,
-            files=_files,
-            event_types=[],
-            enqueue_fn=_enqueue_fn,
-            notify_fn=_notify_fn,
-            adapter=_adapter,
-        )
+        if not is_campaign_control:
+            await on_task_done(
+                instance_id=_instance_id,
+                title=title,
+                user_request=_user_request,
+                workspace=_workspace,
+                parsed=None,
+                files=_files,
+                event_types=list(payload.get("completed_event_types") or []),
+                enqueue_fn=_enqueue_fn,
+                notify_fn=_notify_fn,
+                adapter=_adapter,
+            )
     except Exception as _exc:
         logger.warning("[RESEARCH_LOOP] integration failed: %s", _exc, exc_info=True)
 
@@ -9335,6 +9938,28 @@ async def _run_comprehensive_evaluation(task, root_goal: str, config: dict) -> d
             if content_parts:
                 content_sample_lines.append("\n内容样本：")
                 content_sample_lines.extend(content_parts)
+            # Delivery is one acceptance signal, never a substitute for the
+            # requested content/artifacts. Expose real callback evidence to
+            # the checker so it can evaluate that criterion together with all
+            # other criteria.
+            try:
+                delivery_evidence = []
+                step_results = getattr(task, "metadata", {}).get("step_results") or {}
+                for step_result in (step_results.values() if isinstance(step_results, dict) else []):
+                    if not isinstance(step_result, dict):
+                        continue
+                    event_name = str(step_result.get("event_type") or "")
+                    if event_name not in {"push_files", "post_message", "send_file_proactive", "send_message_proactive", "send_user_text"}:
+                        continue
+                    delivery_evidence.append(
+                        f"event={event_name}, ok={bool(step_result.get('ok'))}, "
+                        f"delivered={bool(step_result.get('delivered'))}, pushed={int(step_result.get('pushed') or 0)}"
+                    )
+                if delivery_evidence:
+                    content_sample_lines.append("\n真实通道回执：")
+                    content_sample_lines.extend(delivery_evidence)
+            except Exception:
+                pass
             content_sample_str = "\n".join(content_sample_lines) or "（无有效文件）"
             replacements = {
                 "{{user_message}}": str(user_message or "")[:2400],
@@ -9370,22 +9995,6 @@ async def _run_comprehensive_evaluation(task, root_goal: str, config: dict) -> d
                     parsed = _json_from_llm(raw)
                 except Exception:
                     parsed = None
-                # ── Delivery override: if any delivery step pushed successfully, mark satisfied ──
-                _delivery_events = {"push_files", "post_message", "send_file_proactive", "send_message_proactive"}
-                try:
-                    _step_results = getattr(task, 'metadata', {}).get('step_results') or {}
-                    for _sr in (_step_results.values() if isinstance(_step_results, dict) else []):
-                        if isinstance(_sr, dict) and _sr.get('event_type') in _delivery_events:
-                            if _sr.get('pushed') or _sr.get('ok'):
-                                logger.info("[LLM_CHECK] delivery override: step '%s' pushed=%s → satisfied=True",
-                                           _sr.get('event_type'), _sr.get('pushed'))
-                                result = {"satisfied": True, "missing": [], "reason": "delivery step succeeded",
-                                          "_source": "delivery_override"}
-                                task.append_log("iteration_llm_check", result)
-                                return result
-                except Exception:
-                    pass
-                # ── End delivery override ──
                 if isinstance(parsed, dict):
                     satisfied = bool(parsed.get("satisfied", False))
                     missing_raw = parsed.get("missing") or parsed.get("missing_items") or []
@@ -9475,6 +10084,23 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
                 section_text = _extract_markdown_section(corpus, title)
                 if not section_text or (min_length and len(section_text) < min_length):
                     missing.append("breakthrough_directions" if re.search(r"突破|创新", title) else f"section:{title or 'missing'}")
+    # A broad planner glob (for example *.md) must not weaken an explicit
+    # filename in the user's request or expected-artifact description.
+    named_sources = [str(root_goal or "")]
+    named_sources.extend(str(item.get("description") or "") for item in expected if isinstance(item, dict))
+    requested_names = {
+        os.path.basename(match).lower()
+        for source in named_sources
+        for match in re.findall(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.(?:md|pdf|csv|json|png|jpe?g|webp|xlsx)",
+            source,
+            re.I,
+        )
+        if "*" not in match
+    }
+    actual_names = {os.path.basename(str(row.get("relative_path") or "")).lower() for row in valid_files}
+    for name in sorted(requested_names - actual_names):
+        missing.append(f"named_artifact:{name}")
     field_hits: dict[str, int] = {}
     required_fields = [str(x).strip() for x in (check_cfg.get("required_fields") or []) if str(x).strip()]
     trigger_terms = [str(x).strip().lower() for x in (check_cfg.get("required_fields_trigger_terms") or []) if str(x).strip()]

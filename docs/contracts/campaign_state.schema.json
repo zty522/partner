@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "campaign_state.schema.json",
+  "title": "CampaignState",
+  "type": "object",
+  "required": ["campaign_id", "goal", "status", "allowed_instances", "active_instances", "restore_instances", "max_active", "deadline_at", "budget", "usage", "report_interval_seconds", "created_at", "updated_at"],
+  "properties": {
+    "campaign_id": {"type": "string", "minLength": 1},
+    "goal": {"type": "string", "minLength": 1},
+    "status": {"enum": ["draft", "running", "paused", "blocked", "completed", "cancelled"]},
+    "allowed_instances": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["01", "02", "03", "04", "05"]}},
+    "active_instances": {"type": "array", "maxItems": 2, "uniqueItems": true, "items": {"enum": ["01", "02", "03", "04", "05"]}},
+    "restore_instances": {"type": "array", "maxItems": 2, "uniqueItems": true, "items": {"enum": ["01", "02", "03", "04", "05"]}},
+    "max_active": {"type": "integer", "minimum": 1, "maximum": 2},
+    "deadline_at": {"type": "string", "format": "date-time"},
+    "budget": {
+      "type": "object",
+      "required": ["max_work_items", "max_failures", "max_retries_per_item", "max_runtime_seconds", "max_model_calls", "max_cost_units"],
+      "properties": {
+        "max_work_items": {"type": "integer", "minimum": 1},
+        "max_failures": {"type": "integer", "minimum": 1},
+        "max_retries_per_item": {"type": "integer", "minimum": 0},
+        "max_runtime_seconds": {"type": "integer", "minimum": 60},
+        "max_model_calls": {"type": "integer", "minimum": 0},
+        "max_cost_units": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "usage": {
+      "type": "object",
+      "required": ["work_items_created", "work_items_completed", "failures", "retries", "model_calls", "cost_units"],
+      "properties": {
+        "work_items_created": {"type": "integer", "minimum": 0},
+        "work_items_completed": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "model_calls": {"type": "integer", "minimum": 0},
+        "cost_units": {"type": "number", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "report_interval_seconds": {"type": "integer", "minimum": 60},
+    "last_report_at": {"type": "string"},
+    "stop_reason": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "started_at": {"type": "string"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/project_state.schema.json",
+  "title": "ProjectState",
+  "type": "object",
+  "required": ["project_id", "owner_instance", "status", "goal", "updated_at"],
+  "properties": {
+    "project_id": {"type": "string", "minLength": 1},
+    "owner_instance": {"type": "string", "pattern": "^0[1-5]$"},
+    "status": {"enum": ["active", "paused", "blocked", "completed", "cancelled"]},
+    "goal": {"type": "string", "minLength": 1},
+    "current_iteration": {"type": "integer", "minimum": 0},
+    "latest_receipt_id": {"type": "string"},
+    "blocked_reason": {"type": "string"},
+    "resume_event": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

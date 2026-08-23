@@ -1,145 +1,108 @@
-"""Atomic QQ file push event for Partner Harness — tested and working."""
-import os, logging
+"""Verified user file delivery event.
+
+Appending a JSONL record is not delivery. Files are sent through the runtime's
+configured channel callback, which is the same path used by normal reports.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_AUTO_FILE_PREFIXES = ("login", "screenshot", "browser", "xhs_", "xiaohongshu")
+_AUTO_FILE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf")
 
-def atomic_push_files(ctx, params):
-    """Push a specific file or all files in a directory to QQ user.
-    
-    Params:
-        source: str — file path or directory path (required)
-        caption: str — message text for QQ (default: filename)
-    
-    Returns {ok, pushed, total, results}
-    
-    Works with both HarnessContext objects and dict contexts.
+
+def _working_dir(ctx: Any) -> str:
+    task = getattr(ctx, "task_instance", None)
+    path = getattr(task, "working_dir", "") if task is not None else ""
+    if not path:
+        path = getattr(ctx, "working_dir", "") or getattr(ctx, "project_dir", "") or ""
+    if not path and isinstance(ctx, dict):
+        path = str(ctx.get("working_dir") or ctx.get("project_dir") or "")
+    return os.path.abspath(path) if path else ""
+
+
+def _resolve_source(ctx: Any, source: str) -> tuple[str, str]:
+    """Resolve an explicit source, or the newest current-task visual artifact."""
+    workdir = _working_dir(ctx)
+    if source:
+        candidate = source if os.path.isabs(source) else os.path.join(workdir, source)
+        return os.path.abspath(candidate), "explicit"
+
+    if not workdir or not os.path.isdir(workdir):
+        return "", "current task working directory is unavailable"
+    candidates = []
+    for entry in Path(workdir).iterdir():
+        if not entry.is_file():
+            continue
+        lower = entry.name.lower()
+        if lower.endswith(_AUTO_FILE_EXTENSIONS) and lower.startswith(_AUTO_FILE_PREFIXES):
+            candidates.append(str(entry))
+    if not candidates:
+        return "", "no login/screenshot/xhs visual artifact exists in the current task"
+    return max(candidates, key=os.path.getmtime), "current_task_auto"
+
+
+def _deliver_one(path: str, caption: str) -> dict:
+    from partner.mind import executor as mind_executor
+
+    result = mind_executor.push_file_now(path, caption)
+    result.setdefault("path", path)
+    result.setdefault("name", os.path.basename(path))
+    return result
+
+
+def atomic_push_files(ctx, params: dict) -> dict:
+    """Deliver files and report actual channel acknowledgements.
+
+    Auto-discovery is intentionally limited to the current task directory. An
+    older task's artifact requires an explicit path.
     """
-    import asyncio as _asyncio
-    try:
-        # Support both HarnessContext (object) and dict-based ctx
-        if hasattr(ctx, 'workspace'):
-            workspace = ctx.workspace
-        elif isinstance(ctx, dict):
-            workspace = ctx.get("workspace", "")
-        else:
-            workspace = ""
-        
-        source = params.get("source", "")
-        caption = params.get("caption", "")
-        
-        if not source:
-            return {"ok": False, "error": "source parameter required (file path or directory)"}
-        
-        # Resolve relative paths against workspace
-        if not os.path.isabs(source) and workspace:
-            source = os.path.join(workspace, source)
-        
-        # Try alternative extensions if exact path not found (e.g., planner says .png but file is .jpg)
-        if not os.path.exists(source):
-            alt_exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.pdf', '.csv', '.xlsx', '.txt', '.md']
-            base = os.path.splitext(source)[0]
-            found = False
-            for ext in alt_exts:
-                alt_path = base + ext
-                if os.path.exists(alt_path):
-                    logger.info("[PUSH-EVENT] source %s not found, using %s instead", os.path.basename(source), os.path.basename(alt_path))
-                    source = alt_path
-                    found = True
-                    break
-            if not found:
-                return {"ok": False, "error": f"source not found: {source}"}
-        
-        # Use direct HTTP API to avoid asyncio.run() conflict with existing event loop
-        if os.path.isfile(source):
-            ok = _push_single_file_direct(workspace, source, caption)
-            r = {"ok": True, "pushed": int(ok), "total": 1, "results": {os.path.basename(source): ok}}
-        elif os.path.isdir(source):
-            results = {}
-            for f in sorted(os.listdir(source)):
-                fp = os.path.join(source, f)
-                if os.path.isfile(fp) and os.path.getsize(fp) > 100:
-                    ok = _push_single_file_direct(workspace, fp, caption or f)
-                    results[f] = ok
-            pushed = sum(1 for v in results.values() if v)
-            r = {"ok": True, "pushed": pushed, "total": len(results), "results": results}
-        else:
-            return {"ok": False, "error": f"not a file or directory: {source}"}
-        
-        logger.info("[PUSH-EVENT] %d/%d files pushed", r.get("pushed", 0), r.get("total", 0))
-        return {"ok": True, "pushed": r.get("pushed", 0), "total": r.get("total", 0)}
-    
-    except Exception as e:
-        logger.exception("push_files failed")
-        return {"ok": False, "error": str(e)}
+    source, provenance = _resolve_source(ctx, str(params.get("source") or ""))
+    caption = str(params.get("caption") or "")
+    if not source:
+        return {"ok": False, "pushed": 0, "total": 0, "status": "missing", "error": provenance}
+    if not os.path.exists(source):
+        return {"ok": False, "pushed": 0, "total": 0, "status": "missing", "error": f"source not found: {source}"}
 
+    if os.path.isfile(source):
+        paths = [source]
+    elif os.path.isdir(source):
+        paths = [
+            os.path.join(source, name)
+            for name in sorted(os.listdir(source))
+            if os.path.isfile(os.path.join(source, name)) and os.path.getsize(os.path.join(source, name)) > 0
+        ]
+    else:
+        return {"ok": False, "pushed": 0, "total": 0, "status": "invalid", "error": f"not a file or directory: {source}"}
 
-def _push_single_file_direct(workspace: str, filepath: str, caption: str = "") -> bool:
-    """Push a single file to QQ using direct HTTP API (no asyncio.run)."""
-    import json, requests, base64
-    cfg_path = os.path.join(workspace, "config", "qq_config.json")
-    ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
-    
-    if not os.path.exists(cfg_path) or not os.path.exists(ctx_path):
-        return False
-    
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-    with open(ctx_path) as f:
-        ctx = json.load(f)
-    
-    app_id = cfg.get("app_id", "")
-    secret = cfg.get("app_secret", "")
-    openid = ctx.get("openid", "")
-    sandbox = cfg.get("is_sandbox", False)
-    base = "https://api.sgroup.qq.com" if not sandbox else "https://sandbox.api.sgroup.qq.com"
-    
-    if not app_id or not secret or not openid:
-        return False
-    
-    # Get access token
-    try:
-        r = requests.post("https://bots.qq.com/app/getAppAccessToken",
-                         json={"appId": app_id, "clientSecret": secret},
-                         timeout=10,
-                         proxies={"http": None, "https": None})
-        token = r.json().get("access_token", "")
-        if not token:
-            return False
-    except Exception:
-        return False
-    
-    # Read file
-    with open(filepath, "rb") as f:
-        data = f.read()
-    fn = os.path.basename(filepath)
-    ext = os.path.splitext(fn)[1].lower()
-    ft = 1 if ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp') else 4
-    b64 = base64.b64encode(data).decode("ascii")
-    
-    headers = {
-        "Authorization": f"QQBot {token}",
-        "Content-Type": "application/json",
-        "X-Union-Appid": app_id,
+    results = [_deliver_one(path, caption or os.path.basename(path)) for path in paths]
+    pushed = sum(1 for item in results if item.get("delivered") is True)
+    ok = bool(results) and pushed == len(results)
+    status = "sent" if ok else ("partial" if pushed else "failed")
+    response = {
+        "ok": ok,
+        "status": status,
+        "pushed": pushed,
+        "total": len(results),
+        "provenance": provenance,
+        "source": source,
+        "results": results,
+        "files": paths if ok else [],
     }
-    
-    # Upload file
+    if not ok:
+        response["error"] = f"delivery acknowledged for {pushed}/{len(results)} files"
+    logger.info("[PUSH-FILES] status=%s acknowledged=%d/%d source=%s", status, pushed, len(results), source)
     try:
-        r = requests.post(f"{base}/v2/users/{openid}/files", headers=headers,
-                         json={"file_type": ft, "file_data": b64,
-                               "srv_send_msg": False, "file_name": fn},
-                         timeout=30,
-                         proxies={"http": None, "https": None})
-        fi = r.json().get("file_info", "")
-        if not fi:
-            return False
-        
-        # Send message with file
-        r2 = requests.post(f"{base}/v2/users/{openid}/messages", headers=headers,
-                          json={"content": caption or fn, "msg_type": 7,
-                                "media": {"file_info": fi}},
-                          timeout=10,
-                          proxies={"http": None, "https": None})
-        return r2.status_code == 200
+        from partner.evolution.evolution_log import log_evolution
+        log_evolution("user_file_delivery", detail={"status": status, "pushed": pushed, "total": len(results), "path": source})
     except Exception:
-        return False
+        pass
+    return response
+
+
+__all__ = ["atomic_push_files"]

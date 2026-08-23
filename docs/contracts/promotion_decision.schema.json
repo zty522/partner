@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/promotion_decision.schema.json",
+  "title": "PromotionDecision",
+  "type": "object",
+  "required": ["experiment_id", "decision", "evidence", "regression_passed", "decided_at"],
+  "properties": {
+    "experiment_id": {"type": "string", "minLength": 1},
+    "decision": {"enum": ["promoted", "rejected", "inconclusive"]},
+    "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "metrics_before": {"type": "object"},
+    "metrics_after": {"type": "object"},
+    "regression_passed": {"type": "boolean"},
+    "rollback_required": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "decided_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

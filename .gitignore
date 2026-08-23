@@ -41,7 +41,6 @@ knowledge/
 logs/
 ideas/
 design/
-docs/
 temp/
 # Gitignored scripts (only build/deploy artifacts)
 scripts/*.bak
@@ -52,7 +51,6 @@ config/
 partner/projects/
 
 # Old test & event template files (kept for reference locally)
-tests/
 templates/
 
 # Partner - old integrations (removed in v0.2.0)

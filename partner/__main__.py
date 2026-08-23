@@ -12,6 +12,30 @@ from datetime import datetime
 from partner.monitoring.instance_root import resolve_instance_workspace
 from partner.workspace.workspace_layout import append_history, ensure_instance_layout
 
+def validate_pdf(file_path):
+    """Validate basic PDF structure without claiming that its content is correct."""
+    try:
+        with open(file_path, "rb") as f:
+            header = f.read(5)
+            if header != b"%PDF-":
+                return False, "Invalid PDF magic number"
+            f.seek(0, 2)
+            file_size = f.tell()
+            if file_size < 1024:
+                return False, "PDF is too small to be a user report"
+            f.seek(max(0, file_size - 2048))
+            if b"%%EOF" not in f.read():
+                return False, "Missing PDF EOF marker"
+            f.seek(0)
+            content_sample = f.read(min(file_size, 65536))
+            if b" obj" not in content_sample and b"xref" not in content_sample:
+                return False, "Missing PDF object structure"
+        return True, "Valid PDF structure"
+    except Exception as e:
+        return False, f"Error validating PDF: {e}"
+
+
+
 # Set UTF-8 encoding for cross-platform compatibility
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -41,6 +65,33 @@ def _looks_like_instance_launch(argv: list[str]) -> bool:
                for arg in argv)
 
 
+def correct_extension(file_data: bytes, filename: str) -> str:
+    """根据文件内容魔数纠正扩展名：PNG/JPEG 图片保持，文本内容纠正为 .md/.txt。
+
+    解决"截图空内容"问题的一环：浏览器截图失败后步骤产物是 markdown 文本，
+    但文件名带 .png 被直接发送。此处按内容真实类型修正，QQ 端收到正确类型。
+    """
+    try:
+        if file_data[:8] == b"\x89PNG\r\n\x1a\n":
+            return filename if filename.lower().endswith(".png") else os.path.splitext(filename)[0] + ".png"
+        if file_data[:3] in (b"\xff\xd8\xff", b"GIF"):
+            return filename if filename.lower().endswith((".jpg", ".jpeg", ".gif")) else os.path.splitext(filename)[0] + ".jpg"
+        if file_data[:2] == b"\x89" or file_data[:4] == b"II*\x00" or file_data[:4] == b"MM\x00*":
+            return filename if filename.lower().endswith(".tif") else os.path.splitext(filename)[0] + ".tif"
+        # 文本内容：纠正为 md/txt
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
+            try:
+                _text = file_data[:512].decode("utf-8")
+                if _text.lstrip().startswith(("#", "<", "{")) or "\n" in _text:
+                    return os.path.splitext(filename)[0] + ".md"
+            except UnicodeDecodeError:
+                pass
+    except Exception:
+        pass
+    return filename
+
+
 def _run_instance_mode(argv: list[str]):
     parser = argparse.ArgumentParser(prog="python -m partner")
     parser.add_argument("--instance-id", default=os.environ.get("PARTNER_INSTANCE_ID", "default"))
@@ -54,6 +105,17 @@ def _run_instance_mode(argv: list[str]):
 
     workspace = args.workspace or str(resolve_instance_workspace(args.instance_id))
     ensure_instance_layout(workspace)
+    from partner.monitoring.run_control import is_instance_paused
+    if is_instance_paused(workspace, args.instance_id):
+        print(f"Partner instance '{args.instance_id}' is persistently paused; startup skipped.", flush=True)
+        return
+    if args.instance_id in {"01", "02", "03", "04", "05"}:
+        from partner.governance.scheduler import assert_start_allowed
+        try:
+            assert_start_allowed(workspace, args.instance_id)
+        except RuntimeError as exc:
+            print(f"Partner instance '{args.instance_id}' startup denied by two-slot scheduler: {exc}", flush=True)
+            return
     # Check for stale PID file from a killed instance
     pid_file = os.path.join(workspace, "instance.pid")
     if os.path.exists(pid_file):
@@ -167,6 +229,8 @@ def _run_instance_mode(argv: list[str]):
             return None
         safe_name = os.path.basename(str(filename or "partner_file").strip()) or "partner_file"
         safe_name = re.sub(r'[<>:\"/\\|?*\x00-\x1f]+', "_", safe_name).strip(" ._") or "partner_file"
+        # 内容类型校验：扩展名与文件真实类型不符时纠正（防止 md 文本冒充 png/jpg 发送）
+        safe_name = correct_extension(file_data, safe_name)
         stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
         from partner.workspace.workspace_layout import outgoing_dir
         out_dir = outgoing_dir(workspace)
@@ -238,11 +302,11 @@ def _run_instance_mode(argv: list[str]):
                 ctx = json.load(f)
         except Exception:
             _append_proactive_history(content, "", kind="message")
-            return True
+            return False
         openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
         if not openid:
             _append_proactive_history(content, "", kind="message")
-            return True
+            return False
         if openid in ("desktop_gui", "tui", "tui_user"):
             _append_proactive_history(content, openid, kind="message")
             return True
@@ -254,7 +318,7 @@ def _run_instance_mode(argv: list[str]):
             return ok
         # No bridge — just write to history
         _append_proactive_history(content, openid, kind="message")
-        return True
+        return False
 
     set_push_callback(_push_to_last_user)
 
@@ -268,22 +332,24 @@ def _run_instance_mode(argv: list[str]):
         except Exception as exc:
             print(f"QQ proactive file push skipped: no qq_user_context.json ({exc})")
             _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-            return True
+            return False
         openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
         if not openid:
             print("QQ proactive file push skipped: missing openid in qq_user_context.json")
             _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-            return True
+            return False
         text = caption or filename or "Partner 阶段汇报"
         if openid == "desktop_gui":
             _append_proactive_history(text, openid, kind="file", attachments=attachments)
             return True
         # QQ user — send via bridge if available
         if _qq_bridge is not None:
+            extension = os.path.splitext(filename or "")[1].lower()
+            qq_file_type = 1 if extension in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp") else 4
             ok = _qq_bridge.send_file_proactive(
                 openid,
                 file_data,
-                4,
+                qq_file_type,
                 QQMessageType.PRIVATE,
                 text_content=text,
                 file_name=filename,
@@ -293,7 +359,7 @@ def _run_instance_mode(argv: list[str]):
             return ok
         # No bridge — just write to history
         _append_proactive_history(text, openid, kind="file", attachments=attachments)
-        return True
+        return False
 
     set_file_push_callback(_push_file_to_last_user)
 

@@ -26,7 +26,7 @@ DEFAULT_CONFIG: JsonDict = {
         "per_event": {
             "atomic_http_get": {"timeout": 20, "retries": 1},
             "micro_planner": {"timeout": 45, "retries": 0},
-            "batch_planner": {"timeout": 60, "retries": 0},
+            "batch_planner": {"timeout": 180, "retries": 1},
             "curiosity_engine": {"timeout": 60, "retries": 0},
             "smart_llm_structured_action": {"timeout": 600, "retries": 0},
             "agent_call": {"timeout": 600, "retries": 0},

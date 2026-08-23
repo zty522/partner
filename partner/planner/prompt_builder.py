@@ -218,17 +218,36 @@ def build_available_agents_section() -> str:
         registry = AgentRegistry(workspace=None)
         agents = registry.list_agents()
 
-        # Health-check filter: skip agents that are not installed/available
-        # Use simple import check instead of subprocess health checks (too slow)
+        # Health-check filter: skip agents that are not installed/available.
+        # Fast checks only (no subprocess): python_api → import module;
+        # CLI command → which()/exists() on the command binary; python -m → import module.
+        import importlib
+        import shutil
+
         healthy_agents = []
         for m in agents:
+            ep = m.endpoint_config or {}
+            exec_module = ep.get("exec_module", "")
+            command = str(ep.get("command") or "").strip()
             try:
-                # Simple module check - fast, no subprocess
-                import importlib
-                exec_module = m.endpoint_config.get("exec_module", "")
                 if exec_module:
                     importlib.import_module(exec_module)
-                healthy_agents.append(m)
+                    healthy_agents.append(m)
+                elif command:
+                    parts = command.split()
+                    cmd0 = parts[0] if parts else ""
+                    if len(parts) >= 3 and cmd0 in ("python", "python3") and parts[1] == "-m":
+                        # python -m module: 模块可导入才算已安装
+                        try:
+                            importlib.import_module(parts[2])
+                            healthy_agents.append(m)
+                        except ImportError:
+                            pass  # module not installed, skip
+                    elif shutil.which(cmd0) or os.path.exists(cmd0):
+                        healthy_agents.append(m)
+                    # else: CLI 二进制不存在（未安装），跳过
+                else:
+                    healthy_agents.append(m)  # 无命令可查，保留
             except ImportError:
                 pass  # Module not installed, skip
             except Exception:
@@ -443,6 +462,25 @@ def build_prompt(
     # Load procedural memory and layered rules
     proc_mem = load_procedural_memory(workspace_root, user_message)
     layered_rules = load_layered_rules(workspace_root)
+    governed_context = ""
+    if workspace_root or working_dir:
+        try:
+            from ..governance.context_selector import select_context
+            from ..governance.storage import instance_id as _instance_id
+
+            context_workspace = workspace_root or working_dir
+            selected, governed_context = select_context(
+                context_workspace,
+                user_message,
+                instance_id=_instance_id(working_dir or workspace_root) or os.getenv("PARTNER_INSTANCE_ID", ""),
+                budget_chars=9000,
+                semantic_selector=None,
+            )
+            logger.info("[PROMPT_BUILDER] governed context selected=%s used=%s/%s",
+                        [item["document_id"] for item in selected.selected],
+                        selected.used_chars, selected.budget_chars)
+        except Exception as exc:
+            logger.warning("[PROMPT_BUILDER] governed context unavailable: %s", exc)
 
     arts = json.dumps(expected_artifacts or [], ensure_ascii=False)
 
@@ -488,6 +526,9 @@ def build_prompt(
     if layered_rules and layered_rules.strip():
         context_blocks.append(f"### 分层上下文规则\n{layered_rules}")
         _debug_ctx.append("layered_rules")
+    if governed_context and governed_context.strip():
+        context_blocks.append(f"### 治理文档上下文（带来源与层级）\n{governed_context}")
+        _debug_ctx.append("governed_context")
     if rules and rules.strip():
         context_blocks.append(f"### 行为规则\n{rules}")
         _debug_ctx.append("rules")
@@ -609,6 +650,17 @@ def build_prompt(
             "- 如果用户要求**PDF/文件/表格/CSV/导出**：安排 atomic_write_artifact 步骤写入对应格式\n"
             "- 如果用户没指定格式但偏好 PDF：加 atomic_write_artifact 写 .md 报告 + atomic_convert_md_to_pdf 转 PDF\n"
             "- 如果用户没指定格式且不偏好 PDF：不需要写文件，不要强制安排写文件或转 PDF 步骤\n"
+            "\n"
+            "### 输出长度与格式约束\n"
+            "- 计划 JSON 总长**不超过 8000 字符**：每步 description 一句话（30-80 字），parameters 只放必要参数。\n"
+            "- 输出必须是纯 JSON 数组，不要 markdown 代码块，不要任何解释文字。\n"
+            "- 不要在 description 或 parameters 中嵌入代码、长文本内容——内容在执行阶段由后续 LLM 步骤生成。\n"
+            "\n"
+            "### 落地执行原则（研究/分析/改进类任务必须遵守）\n"
+            "- **方案/报告必须建立在实际执行之上**：涉及代码分析的先 run_command/execute_code 运行真实代码；涉及数据的先读取真实数据/文件；涉及网页的先打开页面再提取。\n"
+            "- **禁止只输出方案而不落地**：能实际验证的结论必须安排执行步骤（运行命令、跑脚本、检查真实产出），不能止步于「提出方案/建议」。\n"
+            "- 分析/改进类任务：第一步应是读取真实代码或数据（read_file/搜索），结尾应包含实际运行验证步骤；不要只写「建议优化 X」。\n"
+            "- 截图/网页捕获类步骤：output/save_path 必须指向任务工作目录（{working_dir}），不得输出到 /tmp。\n"
         )
 
     # Build available agents section

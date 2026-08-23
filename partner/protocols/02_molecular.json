@@ -1,0 +1,41 @@
+{
+  "protocol_id": "molecular_generation",
+  "instance_id": "02",
+  "goal": "用可复现对照实验推进分子生成方法评估",
+  "transitions": {
+    "molecular_generation_benchmark": {
+      "iteration": 1,
+      "finding": "有效率和唯一率不能证明结构真正多样。",
+      "next": {
+        "title_suffix": "_结构多样性实证",
+        "event_type": "molecular_diversity_benchmark",
+        "user_request": "【02 项目续跑第二轮】直接调用且只调用 molecular_diversity_benchmark，读取上一轮 CSV，真实计算 Bemis-Murcko 骨架多样性和 Morgan 指纹两两相似度，生成并发送详细 PDF。"
+      }
+    },
+    "molecular_diversity_benchmark": {
+      "iteration": 2,
+      "finding": "已完成骨架/指纹多样性；需要补充合成可及性与随机基线。",
+      "next": {
+        "title_suffix": "_合成与随机基线",
+        "event_type": "molecular_synth_baseline_benchmark",
+        "user_request": "【02 项目续跑第三轮】直接调用且只调用 molecular_synth_baseline_benchmark，计算 SA 合成可及性，并与同样本量可复现随机生成基线比较，生成并发送详细 PDF。"
+      }
+    },
+    "molecular_synth_baseline_benchmark": {
+      "iteration": 3,
+      "finding": "已完成 SA/随机基线对照；需要检查 QED/SA 多目标头部候选。",
+      "next": {
+        "title_suffix": "_多目标候选选择",
+        "event_type": "molecular_goal_optimization_benchmark",
+        "user_request": "【02 项目续跑第四轮】直接调用且只调用 molecular_goal_optimization_benchmark，读取第三轮逐行数据，执行 QED 高、SA 低的多目标排序，检查头部骨架集中度，发送详细 PDF 和候选 CSV。"
+      }
+    },
+    "molecular_goal_optimization_benchmark": {
+      "iteration": 4,
+      "finding": "Top-20 只有 9 个唯一结构和 4 个骨架，头部候选结构集中。",
+      "terminal_status": "blocked",
+      "stop_reason": "当前缺少目标活性、分子对接或实验数据；继续排序不会产生新证据。",
+      "resume_event": "molecular_target_data_available"
+    }
+  }
+}

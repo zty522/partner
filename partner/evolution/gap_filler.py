@@ -14,6 +14,8 @@ import zipfile
 import tarfile
 from datetime import datetime
 
+from .evolution_log import log_evolution
+
 logger = logging.getLogger(__name__)
 
 TOOLS_DIR = "/mnt/e/work/partner_workspace/external/tools"
@@ -97,6 +99,8 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
               path, message, ts}
     """
     ts = datetime.now().isoformat(timespec="seconds")
+
+    log_evolution("fill_gap_start", detail={"gap_key": tool_key})
     result = {"ok": False, "status": "unsupported", "path": "", "message": "", "ts": ts, "tool": tool_key}
 
     path = detect_tool(tool_key)
@@ -104,6 +108,7 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
         result.update({"ok": True, "status": "already_present", "path": path,
                        "message": f"{tool_key} 已就绪: {path}"})
         _record(result, workspace)
+        log_evolution("gap_present", detail={"gap_key": tool_key, "path": path})
         return result
 
     src = _KNOWN_TOOL_SOURCES.get(tool_key, {})
@@ -124,6 +129,10 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
         result.update({"message": f"未知工具 {tool_key}，无法自动补缺"})
 
     _record(result, workspace)
+    if result.get("status") == "filled":
+        log_evolution("gap_filled", detail={"gap_key": tool_key, "path": result.get("path", "")})
+    else:
+        log_evolution("gap_fill_failed", detail={"gap_key": tool_key, "status": result.get("status")})
     return result
 
 

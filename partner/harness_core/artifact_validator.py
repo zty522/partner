@@ -59,6 +59,8 @@ class ArtifactValidator:
                     "pattern": expected.pattern,
                     "description": expected.description,
                     "paths": matches,
+                    "provenance": "current_task",
+                    "task_root": root,
                 })
             elif expected.required:
                 missing.append({
@@ -95,20 +97,13 @@ class ArtifactValidator:
         return False
 
     def _file_matches(self, root: str, pattern: str) -> list[str]:
-        # VERSION: multi-root fix 2026-08-08
         if not pattern:
             return []
         paths = []
         seen: set[str] = set()
-        # Also search the canonical screenshots directory
+        # Acceptance is task-local. A global screenshot directory can make an
+        # old task's image satisfy a new task's requirements.
         search_roots = [root]
-        try:
-            from partner.utils.workspace import get_screenshots_dir
-            ss_dir = get_screenshots_dir()
-            if os.path.isdir(ss_dir):
-                search_roots.append(ss_dir)
-        except Exception:
-            pass
         # Selector/planner outputs sometimes express alternatives as
         # "*.csv, *.xlsx". Treat those as one requirement with multiple
         # acceptable patterns, not as one literal glob and not as two required
@@ -117,6 +112,8 @@ class ArtifactValidator:
         for item in patterns or [pattern]:
             for sr in search_roots:
                 full_pattern = item if os.path.isabs(item) else os.path.join(sr, item)
+                # 图片类 pattern（*.png 等）同时接受 jpg/jpeg/webp——web_capture 压缩输出 jpg 是已知行为
+                matched_any = False
                 for path in glob.glob(full_pattern, recursive=True):
                     try:
                         full = os.path.abspath(path)
@@ -127,8 +124,27 @@ class ArtifactValidator:
                         if os.path.isfile(full) and os.path.getsize(full) > 0 and full not in seen:
                             seen.add(full)
                             paths.append(full)
+                            matched_any = True
                     except Exception:
                         pass
+                if not matched_any and os.path.basename(item).lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".webp", ".gif")):
+                    # 尝试常见图片扩展名（如 *.png → *.jpg/*.jpeg/*.webp/*.gif）
+                    for alt_ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                        alt = item[:-4] + alt_ext if item.lower().endswith(
+                            (".png", ".jpg", ".jpeg", ".webp", ".gif")) else item
+                        for path in glob.glob(os.path.join(sr, alt), recursive=True):
+                            try:
+                                full = os.path.abspath(path)
+                                if not (full == sr or full.startswith(sr + os.sep)):
+                                    continue
+                                if self._is_internal_artifact(full):
+                                    continue
+                                if os.path.isfile(full) and os.path.getsize(full) > 0 and full not in seen:
+                                    seen.add(full)
+                                    paths.append(full)
+                            except Exception:
+                                pass
         return sorted(paths)
 
     def _is_internal_artifact(self, path: str) -> bool:

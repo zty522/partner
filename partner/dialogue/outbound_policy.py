@@ -8,7 +8,7 @@ UNAVAILABLE_NOTICE = "当前实例或 LLM 暂时没有响应，请稍后再试�
 TEMPLATES = {
     # ── Progress (internal, not shown to user unless critical) ──
     "progress": "⏳ {current}/{total} {description}",
-    "progress_done": "✅ {current}/{total} {description}",
+    "progress_done": "{icon} {current}/{total} {description}{summary}",
     "plan_ready": "📋 已规划 {total} 步，开始执行",
 
     # ── Task acknowledgment (shown before plan) ──

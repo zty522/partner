@@ -1,0 +1,20 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.x, pytest-9.0.3
+collected 137 items
+
+tests/test_artifact_validator.py ......                                    [  5%]
+tests/test_correct_extension.py ....                                       [  9%]
+tests/test_direct_api.py .......                                           [ 16%]
+tests/test_evaluator.py .......                                            [ 22%]
+tests/test_gap_filler.py ....                                              [ 26%]
+tests/test_campaign.py ............
+tests/test_campaign_soak.py .
+tests/test_governance.py ..........
+tests/test_partner_dashboard.py ...........
+tests/test_recovery_flows.py ....................                          [ 63%]
+tests/test_run_control.py ..                                               [ 65%]
+tests/test_run_log.py ....                                                 [ 69%]
+tests/test_self_review.py .........                                        [ 77%]
+tests/test_vision_events.py .......                                        [ 84%]
+
+============================== 137 passed in 5.07s ==============================

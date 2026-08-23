@@ -138,6 +138,25 @@ class TaskQueue:
                 t.result_summary = reason
                 break
         self.save()
+
+    def fail_matching_description_fragment(self, fragment: str, reason: str = "") -> int:
+        """Close pending/in-progress tasks belonging to a cancelled controller."""
+        fragment = str(fragment or "").strip()
+        if not fragment:
+            return 0
+        changed = 0
+        for task in self.tasks:
+            if task.status not in (TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value):
+                continue
+            if fragment not in str(task.description or ""):
+                continue
+            task.status = TaskStatus.FAILED.value
+            task.result_summary = str(reason or "cancelled by controller")
+            task.completed_at = datetime.now().isoformat()
+            changed += 1
+        if changed:
+            self.save()
+        return changed
     
     def stats(self) -> dict:
         total = len(self.tasks)

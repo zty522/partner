@@ -1601,6 +1601,42 @@ expected_artifacts：
             continue_from_project = ""
             cleaned_text = text
 
+        # Campaign messages are already governed, scoped and assigned by the
+        # persistent Controller.  Sending them through the conversational LLM
+        # router used to invent unrelated artifact requirements (notably a PDF
+        # for a blocked-data audit), waste several model calls and leak a
+        # truncated internal instruction as the user-facing task title.
+        if sender_id == "campaign_controller" and "[PARTNER_CAMPAIGN " in cleaned_text:
+            project_match = re.search(r"(?m)^项目：([^\n]+)", cleaned_text)
+            project_id = project_match.group(1).strip() if project_match else "campaign_work"
+            marker_match = re.search(r"work_item_id=([^\s\]]+)", cleaned_text)
+            work_label = marker_match.group(1) if marker_match else "work"
+            decision = InteractionDecision(
+                reply_to_user="",
+                need_lifeline_update=True,
+                lifeline_action="add_task",
+                target_project=project_id,
+                task_title=f"Campaign {work_label}",
+                task_description=cleaned_text,
+                event_type="batch_plan",
+                event_kind="campaign_work",
+                stop_after_completion=True,
+                # TaskQueue currently sorts larger numeric priorities first.
+                priority=10,
+                delivery_required=False,
+                expected_artifacts=[],
+            )
+            if task:
+                decision.task_instance_id = task.task_id
+                decision.task_working_dir = task.working_dir
+                decision.continue_from_project = task.continue_from_project
+            self._record_event_decision(sender_id, cleaned_text, decision)
+            self._apply_lifeline_update(
+                decision, sender_id=sender_id, sender_name=sender_name, raw_text=cleaned_text,
+            )
+            self._update_sender_dialog_state(sender_id, decision, cleaned_text)
+            return decision
+
         # ── Direct-reply LLM-based routing ──
         # Use LLM to decide if this message is a simple query (direct reply) or complex task (batch plan)
         try:

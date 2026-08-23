@@ -1,0 +1,131 @@
+version: 1
+updated_at: "2026-08-23"
+authority_order: [canonical, current, reference, historical]
+tiers:
+  L0: always-load routing metadata only
+  L1: stable system identity, rules, and current baseline
+  L2: domain, architecture, project, and playbook knowledge
+  L3: current project state, latest receipt, and task evidence
+  L4: raw logs and historical archives; never load by default
+documents:
+  - id: current_status
+    path: docs/current_status.md
+    tier: L1
+    authority: canonical
+    tags: [status, instances, priorities, evidence]
+    instances: [all]
+    max_chars: 7000
+  - id: self_awareness
+    path: docs/self_awareness.md
+    tier: L1
+    authority: canonical
+    tags: [identity, principles, boundaries, evolution]
+    instances: [all]
+    max_chars: 5000
+  - id: verification_rules
+    path: docs/handoff/verification_rules.md
+    tier: L1
+    authority: canonical
+    tags: [verification, delivery, evidence, anti-pattern]
+    instances: [all]
+    max_chars: 6000
+  - id: knowledge_system
+    path: docs/architecture/knowledge_system.md
+    tier: L2
+    authority: canonical
+    tags: [context, knowledge, documents, memory]
+    instances: [all]
+    max_chars: 7000
+  - id: project_iteration_loop
+    path: docs/architecture/project_iteration_loop.md
+    tier: L2
+    authority: canonical
+    tags: [project, iteration, receipt, next-action, resume]
+    instances: [all]
+    max_chars: 7000
+  - id: evolution_loop
+    path: docs/architecture/evolution_loop.md
+    tier: L2
+    authority: canonical
+    tags: [evolution, issue, hypothesis, experiment, rollback]
+    instances: ["03", "05", all]
+    max_chars: 8000
+  - id: instance_scheduler
+    path: docs/architecture/instance_scheduler.md
+    tier: L2
+    authority: canonical
+    tags: [instances, scheduling, pause, resume, resources]
+    instances: [all]
+    max_chars: 5000
+  - id: continuous_campaign
+    path: docs/architecture/continuous_campaign.md
+    tier: L2
+    authority: canonical
+    tags: [campaign, continuous, overnight, long-running, 持续运行, 长期运行, 恢复]
+    instances: [all]
+    max_chars: 7000
+  - id: autonomous_scheduler
+    path: docs/architecture/autonomous_scheduler.md
+    tier: L2
+    authority: canonical
+    tags: [campaign, scheduler, slots, leases, 自动调度, 双槽, 租约]
+    instances: [all]
+    max_chars: 5000
+  - id: recovery_watchdog
+    path: docs/architecture/recovery_and_watchdog.md
+    tier: L2
+    authority: canonical
+    tags: [campaign, recovery, watchdog, retry, restart, 恢复, 超时, 重试]
+    instances: [all]
+    max_chars: 5000
+  - id: campaign_safety_budget
+    path: docs/architecture/cost_and_safety_budget.md
+    tier: L2
+    authority: canonical
+    tags: [campaign, cost, budget, safety, 成本, 预算, 安全]
+    instances: [all]
+    max_chars: 5000
+  - id: overnight_run
+    path: docs/operations/overnight_run.md
+    tier: L2
+    authority: current
+    tags: [campaign, operations, overnight, soak, 运维, 长跑]
+    instances: [all]
+    max_chars: 5000
+  - id: xiaohongshu_playbook
+    path: docs/playbooks/xiaohongshu_browser.md
+    tier: L2
+    authority: current
+    tags: [xiaohongshu, 小红书, browser, 浏览器, login, 登录, screenshot, 截图, vision, 读图, delivery, 交付]
+    instances: ["01"]
+    max_chars: 8000
+  - id: molecular_project
+    path: docs/projects/molecular_generation.md
+    tier: L2
+    authority: current
+    tags: [molecular, 分子生成, 分子, rdkit, qed, sa, diversity, 多样性, benchmark, 实验]
+    instances: ["02"]
+    max_chars: 8000
+  - id: architecture_review
+    path: docs/architecture_review.md
+    tier: L2
+    authority: current
+    tags: [architecture, gaps, priorities]
+    instances: ["03"]
+    max_chars: 7000
+  - id: change_log
+    path: docs/change_log.md
+    tier: L4
+    authority: reference
+    tags: [history, bugs, fixes, anti-pattern]
+    instances: [all]
+    max_chars: 5000
+    default_load: false
+  - id: evolution_journal
+    path: docs/evolution_journal.md
+    tier: L4
+    authority: historical
+    tags: [history, evolution, raw-log]
+    instances: [all]
+    max_chars: 3000
+    default_load: false

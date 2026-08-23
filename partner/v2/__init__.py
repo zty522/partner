@@ -24,6 +24,7 @@ JsonDict = dict[str, Any]
 # ── Convenience re-exports ──
 from .push_events import atomic_push_files
 from .gap_events import atomic_ensure_tool
+from .vision_events import atomic_read_image
 from .perception import (
     atomic_screen_capture,
     atomic_screen_ocr,
@@ -62,6 +63,8 @@ from .browser import (
     atomic_browser_video,
     atomic_browser_screenshot,
     atomic_browser_execute,
+    atomic_xhs_open_publish_editor,
+    atomic_xhs_inspect_upload_requirements,
 )
 from .media import (
     atomic_gen_chart,
@@ -99,6 +102,43 @@ from .loop_engine import (
 from .capability_events import (
     atomic_capability_inventory,
     atomic_write_design,
+)
+from .pdf_events import atomic_generate_pdf, atomic_generate_detailed_pdf
+from .molecular_events import atomic_molecular_generation_benchmark
+from .molecular_diversity_events import atomic_molecular_diversity_benchmark
+from .molecular_iteration_events import (
+    atomic_molecular_synth_baseline_benchmark,
+    atomic_molecular_goal_optimization_benchmark,
+)
+from .repair_events import (
+    atomic_auto_repair_plan, atomic_batch_plan_fallback,
+    atomic_handle_login_wall, atomic_write_artifact_fallback,
+    atomic_open_login_on_confirm, atomic_open_browser_foreground_and_notify,
+    atomic_resume_after_login, atomic_verify_login_and_continue,
+    atomic_skip_login, atomic_send_user_text,
+)
+from .chart_events import atomic_create_chart
+from .iteration_events import (
+    atomic_understand_intent,
+    atomic_write_plan,
+    atomic_strict_reflect,
+    atomic_next_iteration,
+)
+from .governance_events import (
+    atomic_select_context,
+    atomic_record_iteration,
+    atomic_request_next_action,
+    atomic_record_issue,
+    atomic_start_evolution_experiment,
+    atomic_decide_evolution_experiment,
+    atomic_observe_evolution_signals,
+)
+from .campaign_events import (
+    atomic_campaign_status,
+    atomic_create_campaign,
+    atomic_enqueue_campaign_work,
+    atomic_pause_campaign,
+    atomic_cancel_campaign,
 )
 
 
@@ -170,6 +210,18 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_push_files, {"external_call": True}),
         ("ensure_tool", "确保外部工具可用（检测/自动下载补缺）。参数: tool(plink/iqtree/bcftools/prokka等)", "local",
          atomic_ensure_tool, {"external_call": False, "produces_artifact": False}),
+        ("read_image", "读取图片内容：用 workspace api.json 预设的 qwen 视觉模型（vision_model）描述图片。参数: path(图片路径), prompt(可选)。用于核查截图/图表内容。", "local",
+         atomic_read_image, {}),
+
+        # ── 迭代引擎 (5 events) ──
+        ("understand_intent", "理解用户初始意图：目标/约束/成功标准/期望效果。参数: task(可选)", "local",
+         atomic_understand_intent, {"external_call": True, "produces_artifact": True}),
+        ("write_plan", "基于意图+可用能力写迭代计划文档。参数: round(可选)", "local",
+         atomic_write_plan, {"external_call": True, "produces_artifact": True}),
+        ("strict_reflect", "对本轮执行结果做严格反思批评（证据驱动，找根因与缺口）。参数: round(可选)", "local",
+         atomic_strict_reflect, {"external_call": True, "produces_artifact": True}),
+        ("next_iteration", "根据意图+上轮反思提出下一轮计划并启动执行（写 inbox 不等待）。参数: round(可选), max_iterations(可选)", "local",
+         atomic_next_iteration, {"external_call": True, "produces_artifact": True}),
 
         # ── Browser (9 events) ──
         ("browser_open", "打开浏览器并访问指定URL。参数: url, headless(可选), browser_type(可选)", "local",
@@ -190,6 +242,10 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_browser_screenshot, {"external_call": True, "produces_artifact": True}),
         ("browser_execute", "在页面执行JavaScript代码。参数: script, args(可选)", "local",
          atomic_browser_execute, {"external_call": True}),
+        ("xiaohongshu_open_publish_editor", "确定性打开小红书上传图文入口，核验真实上传控件并保存截图和JSON证据；不会上传或发布。参数: 无", "local",
+         atomic_xhs_open_publish_editor, {"external_call": True, "produces_artifact": True}),
+        ("xiaohongshu_inspect_upload_requirements", "读取小红书真实上传控件的accept/multiple及页面格式要求，输出JSON和MD；不会上传或发布。参数: 无", "local",
+         atomic_xhs_inspect_upload_requirements, {"external_call": True, "produces_artifact": True}),
 
         # ── Media (5 events) ──
         ("gen_chart", "生成数据图表（柱状图/折线图/散点图/饼图）。参数: data, chart_type, title, save_path, color_theme(可选)", "local",
@@ -252,5 +308,68 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_capability_inventory, {"external_call": False, "produces_artifact": True}),
         ("write_design", "为当前任务生成软件项目式总设计文档，写入项目目录 design.md。参数: goal(可选), save_path(可选)", "llm",
          atomic_write_design, {"external_call": True, "produces_artifact": True}),
+        # ── User Reporting (self-evolution additions) ──
+        ("generate_pdf", "把内容转 PDF 方便用户阅读。参数: content 或 source_path, output_path(可选), title(可选)", "local",
+         atomic_generate_pdf, {"external_call": False, "produces_artifact": True}),
+        ("generate_detailed_pdf", "生成面向用户的详细 PDF 报告；正文至少1200字、至少4个章节，并包含可核查的证据/数据/结果。建议章节：摘要、目标与方法、执行证据、结果、限制风险、结论与下一步。参数: content 或 source_path, output_path(可选), title(可选)", "local",
+         atomic_generate_detailed_pdf, {"external_call": False, "produces_artifact": True}),
+        ("molecular_generation_benchmark", "本地运行可复现 RDKit 分子生成基准：生成50+候选，计算 validity/uniqueness/novelty/QED/MW/logP，输出 CSV/JSON/PNG/详细 PDF 并要求真实发送回执。参数: 无", "local",
+         atomic_molecular_generation_benchmark, {"external_call": True, "produces_artifact": True}),
+        ("molecular_diversity_benchmark", "读取上一轮分子CSV，真实计算 Bemis-Murcko 骨架多样性与 Morgan 指纹两两相似度，输出 JSON/PNG/MD/详细PDF。参数: source(可选)", "local",
+         atomic_molecular_diversity_benchmark, {"external_call": True, "produces_artifact": True}),
+        ("molecular_synth_baseline_benchmark", "读取上一轮分子CSV，计算SA合成可及性并与同样本量可复现随机生成基线比较。参数: source(可选)", "local",
+         atomic_molecular_synth_baseline_benchmark, {"external_call": True, "produces_artifact": True}),
+        ("molecular_goal_optimization_benchmark", "读取QED/SA对照CSV，执行多目标排序、骨架集中度检查并输出前20候选和详细PDF。参数: source(可选)", "local",
+         atomic_molecular_goal_optimization_benchmark, {"external_call": True, "produces_artifact": True}),
+        ("create_chart", "根据数据生成图表 PNG。参数: type(line/bar/scatter), data, output_path(可选), title(可选)", "local",
+         atomic_create_chart, {"external_call": False, "produces_artifact": True}),
+
+        ("auto_repair_plan", "plan 执行失败时基于已有产物重生成。参数: 无（自动扫 task dir）", "local",
+         atomic_auto_repair_plan, {"external_call": False}),
+        ("batch_plan_fallback", "batch_planner 超时时用本地 micro-plan 模板替代。参数: 无", "local",
+         atomic_batch_plan_fallback, {"external_call": False}),
+        ("handle_login_wall", "检测到登录墙时停止重试并记录状态。参数: 无", "local",
+         atomic_handle_login_wall, {"external_call": False}),
+        ("write_artifact_fallback", "atomic_write_artifact 失败时用 atomic_generate_pdf 重生成。参数: 无", "local",
+         atomic_write_artifact_fallback, {"external_call": False}),
+        ("open_login_on_confirm", "用户确认后在电脑前台打开并保持登录网页，同时通过真实用户通道发送登录提示；两者均有回执才成功。参数: url (可选, 默认小红书)", "browser",
+         atomic_open_login_on_confirm, {"external_call": False}),
+        ("open_browser_foreground_and_notify", "在电脑前台打开并保持网页，同时通过真实用户通道通知用户操作；浏览器打开和消息送达均有回执才成功。参数: url, message(可选)", "browser",
+         atomic_open_browser_foreground_and_notify, {"external_call": True}),
+        ("resume_after_login", "用户回「已登录」后恢复任务执行。参数: 无", "local",
+         atomic_resume_after_login, {"external_call": False}),
+        ("verify_login_and_continue", "用真实网页导航与 Cookie 证据验证登录；验证成功后真实通知用户并自动排队执行下一步，而不是只写计划。参数: url(可选), next_task(可选)", "local",
+         atomic_verify_login_and_continue, {"external_call": True}),
+        ("skip_login", "用户选择跳过登录。参数: 无", "local",
+         atomic_skip_login, {"external_call": False}),
+        ("send_user_text", "通过 QQ Bot API 真实发文本消息给用户。参数: text (必填)", "external",
+         atomic_send_user_text, {"external_call": False}),
+
+        # ── Governed context / project / evolution contracts ──
+        ("select_context", "读取 L0 目录，用确定性规则+低成本 LLM 分类选择本步 L1/L2/L3 上下文，记录来源与预算。参数: query, project_id(可选), budget_chars(可选), document_ids(可选)", "local",
+         atomic_select_context, {"external_call": True, "produces_artifact": True}),
+        ("record_iteration", "为项目本轮写入可验证 IterationReceipt，包含 inputs/actions/artifacts/findings/next_actions 或 stop_reason。", "local",
+         atomic_record_iteration, {"external_call": False, "produces_artifact": True}),
+        ("request_next_action", "读取项目最新 Receipt 并返回 proposed NextAction；没有运行时 enqueue 回执时不得冒充 queued。参数: project_id, task_id(仅在已入队后提供)", "local",
+         atomic_request_next_action, {"external_call": False}),
+        ("record_issue", "把可复核问题写入 Issue Ledger 并去重累计。参数: summary, category, severity, evidence", "local",
+         atomic_record_issue, {"external_call": False}),
+        ("start_evolution_experiment", "为 Issue 建立 candidate 自进化实验。参数: issue_id, hypothesis, intervention, baseline, success_criteria, tests", "local",
+         atomic_start_evolution_experiment, {"external_call": False, "produces_artifact": True}),
+        ("decide_evolution_experiment", "根据显式成功标准、回归和前后证据决定 promoted/rejected/inconclusive；未过晋升门不得 promoted。", "local",
+         atomic_decide_evolution_experiment, {"external_call": False}),
+        ("observe_evolution_signals", "从事件失败、当前任务无产物、交付缺回执和连续重复事件中提取高信号 Issue；不根据模糊文字猜测问题。", "local",
+         atomic_observe_evolution_signals, {"external_call": False}),
+        ("campaign_status", "读取持久 Campaign、WorkItem 和 Lease 状态；service/heartbeat 不冒充任务进度。", "local",
+         atomic_campaign_status, {"external_call": False}),
+        ("create_campaign", "创建有期限、双槽、重试/失败/模型/成本预算的长期 Campaign；只持久化，需 runner 才会 dispatch。", "local",
+         atomic_create_campaign, {"external_call": False, "produces_artifact": True}),
+        ("enqueue_campaign_work", "向现有 Campaign 添加有边界 WorkItem；真实发布/支付/凭证动作自动进入 human_required。", "local",
+         atomic_enqueue_campaign_work, {"external_call": False, "produces_artifact": True}),
+        ("pause_campaign", "持久暂停 Campaign，不删除 WorkItem/Receipt/Lease 证据。", "local",
+         atomic_pause_campaign, {"external_call": False}),
+        ("cancel_campaign", "取消 Campaign 并保留全部审计记录。参数: reason", "local",
+         atomic_cancel_campaign, {"external_call": False}),
+
     ]
     return events

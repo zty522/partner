@@ -23,11 +23,11 @@ OUTPUT_REQUIRED_TYPES = {   # 必须产出文件的实例（全部实例都需�
 
 # 实例角色 → 默认研究方向
 INSTANCE_ROLES = {
-    "01": "desktop_monitor",
-    "02": "knowledge_acquisition",
-    "03": "deep_research",
-    "04": "code_analysis",
-    "05": "tool_testing",
+    "01": "xiaohongshu_operations",
+    "02": "molecular_generation",
+    "03": "partner_framework_frontend",
+    "04": "literature_github_learning",
+    "05": "agent_self_evolution",
 }
 
 # 一次性动作关键词：一轮即完成，重复无意义 → 不循环
@@ -57,6 +57,13 @@ def should_loop(user_request: str) -> bool:
     """
     text = (user_request or "").strip()
     if not text:
+        return False
+    # A persistent Campaign owns continuation across bounded WorkItems. Running
+    # the legacy in-memory Research Loop as well would create two schedulers and
+    # duplicate follow-up tasks.
+    if text.startswith("[PARTNER_CAMPAIGN "):
+        return False
+    if text.startswith(("[自动反思触发]", "【自动反思触发】", "[自动迭代触发]", "【第 ")):
         return False
     # 研究意图优先：即使同时提到"列出/目录"，只要主意图是研究就循环
     if any(k in text for k in _RESEARCH_KEYWORDS):
@@ -132,10 +139,12 @@ def archive_outputs(instance_id: str, workspace: str, files: list[str], round_nu
                     continue
                 if fn in seen:
                     continue
-                if (want and fn not in want) and not fn.endswith(_OUTPUT_EXTS):
+                src = os.path.join(tp, fn)
+                # When the caller provides exact current-task evidence, never
+                # sweep unrelated artifacts from recent task directories.
+                if want and src not in want and fn not in want:
                     continue
-                if fn in want or fn.endswith(_OUTPUT_EXTS):
-                    src = os.path.join(tp, fn)
+                if (want and (src in want or fn in want)) or (not want and fn.endswith(_OUTPUT_EXTS)):
                     if not os.path.isfile(src):
                         continue
                     try:
@@ -252,11 +261,40 @@ async def on_task_done(
     Returns:
         True 如果 enqueued 了下一个任务，False 如果停止。
     """
+    # Campaign tasks are deliberately single-round. Persist their evidence and
+    # hand control back to the recoverable Campaign Controller instead of
+    # entering this process-local loop.
+    try:
+        from ..governance.campaign import complete_campaign_work
+
+        campaign_result = complete_campaign_work(
+            workspace,
+            user_request,
+            files=list(files or []),
+            event_types=list(event_types or []),
+            success=True,
+        )
+        if campaign_result.get("handled"):
+            if not campaign_result.get("ok"):
+                await notify_fn(
+                    f"⚠️ {instance_id} Campaign 本轮未通过治理验收，已记录失败/重试，"
+                    f"没有冒充完成：{campaign_result.get('status')}"
+                )
+            return False
+    except Exception as exc:
+        logger.exception("[CAMPAIGN] completion integration failed: %s", exc)
+
     state = get_state(instance_id)
+    current_events = set(event_types or [])
+    protocol_progress = bool(current_events & {
+        "xiaohongshu_open_publish_editor", "xiaohongshu_inspect_upload_requirements",
+        "molecular_generation_benchmark", "molecular_diversity_benchmark",
+        "molecular_synth_baseline_benchmark", "molecular_goal_optimization_benchmark",
+    })
 
     # 首次调用 → 判断任务类型是否适合循环
     if not state.active:
-        if not should_loop(user_request):
+        if not protocol_progress and not should_loop(user_request):
             logger.info("[RESEARCH_LOOP] %s 任务类型不循环（一次性/非研究），跳过自主循环", instance_id)
             return False
         state.active = True
@@ -265,14 +303,59 @@ async def on_task_done(
         state.workspace = workspace
 
     state.round += 1
+    prior_event_types = list(state.last_event_types or [])
     state.last_event_types = (state.last_event_types or []) + (event_types or [])
     state.last_outputs.append(list(files or []))
+
+    # Observe only explicit runtime signals.  This creates Issue records for
+    # failed status, missing required outputs, missing delivery receipts, or
+    # three identical event rounds; it does not infer problems from vague prose.
+    try:
+        from ..governance.signal_detector import detect_and_record
+        detect_and_record(
+            workspace,
+            instance_id=instance_id,
+            expected_outputs=instance_id in OUTPUT_REQUIRED_TYPES,
+            files=list(files or []),
+            event_types=list(event_types or []),
+            result=dict(parsed or {}),
+            prior_event_types=prior_event_types,
+        )
+    except Exception as exc:
+        logger.debug("[RESEARCH_LOOP] evolution signal observation failed: %s", exc)
 
     logger.info(
         "[RESEARCH_LOOP] %s round=%d/%d events=%s files=%s",
         instance_id, state.round, MAX_ROUNDS,
         event_types, files,
     )
+
+    # Instance-specific workflows are declarative protocols.  The bridge writes
+    # an IterationReceipt before it queues a NextAction, and only marks that
+    # action queued after the awaited runtime enqueue callback returns.
+    try:
+        from ..governance.protocols import apply_transition
+
+        protocol_result = await apply_transition(
+            instance_id=instance_id,
+            workspace=workspace,
+            title=title,
+            event_types=current_events,
+            files=list(files or []),
+            parent_user_request=state.parent_user_request,
+            enqueue_fn=enqueue_fn,
+        )
+    except Exception as exc:
+        logger.exception("[RESEARCH_LOOP] declarative protocol failed: %s", exc)
+        protocol_result = {"handled": True, "continued": False, "error": str(exc)} if protocol_progress else None
+    if protocol_result and protocol_result.get("handled"):
+        if protocol_result.get("message"):
+            await notify_fn(protocol_result["message"])
+        if protocol_result.get("error"):
+            await notify_fn(f"❌ {instance_id} 项目协议记录失败，未冒充续跑：{protocol_result['error']}")
+        if not protocol_result.get("continued"):
+            state.active = False
+        return bool(protocol_result.get("continued"))
 
     # ── Gate 1: 轮次限制 ──
     if state.round >= MAX_ROUNDS:
@@ -291,7 +374,7 @@ async def on_task_done(
     if instance_id in OUTPUT_REQUIRED_TYPES:
         if not _has_output_this_round(state):
             state.no_output_streak += 1
-            _record_eval(instance_id, workspace, state.round, title, 0, ["无产出文件"], [])
+            evaluation = _record_eval(instance_id, workspace, state.round, title, 0, ["无产出文件"], [])
             logger.info("[RESEARCH_LOOP] %s no output streak=%d/2", instance_id, state.no_output_streak)
             if state.no_output_streak >= 2:
                 logger.info("[RESEARCH_LOOP] %s 2 consecutive no-output, stopping", instance_id)
@@ -302,7 +385,7 @@ async def on_task_done(
             logger.info("[RESEARCH_LOOP] %s fix task: %s", instance_id, next_task)
         else:
             state.no_output_streak = 0
-            _record_eval(instance_id, workspace, state.round, title, None, None, files or [])
+            evaluation = _record_eval(instance_id, workspace, state.round, title, None, None, files or [])
             archive_outputs(instance_id, workspace, files or [], round_num=state.round)
             next_task = await _generate_next_task(state, parsed, title, user_request, adapter)
     else:
@@ -312,11 +395,62 @@ async def on_task_done(
         await _stop(state, notify_fn)
         return False
 
-    await enqueue_fn(
-        next_task["title"],
-        next_task["user_request"],
-        state.parent_user_request,
-    )
+    # Generic research rounds use the same receipt/action contract as declared
+    # protocols.  No receipt means no continuation, so a model cannot claim a
+    # next round merely because it wrote one in prose.
+    try:
+        from ..governance.project_loop import enqueue_next_action, generic_project_id, record_iteration
+        from ..governance.storage import latest_receipt
+
+        project_id = generic_project_id(instance_id, state.parent_user_request)
+        previous_receipt = latest_receipt(workspace, project_id)
+        finding = str((parsed or {}).get("summary") or (parsed or {}).get("content") or "")[:1000]
+        if not finding:
+            finding = f"本轮质量评分 {int((evaluation or {}).get('score', 0)) if 'evaluation' in locals() else 0}/100"
+        receipt_result = record_iteration(workspace, {
+            "project_id": project_id,
+            "owner_instance": instance_id,
+            "project_goal": state.parent_user_request or title,
+            "goal": title,
+            "inputs": list(previous_receipt.artifacts) if previous_receipt else [],
+            "actions_executed": list(event_types or []) or ["batch_plan"],
+            "artifacts": list(files or []),
+            "findings": [finding],
+            "next_actions": [{
+                "title": next_task["title"],
+                "event_type": "batch_plan",
+                "params": {"user_request": next_task["user_request"]},
+                "status": "proposed",
+            }],
+            "delivery_confirmed": bool((parsed or {}).get("delivery_confirmed", False)),
+            "requires_delivery": False,
+        })
+        if not receipt_result.get("ok"):
+            raise RuntimeError(str(receipt_result))
+        queue_result = await enqueue_next_action(
+            workspace, project_id, enqueue_fn, state.parent_user_request,
+        )
+        if not queue_result.get("queued"):
+            raise RuntimeError(f"runtime enqueue not acknowledged: {queue_result}")
+    except Exception as exc:
+        logger.exception("[RESEARCH_LOOP] governed generic continuation failed: %s", exc)
+        _record_failure_event(instance_id, state, title, "continuation_not_queued", str(exc))
+        await notify_fn(f"❌ {instance_id} 下一轮未获得入队回执，已停止且未冒充续跑：{exc}")
+        state.active = False
+        return False
+    try:
+        score = int((evaluation or {}).get("score", 0)) if 'evaluation' in locals() else 0
+        reasons = "；".join((evaluation or {}).get("reasons", [])[:3]) if 'evaluation' in locals() else "未评分"
+        evidence_files = "、".join(os.path.basename(path) for path in (files or [])[:4]) or "无"
+        await notify_fn(
+            f"🔁 {instance_id} 有意义自进化 · 第 {state.round} 轮\n"
+            f"已核查：{title}\n"
+            f"证据文件：{evidence_files}\n"
+            f"质量评分：{score}/100（{reasons}）\n"
+            f"已自动执行下一步：{next_task.get('user_request','')[:240]}"
+        )
+    except Exception as exc:
+        logger.debug("[RESEARCH_LOOP] progress notification failed: %s", exc)
     logger.info("[RESEARCH_LOOP] %s enqueued: %s", instance_id, next_task.get("title", "")[:60])
     logger.info("[RESEARCH_LOOP] %s returning True", instance_id)
     return True
@@ -343,6 +477,17 @@ def _record_failure_event(instance_id: str, state, title: str, ftype: str, reaso
                        round_num=getattr(state, "round", 0))
     except Exception as exc:
         logger.debug("[RESEARCH_LOOP] failure record failed (non-fatal): %s", exc)
+    try:
+        from ..governance.evolution_loop import record_issue
+        record_issue(getattr(state, "workspace", ""), {
+            "summary": reason,
+            "category": "planning" if ftype == "repetitive_loop" else "verification",
+            "severity": "high",
+            "evidence": [f"task={title}", f"round={getattr(state, 'round', 0)}", f"type={ftype}"],
+            "instance_id": instance_id,
+        })
+    except Exception as exc:
+        logger.debug("[RESEARCH_LOOP] governance issue record failed (non-fatal): %s", exc)
 
 
 def _record_eval(instance_id: str, workspace: str, round_num: int, title: str,
@@ -373,8 +518,10 @@ def _record_eval(instance_id: str, workspace: str, round_num: int, title: str,
                 pass
         logger.info("[RESEARCH_LOOP] %s round=%s quality=%s/100 (%s)",
                     instance_id, round_num, score, "; ".join(reasons or []))
+        return {"score": score, "reasons": reasons or []}
     except Exception as exc:
         logger.debug("[RESEARCH_LOOP] evaluator failed (non-fatal): %s", exc)
+        return {"score": 0, "reasons": [f"评分失败: {exc}"]}
 
 
 def reset(instance_id: str) -> None:
@@ -469,7 +616,9 @@ async def _generate_next_task(
             "2. 指出尚未深入、尚未解决、可进一步展开的具体方向\n"
             "3. 生成一个具体的下一步任务指令——禁止泛泛的\"继续分析/继续研究\"，必须具体到对象和问题"
             "（例如\"深入分析 executor.py 的事件循环依赖\"、\"对比 A 与 B 的实现\"、\"验证上一轮提出的 X 假设\"）\n"
-            "4. 说明这一步要产出什么文件\n\n"
+            "4. 说明这一步要产出什么文件\n"
+            "5. **必须包含实际执行动作**：优先安排运行代码/命令/访问真实数据来验证结论，\n"
+            "   不能只写方案、只做文本分析；上轮提出的方案/假设要用真实运行验证。\n\n"
             "只输出任务指令本身（中文，150字以内的一段话，将直接作为下一步任务执行）。"
         )
         try:
@@ -486,14 +635,16 @@ async def _generate_next_task(
 
     # ── Fallback：固定模板（LLM 不可用 / prior 为空时）──
     role = INSTANCE_ROLES.get(state.instance_id, "general")
-    if role == "desktop_monitor":
-        task = "继续桌面监控：再次截图，并与上一轮对比是否有变化。产出变化报告。"
-    elif role == "deep_research":
-        task = f"继续深度研究（第{state.round}轮）：基于上一轮分析结果，尝试运行代码、对比结果、深入分析。产出更新的研究报告。"
-    elif role in ("code_analysis", "knowledge_acquisition"):
-        task = f"继续代码分析（第{state.round}轮）：分析上一轮未覆盖的模块，产出更完整的分析报告。"
-    elif role == "tool_testing":
-        task = f"继续工具测试（第{state.round}轮）：对上一轮发现的工具进行更深入的 benchmark 测试。产出测试报告。"
+    if role == "xiaohongshu_operations":
+        task = "继续小红书账户维护：读取上一轮页面证据，执行一个尚未完成且不涉及未授权发布的具体步骤，并发送逐步视觉回执。"
+    elif role == "molecular_generation":
+        task = f"继续分子生成项目（第{state.round}轮）：读取上一轮逐行数据，提出并运行一个会产生新指标或新对照的实验，产出详细报告。"
+    elif role == "partner_framework_frontend":
+        task = f"继续 Partner 框架/前端优化（第{state.round}轮）：选取上一轮未解决的一个具体缺口，修改实现并运行针对性测试和回归。"
+    elif role == "literature_github_learning":
+        task = f"继续文献/GitHub 学习（第{state.round}轮）：真实获取并运行或核查一个具体方法，把可复用结论写入项目知识而非只做摘要。"
+    elif role == "agent_self_evolution":
+        task = f"继续 Agent 自进化实验（第{state.round}轮）：基于真实 Issue 提出可证伪假设，实施候选改进并完成前后对照与晋升判断。"
     else:
         task = f"继续上一轮任务（第{state.round}轮）：深入分析，产出报告。"
 
