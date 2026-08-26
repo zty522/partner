@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/episode_trace_v3.schema.json",
+  "title": "EpisodeTraceV3ReducedState",
+  "type": "object",
+  "required": ["schema_version", "episode_id", "task_id", "instance_id", "status", "conversation_items", "model_calls", "tool_calls", "artifacts", "delivery", "failure_classes", "source_refs", "reward_vector", "reduced_at"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "episode_id": {"type": "string", "pattern": "^episode_"},
+    "task_id": {"type": "string", "minLength": 1},
+    "instance_id": {"pattern": "^0[1-5]$"},
+    "project_id": {"type": "string"},
+    "status": {"type": "string"},
+    "conversation_items": {"type": "array", "items": {"type": "object"}},
+    "model_calls": {"type": "array", "items": {"type": "object"}},
+    "tool_calls": {"type": "array", "items": {"type": "object"}},
+    "artifacts": {"type": "array", "items": {"type": "object"}},
+    "delivery": {"type": "object"},
+    "failure_classes": {"type": "array", "items": {"type": "string"}},
+    "failure_details": {"type": "array", "items": {"type": "object"}},
+    "source_refs": {"type": "array", "items": {"type": "string"}},
+    "reward_vector": {"$ref": "reward_vector_v3.schema.json"},
+    "reduced_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

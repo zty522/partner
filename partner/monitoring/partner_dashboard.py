@@ -103,8 +103,38 @@ def _instance_heartbeat(instance_workspace: str) -> JsonDict:
     }
 
 
+def _delivery_state(instance_workspace: str) -> JsonDict:
+    state = _read_json(os.path.join(instance_workspace, "state", "qq_delivery_state.json"))
+    return {
+        "delivery_ready": bool(state.get("delivery_ready", False)),
+        "delivery_status": str(state.get("status") or "unknown"),
+        "delivery_error_type": str(state.get("error_type") or ""),
+        "delivery_updated_at": str(state.get("updated_at") or ""),
+    }
+
+
 def _latest_receipt_summary(workspace_root: str, project_id: str) -> JsonDict:
     """Read the latest IterationReceipt for a governance project."""
+    action_history = os.path.join(
+        workspace_root, "share", "projects", project_id, "governance", "action_history.jsonl",
+    )
+    effective_actions = {}
+    try:
+        for line in _read_text(action_history, limit=200_000).splitlines():
+            row = json.loads(line)
+            if isinstance(row, dict) and row.get("action_id"):
+                effective_actions[str(row["action_id"])] = row
+    except (ValueError, TypeError):
+        effective_actions = {}
+
+    def summarize_action(action):
+        current = effective_actions.get(str(action.get("action_id") or ""), action)
+        return {
+            "title": current.get("title", action.get("title", "")),
+            "event_type": current.get("event_type", action.get("event_type", "")),
+            "status": current.get("status", action.get("status", "")),
+            "task_id": current.get("task_id", action.get("task_id", "")),
+        }
     try:
         from partner.governance.storage import latest_receipt
 
@@ -125,10 +155,7 @@ def _latest_receipt_summary(workspace_root: str, project_id: str) -> JsonDict:
             "findings": data.get("findings", []),
             "stop_reason": data.get("stop_reason", ""),
             "delivery_confirmed": bool(data.get("delivery_confirmed", False)),
-            "next_actions": [{
-                "title": action.get("title", ""), "event_type": action.get("event_type", ""),
-                "status": action.get("status", ""), "task_id": action.get("task_id", ""),
-            } for action in actions if isinstance(action, dict)],
+            "next_actions": [summarize_action(action) for action in actions if isinstance(action, dict)],
             "created_at": data.get("created_at", ""),
         }
     gov_dir = os.path.join(
@@ -156,12 +183,7 @@ def _latest_receipt_summary(workspace_root: str, project_id: str) -> JsonDict:
     for action in actions:
         if not isinstance(action, dict):
             continue
-        next_action_summary.append({
-            "title": action.get("title", ""),
-            "event_type": action.get("event_type", ""),
-            "status": action.get("status", ""),
-            "task_id": action.get("task_id", ""),
-        })
+        next_action_summary.append(summarize_action(action))
     return {
         "iteration": int(data.get("iteration", 0) or 0),
         "goal": data.get("goal", ""),
@@ -239,7 +261,7 @@ def _project_id_for(instance_id: str) -> str:
     return str(role or "")
 
 
-def _instance_row(instance_id, *, workspace_root, service_state, heartbeat, project_id):
+def _instance_row(instance_id, *, workspace_root, service_state, heartbeat, delivery_state, project_id):
     project_state = _project_state_summary(workspace_root, project_id)
     receipt_summary = _latest_receipt_summary(workspace_root, project_id)
     age = heartbeat.get("age_seconds", -1)
@@ -252,6 +274,8 @@ def _instance_row(instance_id, *, workspace_root, service_state, heartbeat, proj
         "instance_id": instance_id,
         "service": service_state,
         "healthy": bool(healthy),
+        "user_ready": bool(healthy and delivery_state.get("delivery_ready")),
+        **delivery_state,
         "age": _format_age(age) if isinstance(age, int) and age >= 0 else "unknown",
         "cycles": heartbeat.get("cycle_count", 0),
         "crashes": heartbeat.get("crash_count", 0),
@@ -310,17 +334,28 @@ def snapshot(
         heartbeat = _instance_heartbeat(
             os.path.join(workspace_root, "instances", inst_id)
         )
+        delivery_state = _delivery_state(
+            os.path.join(workspace_root, "instances", inst_id)
+        )
         project_id = _project_id_for(inst_id)
         row = _instance_row(
             inst_id,
             workspace_root=workspace_root,
             service_state=service,
             heartbeat=heartbeat,
+            delivery_state=delivery_state,
             project_id=project_id,
         )
         if not include_inactive and service != "active":
             continue
         instances.append(row)
+
+    try:
+        from partner.state.config import runtime_mode
+
+        mode = runtime_mode(workspace_root)
+    except Exception:
+        mode = "manual_stable"
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -328,7 +363,9 @@ def snapshot(
         "code_root": code_root,
         "active_count": sum(1 for r in instances if r["service"] == "active"),
         "healthy_count": sum(1 for r in instances if r["healthy"]),
+        "user_ready_count": sum(1 for r in instances if r["user_ready"]),
         "max_active": 2,
+        "runtime_mode": mode,
         "instances": instances,
         "pytest": _pytest_summary(pytest_summary_path),
         "campaign": _campaign_summary(workspace_root),
@@ -340,9 +377,10 @@ def render_text(snapshot_data):
     lines = []
     lines.append(f"Partner Dashboard @ {snapshot_data['generated_at']}")
     lines.append(
-        f"workspace={snapshot_data['workspace_root']}  active="
+        f"workspace={snapshot_data['workspace_root']}  mode={snapshot_data.get('runtime_mode', 'manual_stable')}  active="
         f"{snapshot_data['active_count']}/{snapshot_data['max_active']}  "
-        f"healthy={snapshot_data['healthy_count']}/{len(INSTANCE_IDS)}"
+        f"healthy={snapshot_data['healthy_count']}/{len(INSTANCE_IDS)}  "
+        f"user-ready={snapshot_data.get('user_ready_count', 0)}/{len(INSTANCE_IDS)}"
     )
     pytest_data = snapshot_data.get("pytest") or {}
     if pytest_data.get("passed") or pytest_data.get("failed"):
@@ -363,7 +401,7 @@ def render_text(snapshot_data):
         )
     lines.append("")
     header = (
-        f"{'inst':<4} {'svc':<10} {'healthy':<8} {'age':<10} "
+        f"{'inst':<4} {'svc':<10} {'healthy':<8} {'qq':<10} {'age':<10} "
         f"{'cycles':<8} {'crash':<6} {'pid':<7} {'proj':<8} {'status':<10}"
     )
     lines.append(header)
@@ -373,6 +411,7 @@ def render_text(snapshot_data):
             f"{row['instance_id']:<4} "
             f"{row['service']:<10} "
             f"{str(row['healthy']):<8} "
+            f"{row.get('delivery_status', 'unknown'):<10} "
             f"{row['age']:<10} "
             f"{row['cycles']:<8} "
             f"{row['crashes']:<6} "

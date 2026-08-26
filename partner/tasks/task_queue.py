@@ -13,6 +13,7 @@ class TaskStatus(Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TaskType(Enum):
@@ -152,6 +153,35 @@ class TaskQueue:
                 continue
             task.status = TaskStatus.FAILED.value
             task.result_summary = str(reason or "cancelled by controller")
+            task.completed_at = datetime.now().isoformat()
+            changed += 1
+        if changed:
+            self.save()
+        return changed
+
+    def cancel_pending_before(self, cutoff: datetime, reason: str = "runtime restarted") -> int:
+        """Close pending work that cannot survive a process restart.
+
+        The executable event queue is intentionally in memory.  Leaving its
+        pre-restart TaskQueue mirrors as ``pending`` makes monitoring claim a
+        backlog that the new process can never consume.
+        """
+        changed = 0
+        for task in self.tasks:
+            if task.status not in (TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value):
+                continue
+            try:
+                created = datetime.fromisoformat(str(task.created_at))
+            except (TypeError, ValueError):
+                created = datetime.min
+            if created.tzinfo is not None and cutoff.tzinfo is None:
+                created = created.replace(tzinfo=None)
+            elif created.tzinfo is None and cutoff.tzinfo is not None:
+                created = created.replace(tzinfo=cutoff.tzinfo)
+            if created >= cutoff:
+                continue
+            task.status = TaskStatus.CANCELLED.value
+            task.result_summary = str(reason)
             task.completed_at = datetime.now().isoformat()
             changed += 1
         if changed:

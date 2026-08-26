@@ -27,6 +27,11 @@ DEFAULT_CONFIG: JsonDict = {
             "atomic_http_get": {"timeout": 20, "retries": 1},
             "micro_planner": {"timeout": 45, "retries": 0},
             "batch_planner": {"timeout": 180, "retries": 1},
+            # Semantic repair has its own bounded outer loop.  It uses the
+            # same model and prompt size as batch planning, so a 60s global
+            # default spuriously times out healthy 60-90s responses and leaves
+            # uncancellable worker threads running in parallel.
+            "batch_planner_semantic_repair": {"timeout": 180, "retries": 0},
             "curiosity_engine": {"timeout": 60, "retries": 0},
             "smart_llm_structured_action": {"timeout": 600, "retries": 0},
             "agent_call": {"timeout": 600, "retries": 0},

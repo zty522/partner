@@ -108,7 +108,8 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.units import cm
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.enums import TA_LEFT, TA_CENTER
+        from reportlab.lib import colors
         # 注册支持 CJK 的字体（reportlab 自带 STSong-Light/HeiseiMin-W3）
         from reportlab.pdfbase import pdfmetrics as _pdfmetrics
         from reportlab.pdfbase.cidfonts import UnicodeCIDFont as _UnicodeCIDFont
@@ -140,13 +141,43 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
             fontSize=10,
             leading=14,
             alignment=TA_LEFT,
+            textColor=colors.HexColor("#263238"),
+            spaceAfter=5,
         )
+        styles["Title"].fontName = _cn_font
+        styles["Title"].fontSize = 22
+        styles["Title"].leading = 29
+        styles["Title"].textColor = colors.HexColor("#173F5F")
+        styles["Title"].alignment = TA_CENTER
+        for _name, _color, _size in (
+            ("Heading1", "#173F5F", 17), ("Heading2", "#20639B", 14),
+            ("Heading3", "#3CAEA3", 11), ("Heading4", "#555555", 10),
+        ):
+            styles[_name].fontName = _cn_font
+            styles[_name].textColor = colors.HexColor(_color)
+            styles[_name].fontSize = _size
+            styles[_name].leading = _size + 5
+            styles[_name].spaceBefore = 10
+            styles[_name].spaceAfter = 6
         doc = SimpleDocTemplate(
             out_path, pagesize=A4,
             leftMargin=2*cm, rightMargin=2*cm,
             topMargin=2*cm, bottomMargin=2*cm,
         )
-        story = [Paragraph(_escape(title), styles["Title"])]
+        subtitle_style = ParagraphStyle(
+            "ReportSubtitle", parent=body_style, fontName=_cn_font, fontSize=9,
+            leading=12, alignment=TA_CENTER, textColor=colors.HexColor("#607D8B"),
+        )
+        story = [
+            Spacer(1, 0.5 * cm),
+            Paragraph(_escape(title), styles["Title"]),
+            Spacer(1, 0.18 * cm),
+            Paragraph("Partner · 证据驱动执行报告", subtitle_style),
+            Spacer(1, 0.25 * cm),
+        ]
+        from reportlab.platypus import HRFlowable
+        story.append(HRFlowable(width="72%", thickness=2, color=colors.HexColor("#3CAEA3"),
+                                spaceBefore=3, spaceAfter=14, hAlign="CENTER"))
         # 嵌入图片
         from reportlab.platypus import Image as RLImage
         from reportlab.lib.utils import ImageReader
@@ -165,8 +196,6 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
                     logger.warning("[GENERATE_PDF] skip image %s: %s", img_path, e)
         # ── 真正的 markdown 解析（# ## ### 标题、表格、列表、代码块、引用、段落） ──
         from reportlab.platypus import Table, TableStyle, ListFlowable, ListItem, KeepTogether
-        from reportlab.lib import colors
-
         lines = content.split("\n")
         i = 0
         in_code_block = False
@@ -204,6 +233,10 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
                 continue
             # 标题
             if stripped.startswith("# "):
+                # The document cover already carries the report title.
+                if stripped[2:].strip() == title.strip():
+                    i += 1
+                    continue
                 story.append(Paragraph(_escape(stripped[2:].strip()), styles["Heading1"]))
                 story.append(Spacer(1, 0.2*cm))
                 i += 1
@@ -299,7 +332,6 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
             # 水平线
             if stripped in ("---", "***", "___"):
                 story.append(Spacer(1, 0.1*cm))
-                from reportlab.platypus import HRFlowable
                 story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
                 story.append(Spacer(1, 0.1*cm))
                 i += 1
@@ -316,12 +348,32 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
                 story.append(code_para)
             except Exception:
                 pass
-        doc.build(story)
+        def _page(canvas, document):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor("#D7E3EA"))
+            canvas.setLineWidth(0.5)
+            canvas.line(2 * cm, A4[1] - 1.25 * cm, A4[0] - 2 * cm, A4[1] - 1.25 * cm)
+            canvas.setFont("Helvetica", 8)
+            canvas.setFillColor(colors.HexColor("#78909C"))
+            canvas.drawString(2 * cm, A4[1] - 1.05 * cm, "PARTNER · EVIDENCE REPORT")
+            canvas.drawRightString(A4[0] - 2 * cm, 1.05 * cm, f"{document.page}")
+            canvas.restoreState()
+
+        doc.build(story, onFirstPage=_page, onLaterPages=_page)
         size = os.path.getsize(out_path)
         logger.info("[GENERATE_PDF] wrote %s (%dB)", out_path, size)
         try:
             from partner.evolution.evolution_log import log_evolution
             log_evolution("pdf_generated", detail={"path": out_path, "size": size, "title": title[:50]})
+        except Exception:
+            pass
+        # ── Hook: PDF 路径也触发 self-reflect（与 _atomic_write_artifact 对齐） ──
+        # 修复 2026-08-24 cron 实证：5.5h 内 200 条 pdf_generated 但 0 条 report_delivered
+        # 根因：_atomic_write_artifact 钩子只在 .md 路径调，PDF 路径（atomic_generate_pdf）
+        # 不调 → self-evolution 迭代链沉默。今补 PDF 路径挂钩。
+        try:
+            from partner.mind.harness import _maybe_trigger_self_reflect_after_write
+            _maybe_trigger_self_reflect_after_write(ctx, out_path, content[:1000])
         except Exception:
             pass
         return {

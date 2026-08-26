@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/evidence_manifest.schema.json",
+  "title": "EvidenceManifest",
+  "type": "object",
+  "required": ["schema_version", "campaign_id", "work_item_id", "project_id", "instance_id", "event_types", "semantic_outcome_fingerprint", "artifacts", "created_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "work_item_id": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "instance_id": {"pattern": "^0[1-5]$"},
+    "event_types": {"type": "array", "items": {"type": "string"}},
+    "semantic_outcome_fingerprint": {"type": "string", "minLength": 24, "maxLength": 24},
+    "artifacts": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["source_path", "archived_path", "name", "size_bytes", "sha256"],
+        "properties": {
+          "source_path": {"type": "string"}, "archived_path": {"type": "string"},
+          "name": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "created_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

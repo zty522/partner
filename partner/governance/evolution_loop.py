@@ -49,12 +49,21 @@ def record_issue(workspace: str, params: dict[str, Any]) -> dict[str, Any]:
         fingerprint = _fingerprint(issue.category, issue.summary, issue.instance_id, issue.project_id)
         previous = next((row for row in reversed(_read_jsonl(path)) if row.get("fingerprint") == fingerprint), None)
         if previous and previous.get("status") not in {"resolved", "wont_fix"}:
+            incoming_evidence = list(dict.fromkeys(issue.evidence))
+            previous_evidence = list(previous.get("evidence") or [])
+            if set(incoming_evidence).issubset(set(previous_evidence)):
+                # Scouts may see an unchanged candidate policy on every tick.
+                # Preserve append-only trajectories without inventing issue progress.
+                return {"ok": True, "status": "unchanged", "issue": previous, "path": str(path)}
             issue.issue_id = str(previous.get("issue_id") or issue.issue_id)
             issue.created_at = str(previous.get("created_at") or issue.created_at)
             issue.occurrences = int(previous.get("occurrences") or 1) + 1
-            issue.evidence = list(dict.fromkeys(list(previous.get("evidence") or []) + issue.evidence))
+            issue.evidence = list(dict.fromkeys(previous_evidence + incoming_evidence))
         data = issue.to_dict()
         data["fingerprint"] = fingerprint
+        for key in ("source_work_kind", "source_work_item_id", "parent_issue_id", "root_issue_id"):
+            if params.get(key):
+                data[key] = str(params[key])
         append_jsonl(path, data)
         return {"ok": True, "status": "recorded", "issue": data, "path": str(path)}
     except (TypeError, ValueError, OSError) as exc:

@@ -37,6 +37,10 @@ Controller 重启后读取上述文件。若 WorkItem 已产生任务目录，�
 `task_log.jsonl` 恢复 running/completed 状态，不重新注入同一任务。
 同一工作区只允许一个 unfinished active Campaign；新 Campaign 不会静默覆盖仍在运行或暂停的旧 Campaign。
 
+后台 runner 使用启用的 `partner-campaign@.service` 实例，而不是随 user manager 消失的
+transient unit。user systemd 重启后会重新读取持久 Campaign；机器关机时间仍计入 wall-clock deadline。
+因此 `CampaignState.status=running` 必须与 unit/runner 活性联合验证。
+
 ## 单轮所有权
 
 Campaign 消息带 `[PARTNER_CAMPAIGN campaign_id=... work_item_id=...]`。Research Loop 识别该标记后不启动
@@ -49,9 +53,11 @@ Campaign 消息带 `[PARTNER_CAMPAIGN campaign_id=... work_item_id=...]`。Resea
 - 要求产物时，产物必须实际存在。
 - 用户明确指定文件名时必须精确存在；`*.md` 等宽泛 glob 不能拿其他文件替代。
 - 要求交付时，必须在该任务 step result 中找到 `delivered=true` 或 `delivery_confirmed=true`。
+- 非报告业务项还必须有 `started/executed/finished` 三个真实 `campaign_progress_update`；只发最终 PDF 不完成。
 - 文件送达只证明交付通道成功，不能覆盖内容验收；项目 WorkItem 必须有最终 `iteration_llm_check.satisfied=true`。
 - 项目轮完成后写 IterationReceipt；下一轮 action 先保持 proposed。
 - 三轮事件与产物内容签名完全相同会触发熔断和 Issue。
+- 重复签名熔断只适用于业务/进化 WorkItem；report 固定复用 `campaign_report_delivery`，不得因同签名失败。
 
 `completion_status=done` 只是单次执行边界，不是最终完成。Controller 只在其后出现最终 LLM 验收通过时恢复为 completed。
 取消 Campaign 时，所有未终态 WorkItem 会转为 cancelled，活动 Lease 会 released，并恢复启动前的双槽组合。
@@ -78,3 +84,21 @@ Campaign 当前通过 desktop inbox 驱动既有实例，而不是替代实例�
   视觉事务显式保留所有 visual_steps 并记录真实模型调用数。
 - 外部数据扫描必须有深度、排除目录、候选数量和总文件数量上限；到达上限要在报告中声明 truncated。
 - Lease 不得无限越过 Campaign deadline，只允许短暂收尾宽限。
+# Receipt 驱动的项目补给（Sprint 12）
+
+`molecular-continuous` 是第一条受控补给实现：WorkItem 通过产物、语义、交付和 Receipt 门后，
+`materialize_targetdiff_continuous_work()` 才创建一个声明图中的下一阶段。Stage 10/13 是 RL checkpoint；
+05 完成前不会创建下一业务阶段。该 profile 禁用泛化 Project NextAction 和历史 Issue 自动物化。
+
+队列为空分两类：声明图尚有节点时自动补给；到图末端但缺新数据/假设时进入 blocked/waiting。
+waiting 是正确的安全状态。跨项目持续运行应由上层 portfolio scheduler 把槽位切换给另一个有合同的项目。
+
+## 五项目组合补给（2026-08-24）
+
+`portfolio-continuous` 已实现上述上层调度。01–04 用各自的有界输入指纹准入，05 只在新业务波次全部终态后运行；同一指纹不重复派发，代码/内容/外部来源变化可在后续 tick 自动唤醒对应 lane。组合状态持久化到 `portfolio_state.json`，CLI 与详细约束见 `project_portfolio.md`。
+
+2026-08-24 实机补充：有限课程换代后，Controller 可在一次 tick 同时派发 01+02、下一 tick 同时派发 03+04；课程耗尽后的低频 Scout 也按 `max_active` 成批准入。Scout/no-change 不进入业务波次摘要，不再为每次监测触发 05。RL 只有达到负收益/低成功率阈值才建立 Issue，健康动作中排名最低不构成故障。
+
+## 用户可观察性补充（2026-08-24）
+
+Campaign 的直接确定性事件不是“无界面后台作业”。业务 WorkItem 在执行前、实际处理后和文件投递后各产生一次渠道确认的进度回执；Scout 使用低频 compact 文案。报告内容按项目领域生成，公共 PDF 层只负责排版。详细合同见 `user_observability_and_reports.md`，决策见 ADR-0003。

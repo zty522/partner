@@ -295,7 +295,8 @@ def atomic_handle_login_wall(ctx, params: dict) -> dict:
                 inbox_path = "(sent via QQ to user)"
                 try:
                     from partner.evolution.evolution_log import log_evolution
-                    log_evolution("login_wall_text_sent", detail={"len": len(user_text_msg), "msg_id": send_r.get("msg_id", "")})
+                    _inst = _ctx_to_instance(ctx)
+                    log_evolution("login_wall_text_sent", instance=_inst, detail={"len": len(user_text_msg), "msg_id": send_r.get("msg_id", "")})
                 except Exception:
                     pass
             else:
@@ -408,7 +409,8 @@ def atomic_open_browser_foreground_and_notify(ctx, params: dict) -> dict:
     }
     try:
         from partner.evolution.evolution_log import log_evolution
-        log_evolution("login_foreground_ready" if result["ok"] else "login_notification_failed", detail={
+        _inst = _ctx_to_instance(ctx)
+        log_evolution("login_foreground_ready" if result["ok"] else "login_notification_failed", instance=_inst, detail={
             "url": target_url,
             "browser_opened": browser_ok,
             "notified": notified,
@@ -545,7 +547,8 @@ def atomic_verify_login_and_continue(ctx, params: dict) -> dict:
     notified = bool(notification.get("ok") and notification.get("delivered"))
     try:
         from partner.evolution.evolution_log import log_evolution
-        log_evolution("login_verified_and_continued", detail={
+        _inst = _ctx_to_instance(ctx)
+        log_evolution("login_verified_and_continued", instance=_inst, detail={
             "evidence": evidence,
             "next_task_queued": True,
             "notified": notified,
@@ -624,7 +627,8 @@ def atomic_write_artifact_fallback(ctx, params: dict) -> dict:
     })
     try:
         from partner.evolution.evolution_log import log_evolution
-        log_evolution("write_fallback_to_pdf", detail={"ok": r.get("ok"), "size": r.get("size", 0), "pngs": len(pngs)})
+        _inst = _ctx_to_instance(ctx)
+        log_evolution("write_fallback_to_pdf", instance=_inst, detail={"ok": r.get("ok"), "size": r.get("size", 0), "pngs": len(pngs)})
     except Exception:
         pass
     return r
@@ -677,7 +681,8 @@ def atomic_send_user_text(ctx, params: dict) -> dict:
         result = _deliver_text(text)
         try:
             from partner.evolution.evolution_log import log_evolution
-            log_evolution("user_text_sent" if result.get("delivered") else "user_text_send_failed", detail={
+            _inst = _ctx_to_instance(ctx)
+            log_evolution("user_text_sent" if result.get("delivered") else "user_text_send_failed", instance=_inst, detail={
                 "len": len(text),
                 "status": result.get("status", ""),
                 "delivered": bool(result.get("delivered")),
@@ -687,3 +692,17 @@ def atomic_send_user_text(ctx, params: dict) -> dict:
         return result
     except Exception as exc:
         return {"ok": False, "delivered": False, "status": "failed", "error": f"text delivery failed: {exc}"}
+
+
+def _ctx_to_instance(ctx) -> str:
+    """从 HarnessContext 提取实例 ID（Bug #29.3 fix 2026-08-23）：
+    login_wall / user_text_send_failed / write_fallback_to_pdf / login_foreground_ready
+    等事件 detail 不含 path 字段 → 用 ctx.workspace 提取。
+    """
+    if ctx is None:
+        return ""
+    ws = getattr(ctx, "workspace", "") or ""
+    if not ws:
+        return ""
+    m = re.search(r"/instances/([A-Za-z0-9_-]+)/", ws)
+    return m.group(1) if m else ""

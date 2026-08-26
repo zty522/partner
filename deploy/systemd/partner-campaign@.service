@@ -1,0 +1,14 @@
+[Unit]
+Description=Recoverable Partner Campaign %i
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/e/work/partner
+ExecStart=/home/os/miniconda3/bin/python /mnt/e/work/partner/scripts/partner_campaign.py --workspace /mnt/e/work/partner_workspace run --campaign-id %i --interval 15
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

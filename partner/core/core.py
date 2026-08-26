@@ -151,6 +151,7 @@ class Partner:
 
     def start(self):
         """启动（后台模式）。"""
+        startup_at = datetime.now()
         # 应用资源限制
         from ..monitoring.resource_limiter import apply_limits
         apply_limits()
@@ -164,8 +165,18 @@ class Partner:
             print("⚠️  Detected previous crash. Recovering...")
             self._recover()
 
+        cancelled = self.task_queue.cancel_pending_before(
+            startup_at,
+            reason="cancelled on runtime restart: executable event was not persisted",
+        )
+        if cancelled:
+            logger.warning("[TASK_QUEUE] reconciled %d orphaned pending task(s) at startup", cancelled)
+
         self.state.heartbeat(status="")
-        save_partner_config_data(self.workspace, asdict(self.config))
+        # The config file is shared by all instances.  `__main__` resolves an
+        # instance-local workspace in memory; persisting that resolved value
+        # here made the last-started instance overwrite the global config.
+        # Runtime startup must be read-only with respect to shared config.
         print("✅ Partner is running.")
 
         # Background heartbeat thread — updates every 60s so other

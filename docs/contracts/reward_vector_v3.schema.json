@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/reward_vector_v3.schema.json",
+  "title": "RewardVectorV3",
+  "type": "object",
+  "required": ["schema_version", "values", "hard_gate_passed", "policy_eligible", "scalar"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "values": {
+      "type": "object",
+      "required": ["truth", "business_progress", "handoff", "observability", "efficiency", "safety"],
+      "properties": {
+        "truth": {"type": "number", "minimum": 0, "maximum": 1},
+        "business_progress": {"type": "number", "minimum": 0, "maximum": 1},
+        "handoff": {"type": "number", "minimum": 0, "maximum": 1},
+        "observability": {"type": "number", "minimum": 0, "maximum": 1},
+        "efficiency": {"type": "number", "minimum": 0, "maximum": 1},
+        "safety": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    "hard_gate_passed": {"type": "boolean"},
+    "policy_eligible": {"type": "boolean"},
+    "scalar": {"type": "number", "minimum": 0, "maximum": 1}
+  },
+  "additionalProperties": false
+}

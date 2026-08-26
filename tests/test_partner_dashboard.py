@@ -145,6 +145,28 @@ def test_active_only_filter_drops_inactive(tmp_path, monkeypatch):
     assert [row["instance_id"] for row in snapshot["instances"]] == ["01", "02"]
     assert snapshot["active_count"] == 2
     assert snapshot["healthy_count"] == 2
+    assert snapshot["user_ready_count"] == 0
+
+
+def test_dashboard_separates_runtime_health_from_qq_delivery(tmp_path, monkeypatch):
+    workspace = _make_workspace(tmp_path)
+    _heartbeat(workspace, "01", age_seconds=5, cycles=10, crashes=0)
+    _write_json(workspace / "instances" / "01" / "state" / "qq_delivery_state.json", {
+        "delivery_ready": False,
+        "status": "error",
+        "error_type": "TimeoutError",
+    })
+    monkeypatch.setattr(pd, "_service_state", lambda inst: "active" if inst == "01" else "inactive")
+    snapshot = pd.snapshot(
+        workspace_root=str(workspace), code_root=str(tmp_path),
+        pytest_summary_path=str(tmp_path / "missing.txt"), include_inactive=False,
+    )
+    row = snapshot["instances"][0]
+    assert row["healthy"] is True
+    assert row["user_ready"] is False
+    assert row["delivery_status"] == "error"
+    assert snapshot["user_ready_count"] == 0
+    assert "user-ready=0/5" in pd.render_text(snapshot)
 
 
 def test_blocked_project_surfaces_resume_event(tmp_path, monkeypatch):

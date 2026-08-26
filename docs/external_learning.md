@@ -1,176 +1,88 @@
-# 外部知识借鉴记录 (External Learning Log)
+# Partner 外部资料学习与采用状态
 
-记录从外部代码库、论文中学习和借鉴的内容，以及如何应用到 Partner 的改进中。
+**基线日期**: 2026-08-23
+**权威性**: 当前（L2）
 
----
+## 1. 三种状态不得混淆
 
-## 1. PocketFlow — 分子生成引擎
+- `present`：文件在 `/mnt/e/work/partner_workspace/external` 存在。
+- `indexed`：Partner 记录了路径、大小、SHA256 和候选用途。
+- `integrated`：已有可执行接口、针对性测试、实机证据和 promotion decision。
 
-**来源**: `/mnt/e/work/partner_workspace/external/PocketFlow/`
-**论文**: PocketFlow (Nature Machine Intelligence, 2024)
-**功能**: 基于蛋白口袋结构的配体分子生成（ZINC 预训练模型）
+文件存在或被 LLM 总结绝不等于已集成。历史文档中“OODA 是 SESA Proposer”、
+“03/05 并行就是 Polar rollout”和“success_count 即 RL”的说法均不再作为当前事实。
+OODA 已删除；实例并行也不等于完整的 RL rollout 系统。
 
-**调用方式**:
-- Wrapper: `partner/partner/agents/wrappers/pocketflow_wrapper.py`
-- Manifest: `partner/partner/agents/manifests/pocketflow.json`
-- 入口: `main_generate.py -pkt <pdb_path>`
-- Conda 环境: `pocketflow`
+## 2026-08-24 TargetDiff split 来源
 
-**借鉴应用到 Partner**:
-- 通过 `call_agent_skill(pocketflow)` 在 batch_plan 中调用
-- SP140 PHD 口袋生成 20 个候选分子的测试已通过
-- 生成结果经 RDKit 分析性质后输出 PDF 报告
+- 作者仓库：<https://github.com/guanjq/targetdiff>，README 声明数据文件与生成合同。
+- 作者 Google Drive 在本次访问时返回 HTTP 404，未伪装成已下载成功。
+- 替代镜像：<https://zenodo.org/records/17107488>，只下载 15.3 MB `split_by_name.pt`，未下载 1.6 GB 数据包；MD5 与 Zenodo 记录一致。
+- 状态：`present + checksum_verified + structurally_audited + experiment_consumed`；来源仍标注 mirror，不提升为作者官方托管。
 
----
+## 2. 已策划的自进化/RL 核心源
 
-## 2. CytoBridge — 单细胞轨迹推断
+| 源 | 真实路径 | 当前采用 | 状态 |
+|---|---|---|---|
+| Polar Agentic RL | `external/literature/Polar Agentic RL on Any Harness at Scale.pdf` | harness / trajectory / evaluator 分层，异步 rollout 设计 | indexed, design reference |
+| RLVR-World | `external/code/RLVR-World-main/README.md` | 任务特定的可验证奖励 | indexed, design reference |
+| SESA | `external/code/SESA-Self-Evolving-Search-Agents-master/README.md` | 失败队列、技能卡、Proposer/Solver 分离 | indexed, design reference |
+| JIT-RL | `external/literature/Just-In-Time Reinforcement Learning Continual Learning in LLM Agents Without Gradient Updates.pdf` | 不更新模型权重的经验复用 | indexed, design reference |
+| DeepSeek Harness | `external/code/deepseek-harness/docs/architecture.md` | durable/live 事件分离、可重放 Session、tool pipeline、可检测压缩边界 | indexed, design reference |
+| OpenAI Codex | `external/code/openai-codex/codex-rs/rollout-trace/README.md` | raw evidence→离线 reducer、模型可见/运行时分离、thread store、exec policy | indexed, design reference |
+| Hermes Agent | `external/code/hermes-agent/agent/trajectory.py` | memory/检索/候选 Skill、observer 关联与上下文压缩 | indexed, design reference |
+| OpenClaw | `external/code/openclaw/docs/agent-runtime-architecture.md` | Gateway/session/transcript 权威、分级记忆、cron 隔离 | indexed, design reference |
 
-**来源**: `/mnt/e/work/partner_workspace/external/CytoBridge/`
-**GitHub**: https://github.com/JackkWangzh/CytoBridge-agent
-**功能**: 单细胞转录组轨迹推断与细胞动力学建模（PAGA, DPT, RNA velocity）
+机器目录由 `partner/governance/external_catalog.py` 生成到
+`share/mind/external/catalog.json`。当前 8/8 策划源已找到并哈希，集成数仍记为 0；
+这是有意的证据边界。
 
-**调用方式**:
-- Wrapper: `partner/partner/agents/wrappers/cytobridge_wrapper.py`
-- Manifest: `partner/partner/agents/manifests/cytobridge.json`
-- CLI: `cytobridge-agent run`
-- Conda 环境: `cytobridge`
+四套 Harness 的官方仓库、固定 revision、许可证、逐项学习结论和不采用边界见
+`docs/architecture/harness_reference_adoption.md` 与
+`third_party/harness_design_references.md`。浅克隆只用于阅读，没有执行安装脚本，
+也没有把 TypeScript/Rust 源码复制进 Partner。
 
-**借鉴应用到 Partner**:
-- pancreas.h5ad 数据集上的轨迹推断测试已完成
-- 进度回调链路: wrapper → dispatcher → harness → QQ
+## 3. 已落地的借鉴
 
----
+Partner 新增的离线 RL 层不微调 LLM 权重，而是将持久化 Campaign WorkItem 转成
+`state -> action -> outcome -> reward` 轨迹：
 
-## 3. SESA — 自进化搜索 Agent
+- 正证据：最终验收、新产物、QQ 真实送达、有 `resume_event` 的受控阻塞。
+- 负证据：缺产物、缺交付、重试、超时、watchdog 和失败终态。
+- 策略：保守的离线 contextual bandit，输出始终是 candidate。
+- 晋升：样本数、均奖励和成功率达标只允许 canary；生产仍必须通过
+  `EvolutionExperiment -> PromotionDecision`。
 
-**来源**: `/mnt/e/work/partner_workspace/external/SESA-Self-Evolving-Search-Agents-master/`
-**论文**: "Self-Play Meets Skill Evolution: Self-Evolving Search Agents that Pose, Solve, and Remember" (2025)
-**核心机制**:
-- Proposer ↔ Solver 自我博弈
-- 失败 → 提取结构化 Skill Card → 持久化到 Skill Bank
-- 检索相似技能辅助后续任务
-- Skill Card 格式: CATEGORY, PATTERN, COMMON_CONFUSION, KEY_DISTINCTION, TRIGGER_KEYWORDS, QUERIES
+实现见 `partner/governance/rl_evolution.py`，设计见
+`docs/architecture/rl_evolution.md`。
 
-**借鉴应用到 Partner**:
-| 借鉴内容 | Partner 对应实现 | 文件 |
-|----------|-----------------|------|
-| Skill Bank 持久化 | SQLite 技能库 + 结构化技能卡 | `partner/evolution/self_heal.py:SkillBank` |
-| 失败→技能提取 | SKILL_EXTRACT_PROMPT 驱动 LLM 提取 | `partner/evolution/self_heal.py:SelfHealEngine` |
-| 技能检索 | 关键词匹配检索 top-k | `SkillBank.retrieve()` |
-| 技能验证 | success_count / fail_count 追踪 | `SkillBank.record_result()` |
-| Proposer/Solver 动态 | OODA Engine (Proposer) + batch_plan Executor (Solver) | `ooda_engine.py` + `executor.py` |
+## 4. 两小时运行的实际学习结果
 
----
+`campaign_46a3b906ffee` 的 10 个非报告终态已转换为轨迹。当前唯一正奖励的
+确定性方案是 02 `molecular_data_readiness_audit`（奖励 0.32）；
+01 本轮 Campaign 任务、03/04 泛化规划和 05 的多个实验任务均为负奖励。
+没有任何动作达到 canary 门槛。
 
-## 4. VeriSkill — 程序验证技能自进化
+这个结果不是“RL 已练好”，而是第一次将“为什么下一轮要换策略”变成可重算的证据。
 
-**来源**: `/mnt/e/work/partner_workspace/external/literature/VeriSkill.pdf`
-**论文**: "VeriSkill: A Self-Evolution Framework for Program Verification Skills" (2025)
-**核心机制**:
-- 验证失败归因到技能缺陷
-- 提取诊断签名→可复用课程
-- 迭代精炼：只保留能提高验证性能的技能
-- 在保留程序语义的前提下改进
+## 5. 其他外部项目
 
-**借鉴应用到 Partner**:
-| 借鉴内容 | Partner 对应实现 |
-|----------|-----------------|
-| 失败归因到技能 | `SelfHealEngine.diagnose_and_fix()` — 步骤结果→根因→修复动作 |
-| 迭代精炼 | `SkillBank.record_result()` — 只保留成功率高的技能 |
-| 修复验证 | `_apply_fix()` — params/env/config 三种自动修复 |
-| 不破坏原有功能 | 代码修复走 Hermes delegation，不直接修改 |
+AI2BMD、Biomni、CytoBridge、ViSNet、Amber/MMPBSA、PocketFlow 和 TargetDiff 均保留在
+`external/`。它们属于 02/04 后续的领域学习候选，未通过单独复现、资源上限、
+许可证和回归门槛前，不得被文档写成“Partner 已集成”。
 
----
+## 6. 为什么不直接运行全量 RL 训练栈
 
-## 5. AI2BMD — AI 驱动分子动力学
+Polar/SESA 类训练流程需要明确环境隔离、大量 rollout、GPU/分布式资源和单独评估。
+当前电脑已受制于最多两实例，盲目安装全栈会扩大故障面。先完成与这些研究兼容的
+轨迹、奖励、评估和晋升接口，之后才能在隔离设备上替换训练器。
 
-**来源**: `/mnt/e/work/partner_workspace/external/AI2BMD/`
-**功能**: 基于深度学习的生物分子动力学模拟（替代传统 MD）
-**状态**: 已放置，尚未集成到 Partner agent 调用链
+## 7. 2026-08-26 四 Harness 统一与生产样本纠正
 
----
-
-## 6. ViSNet — 等变图神经网络分子性质预测
-
-**来源**: `/mnt/e/work/partner_workspace/external/ViSNet/`
-**功能**: 基于等变神经网络的分子势能和力预测
-**状态**: 已放置，尚未集成
-
----
-
-## 7. Amber / MMPBSA — 分子动力学模拟与结合能计算
-
-**来源**: `/mnt/e/work/partner_workspace/external/amber/`, `/mnt/e/work/partner_workspace/external/mmpbsa/`
-**功能**: 
-- Amber: 经典分子动力学模拟套件
-- MMPBSA: 蛋白-配体结合自由能计算
-**状态**: 已放置，mmpbsa 有 Python 脚本（`analyze_racp_il33_contacts.py`），可通过 wrapper 调用
-
----
-
-## 8. Hermes Agent — 当前 Agent 框架
-
-**来源**: `/mnt/e/work/partner_workspace/external/hermes-agent/`
-**功能**: Partner 运行的 Agent 框架本身
-**状态**: 运行依赖（runtime dependency），非工具集成
-
----
-
-## 待集成
-
-| 工具 | 来源 | 用途 | 优先级 |
-|------|------|------|--------|
-| ViSNet | external/ViSNet | 分子性质预测（对接后评分） | 高 |
-| Amber/MMPBSA | external/amber, external/mmpbsa | 结合能计算 | 中 |
-| AI2BMD | external/AI2BMD | AI MD 模拟 | 低 |
-
----
-
-*最后更新: 2026-08-06*
-
----
-
-## 9. Polar — Agentic RL on Any Harness
-
-**来源**: `/mnt/e/work/partner_workspace/external/literature/Polar Agentic RL on Any Harness at Scale.pdf`
-**代码**: `/mnt/e/work/partner_workspace/external/ProRL-Agent-Server-stable/`
-**论文**: NVIDIA, arXiv:2605.24220 (2026)
-**核心机制**:
-- API Proxy 模式: 在 agent harness 和 LLM 之间插入代理，拦截所有 API 调用
-- 记录 token 级交互轨迹用于 RL 训练
-- 异步 rollout: 并行管理多个 harness 实例
-- 黑盒集成: 不需要修改 agent 代码
-
-**借鉴应用到 Partner**:
-| 借鉴内容 | Partner 对应实现 | 文件 |
-|----------|-----------------|------|
-| API Proxy 拦截 | direct_api.py 已记录每次 LLM 调用 | `partner/adapters/direct_api.py` |
-| 轨迹记录 | hermes_chat.jsonl 记录所有 LLM 调用 | `instances/03/state/logs/hermes_chat.jsonl` |
-| 异步 rollout | Partner 实例独立运行（03/05 并行） | `partner/__main__.py` |
-| 解耦设计 | adapter 层隔离模型/训练框架 | `partner/adapters/` |
-
----
-
-## 10. ERA — AI System for Scientific Software (Nature)
-
-**来源**: `/mnt/e/work/partner_workspace/external/literature/An AI system to help scientists write expert-level empirical software.pdf`
-**论文**: Nature Vol 654, 2026 (Google Research)
-**核心机制**:
-- LLM + **树搜索**系统探索代码解空间
-- **连续质量评分**（非布尔）：每个候选方案都有分数
-- 代码变异: LLM 改写代码 → 评估质量 → 保留最优分支
-- 在生物信息学发现 40 种超越人类的方法
-- 在流行病学生成 14 个超越 CDC 的模型
-
-**借鉴应用到 Partner**:
-| 借鉴内容 | Partner 对应实现 | 文件 |
-|----------|-----------------|------|
-| 树搜索修复 | tree_search_heal: 并尝试 N 种修复策略，选最优 | `partner/evolution/tree_search.py` (新建) |
-| 策略生成 | LLM 生成多样化的修复策略（非单一方案） | `TreeSearchHealer._generate_strategies()` |
-| 质量评分 | 每种修复策略评分(0-10)，选最高分 | `TreeSearchHealer._score_result()` |
-| 分支探索 | 深度≤3，每层 ≤3 分支 | `TreeSearchHealer.search()` |
-| 修复→评估→选优 | 自愈失败后自动进入树搜索 | `executor.py` (集成) |
-
----
-
-*最后更新: 2026-08-06*
+- DeepSeek Harness、OpenAI Codex、Hermes Agent、OpenClaw 已固定版本并统一为 Partner 自己的
+  Episode Trace v3 设计；外部源码没有复制或执行，`indexed != integrated` 仍成立。
+- 重新以 Episode 粒度审查任务 `45cbe78a-bc36-46a3-9961-02b645baf7d3` 后发现，逐字来源门只证明
+  引文来自旧成品，不能证明旧成品对当前运行能力的描述仍为真。最终文件实际由 `create_file` 写成，
+  却声称本回合没有 shell/file-write；Receipt `receipt_680db01279ab` 已追加 invalidate。
+- 生成时与最终治理时现在都会拒绝和真实写文件事件矛盾的能力声明。首个自进化尝试只在 shadow
+  创建 Candidate Experiment，`promotion=false`，不修改 production。

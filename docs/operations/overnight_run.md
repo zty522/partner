@@ -27,7 +27,9 @@ python scripts/partner_campaign.py start \
   --detach
 ```
 
-`--detach` 使用 user systemd transient unit；外部 Agent 退出后仍继续。未加 `--detach` 时只创建 Campaign，不自动运行。
+`--detach` 使用已启用的 user systemd template instance；外部 Agent 退出或 user manager
+重启后会恢复 runner。电脑/WSL 完全关闭期间不能执行，恢复后 Controller 会按持久账本和
+原 deadline 收口，不能把关机时间冒充运行时间。未加 `--detach` 时只创建 Campaign，不自动运行。
 
 ## 查看与控制
 
@@ -41,6 +43,8 @@ python scripts/partner_campaign.py stop --reason "用户终止"
 ## 验真
 
 - service active 不是任务完成。
+- Campaign `status=running` 也不证明 runner 存活；必须同时核对对应
+  `partner-campaign@<campaign_id>.service`。临时 unit 消失而状态仍 running 时，应按恢复手册处理。
 - 查看 WorkItem 的 task_id、状态、产物和 evidence。
 - 项目轮必须出现新 IterationReceipt。
 - QQ 汇报必须有该任务 step result 的 delivered=true。

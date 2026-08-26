@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -117,12 +118,20 @@ async def _call_general_agent(
         "⏱ Timeout — denying command",
         "PARTNER_AGENT_STILL_RUNNING_OR_UNAVAILABLE",
         "Error: agent backend not available",
-        "timeout",
-        "denying command",
     ]:
         if pattern.lower() in reply_lower:
             logger.warning("[CALL_AGENT] %s returned error pattern '%s' for task=%s", agent, pattern, task[:80])
             return SkillResult(False, error=f"{agent} 执行超时或拒绝请求: {reply[:200]}")
+    # Ordinary deliverables may legitimately discuss timeout handling or a
+    # denied command. Treat those generic words as transport errors only in a
+    # short, error-shaped response; scanning an entire report caused valid
+    # architecture analyses to be discarded.
+    if len(reply.strip()) < 500 and re.search(
+        r"(?:^|\n)\s*(?:error\s*[:：]\s*)?(?:timeout|timed out|denying command)\b",
+        reply_lower,
+    ):
+        logger.warning("[CALL_AGENT] %s returned short timeout/refusal response for task=%s", agent, task[:80])
+        return SkillResult(False, error=f"{agent} 执行超时或拒绝请求: {reply[:200]}")
 
     if task_instance:
         task_instance.append_log("call_agent_task_completed", {

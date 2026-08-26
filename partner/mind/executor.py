@@ -14,6 +14,7 @@ import os
 import uuid
 import re
 import smtplib
+import sys
 import threading
 import time as _time
 import uuid
@@ -28,7 +29,8 @@ import yaml
 from .event_types import MindEvent, EventType, report
 from ..core.delivery_queue import deliver, init as delivery_init, register_channel
 from ..adapters.adapter import USER_FRIENDLY_PROGRESS_REPLY
-from ..dialogue.outbound_policy import UNAVAILABLE_NOTICE, prefix_event_notice, send_template
+from ..dialogue.outbound_policy import THINKING_NOTICE, UNAVAILABLE_NOTICE, prefix_event_notice, send_template
+from ..state.config import manual_stable_mode
 from ..goal.acceptance_criteria import AcceptanceCriteriaGenerator
 from ..skills.summarize_search import summarize_search_results
 from ..knowledge.research_memory import (
@@ -264,17 +266,17 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
                                   source: str = "", parent_id: str = "",
                                   force_send: bool = True,
                                   bypass_rate_limit: bool = False,
-                                  files: list[str] | None = None) -> None:
+                                  files: list[str] | None = None) -> dict:
     plain = re.sub(r"^【[^】]+】", "", str(content or "")).strip()
     if plain in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
         logger.info("[REPORT] skipped thinking-only event receipt: %s/%s", event_type, event_kind)
-        return
+        return {"ok": False, "delivered": False, "status": "suppressed"}
     # Also skip THINKING_NOTICE ("[进度] 正在思考...") — these come from task_queue lifeline,
     # not from progress events. The first one is already delivered as reply_to_user.
     _stripped_plain = plain.rstrip(".").replace(" ", "")
     if _stripped_plain in ("[进度]正在思考", "[进度]thinking"):
         logger.debug("[REPORT] skipped THINKING_NOTICE duplicate: plain=%r", plain[:60])
-        return
+        return {"ok": False, "delivered": False, "status": "suppressed"}
     # Skip any "[进度]" messages if the active plan has already completed/stopped
     if plain.startswith("[进度]"):
         try:
@@ -285,7 +287,7 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
                     _ap = _json_ap.load(_f)
                 if str(_ap.get("status") or "").lower() in ("waiting", "completed", "stopped"):
                     logger.debug("[REPORT] skipped progress message after plan stop: %s", plain[:60])
-                    return
+                    return {"ok": False, "delivered": False, "status": "suppressed"}
         except Exception:
             pass
     # Message deduplication: skip if same hash was sent within DEDUP_WINDOW_SEC
@@ -301,18 +303,20 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
         "project:backend_timeout_notice",
         "batch_plan:summary",
     }
-    if source in _noisy_sources:
+    if source in _noisy_sources and not (
+        source == "batch_plan:summary" and manual_stable_mode(_workspace)
+    ):
         logger.info("[REPORT] suppressed noisy batch_plan source=%s", source)
-        return
+        return {"ok": False, "delivered": False, "status": "suppressed"}
     # Also suppress check/reflect/curiosity events that are intermediate
     if isinstance(event_type, EventType):
         if event_type in {EventType.CHECK, EventType.REFLECT, EventType.CURIOSITY_EXPLORE}:
             logger.info("[REPORT] suppressed intermediate event=%s source=%s", event_type, source)
-            return
+            return {"ok": False, "delivered": False, "status": "suppressed"}
     last_sent = _recent_report_hashes.get(content_hash)
     if last_sent is not None and (now - last_sent) < _DEDUP_WINDOW_SEC:
         logger.debug("[REPORT] dedup skipped duplicate report: hash=%s age=%.2fs", content_hash, now - last_sent)
-        return
+        return {"ok": False, "delivered": False, "status": "deduplicated"}
     _recent_report_hashes[content_hash] = now
     # Prune stale entries every 50 reports to prevent unbounded growth
     if len(_recent_report_hashes) > 200:
@@ -325,15 +329,21 @@ async def _enqueue_visible_report(content: str, event_type: EventType | str, *,
         workspace=_workspace,
     )
     if not text:
-        return
+        return {"ok": False, "delivered": False, "status": "empty"}
     # Send progress message to user via registered push callback
     if _push_callback is not None:
         try:
-            _push_callback(text)
+            acknowledged = bool(_push_callback(text))
+            if acknowledged:
+                return {"ok": True, "delivered": True, "status": "sent"}
+            logger.warning("[REPORT] active channel did not acknowledge source=%s", source)
+            return {"ok": False, "delivered": False, "status": "failed"}
         except Exception as exc:
             logger.debug("[REPORT] push callback failed: %s", exc)
+            return {"ok": False, "delivered": False, "status": "failed", "error": str(exc)}
     else:
         logger.debug("[REPORT] no push callback registered, progress not sent")
+        return {"ok": False, "delivered": False, "status": "unavailable"}
 
 
 def _record_growth_event_visible(*args, notify: bool = True, **kwargs):
@@ -502,6 +512,8 @@ def _sanitize_user_report_text(text: str) -> str:
     """Remove internal agent/runtime noise before user-facing delivery."""
     if not text:
         return ""
+    # Reasoning-model traces are never user-facing content.
+    text = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL | re.I)
     # Strip HTML <img> tags that may leak from web_capture results
     text = re.sub(r"<img\s+[^>]*/?>", "", str(text or ""))
     stripped_text = (text or "").strip()
@@ -2030,6 +2042,7 @@ def _push_stage_report_files(published: dict) -> bool:
 _ONE_SHOT_FILE_EXTS = {
     ".xlsx", ".xls", ".csv", ".tsv", ".docx", ".pptx", ".pdf",
     ".png", ".jpg", ".jpeg", ".webp", ".txt", ".md",
+    ".json",
     ".mp4", ".m4v", ".mov", ".webm",
 }
 
@@ -2038,7 +2051,8 @@ def _is_diagnostic_artifact(path: str) -> bool:
     name = os.path.basename(path or "")
     lower = name.lower()
     parts = set(os.path.normpath(path or "").split(os.sep))
-    if name in {"_missing_artifacts.md", "_error_report.md"}:
+    if name in {"_missing_artifacts.md", "_error_report.md", "task_instance.json",
+                "batch_plan_result.json"}:
         return True
     if lower.startswith("_step_") and lower.endswith(".result.json"):
         return True
@@ -2376,6 +2390,11 @@ def _required_output_exts(user_request: str, event_type: str = "", event_kind: s
     # labels such as "deliver_existing_csv" are hints, not a user contract.
     text = user_request or ""
     required: set[str] = set()
+    rejects_pdf = bool(re.search(
+        r"(?:不要|不需(?:要)?|无需|禁止|别|不生成|不输出|不制作).{0,10}(?:pdf|PDF)"
+        r"|(?:pdf|PDF).{0,10}(?:不要|不需(?:要)?|无需|禁止|别|不生成|不输出|不制作)",
+        text,
+    ))
     if re.search(r"(excel|xlsx|xls|工作簿)", text, re.I):
         required.update({".xlsx", ".xls"})
     if re.search(r"\bcsv\b|逗号分隔", text, re.I):
@@ -2384,16 +2403,38 @@ def _required_output_exts(user_request: str, event_type: str = "", event_kind: s
         required.update({".csv", ".xlsx", ".xls"})
     if re.search(r"\bpptx?\b|幻灯片|PPT", text, re.I):
         required.add(".pptx")
-    if re.search(r"\bpdf\b", text, re.I):
+    if re.search(r"\bpdf\b", text, re.I) and not rejects_pdf:
         required.add(".pdf")
-    elif re.search(r"(报告|report)", text, re.I) and not re.search(r"(markdown|md|\.md|仅\s*md|只要\s*md)", text, re.I):
+    elif (not rejects_pdf and re.search(r"(报告|report)", text, re.I)
+          and not re.search(r"(markdown|md|\.md|仅\s*md|只要\s*md)", text, re.I)):
         required.add(".pdf")
-    if event_type == EventType.PDF_REPORT.value:
+    if event_type == EventType.PDF_REPORT.value and not rejects_pdf:
         required.add(".pdf")
     if re.search(r"(图片|截图|图像|png|jpg|jpeg|webp)", text, re.I):
         required.update({".png", ".jpg", ".jpeg", ".webp"})
     if re.search(r"(word|docx)", text, re.I):
         required.add(".docx")
+    # A filename mentioned as an input is not an output contract.  Concrete
+    # source extensions require an output/edit verb near the filename.
+    output_verb = r"(?:生成|创建|编写|输出|保存|写入|修改|实现|产出|交付|制作|补充|更新)"
+    py_output = re.search(
+        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.py",
+        text, re.I,
+    )
+    if py_output or re.search(r"Python\s*源码|Python\s*脚本", text, re.I):
+        required.add(".py")
+    json_output = re.search(
+        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.json",
+        text, re.I,
+    )
+    if json_output or re.search(r"机器可读\s*JSON|JSON\s*结果", text, re.I):
+        required.add(".json")
+    md_output = re.search(
+        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.md",
+        text, re.I,
+    )
+    if md_output or re.search(r"Markdown", text, re.I):
+        required.add(".md")
     return required
 
 
@@ -2402,7 +2443,6 @@ def _align_expected_artifacts_with_required_exts(expected: object, required_exts
     if not required_exts:
         return items[:8]
     normalized_exts = sorted({ext if str(ext).startswith(".") else f".{ext}" for ext in required_exts})
-    patterns = [f"*{ext}" for ext in normalized_exts]
     aligned: list[dict] = []
     for item in items:
         kind = str(item.get("type") or "file").strip().lower()
@@ -2414,12 +2454,13 @@ def _align_expected_artifacts_with_required_exts(expected: object, required_exts
         if ext and ext not in normalized_exts:
             continue
         aligned.append(item)
-    aligned.append({
-        "type": "file",
-        "pattern": ", ".join(patterns),
-        "description": f"当前目标格式文件（可接受扩展名：{', '.join(normalized_exts)}）",
-        "required": True,
-    })
+    for ext in normalized_exts:
+        aligned.append({
+            "type": "file",
+            "pattern": f"*{ext}",
+            "description": f"当前目标要求的 {ext} 文件",
+            "required": True,
+        })
     deduped: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for item in aligned:
@@ -2429,6 +2470,44 @@ def _align_expected_artifacts_with_required_exts(expected: object, required_exts
         seen.add(key)
         deduped.append(item)
     return deduped[:8]
+
+
+def _campaign_code_fallback_micro_plan(user_request: str, task_dir: str):
+    """Build a bounded execution plan for an explicit code task after planner timeout."""
+    from .harness import HarnessStep, MicroPlan
+
+    text = str(user_request or "")
+    names: list[str] = []
+    for match in re.finditer(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.(?:py|json|md|pdf)", text, re.I):
+        name = os.path.basename(match.group(0)).lower()
+        if name not in names:
+            names.append(name)
+    scripts = [name for name in names if name.endswith(".py")]
+    if not scripts:
+        return None
+    script_path = os.path.join(task_dir, scripts[0])
+    expected = [
+        {"type": "file", "pattern": name, "description": f"明确要求的 {name}", "required": True}
+        for name in names
+    ]
+    steps = [
+        HarnessStep("fallback_generate_code", "generate_code", {
+            "task": text + "\n\n只输出完整可执行 Python 源码，不要 think、工具调用、Markdown 围栏或解释。",
+            "language": "python",
+        }),
+        HarnessStep("fallback_write_code", "create_file", {
+            "path": script_path, "content": "$fallback_generate_code.result.content",
+        }, ["fallback_generate_code"]),
+        HarnessStep("fallback_run_code", "run_command", {
+            "command": f"{sys.executable} {script_path}", "timeout": 300,
+        }, ["fallback_write_code"]),
+        HarnessStep("fallback_verify_outputs", "list_directory", {"path": task_dir}, ["fallback_run_code"]),
+        HarnessStep("fallback_send_summary", "send_user_text", {
+            "text": "本轮代码已执行，正在核验并发送声明产物。",
+        }, ["fallback_verify_outputs"]),
+        HarnessStep("fallback_push_files", "push_files", {"source": task_dir}, ["fallback_verify_outputs"]),
+    ]
+    return MicroPlan(plan=steps, expected_artifacts=expected)
 
 
 def _has_file_expected_artifact(*groups: object) -> bool:
@@ -2490,7 +2569,11 @@ def _file_satisfies_output_group(path: str, group: str, wanted_exts: set[str]) -
     if group != "report":
         return True
     name = os.path.basename(path or "").lower()
-    if ext in {".pdf", ".docx"}:
+    if ext in {".pdf", ".docx", ".md"}:
+        # Candidate files are already confined to the current task, filtered
+        # by required extension and mtime. Requiring the literal word
+        # "report/报告" in an explicitly requested Markdown filename rejects
+        # valid names such as harness_episode_learning_closed_loop.md.
         return True
     return bool(re.search(r"(report|报告)", name, re.I))
 
@@ -2696,7 +2779,8 @@ def _resolve_one_shot_output_files(project_dir: str, parsed: dict | None,
     if artifact_path:
         add_path(artifact_path)
 
-    if paths:
+    found_exts = {os.path.splitext(path)[1].lower() for path in paths}
+    if paths and (not required_exts or required_exts.issubset(found_exts)):
         return paths[:6]
 
     cutoff = float(since_ts or 0)
@@ -3835,6 +3919,22 @@ async def _handle_user_message(event: MindEvent):
     message_id = str(payload.get("message_id") or "").strip()
     source = str(payload.get("source") or "desktop_gui").strip()
 
+    # Bind every downstream receipt to the channel that supplied this message.
+    # Without this, a local desktop canary can accidentally keep using an old
+    # QQ openid and appear silent even though the local UI is available.
+    try:
+        from ..core.delivery_context import record_active_user_context
+
+        record_active_user_context(
+            _workspace,
+            source=source,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            message_id=message_id,
+        )
+    except Exception as exc:
+        logger.warning("[USER_MESSAGE] failed to persist active delivery context: %s", exc)
+
     # Reset research loop on new user message
     try:
         _instance_id = os.path.basename(_workspace.rstrip("/")) if _workspace else ""
@@ -3900,7 +4000,8 @@ async def _handle_user_message(event: MindEvent):
         _ack = f"收到指令「{text[:60]}{'...' if len(text) > 60 else ''}」，正在思考..."
         try:
             if _push_callback is not None:
-                _push_callback(_ack)
+                ack_delivery = push_text_now(_ack)
+                _append_event_pipeline(event.id, "user_message", "ack_delivery", ack_delivery)
         except Exception:
             pass
     # ── End acknowledgment ──
@@ -3963,6 +4064,10 @@ async def _handle_user_message(event: MindEvent):
                     target = pending_batch_plans[-1]
                     target.payload["user_request"] = text
                     target.payload["title"] = decision.task_title or text[:80]
+                    target.payload["task_id"] = decision.task_instance_id
+                    target.payload["task_instance_id"] = decision.task_instance_id
+                    target.payload["queue_task_id"] = decision.queue_task_id
+                    target.payload["task_working_dir"] = decision.task_working_dir
                     logger.info("[USER_MESSAGE] updated existing pending BATCH_PLAN with latest message: %s", text[:60])
                     _append_event_pipeline(event.id, "user_message", "merged", {
                         "merged_into_existing_batch_plan": True,
@@ -3983,6 +4088,16 @@ async def _handle_user_message(event: MindEvent):
                     "event_type": decision.event_type,
                     "event_kind": decision.event_kind,
                     "stop_after_completion": decision.stop_after_completion,
+                    "task_id": decision.task_instance_id,
+                    "task_instance_id": decision.task_instance_id,
+                    "queue_task_id": decision.queue_task_id,
+                    "task_working_dir": decision.task_working_dir,
+                    "continue_from_project": decision.continue_from_project,
+                    "delivery_required": decision.delivery_required,
+                    "expected_artifacts": list(decision.expected_artifacts or []),
+                    "artifact_freshness_policy": decision.artifact_freshness_policy,
+                    "reuse_existing_artifact": decision.reuse_existing_artifact,
+                    "reuse_reason": decision.reuse_reason,
                 },
                 source="user_message_handler",
             )
@@ -3990,7 +4105,7 @@ async def _handle_user_message(event: MindEvent):
 
         # Direct reply without separate event (orchestrator already handled it)
         reply = str(decision.reply_to_user or "").strip()
-        if reply and reply not in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
+        if reply and reply not in {THINKING_NOTICE, "思考中.......", "思考中......", "思考中……", "Thinking..."}:
             _append_assistant_dialog_history(reply, sender_id=sender_id, sender_name="Partner", message_id=message_id, source=source)
             try:
                 if _push_callback is not None:
@@ -5259,6 +5374,14 @@ async def _enqueue_stop_project_event(event: MindEvent, title: str, reason: str,
             "previous_event_kind": str(payload.get("event_kind") or "")[:120],
             "completed_files": list(payload.get("completed_files") or []),
             "completed_event_types": list(payload.get("completed_event_types") or []),
+            "task_id": str(payload.get("task_id") or payload.get("task_instance_id") or ""),
+            "queue_task_id": str(payload.get("queue_task_id") or ""),
+            "root_user_request": str(payload.get("root_user_request") or payload.get("user_request") or "")[:4000],
+            "delivery_confirmed": bool(payload.get("delivery_confirmed")),
+            "completion_ok": bool(payload.get("completion_ok")),
+            "completion_findings": list(payload.get("completion_findings") or []),
+            "completion_inputs": list(payload.get("completion_inputs") or []),
+            "next_action": str(payload.get("next_action") or "")[:2000],
         },
         source=f"{event.type.value}:selector_stop_project",
         parent_id=event.id,
@@ -5869,6 +5992,46 @@ def _batch_plan_step_label(step: Any) -> str:
     return f"{step_id}: {label}（依赖：{depends}）"
 
 
+def _manual_task_input_paths(task: Any) -> list[str]:
+    """Return only existing source paths that the executed plan actually named."""
+    metadata = getattr(task, "metadata", None)
+    plan = metadata.get("last_plan") if isinstance(metadata, dict) and isinstance(metadata.get("last_plan"), list) else []
+    found: list[str] = []
+    produced: set[str] = set()
+    producer_events = {
+        "atomic_write_artifact", "atomic_json_table_artifact", "create_file",
+        "atomic_convert_md_to_pdf", "generate_pdf", "generate_detailed_pdf",
+    }
+    for step in plan:
+        if not isinstance(step, dict) or str(step.get("event_type") or "") not in producer_events:
+            continue
+        params = step.get("parameters") if isinstance(step.get("parameters"), dict) else {}
+        for key in ("path", "filename", "output_file", "output_path"):
+            value = str(params.get(key) or "").strip()
+            if value and os.path.isabs(value):
+                produced.add(os.path.realpath(value))
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str):
+            candidate = value.strip()
+            if (candidate and os.path.isabs(candidate) and os.path.exists(candidate)
+                    and os.path.realpath(candidate) not in produced and candidate not in found):
+                found.append(candidate)
+
+    for step in plan:
+        if isinstance(step, dict):
+            if str(step.get("event_type") or "") in producer_events:
+                continue
+            visit(step.get("parameters") or {})
+    return found
+
+
 def _should_run_experiment(root_request: str, payload: dict) -> bool:
     """Check if experiment trigger keywords are in root_request and experiment phase not yet run."""
     if payload.get("_experiment_phase") or payload.get("metadata", {}).get("_experiment_phase"):
@@ -5892,6 +6055,50 @@ def _should_run_experiment(root_request: str, payload: dict) -> bool:
     return False
 
 
+def _batch_plan_dedup_key(root_request: str, title: str = "") -> str:
+    """Deduplicate duplicate transports, while allowing governed retries."""
+    campaign_marker = re.search(r"\[PARTNER_CAMPAIGN\s+campaign_id=[^\]]+\]", root_request or "")
+    if campaign_marker:
+        attempt = re.search(r"\[campaign_attempt=\d+\]", root_request or "")
+        recovery = re.search(r"\[transport_recovery=\d+\]", root_request or "")
+        suffix = "".join(match.group(0) for match in (attempt, recovery) if match)
+        return campaign_marker.group(0) + suffix
+    normalized_request = re.sub(r"\s+", " ", str(root_request or "")).strip()
+    if normalized_request:
+        # Compact titles deliberately discard most of the user request, so
+        # they cannot distinguish a corrected retry from the failed attempt
+        # immediately before it.  Hash the full normalized request: duplicate
+        # transports still collapse, while a materially changed user message
+        # remains executable.
+        return "manual:" + hashlib.sha256(normalized_request.encode("utf-8")).hexdigest()[:24]
+    return "title:" + str(title or "").strip()
+
+
+def _select_direct_governance_event(
+    direct_request: str,
+    handler_names: object,
+    *,
+    manual_mode: bool,
+) -> str:
+    """Select a legacy deterministic Campaign shortcut when it is allowed.
+
+    ``manual_stable`` deliberately has one execution path: user message ->
+    bounded plan -> Harness -> verified delivery. Merely mentioning an event
+    name (including in a prohibition) must never jump onto the old Campaign
+    protocol.
+    """
+    if manual_mode:
+        return ""
+    request = str(direct_request or "")
+    for name in list(handler_names or []):
+        if name not in request:
+            continue
+        if re.search(rf"(?:禁止|不要|不得|禁用)\s*{re.escape(name)}", request, re.I):
+            continue
+        return str(name)
+    return ""
+
+
 async def _handle_batch_plan_event(event: MindEvent):
     """Top-level batch planner: plan once, execute Harness, then optional curiosity fills."""
     # Dedup guard: if this event_id is already in-flight, skip this event
@@ -5905,7 +6112,9 @@ async def _handle_batch_plan_event(event: MindEvent):
     root_request = _root_user_request(event.payload or {}) or str((event.payload or {}).get("user_request") or "")
     title = str((event.payload or {}).get("title") or (event.payload or {}).get("project") or "").strip()
     campaign_marker = re.search(r"\[PARTNER_CAMPAIGN\s+campaign_id=[^\]]+\]", root_request)
-    dedup_key = campaign_marker.group(0) if campaign_marker else (title or root_request[:80])
+    from ..state.config import manual_stable_mode, runtime_capability_enabled
+    manual_mode = manual_stable_mode(_workspace)
+    dedup_key = _batch_plan_dedup_key(root_request, title)
     if dedup_key and dedup_key in _batch_plan_recently_completed:
         elapsed = _time.time() - _batch_plan_recently_completed[dedup_key]
         if elapsed < 60:
@@ -5967,7 +6176,7 @@ async def _handle_batch_plan_event(event: MindEvent):
         )
     task = TaskInstance.load_or_create(
         _workspace,
-        task_id=str(payload.get("task_id") or ""),
+        task_id=str(payload.get("task_id") or payload.get("task_instance_id") or ""),
         user_message=root_request or title,
         continue_from_project=str(payload.get("continue_from_project") or ""),
         metadata={
@@ -6047,7 +6256,8 @@ async def _handle_batch_plan_event(event: MindEvent):
             report_error = str(exc)
         else:
             report_error = ""
-        heading = "Partner Campaign 最终总结" if "最终报告" in os.path.basename(report_path) or "最终日报" in direct_request else "Partner Campaign 阶段进度"
+        is_final_report = "最终报告" in direct_request or "最终日报" in direct_request
+        heading = "Partner Campaign 最终总结" if is_final_report else "Partner Campaign 阶段进度"
         delivery = push_text_now(f"{heading}\n\n{report_text[:3200]}") if report_text else {
             "ok": False, "delivered": False, "error": report_error or "campaign report missing",
         }
@@ -6059,6 +6269,127 @@ async def _handle_batch_plan_event(event: MindEvent):
             event, title,
             "campaign report delivered" if delivery.get("delivered") else "campaign report delivery failed",
             stop_payload,
+        )
+        _batch_plan_inflight.discard(event.id)
+        if dedup_key:
+            _batch_plan_recently_completed[dedup_key] = _time.time()
+        return
+
+    # Framework/external-learning/self-evolution Campaign work uses bounded,
+    # deterministic protocols.  This prevents generic planners from turning
+    # audits into long file-list loops or prose-only "improvements".
+    from partner.v2.campaign_governance_events import HANDLERS as governance_audit_handlers
+    from partner.v2.execution_iteration_events import HANDLERS as execution_iteration_handlers
+    from partner.v2.targetdiff_project_events import HANDLERS as targetdiff_project_handlers
+    from partner.v2.targetdiff_provenance_events import HANDLERS as targetdiff_provenance_handlers
+    from partner.v2.targetdiff_continuous_events import HANDLERS as targetdiff_continuous_handlers
+    from partner.v2.targetdiff_official_split_events import HANDLERS as targetdiff_official_split_handlers
+    from partner.v2.continuous_project_events import HANDLERS as continuous_project_handlers
+    campaign_governance_handlers = {
+        **governance_audit_handlers, **execution_iteration_handlers, **targetdiff_project_handlers,
+        **targetdiff_provenance_handlers,
+        **targetdiff_continuous_handlers,
+        **targetdiff_official_split_handlers,
+        **continuous_project_handlers,
+    }
+    governance_event = _select_direct_governance_event(
+        direct_request,
+        campaign_governance_handlers,
+        manual_mode=manual_mode,
+    )
+    if governance_event:
+        from types import SimpleNamespace
+        from partner.v2.push_events import atomic_push_files
+        from partner.governance.user_experience import (
+            execution_receipt_message, file_delivery_confirmed, finish_message, instance_from_workspace,
+            instruction_received_message, progress_receipt, report_caption, start_message,
+            validate_progress_receipts, verification_receipt_message,
+        )
+        direct_ctx = SimpleNamespace(
+            workspace=_workspace, working_dir=task.working_dir,
+            project_dir=project_dir, task_instance=task,
+        )
+        campaign_id_match = re.search(r"campaign_id=([^\s\]]+)", direct_request)
+        execution_wave_match = re.search(r"execution_wave=(\d+)", direct_request)
+        targetdiff_stage_match = re.search(r"targetdiff_stage=(\d+)", direct_request)
+        strategy_match = re.search(r"strategy_id=([^\s\]]+)", direct_request)
+        instance_id = instance_from_workspace(_workspace)
+        display_title = strategy_match.group(1) if strategy_match else governance_event
+        progress_receipts = []
+        received_text = instruction_received_message(
+            instance_id=instance_id, title=display_title,
+            event_type=governance_event, instruction=direct_request,
+        )
+        received_delivery = push_text_now(received_text)
+        progress_receipts.append(progress_receipt(
+            phase="instruction_received", message=received_text, delivery=received_delivery,
+        ))
+        task.append_log("campaign_progress_update", progress_receipts[-1])
+        started_text = start_message(
+            instance_id=instance_id, title=display_title,
+            event_type=governance_event, instruction=direct_request,
+        )
+        started_delivery = push_text_now(started_text)
+        progress_receipts.append(progress_receipt(
+            phase="started", message=started_text, delivery=started_delivery,
+        ))
+        task.append_log("campaign_progress_update", progress_receipts[-1])
+        direct = await asyncio.to_thread(
+            campaign_governance_handlers[governance_event], direct_ctx,
+            {"campaign_id": campaign_id_match.group(1) if campaign_id_match else "",
+             "wave": int(execution_wave_match.group(1)) if execution_wave_match else 1,
+             "stage": int(targetdiff_stage_match.group(1)) if targetdiff_stage_match else 1,
+             "strategy_id": strategy_match.group(1) if strategy_match else ""},
+        )
+        files = [str(path) for path in (direct.get("files") or []) if path]
+        executed_text = execution_receipt_message(
+            instance_id=instance_id, event_type=governance_event,
+            result=direct, instruction=direct_request,
+        )
+        executed_delivery = push_text_now(executed_text)
+        progress_receipts.append(progress_receipt(
+            phase="executed", message=executed_text, delivery=executed_delivery,
+        ))
+        task.append_log("campaign_progress_update", progress_receipts[-1])
+        pdf_path = next((path for path in files if path.lower().endswith(".pdf")), "")
+        file_delivery = await asyncio.to_thread(
+            atomic_push_files, direct_ctx,
+            {"source": pdf_path, "caption": report_caption(instance_id, display_title)},
+        ) if direct.get("ok") and pdf_path else {"ok": False, "pushed": 0, "delivered": False}
+        verified_text = verification_receipt_message(
+            instance_id=instance_id, result=direct,
+            file_delivery=file_delivery, instruction=direct_request,
+        )
+        verified_delivery = push_text_now(verified_text)
+        progress_receipts.append(progress_receipt(
+            phase="verified", message=verified_text, delivery=verified_delivery,
+        ))
+        task.append_log("campaign_progress_update", progress_receipts[-1])
+        finished_text = finish_message(
+            instance_id=instance_id, title=display_title, event_type=governance_event,
+            result=direct, instruction=direct_request,
+            report_delivered=file_delivery_confirmed(file_delivery),
+        )
+        summary_delivery = push_text_now(finished_text)
+        progress_receipts.append(progress_receipt(
+            phase="finished", message=finished_text, delivery=summary_delivery,
+        ))
+        task.append_log("campaign_progress_update", progress_receipts[-1])
+        progress_validation = validate_progress_receipts(progress_receipts, direct_request)
+        direct["file_delivery"] = file_delivery
+        direct["summary_delivery"] = summary_delivery
+        direct["progress_receipts"] = progress_receipts
+        direct["progress_validation"] = progress_validation
+        accepted = bool(
+            direct.get("ok") and file_delivery.get("ok")
+            and int(file_delivery.get("pushed") or 0) == 1
+            and summary_delivery.get("delivered") and progress_validation.get("ok")
+        )
+        _record_direct_campaign_result(direct, governance_event, accepted=accepted)
+        stop_payload = {**payload, "completed_files": files,
+                        "completed_event_types": [governance_event]}
+        await _enqueue_stop_project_event(
+            event, title, f"{governance_event} {'completed' if accepted else 'failed'}", stop_payload,
         )
         _batch_plan_inflight.discard(event.id)
         if dedup_key:
@@ -6363,7 +6694,8 @@ async def _handle_batch_plan_event(event: MindEvent):
         # planner step IDs. Browser atomic events still send required visual
         # receipts directly.
         progress_updates = bool(iteration_cfg.get("progress_updates", True)) and not bool(campaign_marker)
-        max_iterations = max(1, int(iteration_cfg.get("max_iterations") or 3))
+        manual_progress_deliveries: list[bool] = []
+        max_iterations = 1 if manual_mode else max(1, int(iteration_cfg.get("max_iterations") or 3))
         batch_planner = BatchPlanner.from_workspace(_workspace)
         # ── Clean up old deliverable/output dirs that might contain cached results ──
         try:
@@ -6442,17 +6774,28 @@ async def _handle_batch_plan_event(event: MindEvent):
         except Exception as _exc:
             logger.debug("[PROBE] failed: %s", _exc)
 
-        micro_plan, planner_calls = await batch_planner.plan(
-            adapter=_adapter,
-            user_message=root_request or str(payload.get("user_request") or title),
-            task_instance=task,
-            registry=registry,
-            state_md=state_md if task.continue_from_project else "",
-            relevant_experiences=relevant_experiences,
-            growth_context=growth_context,
-            event_type=event.type.value,
-            probe_results=_probe_results,
-        )
+        try:
+            micro_plan, planner_calls = await batch_planner.plan(
+                adapter=_adapter,
+                user_message=root_request or str(payload.get("user_request") or title),
+                task_instance=task,
+                registry=registry,
+                state_md=state_md if task.continue_from_project else "",
+                relevant_experiences=relevant_experiences,
+                growth_context=growth_context,
+                event_type=event.type.value,
+                probe_results=_probe_results,
+            )
+        except Exception as planner_exc:
+            micro_plan = _campaign_code_fallback_micro_plan(
+                root_request or str(payload.get("user_request") or title), task.working_dir,
+            ) if campaign_marker else None
+            if micro_plan is None:
+                raise
+            planner_calls = 1
+            task.append_log("campaign_code_plan_fallback", {
+                "planner_error": str(planner_exc), "steps": len(micro_plan.plan),
+            })
         # Persist cost evidence before executing the plan.  If the service is
         # interrupted mid-step, Campaign reconciliation must still account for
         # the planner calls that already happened.
@@ -6467,6 +6810,33 @@ async def _handle_batch_plan_event(event: MindEvent):
             )
             # Also filter out PDF-conversion plan steps when user doesn't prefer PDF
             micro_plan.plan = [s for s in micro_plan.plan if s.event_type not in ("atomic_convert_md_to_pdf",)]
+        if required_exts:
+            micro_plan.expected_artifacts = _align_expected_artifacts_with_required_exts(
+                micro_plan.expected_artifacts,
+                required_exts,
+            )
+        if manual_mode:
+            from ..planner.batch_planner import _MANUAL_BLOCKED_EVENTS
+            blocked_events = _MANUAL_BLOCKED_EVENTS
+            blocked_ids = {
+                str(step.id) for step in micro_plan.plan
+                if str(getattr(step, "event_type", "")) in blocked_events
+            }
+            changed = True
+            while changed:
+                changed = False
+                for step in micro_plan.plan:
+                    step_id = str(getattr(step, "id", ""))
+                    deps = {str(value) for value in (getattr(step, "depends_on", None) or [])}
+                    if step_id not in blocked_ids and deps & blocked_ids:
+                        blocked_ids.add(step_id)
+                        changed = True
+            if blocked_ids:
+                task.append_log("manual_stable_plan_filtered", {
+                    "blocked_step_ids": sorted(blocked_ids),
+                    "reason": "automatic iteration/campaign steps are opt-in",
+                })
+                micro_plan.plan = [step for step in micro_plan.plan if str(getattr(step, "id", "")) not in blocked_ids]
         # Sync corrected expected_artifacts back to task for validation
         task.update_expected_artifacts(micro_plan.expected_artifacts or [])
         pending_plan = micro_plan
@@ -6559,7 +6929,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                     ack_msg = send_template("task_ack_short", title=task_title[:80], total=planned_steps)
                 else:
                     ack_msg = send_template("task_ack", title=task_title[:80], goal=task_goal[:200], total=planned_steps)
-                await _enqueue_visible_report(
+                task_ack_delivery = await _enqueue_visible_report(
                     ack_msg,
                     EventType.BATCH_PLAN,
                     event_kind=visible_kind,
@@ -6568,6 +6938,8 @@ async def _handle_batch_plan_event(event: MindEvent):
                     parent_id=event.id,
                     bypass_rate_limit=True,
                 )
+                if manual_mode:
+                    manual_progress_deliveries.append(bool(task_ack_delivery.get("delivered")))
                 # Then: plan details (brief)
                 plan_msg = send_template("plan_ready", total=planned_steps, next_event=next_event_name)
                 if wm_note:
@@ -6586,7 +6958,7 @@ async def _handle_batch_plan_event(event: MindEvent):
             # Generate acceptance criteria on first iteration
             if iteration == 0:
                 ac_cfg = iteration_cfg.get("acceptance_criteria") if isinstance(iteration_cfg.get("acceptance_criteria"), dict) else {}
-                if ac_cfg.get("enabled", True) and _adapter:
+                if not manual_mode and ac_cfg.get("enabled", True) and _adapter:
                     try:
                         generator = AcceptanceCriteriaGenerator(
                             workspace=_workspace,
@@ -6647,7 +7019,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                         message = send_template("parallel", items="；".join(lines))
                     else:
                         message = send_template("parallel", items=", ".join(str(x) for x in update.get("step_ids") or []))
-                    await _enqueue_visible_report(
+                    step_start_delivery = await _enqueue_visible_report(
                         message,
                         EventType.BATCH_PLAN,
                         event_kind=visible_kind,
@@ -6656,11 +7028,13 @@ async def _handle_batch_plan_event(event: MindEvent):
                         parent_id=event.id,
                         bypass_rate_limit=True,
                     )
+                    if manual_mode:
+                        manual_progress_deliveries.append(bool(step_start_delivery.get("delivered")))
                     return
                 if phase == "step_start":
                     deps = update.get("depends_on") or []
                     dep_text = "无依赖，可直接执行" if not deps else "等待：" + ", ".join(str(x) for x in deps)
-                    await _enqueue_visible_report(
+                    step_complete_delivery = await _enqueue_visible_report(
                         send_template(
                             "progress",
                             current=update.get("ordinal"),
@@ -6674,6 +7048,8 @@ async def _handle_batch_plan_event(event: MindEvent):
                         parent_id=event.id,
                         bypass_rate_limit=True,
                     )
+                    if manual_mode:
+                        manual_progress_deliveries.append(bool(step_complete_delivery.get("delivered")))
                     # Update active_plan.json phase status to running
                     try:
                         _update_active_plan_phase(_workspace, update.get("ordinal", 1) - 1, "running")
@@ -6698,7 +7074,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                     _icon = "✅" if step_ok else "❌"
                     if not step_ok and err_text:
                         summary = (f"；失败：{err_text}" if not summary else f"；{summary}（失败：{err_text}）")
-                    await _enqueue_visible_report(
+                    step_complete_delivery = await _enqueue_visible_report(
                         send_template(
                             "progress_done",
                             icon=_icon,
@@ -6714,6 +7090,8 @@ async def _handle_batch_plan_event(event: MindEvent):
                         parent_id=event.id,
                         bypass_rate_limit=True,
                     )
+                    if manual_mode:
+                        manual_progress_deliveries.append(bool(step_complete_delivery.get("delivered")))
                     # Update active_plan.json phase status to completed/failed
                     try:
                         step_ok = update.get("ok", True)
@@ -6743,6 +7121,16 @@ async def _handle_batch_plan_event(event: MindEvent):
                 planner_llm_calls=pending_plan_calls,
                 progress_callback=progress_callback,
             )
+            result_steps_now = getattr(result, "step_results", None) or {}
+            execution_ok_now = bool(getattr(result, "ok", False)) and all(
+                not isinstance(value, dict) or bool(value.get("ok", True))
+                for value in result_steps_now.values()
+            )
+            # run_harness_plan loads the same TaskInstance independently.  Any
+            # later save through this outer object must first synchronize the
+            # terminal status, otherwise a real failed/done mark is silently
+            # overwritten back to pending.
+            task.completion_status = "done" if execution_ok_now else "failed"
             total_llm_calls += int(result.llm_calls or 0)
             aggregate_completed_steps += len(getattr(result, "step_results", {}) or {})
             # Track core agent failures across ALL iterations (not just the last)
@@ -6760,6 +7148,28 @@ async def _handle_batch_plan_event(event: MindEvent):
                 task.save()
             if result.parsed:
                 parsed = dict(result.parsed or parsed or {})
+            # Preserve every real file returned by artifact-producing steps.
+            # A parsed summary often exposes only its primary Markdown path,
+            # which previously caused a simultaneously requested JSON sidecar
+            # to exist locally but never enter delivery/Receipt evidence.
+            step_files: list[str] = []
+            for step_result in (result.step_results or {}).values():
+                if not isinstance(step_result, dict):
+                    continue
+                for value in step_result.get("files") or []:
+                    path = str(value or "").strip()
+                    if path and os.path.isfile(path) and path not in step_files:
+                        step_files.append(path)
+            if step_files:
+                existing_files = parsed.get("files") or []
+                if not isinstance(existing_files, (list, tuple, set)):
+                    existing_files = [part for part in re.split(r"[;\n，,]+", str(existing_files)) if part.strip()]
+                merged_files = []
+                for value in [*existing_files, *step_files]:
+                    path = str(value or "").strip()
+                    if path and path not in merged_files:
+                        merged_files.append(path)
+                parsed["files"] = merged_files
             check_result = await _run_comprehensive_evaluation(task, root_request or title, iteration_cfg)
             if progress_updates:
                 await _enqueue_visible_report(
@@ -6771,7 +7181,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                     parent_id=event.id,
                     bypass_rate_limit=True,
                 )
-            if core_step_failed_across_iterations:
+            if core_step_failed_across_iterations and not manual_mode and runtime_capability_enabled(_workspace, "automatic_self_heal"):
                 logger.info("[ITERATION] core agent step failed; attempting self-heal + tree-search task_id=%s iteration=%s", task.task_id, iteration)
                 healed = False
                 step_list = []
@@ -7062,7 +7472,12 @@ async def _handle_batch_plan_event(event: MindEvent):
 
     payload["harness_managed"] = True
     payload["harness_llm_calls"] = total_llm_calls
-    payload["harness_ok"] = bool(result.ok) if result is not None else False
+    result_steps = getattr(result, "step_results", None) or {} if result is not None else {}
+    steps_ok = all(
+        not isinstance(step_result, dict) or bool(step_result.get("ok", True))
+        for step_result in result_steps.values()
+    ) if isinstance(result_steps, dict) else False
+    payload["harness_ok"] = bool(result.ok and steps_ok) if result is not None else False
 
     # If the harness run failed (e.g., file_not_found from an action step),
     # extract the specific error and report it to the user immediately,
@@ -7165,27 +7580,59 @@ async def _handle_batch_plan_event(event: MindEvent):
                     break
     core_step_failed = core_step_failed or core_step_failed_across_iterations
 
-    # LLM-based natural summarization of execution results (replaces PDF generation)
-    # Only run summarize when core steps actually succeeded — otherwise the LLM
-    # hallucinates results from agent error logs
+    # User-visible execution summary. In manual_stable this must be derived
+    # from runtime state: asking a model to summarize source previews allowed
+    # stale text inside an input document to contradict the actual write and
+    # delivery state. The later final Receipt remains the delivery authority.
+    summary_delivered = False
     if _adapter and result is not None and getattr(result, "ok", False) and not core_step_failed:
         try:
-            summary_prompt = (
-                f"请用中文简要总结以下批量规划执行的结果。\n\n任务标题：{title}"
-                f"\n用户请求：{str(root_request)[:600] if root_request else '（无）'}"
-                f"\n迭代次数：{iteration}"
-                f"\n规划步骤数：{aggregate_planned_steps}"
-                f"\n已完成步骤数：{aggregate_completed_steps}"
-                f"\n交付状态：{parsed.get('delivery_status', 'unknown')}"
-            )
-            if parsed.get("findings"):
-                summary_prompt += f"\n关键发现：{'；'.join(str(f)[:200] for f in parsed['findings'] if str(f).strip())[:800]}"
-            if parsed.get("artifact_content"):
-                artifact_preview = str(parsed["artifact_content"])[:800]
-                summary_prompt += f"\n\n产出内容预览：\n{artifact_preview}"
-            summary = (_adapter.chat(summary_prompt, purpose="summarize") or "").strip()
+            step_results = getattr(result, "step_results", None) or {}
+            if manual_mode:
+                succeeded = sum(
+                    1 for value in step_results.values()
+                    if isinstance(value, dict) and bool(value.get("ok", True))
+                )
+                failed = sum(
+                    1 for value in step_results.values()
+                    if isinstance(value, dict) and not bool(value.get("ok", True))
+                )
+                raw_candidate_files = parsed.get("files") or []
+                if isinstance(raw_candidate_files, str):
+                    raw_candidate_files = [raw_candidate_files]
+                candidate_files = [
+                    os.path.basename(str(path))
+                    for path in raw_candidate_files
+                    if str(path).strip()
+                ]
+                artifact_line = (
+                    "已生成待交付候选文件：" + "、".join(candidate_files[:5])
+                    if candidate_files else "本轮没有文件型候选产物"
+                )
+                summary = (
+                    f"真实执行状态：成功 {succeeded} 步，失败 {failed} 步，"
+                    f"计划共 {aggregate_planned_steps or len(step_results)} 步。\n"
+                    f"{artifact_line}。\n"
+                    "最终交付、真值审计与项目 Receipt 尚由后续硬门确认；本消息不提前宣告通过。"
+                )
+            else:
+                summary_prompt = (
+                    f"请用中文简要总结以下批量规划执行的结果。\n\n任务标题：{title}"
+                    f"\n用户请求：{str(root_request)[:600] if root_request else '（无）'}"
+                    f"\n迭代次数：{iteration}"
+                    f"\n规划步骤数：{aggregate_planned_steps}"
+                    f"\n已完成步骤数：{aggregate_completed_steps}"
+                    f"\n交付状态：{parsed.get('delivery_status', 'unknown')}"
+                )
+                if parsed.get("findings"):
+                    summary_prompt += f"\n关键发现：{'；'.join(str(f)[:200] for f in parsed['findings'] if str(f).strip())[:800]}"
+                if parsed.get("artifact_content"):
+                    summary_prompt += f"\n\n产出内容预览：\n{str(parsed['artifact_content'])[:800]}"
+                summary = _sanitize_user_report_text(
+                    (_adapter.chat(summary_prompt, purpose="summarize") or "").strip()
+                )
             if summary and summary != USER_FRIENDLY_PROGRESS_REPLY:
-                await _enqueue_visible_report(
+                summary_delivery = await _enqueue_visible_report(
                     f"📋 执行总结\n\n{summary}",
                     event.type,
                     event_kind=visible_kind,
@@ -7194,6 +7641,7 @@ async def _handle_batch_plan_event(event: MindEvent):
                     parent_id=event.id,
                     bypass_rate_limit=True,
                 )
+                summary_delivered = bool(summary_delivery.get("delivered"))
         except Exception as exc:
             logger.debug("[BATCH_PLANNER] LLM summarization failed: %s", exc)
     pushed, files = _push_one_shot_output_files(
@@ -7356,7 +7804,8 @@ async def _handle_batch_plan_event(event: MindEvent):
 
     # ── Text-only delivery: if no file output expected but task succeeded ──
     is_text_only_delivery = False
-    if not required_exts and result is not None and getattr(result, "ok", False) and not files:
+    if (not required_exts and result is not None and payload.get("harness_ok") and not files
+            and summary_delivered and all(manual_progress_deliveries)):
         is_text_only_delivery = True
         step_results = getattr(result, "step_results", {}) or {}
         for step_id, step_result in sorted(step_results.items()):
@@ -7427,13 +7876,14 @@ async def _handle_batch_plan_event(event: MindEvent):
         parsed["step_done"] = "最终交付文件未生成"
         parsed["findings"] = ["原因：" + item for item in reasons]
         parsed["next_action"] = "修复上游失败后重新生成最终交付文件。"
-    completed_with_delivery = bool(
+    manual_quality_ok = bool(check_result.get("satisfied")) if manual_mode else True
+    completed_with_delivery = bool(payload.get("harness_ok")) and manual_quality_ok and (bool(
         pushed
         and files
         and not missing_required_output
         and delivery_status not in {"partial", "failed"}
         and _final_report_delivery_satisfied(root_request, event.type, files)
-    ) or is_text_only_delivery
+    ) or is_text_only_delivery)
 
     # ── For text-only delivery, set artifact_content in parsed for receipt ──
     if is_text_only_delivery and not parsed.get("artifact_content"):
@@ -7558,16 +8008,17 @@ async def _handle_batch_plan_event(event: MindEvent):
         files=files,
         files_pushed=pushed,
     )
-    await _enqueue_visible_report(
-        receipt_text,
-        event.type,
-        event_kind=visible_kind,
-        priority=2,
-        source=f"{event.type.value}:completion_receipt",
-        parent_id=event.id,
-        bypass_rate_limit=True,
-        files=[] if pushed else files,
-    )
+    if not manual_mode:
+        await _enqueue_visible_report(
+            receipt_text,
+            event.type,
+            event_kind=visible_kind,
+            priority=2,
+            source=f"{event.type.value}:completion_receipt",
+            parent_id=event.id,
+            bypass_rate_limit=True,
+            files=[] if pushed else files,
+        )
     if next_event == EventType.STOP_PROJECT.value:
         try:
             stop_payload = {
@@ -7578,14 +8029,44 @@ async def _handle_batch_plan_event(event: MindEvent):
                     for step in (getattr(result, "plan", None) or [])
                     if str(getattr(step, "event_type", "") or "")
                 ],
+                "delivery_confirmed": bool(completed_with_delivery),
+                "completion_ok": bool(payload.get("harness_ok")) and manual_quality_ok,
+                "completion_findings": [str(value) for value in (parsed.get("findings") or []) if str(value).strip()],
+                "completion_inputs": _manual_task_input_paths(task),
+                "next_action": str(parsed.get("next_action") or ""),
             }
             await _enqueue_stop_project_event(event, title, next_reason, stop_payload)
         except Exception as exc:
             logger.debug("[STOP_PROJECT] enqueue after batch_plan failed: %s", exc)
+    elif manual_mode:
+        if not payload.get("harness_ok"):
+            manual_stop_reason = "本次执行存在失败步骤"
+        elif not manual_quality_ok:
+            missing = [str(value) for value in (check_result.get("missing") or []) if str(value).strip()]
+            detail = "、".join(missing[:4])
+            manual_stop_reason = "验收条件未满足" + (f"：{detail}" if detail else "")
+        else:
+            manual_stop_reason = "步骤或总结消息未获真实渠道回执"
+        try:
+            await _enqueue_stop_project_event(event, title, manual_stop_reason, {
+                **payload,
+                "completed_files": list(files or []),
+                "completed_event_types": [
+                    str(getattr(step, "event_type", "") or "")
+                    for step in (getattr(result, "plan", None) or [])
+                    if str(getattr(step, "event_type", "") or "")
+                ],
+                "delivery_confirmed": False,
+                "completion_ok": bool(payload.get("harness_ok")) and manual_quality_ok,
+                "completion_findings": [str(value) for value in (parsed.get("findings") or []) if str(value).strip()],
+                "completion_inputs": _manual_task_input_paths(task),
+                "next_action": str(parsed.get("next_action") or ""),
+            })
+        except Exception as exc:
+            logger.debug("[STOP_PROJECT] manual failure cleanup failed: %s", exc)
     # Record completion for content-based dedup and clean up inflight tracking
     _batch_plan_inflight.discard(event.id)
-    campaign_marker = re.search(r"\[PARTNER_CAMPAIGN\s+campaign_id=[^\]]+\]", root_request or "")
-    dedup_key = campaign_marker.group(0) if campaign_marker else (title or (root_request or "")[:80])
+    dedup_key = _batch_plan_dedup_key(root_request or "", title)
     if dedup_key:
         _batch_plan_recently_completed[dedup_key] = _time.time()
         # Prune entries older than 5 minutes to prevent unbounded growth
@@ -9106,6 +9587,9 @@ async def _handle_stop_project(event: MindEvent):
     reason = str(payload.get("reason") or "selector chose to stop project execution").strip()
     root_request = str(payload.get("root_user_request") or payload.get("user_request") or "")
     is_campaign_control = "[PARTNER_CAMPAIGN " in root_request
+    from ..state.config import manual_stable_mode
+    manual_mode = manual_stable_mode(_workspace)
+    governance_result: dict[str, Any] = {}
     if not title:
         try:
             from ..projects.project_state import get_active
@@ -9126,14 +9610,89 @@ async def _handle_stop_project(event: MindEvent):
             from ..tasks.task_queue import TaskQueue
 
             queue_path = os.path.join(_workspace, "state", "task_queue.json")
-            completed = TaskQueue(queue_path).complete_matching_title(
-                title,
-                result_summary=f"stopped: {_clip(reason, 180)}",
-            )
-            if completed:
-                append_log(_workspace, title, f"STOP_PROJECT_COMPLETED_TASKS: {completed}")
+            queue = TaskQueue(queue_path)
+            queue_task_id = str(payload.get("queue_task_id") or "")
+            if queue_task_id:
+                if payload.get("completion_ok") and payload.get("delivery_confirmed"):
+                    queue.complete(queue_task_id, result_summary=f"completed: {_clip(reason, 180)}")
+                    append_log(_workspace, title, f"STOP_PROJECT_COMPLETED_TASK: {queue_task_id}")
+                else:
+                    queue.fail(queue_task_id, reason=f"stopped without accepted delivery: {_clip(reason, 180)}")
+                    append_log(_workspace, title, f"STOP_PROJECT_FAILED_TASK: {queue_task_id}")
+            else:
+                completed = queue.complete_matching_title(
+                    title,
+                    result_summary=f"stopped: {_clip(reason, 180)}",
+                )
+                if completed:
+                    append_log(_workspace, title, f"STOP_PROJECT_COMPLETED_TASKS: {completed}")
         except Exception as exc:
             logger.debug(f"[STOP_PROJECT] failed to complete task queue entries for {title}: {exc}")
+        if manual_mode and payload.get("task_id"):
+            try:
+                from ..governance.manual_runtime import record_manual_task_outcome
+
+                governance_result = record_manual_task_outcome(_workspace, {
+                    "task_id": payload.get("task_id"),
+                    "goal": payload.get("root_user_request") or title,
+                    "inputs": payload.get("completion_inputs") or [],
+                    "actions_executed": payload.get("completed_event_types") or ["batch_plan"],
+                    "artifacts": payload.get("completed_files") or [],
+                    "findings": payload.get("completion_findings") or [],
+                    "next_action": payload.get("next_action") or "",
+                    "delivery_confirmed": payload.get("delivery_confirmed"),
+                    "completion_ok": payload.get("completion_ok"),
+                })
+                try:
+                    from ..harness_core import TaskInstance
+
+                    task_record = TaskInstance.load(_workspace, str(payload.get("task_id")))
+                    if task_record:
+                        task_record.metadata["manual_iteration_governance"] = governance_result
+                        task_record.append_log("manual_iteration_governance", governance_result)
+                        accepted = bool(
+                            governance_result.get("ok")
+                            and payload.get("completion_ok")
+                            and payload.get("delivery_confirmed")
+                        )
+                        task_record.mark(
+                            "done" if accepted else "failed",
+                            {
+                                "source": "manual_stop_project_finalization",
+                                "governance_status": governance_result.get("status"),
+                            },
+                        )
+                        # Episode reduction is an observe-only adapter.  Its
+                        # output may feed Shadow learning, but failure here may
+                        # never alter the task result or user-visible delivery.
+                        try:
+                            from ..governance.episode_trace import try_reduce_manual_task
+                            from ..governance.storage import instance_id as _governance_instance_id
+
+                            trace_result = await asyncio.to_thread(
+                                try_reduce_manual_task,
+                                _workspace,
+                                instance_id=_governance_instance_id(_workspace),
+                                task_id=str(payload.get("task_id")),
+                            )
+                            task_record.append_log(
+                                "episode_trace_reduced" if trace_result.get("ok") else "episode_trace_failed",
+                                {
+                                    "episode_id": trace_result.get("episode_id", ""),
+                                    "status": trace_result.get("status", ""),
+                                    "bundle": trace_result.get("bundle", ""),
+                                    "error": str(trace_result.get("error") or "")[:1000],
+                                    "production_mutation": False,
+                                },
+                            )
+                        except Exception as trace_exc:
+                            logger.warning("[EPISODE_TRACE] best-effort reduction failed: %s", trace_exc)
+                except Exception:
+                    pass
+                if not governance_result.get("ok"):
+                    logger.warning("[MANUAL_GOVERNANCE] receipt not recorded: %s", governance_result)
+            except Exception as exc:
+                logger.warning("[MANUAL_GOVERNANCE] failed: %s", exc)
         try:
             pool = await ensure_pool()
             # NoopPool removed — drop_events_for_title was a no-op stub
@@ -9179,7 +9738,7 @@ async def _handle_stop_project(event: MindEvent):
                 # Campaign acceptance/evolution is handled centrally from the
                 # evidence-backed Receipt.  Do not make a second unbudgeted
                 # lesson-model call from STOP_PROJECT.
-                if not is_campaign_control:
+                if not is_campaign_control and not manual_mode:
                     try:
                         from ..meta.learning import generate_lessons_from_task
 
@@ -9258,17 +9817,20 @@ async def _handle_stop_project(event: MindEvent):
         except Exception as exc:
             logger.debug("[LEARNING] record at stop_project failed (non-fatal): %s", exc)
         # ──────────────────────────────────────────────────────────────────
-        successful_stage = reason in {
-            "deliverable file sent successfully", "publish editor entry verified",
-            "upload requirements verified", "diversity benchmark delivered",
-            "synth baseline benchmark delivered", "goal optimization delivered",
-        }
+        successful_stage = bool(payload.get("completion_ok") and payload.get("delivery_confirmed"))
+        if manual_mode:
+            successful_stage = successful_stage and bool(governance_result.get("ok"))
         if not is_campaign_control:
-            stop_notice = (
-                f"✅ 阶段任务「{title}」已完成真实交付。正在根据本轮证据判断是否需要自动执行下一步。"
-                if successful_stage else
-                f"⏹️ 已停止「{title}」的当前执行链，原因：{_clip(reason, 160)}"
-            )
+            if successful_stage:
+                receipt = governance_result.get("receipt") if isinstance(governance_result, dict) else {}
+                receipt_id = str((receipt or {}).get("receipt_id") or "").strip()
+                receipt_note = f"，项目 Receipt={receipt_id}" if receipt_id else ""
+                stop_notice = (
+                    f"✅ 本次手动任务「{title}」已完成：步骤、成品、交付与最终验收均通过{receipt_note}。"
+                    "未自动启动下一轮，正在等待你的下一条指令。"
+                )
+            else:
+                stop_notice = f"⏹️ 已停止「{title}」的当前执行链，原因：{_clip(reason, 160)}"
             await _enqueue_visible_report(
                 stop_notice,
                 EventType.STOP_PROJECT,
@@ -9281,6 +9843,10 @@ async def _handle_stop_project(event: MindEvent):
     except Exception as exc:
         logger.warning(f"[STOP_PROJECT] failed to stop project {title}: {exc}")
     logger.info(f"[MIND] DONE event_type=stop_project, id={event.id[:8]}")
+
+    if manual_mode:
+        logger.info("[RESEARCH_LOOP] manual_stable: stop without automatic continuation")
+        return
 
     # ── Research Loop: 自主研究循环 ──
     try:
@@ -9725,7 +10291,11 @@ def _task_text_file_summaries(task) -> list[dict]:
             if ext in {".md", ".txt", ".csv", ".json"} and size <= 2_000_000:
                 try:
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        preview = f.read(1200)
+                        # Acceptance checks (citations, required sections and
+                        # fields) must inspect a normal full report.  The old
+                        # 1,200-character prefix silently ignored sources and
+                        # sections appearing after the introduction.
+                        preview = f.read(20_000)
                 except Exception:
                     preview = ""
             elif ext == ".pdf" and size <= 5_000_000:
@@ -10044,7 +10614,15 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
     pmid_pairs = re.findall(r"\bPMID[:：\s]*([0-9]{5,10})\b|pubmed\.ncbi\.nlm\.nih\.gov/([0-9]{5,10})", corpus, re.I)
     pmid_values = {item for pair in pmid_pairs for item in pair if item}
     doi_values = set(re.findall(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b", corpus, re.I))
-    citation_count = len(pmid_values | doi_values)
+    grounded_path_citations = {
+        match.rstrip("`'\"，,；;。)")
+        for match in re.findall(
+            r"/(?:[^\s`'\"<>|，、；。：:)]+/)*[^\s`'\"<>|，、；。：:)]+\.(?:md|pdf|json|csv|py|txt)",
+            corpus,
+            re.I,
+        )
+    }
+    citation_count = len(pmid_values | doi_values) + len(grounded_path_citations)
     expected = getattr(task, "expected_artifacts", []) or []
     missing: list[str] = []
     if min_file_count and len(valid_files) < min_file_count:
@@ -10098,6 +10676,19 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
         )
         if "*" not in match
     }
+    # Absolute existing paths named in the request are inputs to inspect, not
+    # additional output artifacts. Requiring copies of README/source files in
+    # the task directory made grounded reports impossible to complete.
+    named_input_paths = {
+        match.rstrip("`'\"，,；;。)")
+        for match in re.findall(
+            r"/(?:[^\s`'\"<>|，、；。：:)]+/)*[^\s`'\"<>|，、；。：:)]+\.(?:md|pdf|csv|json|png|jpe?g|webp|xlsx)",
+            str(root_goal or ""),
+            re.I,
+        )
+        if os.path.isfile(match.rstrip("`'\"，,；;。)"))
+    }
+    requested_names.difference_update(os.path.basename(path).lower() for path in named_input_paths)
     actual_names = {os.path.basename(str(row.get("relative_path") or "")).lower() for row in valid_files}
     for name in sorted(requested_names - actual_names):
         missing.append(f"named_artifact:{name}")
@@ -10143,6 +10734,7 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
         "file_count": len(files),
         "field_hits": field_hits,
         "citation_count": citation_count,
+        "grounded_path_citations": sorted(grounded_path_citations)[:20],
         "pmids": sorted(pmid_values)[:20],
         "dois": sorted(doi_values)[:20],
         "files": [{"relative_path": row["relative_path"], "size": row["size"], "diagnostic": bool(row.get("diagnostic"))} for row in files[:20]],
@@ -10875,6 +11467,10 @@ async def _handle_cron_tick(event: MindEvent):
 
     不提示用户、不搜索、只检查持久化的活跃项目标记。
     """
+    from ..state.config import manual_stable_mode, runtime_capability_enabled
+    if manual_stable_mode(_workspace) or not runtime_capability_enabled(_workspace, "autonomous_cron"):
+        logger.info("[CRON] manual_stable: autonomous cron work disabled")
+        return
     pool = await ensure_pool()
     habits = ensure_habits(_workspace)
     try:
@@ -11478,6 +12074,10 @@ async def _handle_wake_up(event: MindEvent):
 
     没有活跃项目则什么都不做（不提示用户、不搜索）。
     """
+    from ..state.config import manual_stable_mode, runtime_capability_enabled
+    if manual_stable_mode(_workspace) or not runtime_capability_enabled(_workspace, "autonomous_cron"):
+        logger.info("[WAKE_UP] manual_stable: automatic project recovery disabled")
+        return
     pool = await ensure_pool()
     logger.info(f"[WAKE_UP] 唤醒脉冲开始执行")
     _heartbeat_probe_ollama("wake_up")

@@ -850,6 +850,14 @@ class QQQfficialBot:
             # Keep recent msg_id cache across resume so server re-delivery
             # does not trigger duplicate replies after reconnect.
             self._start_heartbeat_task()
+            # A resumed session is delivery-ready just like a fresh READY
+            # session.  Without this callback the bridge leaves its persisted
+            # readiness state at the preceding disconnect error forever.
+            if self._ready_handler and self._bot_info:
+                try:
+                    self._ready_handler(self._bot_info)
+                except Exception as exc:
+                    logger.error(f"Ready handler after RESUMED error: {exc}")
 
         # Message events we care about
         if event == EVENT_C2C_MESSAGE:

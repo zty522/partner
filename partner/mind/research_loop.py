@@ -261,6 +261,11 @@ async def on_task_done(
     Returns:
         True 如果 enqueued 了下一个任务，False 如果停止。
     """
+    from ..state.config import manual_stable_mode, runtime_capability_enabled
+    if manual_stable_mode(workspace) or not runtime_capability_enabled(workspace, "automatic_iteration"):
+        logger.info("[RESEARCH_LOOP] manual_stable: automatic continuation disabled for %s", instance_id)
+        return False
+
     # Campaign tasks are deliberately single-round. Persist their evidence and
     # hand control back to the recoverable Campaign Controller instead of
     # entering this process-local loop.

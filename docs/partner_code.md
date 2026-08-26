@@ -48,7 +48,18 @@ partner/
 │   │   ├── campaign_models.py       ← Campaign/WorkItem/Lease/Report 契约
 │   │   ├── campaign_storage.py      ← Campaign 持久状态与 runner lock
 │   │   ├── campaign.py              ← 长期控制器、恢复、预算、watchdog、报告
-│   │   └── campaign_runtime.py      ← inbox dispatch 与 systemd 双槽切换
+│   │   ├── campaign_runtime.py      ← inbox dispatch、systemd 双槽与 QQ delivery readiness 门
+│   │   ├── external_catalog.py      ← 外部资料路径、哈希与采用边界目录
+│   │   ├── evidence_archive.py      ← WorkItem 持久证据包、SHA256 与语义结果指纹
+│   │   ├── episode_trace.py         ← raw task evidence → Episode Trace v3 + Reward Vector
+│   │   ├── candidate_skills.py      ← 版本化 Candidate Skill 与 append-only revisions
+│   │   ├── strategy_space.py        ← 六类 baseline/candidate 决策目录
+│   │   ├── shadow_replay.py         ← baseline 投影与真实 canary 分离评估
+│   │   ├── shadow_evolution.py      ← 失败聚类与 shadow Experiment（不改生产）
+│   │   ├── manual_runtime.py        ← Receipt、truth audit、trajectory 终态治理
+│   │   ├── continuation.py          ← 业务结果到可执行 Receipt NextAction
+│   │   ├── rl_control.py            ← baseline/candidate 选择、评价与控制策略
+│   │   └── rl_evolution.py          ← v2 业务奖励轨迹与离线候选策略
 │   ├── protocols/                   ← 01/02 阶段转换 JSON（代码包内资源）
 │   │
 │   ├── agents/                      ← Agent 框架
@@ -87,7 +98,12 @@ partner/
 │   │   ├── molecular_diversity_events.py ← 骨架和指纹多样性评估
 │   │   ├── molecular_iteration_events.py ← SA/随机基线与 QED/SA 多目标迭代
 │   │   ├── governance_events.py     ← 上下文、项目收据、问题与进化实验事件
-│   │   └── campaign_events.py       ← Campaign 创建、状态、WorkItem 和暂停/取消
+│   │   ├── campaign_events.py       ← Campaign 创建、状态、WorkItem 和暂停/取消
+│   │   ├── campaign_governance_events.py ← 03/04/05 确定性审计、外部学习与 RL 事件
+│   │   ├── execution_iteration_events.py ← Sprint 11 五实例源码/运行/分析执行切片
+│   │   ├── targetdiff_project_events.py ← Sprint 12 TargetDiff 分组防泄漏与方法决策主线
+│   │   ├── targetdiff_provenance_events.py ← Sprint 12 字段来源与官方 split 合同审计
+│   │   └── targetdiff_continuous_events.py ← Sprint 12 Stage 9–13 与 Receipt handoff 强制门
 │   │
 │   ├── state/                       ← 状态管理
 │   │   ├── config.py                ← 配置解析: 统一 config_root
@@ -127,10 +143,18 @@ partner/
 │   └── skill.md                     ← Agent 功能总览
 │
 ├── scripts/partner_campaign.py      ← Campaign CLI/后台 runner
+├── scripts/partner_rl_update.py     ← 指定 Campaign 的离线轨迹/候选策略重算
+├── scripts/partner_episode_reduce.py ← task raw evidence → Episode Trace v3 离线归约
+├── scripts/partner_shadow_evolution.py ← 只读 Episode 聚类并建立 shadow candidate
 ├── scripts/simulate_campaign_soak.py ← 隔离 fake-clock 长跑模拟
 ├── tests/                           ← 测试代码
 └── third_party/                     ← 第三方依赖
 ```
+
+`partner/v2/continuous_project_events.py` 提供 01–04 的有限业务推进链；
+`targetdiff_official_split_events.py` 新增 calibration 与 error-slice 分析。
+
+`partner/governance/user_experience.py` 定义 Campaign 三阶段用户消息、项目里程碑、文件送达归一化和回执硬门；`partner/v2/domain_reports.py` 按 01/03/04 领域生成报告正文。`partner/v2/pdf_events.py` 只提供统一排版基础，不决定业务章节。
 
 ---
 
@@ -141,7 +165,7 @@ partner_workspace/
 ├── config/                          ← 全局配置（唯一配置位置，实例级不保留 config）
 │   ├── qq_config.json               ← QQ Bot 配置（含 instance_id 隔离）
 │   ├── api.json                     ← API 凭证统一管理（deepseek=对话, qwen=图片）
-│   ├── external_calls.yaml          ← 外部调用超时: batch_planner 120s, classify 45s
+│   ├── external_calls.yaml          ← 外部调用超时: planner/semantic repair 180s, classify 45s
 │   ├── routing_rules.yaml           ← 消息路由规则
 │   ├── global_config.json           ← 实例注册表
 │   ├── partner_config.json          ← Partner 主配置
@@ -157,9 +181,8 @@ partner_workspace/
 │   └── _legacy_config/              ← 旧实例 config/ 归档（历史数据不丢）
 │
 ├── instances/                       ← 实例目录（只保留运行时隔离状态）
-│   ├── 01/                          ← 当前 active：可见浏览器/视觉回执
-│   ├── 02/                          ← 当前 active：分子连续研究
-│   └── 03/ 04/ 05/                  ← 当前 inactive，保留历史状态
+│   ├── 01/ 02/ 03/                  ← 当前暂停，保留手动能力与历史状态
+│   └── 04/ 05/                      ← 当前受控双槽：文献学习 / 离线自进化审计
 │       ├── state/                   ← 实例运行状态（隔离）
 │       │   ├── desktop_inbox.jsonl  ← 任务注入入口（实例级，poller 只读这里）
 │       │   ├── active_plan.json     ← 当前活动计划
@@ -202,4 +225,10 @@ partner_workspace/
 
 ---
 
-*最后更新: 2026-08-23*
+Campaign 目录在 portfolio profile 下新增 `portfolio_state.json`，记录五项目输入指纹、等待原因与最后派发版本；详细合同见 `docs/architecture/project_portfolio.md`。
+
+`partner/governance/episode_trace.py` 保存 raw 引用、构建 model/tool/artifact/delivery 图并计算六维奖励；
+`partner/governance/shadow_evolution.py` 只建立候选实验，不能写生产控制策略；
+`partner/governance/shadow_replay.py` 通过 trajectory marker 区分历史 baseline 与真实 candidate canary。
+
+*最后更新: 2026-08-26（Episode Trace v3、Candidate Registry 与受控 Canary）*

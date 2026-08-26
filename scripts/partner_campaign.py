@@ -16,11 +16,14 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from partner.governance.campaign import (
-    campaign_snapshot, cancel_campaign, create_campaign, seed_default_work,
+    campaign_snapshot, cancel_campaign, create_campaign, seed_default_work, seed_execution_work,
+    PORTFOLIO_MARKER, seed_portfolio_work,
+    seed_targetdiff_project_work,
+    seed_targetdiff_continuous_work,
     tick_campaign,
 )
 from partner.governance.campaign_models import CampaignBudget
-from partner.governance.campaign_runtime import dispatch_to_instance, switch_runtime_slots
+from partner.governance.campaign_runtime import dispatch_to_instance, runtime_instance_ready, switch_runtime_slots
 from partner.governance.campaign_storage import (
     active_campaign_id, campaign_dir, load_campaign, save_campaign,
 )
@@ -69,6 +72,7 @@ def _run(root: str, campaign_id: str, interval: int, once: bool = False) -> int:
                 campaign_id,
                 dispatch=lambda item, text: dispatch_to_instance(root, item, text),
                 switch_slots=lambda ids: switch_runtime_slots(root, ids),
+                runtime_ready=lambda instance_id: runtime_instance_ready(root, instance_id),
             )
             print(json.dumps(result, ensure_ascii=False), flush=True)
             if once or result.get("status") in {"completed", "cancelled", "missing_campaign"}:
@@ -94,6 +98,13 @@ def main() -> int:
     start.add_argument("--max-model-calls", type=int, default=500)
     start.add_argument("--max-cost-units", type=float, default=100.0)
     start.add_argument("--no-seed", action="store_true")
+    start.add_argument(
+        "--profile",
+        choices=("audit", "execution", "molecular", "molecular-continuous", "portfolio-continuous"),
+        default="audit",
+    )
+    start.add_argument("--waves", type=int, default=2)
+    start.add_argument("--stages", type=int, default=5)
     start.add_argument("--detach", action="store_true")
     start.add_argument("--interval", type=int, default=30)
 
@@ -119,6 +130,9 @@ def main() -> int:
     root = args.workspace
 
     if args.command == "start":
+        goal = args.goal
+        if args.profile == "portfolio-continuous" and PORTFOLIO_MARKER not in goal:
+            goal = f"{PORTFOLIO_MARKER} {goal}"
         budget = CampaignBudget(
             max_work_items=args.max_work_items,
             max_failures=args.max_failures,
@@ -128,24 +142,38 @@ def main() -> int:
             max_cost_units=args.max_cost_units,
         )
         state = create_campaign(
-            root, goal=args.goal, allowed_instances=args.instances,
+            root, goal=goal, allowed_instances=args.instances,
             duration_seconds=args.duration, max_active=args.max_active,
             report_interval_seconds=args.report_interval, budget=budget,
         )
         if not args.no_seed:
-            seed_default_work(root, state.campaign_id)
+            if args.profile == "execution":
+                seed_execution_work(root, state.campaign_id, waves=args.waves)
+            elif args.profile == "molecular":
+                seed_targetdiff_project_work(root, state.campaign_id, stages=args.stages)
+            elif args.profile == "molecular-continuous":
+                seed_targetdiff_continuous_work(root, state.campaign_id)
+            elif args.profile == "portfolio-continuous":
+                seed_portfolio_work(root, state.campaign_id)
+            else:
+                seed_default_work(root, state.campaign_id)
         output = {"ok": True, "campaign_id": state.campaign_id, "status": state.status}
         if args.detach:
-            unit = f"partner-campaign-{state.campaign_id.replace('_', '-')[:48]}"
-            command = [
-                "systemd-run", "--user", f"--unit={unit}", "--collect",
-                sys.executable, str(Path(__file__).resolve()), "--workspace", root,
-                "run", "--campaign-id", state.campaign_id, "--interval", str(args.interval),
-            ]
-            result = subprocess.run(command, capture_output=True, text=True)
+            template = Path(__file__).resolve().parents[1] / "deploy/systemd/partner-campaign@.service"
+            link = subprocess.run(
+                ["systemctl", "--user", "link", str(template)], capture_output=True, text=True,
+            )
+            if link.returncode != 0 and "already exists" not in link.stderr.lower():
+                cancel_campaign(root, state.campaign_id, f"runner template link failed: {link.stderr.strip()}")
+                raise SystemExit(link.stderr.strip() or "systemd template link failed")
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+            unit = f"partner-campaign@{state.campaign_id}.service"
+            result = subprocess.run(
+                ["systemctl", "--user", "enable", "--now", unit], capture_output=True, text=True,
+            )
             if result.returncode != 0:
                 cancel_campaign(root, state.campaign_id, f"runner launch failed: {result.stderr.strip()}")
-                raise SystemExit(result.stderr.strip() or "systemd-run failed")
+                raise SystemExit(result.stderr.strip() or "persistent campaign service failed")
             output["runner_unit"] = unit
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0

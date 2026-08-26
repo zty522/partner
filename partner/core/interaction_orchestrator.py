@@ -604,6 +604,7 @@ class InteractionDecision:
     pending_action: str = "none"
     pending_followup: dict = None
     task_instance_id: str = ""
+    queue_task_id: str = ""
     task_working_dir: str = ""
     continue_from_project: str = ""
     delivery_required: bool = False
@@ -2514,6 +2515,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                     logger.debug(f"failed to record user risk signal: {exc}")
             existing = self.task_queue.find_similar_pending(description, sender_id=sender_id)
             if existing:
+                decision.queue_task_id = existing.id
                 # Stale pending task (>30s old with no step files) — skip merge, create new
                 created_at = getattr(existing, 'created_at', '')
                 try:
@@ -2564,6 +2566,7 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 sender_name=sender_name or "QQ用户",
             )
             self.task_queue.add_task(task)
+            decision.queue_task_id = task.id
             if decision.note and target:
                 append_log(self.workspace, target, decision.note)
             self._touch_active_plan(target or task.title, f"用户追加任务：{task.title}")
@@ -2720,6 +2723,19 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                     "event_type": event_type_value,
                     "event_kind": (event_kind or "")[:120],
                     "stop_after_completion": bool(stop_after_completion),
+                    # Preserve the TaskInstance created at interaction time.
+                    # Dropping these fields caused the executor to create a
+                    # second task directory, splitting logs and Campaign
+                    # acceptance evidence across two identities.
+                    "task_id": str(task_instance_id or "")[:120],
+                    "task_instance_id": str(task_instance_id or "")[:120],
+                    "task_working_dir": str(task_working_dir or "")[:1000],
+                    "continue_from_project": str(continue_from_project or "")[:300],
+                    "delivery_required": bool(delivery_required),
+                    "expected_artifacts": list(expected_artifacts or []),
+                    "artifact_freshness_policy": str(artifact_freshness_policy or "new"),
+                    "reuse_existing_artifact": bool(reuse_existing_artifact),
+                    "reuse_reason": str(reuse_reason or "")[:1000],
                 },
                 source=source,
             )

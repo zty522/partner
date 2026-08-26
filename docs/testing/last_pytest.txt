@@ -1,20 +1,24 @@
-============================= test session starts ==============================
-platform linux -- Python 3.13.x, pytest-9.0.3
-collected 137 items
+Partner full regression baseline
+Date: 2026-08-26 (three-source generalization and causal-isolation closeout)
+Command: pytest -q
+Result: 327 passed in 14.45s
 
-tests/test_artifact_validator.py ......                                    [  5%]
-tests/test_correct_extension.py ....                                       [  9%]
-tests/test_direct_api.py .......                                           [ 16%]
-tests/test_evaluator.py .......                                            [ 22%]
-tests/test_gap_filler.py ....                                              [ 26%]
-tests/test_campaign.py ............
-tests/test_campaign_soak.py .
-tests/test_governance.py ..........
-tests/test_partner_dashboard.py ...........
-tests/test_recovery_flows.py ....................                          [ 63%]
-tests/test_run_control.py ..                                               [ 65%]
-tests/test_run_log.py ....                                                 [ 69%]
-tests/test_self_review.py .........                                        [ 77%]
-tests/test_vision_events.py .......                                        [ 84%]
+This baseline verifies Episode Trace v3 bulk and automatic reduction, hard-gated reward,
+versioned Candidate Skills, baseline/executed-canary separation, deterministic grounded
+extraction, durable evidence archival, Receipt handoff, bounded semantic-repair timeouts,
+manual user-message consistency, verbatim-evidence propagation, fallback output rejection,
+historical-postmortem semantics, and explicit intervention-isolation blockers. Historical Campaign, scheduling, delivery, browser/PDF,
+and manual-stable regressions remain covered.
 
-============================== 137 passed in 5.07s ==============================
+Live canary evidence:
+- task: 20267094-ca30-4295-9b77-76cc75c831b2
+- receipt: receipt_3c8508a0fdfc (iteration 28)
+- episode: episode_a844edfc1c673f2b
+- artifact: 9,228 bytes; truth sources 2/2; reward scalar 1.0
+- experiment: experiment_bf3cf4963540
+- candidate: candidate_preflight_aware_planning_v1, status=canary,
+  promotion=false, production_effective=false
+- executed candidate episodes: 17 total, 4 policy-eligible successes and 13 retained failures
+- three-source handoff receipts: receipt_c8d056aa01c6, receipt_f67dabb4d5a2,
+  receipt_ee1489e68318; all truth=3/3 and delivery/handoff=true
+- intervention_isolated=false; promotion remains blocked and production_effective=false

@@ -9,6 +9,7 @@ from partner.v2.browser import atomic_browser_screenshot
 from partner.v2.browser import atomic_xhs_inspect_upload_requirements
 from partner.v2.browser import atomic_xhs_open_publish_editor
 from partner.v2.pdf_events import atomic_generate_pdf, atomic_generate_detailed_pdf
+from partner.projects.project_state import update_project_brief_from_contract
 from partner.v2 import repair_events
 from partner.v2 import molecular_events
 from partner.v2 import molecular_diversity_events
@@ -17,9 +18,264 @@ from partner.v2 import push_events
 from partner.v2.push_events import atomic_push_files
 from partner.mind.event_types import EventType, MindEvent
 from partner.mind.harness import (
-    EventRegistry, HarnessContext, HarnessEventSpec, HarnessStep,
-    _fallback_user_progress_text, _resolve_runtime_value, _validate_plan_against_registry,
+    EventRegistry, HarnessContext, HarnessEventSpec, HarnessStep, _agent_event_handler,
+    _clean_generated_python, _fallback_user_progress_text, _local_create_file,
+    _referenced_failed_dependencies, _resolve_runtime_value, _validate_plan_against_registry,
 )
+from partner.mind.executor import _campaign_code_fallback_micro_plan, _required_output_exts
+
+
+def test_generated_python_rejects_tool_call_transcript():
+    code, error = _clean_generated_python(
+        '[hermes]\n<think>I should inspect files.</think>\n]<]minimax[>[<tool_call>'
+    )
+    assert not code
+    assert "tool-call transcript" in error
+
+
+def test_generated_python_extracts_fenced_code():
+    code, error = _clean_generated_python(
+        "Here is the script:\n```python\nimport json\nprint(json.dumps({'ok': True}))\n```"
+    )
+    assert not error
+    assert code.startswith("import json")
+
+
+def test_create_file_rejects_invalid_python(tmp_path):
+    ctx = SimpleNamespace(
+        task_instance=SimpleNamespace(working_dir=str(tmp_path)),
+        working_dir=str(tmp_path), project_dir=str(tmp_path),
+    )
+    result = _local_create_file(ctx, {"path": "bad.py", "content": "]<]minimax[>[<tool_call>"})
+    assert not result["ok"]
+    assert not (tmp_path / "bad.py").exists()
+
+
+def test_required_output_exts_handles_chinese_enumeration_separator():
+    required = _required_output_exts(
+        "生成 result.json、analysis.md、详细 analysis.pdf，并保存 analyzer.py。"
+    )
+    assert {".json", ".md", ".pdf", ".py"} <= required
+
+
+def test_plan_routes_python_source_generation_to_generate_code():
+    registry = EventRegistry()
+    registry.register(HarnessEventSpec("generate_code", "atomic", "", lambda *_: {}))
+    registry.register(HarnessEventSpec("create_file", "atomic", "", lambda *_: {}))
+    plan = [
+        HarnessStep("make", "smart_llm_structured_action", {"prompt": "Generate complete Python code"}, []),
+        HarnessStep("save", "create_file", {"path": "analysis.py", "content": "$make.result.content"}, ["make"]),
+    ]
+    checked = _validate_plan_against_registry(registry, plan, "unit")
+    assert checked[0].event_type == "generate_code"
+    assert checked[0].parameters["language"] == "python"
+
+
+def test_agent_handler_uses_concrete_step_type_for_code_gate(tmp_path, monkeypatch):
+    import asyncio
+    from partner.skills import external_agent_skills
+
+    async def fake_execute_agent_task(**kwargs):
+        return SimpleNamespace(
+            ok=True, output={"content": "[hermes]\n<think>inspect</think>\n]<]minimax[>[<tool_call>"}, error="",
+        )
+
+    monkeypatch.setattr(external_agent_skills, "execute_agent_task", fake_execute_agent_task)
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(type="campaign_batch_plan"), workspace=str(tmp_path),
+        task_instance=None, progress_callback=None,
+    )
+    result = asyncio.run(_agent_event_handler(ctx, {
+        "_harness_event_type": "generate_code", "agent": "hermes", "task": "write Python code",
+    }))
+    assert result["ok"] is False
+    assert "tool-call transcript" in result["error"]
+
+
+def test_generate_text_forwards_prompt_and_resolved_data_and_strips_reasoning(tmp_path, monkeypatch):
+    import asyncio
+    from partner.skills import external_agent_skills
+
+    captured = {}
+
+    async def fake_execute_agent_task(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            ok=True,
+            output={"content": "[hermes]\n<think>private reasoning</think>\n# Grounded report\n" + "evidence " * 30},
+            error="",
+        )
+
+    monkeypatch.setattr(external_agent_skills, "execute_agent_task", fake_execute_agent_task)
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(type="generate_text"), workspace=str(tmp_path), title="test",
+        task_instance=None, progress_callback=None,
+    )
+    result = asyncio.run(_agent_event_handler(ctx, {
+        "_harness_event_type": "generate_text", "agent": "hermes",
+        "task": "compose report", "prompt": "include exact quotes",
+        "data": {"alpha": {"evidence_quote": "actual quote"}},
+    }))
+    assert "include exact quotes" in captured["task"]
+    assert "actual quote" in captured["task"]
+    assert "<think>" not in result["content"]
+    assert result["content"].startswith("# Grounded report")
+
+
+def test_generate_text_retries_action_promise_and_requires_finished_artifact(tmp_path, monkeypatch):
+    import asyncio
+    from partner.skills import external_agent_skills
+
+    calls = []
+
+    async def fake_execute_agent_task(**kwargs):
+        calls.append(kwargs["task"])
+        if len(calls) == 1:
+            content = "[hermes]\n我将根据三个来源撰写报告，并写入指定文件。"
+        else:
+            content = "[hermes]\n# 完整报告\n\n" + "真实证据与分析。" * 60
+        return SimpleNamespace(ok=True, output={"content": content}, error="")
+
+    monkeypatch.setattr(external_agent_skills, "execute_agent_task", fake_execute_agent_task)
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(type="generate_text"), workspace=str(tmp_path), title="test",
+        task_instance=None, progress_callback=None,
+    )
+    result = asyncio.run(_agent_event_handler(ctx, {
+        "_harness_event_type": "generate_text", "agent": "hermes",
+        "task": "compose report", "prompt": "生成不少于100字的完整正文",
+        "data": {"source": "verified"},
+    }))
+    assert result.get("ok") is not False
+    assert len(calls) == 2
+    assert "纠偏" in calls[1]
+    assert result["content"].startswith("# 完整报告")
+
+
+def test_general_agent_allows_timeout_word_inside_substantive_report(tmp_path, monkeypatch):
+    import asyncio
+    from partner.skills import external_agent_skills
+
+    report = "# Report\n\nTimeout handling is one bounded recovery principle.\n" + "evidence\n" * 80
+    adapter = SimpleNamespace(chat=lambda *args, **kwargs: report)
+    monkeypatch.setattr(external_agent_skills, "_make_adapter", lambda *args, **kwargs: adapter)
+    result = asyncio.run(external_agent_skills.execute_agent_task(
+        workspace=str(tmp_path), agent="hermes", task="write report", allow_web=False,
+    ))
+    assert result.ok is True
+    assert "Timeout handling" in result.output["content"]
+
+
+def test_generate_text_retries_false_file_capability_claim(tmp_path, monkeypatch):
+    import asyncio
+    from partner.skills import external_agent_skills
+
+    calls = []
+
+    async def fake_execute_agent_task(**kwargs):
+        calls.append(kwargs["task"])
+        content = (
+            "完整分析正文。" * 40 + "本环境未配置文件写入工具，请提供文件写入能力。"
+            if len(calls) == 1 else "# 完整且可交付的正文\n\n" + "证据分析。" * 80
+        )
+        return SimpleNamespace(ok=True, output={"content": content}, error="")
+
+    monkeypatch.setattr(external_agent_skills, "execute_agent_task", fake_execute_agent_task)
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(type="generate_text"), workspace=str(tmp_path), title="test",
+        task_instance=None, progress_callback=None,
+    )
+    result = asyncio.run(_agent_event_handler(ctx, {
+        "_harness_event_type": "generate_text", "agent": "hermes", "task": "compose report",
+    }))
+    assert result.get("ok") is not False
+    assert len(calls) == 2
+    assert "未配置文件写入工具" not in result["content"]
+
+
+def test_generate_text_retries_file_mutation_verifier_and_missing_quote_pairs(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from partner.skills import external_agent_skills
+
+    calls = []
+
+    async def fake_execute_agent_task(**kwargs):
+        calls.append(kwargs["task"])
+        if len(calls) == 1:
+            content = (
+                "任务完成。\n\nFile-mutation verifier: 1 file(s) were NOT modified this turn. "
+                "Failed to write file: timed out. " + "状态包装。" * 180
+            )
+        else:
+            content = (
+                "# 完整报告\n\n"
+                "source_path: /tmp/a.md\n"
+                "evidence_quote: 这是来自第一个真实来源且长度超过二十字符的逐字连续引文内容。\n\n"
+                "source_path: /tmp/b.md\n"
+                "evidence_quote: 这是来自第二个真实来源且长度超过二十字符的逐字连续引文内容。\n\n"
+                + "证据分析。" * 180
+            )
+        return SimpleNamespace(ok=True, output={"content": content}, error="")
+
+    monkeypatch.setattr(external_agent_skills, "execute_agent_task", fake_execute_agent_task)
+    ctx = SimpleNamespace(
+        event=SimpleNamespace(type="generate_text"), workspace=str(tmp_path), title="test",
+        task_instance=None, progress_callback=None,
+    )
+    result = asyncio.run(_agent_event_handler(ctx, {
+        "_harness_event_type": "generate_text", "agent": "hermes",
+        "task": "compose report", "prompt": "不少于800个中文字符；保留 source_path 与 evidence_quote 逐字引文",
+        "data": {"verified_sources": json.dumps({"a": {}, "b": {}}, ensure_ascii=False)},
+    }))
+    assert result.get("ok") is not False
+    assert len(calls) == 2
+    assert result["content"].count("source_path:") == 2
+
+
+def test_extract_rejects_robust_fallback_as_ungrounded(tmp_path):
+    import asyncio
+    from partner.mind.harness import _llm_event_handler
+
+    class Robust:
+        async def execute(self, **kwargs):
+            return SimpleNamespace(
+                status="fallback_success", value={"content": "fallback"},
+                content_preview="fallback", fallback_path="fallback.md", ok=True,
+            )
+
+    ctx = SimpleNamespace(
+        adapter=SimpleNamespace(), event=SimpleNamespace(type="extract"),
+        title="test", state_md="", artifact_path=str(tmp_path / "result.md"),
+        build_action_prompt=None, parse_structured_response=None,
+        robust_executor=Robust(), task_instance=SimpleNamespace(),
+    )
+    result = asyncio.run(_llm_event_handler(ctx, {
+        "_harness_event_type": "extract", "data": "real source",
+    }))
+    assert result["ok"] is False
+    assert result["status"] == "fallback_rejected"
+
+
+def test_direct_template_dependency_is_not_degradable():
+    failed = _referenced_failed_dependencies(
+        {"path": "analysis.py", "content": "$step_code.result.content"},
+        ["step_code", "step_design"],
+    )
+    assert failed == ["step_code"]
+
+
+def test_campaign_code_fallback_builds_bounded_execution_chain(tmp_path):
+    plan = _campaign_code_fallback_micro_plan(
+        "编写 analyze.py，生成 result.json、report.md 和 report.pdf", str(tmp_path)
+    )
+    assert plan is not None
+    assert [step.event_type for step in plan.plan] == [
+        "generate_code", "create_file", "run_command", "list_directory", "send_user_text", "push_files",
+    ]
+    assert {item["pattern"] for item in plan.expected_artifacts} == {
+        "analyze.py", "result.json", "report.md", "report.pdf",
+    }
 
 
 def _ctx(workdir, instance="01"):
@@ -391,3 +647,20 @@ def test_xhs_upload_audit_preserves_all_three_visual_model_receipts(tmp_path, mo
     assert len(result["visual_steps"]) == 3
     assert result["model_calls"] == 3
     assert len([step for step in result["visual_steps"] if step["vision"]["model"]]) == 3
+def test_project_brief_tolerates_legacy_string_user_correction(tmp_path):
+    project = "molecular_generation"
+    project_dir = tmp_path / "share" / "projects" / project
+    project_dir.mkdir(parents=True)
+    (project_dir / "project_brief.md").write_text(
+        f"# {project} 项目简报\n\n## 项目目标\n待补充。\n\n## 当前主线\n待补充。\n",
+        encoding="utf-8",
+    )
+    update_project_brief_from_contract(str(tmp_path), project, {
+        "current_goal": "建立防泄漏基线",
+        "current_mainline": "先完成一个项目",
+        "allowed_scope": ["TargetDiff"],
+        "forbidden_scope": ["身份回归"],
+        "user_corrections": ["旧格式字符串也不能让消息路由崩溃"],
+    })
+    brief = (project_dir / "project_brief.md").read_text(encoding="utf-8")
+    assert "建立防泄漏基线" in brief

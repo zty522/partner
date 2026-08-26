@@ -168,8 +168,46 @@ deadline 最终日报、dashboard Campaign 摘要以及确定性 soak。
 ## 2026-08-23 后续回归：30 分钟 Campaign 实跑修复
 
 **命令**: `python -m pytest -q`  
-**当前结果**: **137 passed, 0 failed (5.07s)**
+**当前结果**: **139 passed, 0 failed (5.09s)**
+
+### 2026-08-23 两小时 Campaign/RL 修复附录
+
+**当前结果**: **143 passed, 0 failed (6.46s)**
+
+新增覆盖：failure budget 停止 latch、停止后取消未开始 WorkItem、为最终日报预留创建预算、
+WorkItem 到可验证奖励轨迹的转换、candidate policy 不自动 promotion，以及外部资料 indexed/integrated 边界。
 
 新增覆盖：blocked Campaign 仍按间隔创建阶段报告；终态 blocked 回调幂等；失败任务无需等待 Lease 即重试；
 小红书上传要求审计保留 3 个视觉步骤并报告 3 次模型调用；planner 与逐步骤模型调用去重累计；
-无界分子数据扫描改为有深度、排除目录和文件数量上限。实机阶段报告替代 WorkItem 已获真实 QQ 回执。
+无界分子数据扫描改为有深度、排除目录和文件数量上限；最终报告区分业务阻塞与报告链问题并显示截止原因。
+实机阶段报告替代 WorkItem 已获真实 QQ 回执。
+
+最终日报也获真实 QQ 回执。实跑发现 report 的固定事件签名误触业务三轮重复熔断，现已限定熔断只检查
+非 report WorkItem，并用“两个历史同签名报告 + 当前报告仍完成”的回归用例覆盖。
+
+### 2026-08-23 Sprint 11 execution profile 附录
+
+**当前结果**：**162 passed, 0 failed (4.98s)**
+
+新增 `tests/test_execution_iterations.py`，验证 content inbox 和 TargetDiff pickle 的生成脚本
+确实由子进程运行并产生机器结果；Campaign 测试覆盖两波排队与 05 整轮依赖。
+该数字是当前 pytest 回归，不与 Sprint 10 的独立 L2/L3/L6 历史项相加。
+
+### 2026-08-24 Harness 学习入口与 Issue 去噪附录
+
+**当前结果**：**173 passed, 0 failed (6.64s)**
+
+新增覆盖 DeepSeek Harness/OpenAI Codex 固定来源、许可证、indexed-not-integrated 与
+禁止执行合同；同时验证完全相同 Issue 证据返回 `unchanged`，只有新增证据才累计
+occurrence。`git diff --check` 通过。
+
+### 2026-08-24 持续推进与 RL 控制 v2 附录
+
+**当前结果**：**184 passed, 0 failed (8.47s)**
+
+新增覆盖持久 EvidenceManifest 在 TaskInstance 删除后仍可读取、语义指纹忽略路径/时间戳、
+no-change scout 不制造 novelty、baseline/candidate 交替、每臂三样本晋升门、Receipt 可执行下一动作、
+TargetDiff calibration/error-slice 事件注册，以及归档后重复结果熔断仍有效。
+实机后再增加 Campaign/旧自动反思隔离、attempt/recovery dedup key 区分和失败业务奖励门覆盖。
+QQ 通道故障后再增加显式 delivery readiness 文件与“未 ready 不派发、不计 attempt”的调度覆盖。
+新增 `continuous_project_step` handler 直测，要求机器结果、详细 PDF 和业务指标同时成立。

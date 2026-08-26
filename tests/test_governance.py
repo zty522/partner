@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -116,6 +117,10 @@ def test_issue_dedup_and_evolution_promotion_gate(tmp_path):
     second = record_issue(workspace, {**params, "evidence": ["task-b/log.jsonl"]})
     assert first["issue"]["issue_id"] == second["issue"]["issue_id"]
     assert second["issue"]["occurrences"] == 2
+    unchanged = record_issue(workspace, {**params, "evidence": ["task-b/log.jsonl"]})
+    assert unchanged["status"] == "unchanged"
+    assert unchanged["issue"]["occurrences"] == 2
+    assert len(Path(unchanged["path"]).read_text(encoding="utf-8").splitlines()) == 2
     experiment = start_experiment(workspace, {
         "issue_id": first["issue"]["issue_id"],
         "hypothesis": "显式 NextAction 状态能阻止假续跑",

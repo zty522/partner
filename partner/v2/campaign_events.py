@@ -26,6 +26,10 @@ def atomic_campaign_status(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def atomic_create_campaign(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     workspace = _workspace(ctx)
+    from partner.state.config import manual_stable_mode, runtime_capability_enabled
+    if manual_stable_mode(workspace) or not runtime_capability_enabled(workspace, "automatic_campaigns"):
+        return {"ok": False, "status": "disabled_in_manual_stable", "retryable": False,
+                "error": "自动 Campaign 已暂停；当前默认入口是用户手动消息"}
     duration = int(params.get("duration_seconds") or 28_800)
     budget = CampaignBudget(
         max_work_items=int(params.get("max_work_items") or 40),
@@ -52,6 +56,10 @@ def atomic_create_campaign(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def atomic_enqueue_campaign_work(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     workspace = _workspace(ctx)
+    from partner.state.config import manual_stable_mode, runtime_capability_enabled
+    if manual_stable_mode(workspace) or not runtime_capability_enabled(workspace, "automatic_campaigns"):
+        return {"ok": False, "status": "disabled_in_manual_stable", "retryable": False,
+                "error": "自动 Campaign 已暂停；当前默认入口是用户手动消息"}
     campaign_id = str(params.get("campaign_id") or active_campaign_id(workspace))
     item = enqueue_work_item(workspace, campaign_id, params)
     return {"ok": True, "status": item.status, "work_item": item.to_dict()}

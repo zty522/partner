@@ -265,6 +265,13 @@ def _validate_plan_against_registry(
         "write_file": "atomic_write_artifact",
     }
     valid: list[HarnessStep] = []
+    python_source_steps = {
+        dep
+        for consumer in plan
+        if consumer.event_type in {"create_file", "atomic_write_artifact", "write_file", "atomic_write_file"}
+        and str((consumer.parameters or {}).get("path") or (consumer.parameters or {}).get("filename") or "").lower().endswith(".py")
+        for dep in (consumer.depends_on or [])
+    }
 
     def has_unresolved_placeholder(value: Any) -> bool:
         if isinstance(value, dict):
@@ -282,6 +289,13 @@ def _validate_plan_against_registry(
     for step in plan:
         original_event_type = step.event_type
         step.event_type = aliases.get(step.event_type, step.event_type)
+        if step.event_type == "smart_llm_structured_action" and step.id in python_source_steps:
+            prompt = str((step.parameters or {}).get("prompt") or (step.parameters or {}).get("instruction") or "")
+            if re.search(r"(?:python|\.py\b|code|代码|脚本)", prompt, re.I):
+                step.event_type = "generate_code"
+                step.parameters = dict(step.parameters or {})
+                step.parameters["task"] = prompt
+                step.parameters.setdefault("language", "python")
         if step.event_type != original_event_type:
             logger.info(
                 "[PLAN] %s normalized event alias %s -> %s for step %s",
@@ -343,6 +357,14 @@ def _validate_plan_against_registry(
     return valid
 
 
+def _referenced_failed_dependencies(parameters: Any, failed_deps: list[str]) -> list[str]:
+    parameter_text = json.dumps(parameters or {}, ensure_ascii=False, default=str)
+    return [
+        dep for dep in failed_deps
+        if re.search(rf"\${re.escape(dep)}(?:\.|\b)", parameter_text)
+    ]
+
+
 def _clip(text: Any, limit: int = 1200) -> str:
     raw = str(text or "").strip()
     return raw if len(raw) <= limit else raw[: max(0, limit - 1)].rstrip() + "…"
@@ -353,6 +375,137 @@ def _json_from_llm(raw: str) -> Any:
     # Strip [ollama] prefix added by OllamaLiteAdapter before JSON parsing
     if text.startswith("[ollama]") or text.startswith("[ollama]\n"):
         text = text.split("\n", 1)[1].strip() if "\n" in text else text[len("[ollama]"):].strip()
+    # ── Bug #36 fix (2026-08-25): honor <JSON_OUTPUT> tag contract ──
+    # Micro Planner prompt asks the LLM to wrap JSON in
+    # <JSON_OUTPUT>...</JSON_OUTPUT>. When present, extract the inner JSON
+    # verbatim and short-circuit the aggressive extraction below. Falls back
+    # to legacy extraction if the tag is absent or unbalanced. ADR 0005.
+    _tag_open = "<JSON_OUTPUT>"
+    _tag_close = "</JSON_OUTPUT>"
+    if _tag_open in text and _tag_close in text:
+        _i = text.index(_tag_open) + len(_tag_open)
+        _j = text.index(_tag_close, _i)
+        _extracted = text[_i:_j].strip()
+        if _extracted:
+            try:
+                return json.loads(_extracted)
+            except json.JSONDecodeError:
+                # Tag was present but content is not pure JSON — drop the tag
+                # wrappers and keep the inner text for legacy extraction.
+                text = _extracted
+    # ── Bug #35 fix (2026-08-24 cron): handle <think>…</think> AND reasoning prefix ──
+    # MiniMax-M3 / DeepSeek-R1 / QwQ sometimes emit reasoning prose (with or
+    # without balanced <think> tags) that contains SAMPLE JSON objects before
+    # the real output. The naive "first balanced JSON" approach picks the
+    # sample. Strategy: prefer balanced <think> block if present; otherwise
+    # prefer the JSON whose top-level key matches the expected schema
+    # ({plan: [...]}, {steps: [...]}, etc.). Falls back to first balanced
+    # JSON if no schema-matching candidate found.
+    #
+    # Real-world failure on instance 05 task a6ff8fa6: iteration_reflect_failed
+    # + batch_planner_json_error looping because LLM response had
+    # `prose\n{"plan": [...SAMPLE...]}\n真正输出\n{"plan": [...REAL...]}` and
+    # the helper picked the sample. Same fix pattern as Bug #33 in
+    # iteration_events.py (which only had balanced think tags).
+    # ── Bug #36 phase 2: detect thinking-only retryable failure BEFORE we
+    # strip the think block. deepseek-v4-flash in thinking mode sometimes
+    # emits only reasoning without a JSON payload; this is retryable.
+    # Detection: a balanced <think> block exists AND the text after it
+    # contains no { or [ (no JSON object/array at all).
+    _m = re.search(r"<think>.*?</think>", text, flags=re.DOTALL)
+    if _m:
+        _think_tail = text[_m.end():].strip()
+        if not _think_tail or ("{" not in _think_tail and "[" not in _think_tail):
+            raise ValueError(
+                "JSON parse failed before extraction. "
+                "RETRYABLE: LLM emitted thinking block but no JSON payload"
+            )
+        text = (text[:_m.start()] + text[_m.end():]).strip()
+    _PLAN_KEYS = ("plan", "steps", "data", "results", "output", "content")
+    # Prefer a complete JSON payload before scanning nested candidates.  A
+    # valid planner object normally contains step parameters named `content`;
+    # the old reverse candidate scan therefore selected the innermost
+    # {path, content} parameters dict instead of the outer {plan: [...]}.
+    try:
+        _whole = json.loads(text)
+        if isinstance(_whole, list) and _whole and all(isinstance(item, dict) for item in _whole):
+            return {"plan": _whole}
+        if isinstance(_whole, (dict, list)):
+            return _whole
+    except json.JSONDecodeError:
+        pass
+    # Use Python's decoder at every possible JSON start before doing any
+    # bracket counting. Planner parameters often contain braces in command or
+    # prompt strings; character counting treats those as structure and cuts a
+    # valid payload at the wrong position. raw_decode understands JSON strings.
+    _decoded_candidates = []
+    _decoder = json.JSONDecoder()
+    for _i, _ch in enumerate(text):
+        if _ch not in ("{", "["):
+            continue
+        try:
+            _parsed, _consumed = _decoder.raw_decode(text[_i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(_parsed, (dict, list)):
+            _decoded_candidates.append((_i, _i + _consumed, _parsed))
+    for _start, _end, _parsed in reversed(_decoded_candidates):
+        if isinstance(_parsed, dict) and any(key in _parsed for key in ("plan", "steps")):
+            return _parsed
+    # ── Bug #36 fix (2026-08-25): bare step list auto-wrap ──
+    # Some LLMs (incl. MiniMax-M3 in long manual_stable prompts) emit a bare
+    # JSON array of step dicts WITHOUT the {"plan": [...]} wrapper. raw_decode
+    # succeeds but the dict-match branch above misses it. Wrap as plan to match
+    # _normalize_micro_plan's contract. Documented in ADR 0005.
+    # NB: candidates are appended in raw position order. _decoded_candidates[-1]
+    # is often an empty list (e.g. the trailing depends_on:[]), so we must scan
+    # for the FIRST list whose items are all dicts — that is the real plan.
+    for _cand_start, _cand_end, _cand_parsed in _decoded_candidates:
+        if (
+            isinstance(_cand_parsed, list)
+            and _cand_parsed
+            and all(isinstance(x, dict) for x in _cand_parsed)
+        ):
+            return {"plan": _cand_parsed}
+    for _start, _end, _parsed in reversed(_decoded_candidates):
+        if isinstance(_parsed, dict) and any(key in _parsed for key in _PLAN_KEYS):
+            return _parsed
+    if _decoded_candidates:
+        return _decoded_candidates[-1][2]
+    _candidates = []  # list of (start, end, parsed_dict)
+    for _i, _ch in enumerate(text):
+        if _ch not in ("{", "["):
+            continue
+        _open, _close = ("{", "}") if _ch == "{" else ("[", "]")
+        _depth = 0
+        for _j in range(_i, len(text)):
+            if text[_j] == _open:
+                _depth += 1
+            elif text[_j] == _close:
+                _depth -= 1
+                if _depth == 0:
+                    _cand = text[_i:_j + 1]
+                    try:
+                        _parsed = json.loads(_cand)
+                        if isinstance(_parsed, (dict, list)):
+                            _candidates.append((_i, _j + 1, _parsed))
+                        break
+                    except Exception:
+                        break
+    # Pick LAST schema-matching candidate — LLM (MiniMax-M3 etc.) puts the
+    # real output at the end after reasoning samples. Fall back to LAST
+    # candidate overall (not first) for the same reason: even non-schema JSONs
+    # earlier in the text are usually samples, the real payload comes last.
+    _picked = None
+    for start, end, parsed in reversed(_candidates):
+        if isinstance(parsed, dict) and any(k in parsed for k in _PLAN_KEYS):
+            _picked = (start, end)
+            break
+    if _picked is None and _candidates:
+        start, end, _ = _candidates[-1]
+        _picked = (start, end)
+    if _picked is not None:
+        text = text[_picked[0]:_picked[1]].strip()
     # Strip markdown code block fences (json, plain, or no language)
     if text.startswith("```"):
         text = re.sub(r"^```(?:json|plain|text)?\s*|\s*```$", "", text, flags=re.DOTALL).strip()
@@ -364,6 +517,8 @@ def _json_from_llm(raw: str) -> Any:
     if not starts:
         # No { or [ found — try to find JSON-like content without braces
         # (LLM sometimes outputs just a bare array like "step1", "step2")
+        # The retryable think-only detection happens earlier (line 410-417)
+        # before think stripping, so reaching here means hard failure.
         raise ValueError("no JSON object/array in planner output")
     start = min(starts)
 
@@ -453,6 +608,18 @@ def _json_from_llm(raw: str) -> Any:
         pass
 
     # All attempts exhausted
+    # ── Bug #36 fix (2026-08-25): distinguish retryable vs hard failures ──
+    # If the raw text contains <think> reasoning block but no JSON followed,
+    # this is a retryable LLM output style issue (deepseek-v4-flash thinking
+    # mode stops after reasoning). Raise with retryable hint so callers can
+    # retry instead of failing the whole micro plan step.
+    _has_think = "<think>" in text and "</think>" in text
+    if _has_think and not text.split("</think>", 1)[-1].strip():
+        raise ValueError(
+            "JSON parse failed after all repair attempts. "
+            "RETRYABLE: LLM emitted thinking block but no JSON output. "
+            "Original error: could not parse JSON content"
+        )
     raise ValueError(
         f"JSON parse failed after all repair attempts. "
         f"Original error: could not parse JSON content"
@@ -904,6 +1071,33 @@ class MicroPlanner:
         )
         prompt = f"""你是 Partner Harness 的 Micro Planner。你只规划接下来 2-5 个小事件，不执行任务。
 
+【输出格式硬约束 — 必须严格遵守】
+你的整段响应结构必须正好是：
+[可省略的 <think>...</think> reasoning 块]
+<JSON_OUTPUT>
+{{"plan":[{{"id":"step_1","event_type":"atomic_read_state","parameters":{{"title":"{ctx.title}"}},"depends_on":[]}}],"expected_artifacts":[{{"type":"message","pattern":"text","description":"最终回复","required":true}}]}}
+</JSON_OUTPUT>
+
+关键约束：
+- reasoning 块（<think>...</think>）可选，但如果有，必须在它之后立即开始 <JSON_OUTPUT>，不允许空行/换行/总结性句子
+- 如果你使用 thinking 模式，必须在 reasoning 结束后**强制输出 JSON**——仅输出 reasoning 不输出 JSON 是无效响应
+- <JSON_OUTPUT> 之外不允许任何内容（块前的 reasoning 除外）
+- 块内必须是合法 JSON，包含 "plan" 数组（即使空也要有 key）
+
+正确示例（含 thinking）：
+<think>The task is to read project state. Plan: 1 step, atomic_read_state.</think>
+<JSON_OUTPUT>
+{{"plan":[{{"id":"step_1","event_type":"atomic_read_state","parameters":{{"title":"{ctx.title}"}},"depends_on":[]}}],"expected_artifacts":[]}}
+</JSON_OUTPUT>
+
+错误示例 1（禁止）：<think>...</think>
+\n\n任务内容为空，无法执行。 （只有 reasoning 没有 JSON）
+错误示例 2（禁止）：先写一大段自然语言分析再写 JSON
+错误示例 3（禁止）：JSON 缺少 plan 数组
+错误示例 4（禁止）：<think> 后隔了多个空行才输出 JSON
+
+
+
 目标：用尽量少的 SmartEvent，把本轮目标拆成可本地执行的 AtomicEvent。只有确实需要语言理解、生成、判断时才用 SmartEvent。
 
 可用事件注册表：
@@ -1150,7 +1344,11 @@ class PlanExecutor:
             for step, result, kind in batch:
                 results[step.id] = result
                 pending.pop(step.id, None)
-                llm_calls += 1 if kind == "smart" else 0
+                # ``kind`` describes the plan vocabulary (atomic/smart), not
+                # the actual executor.  Events such as ``extract`` are atomic
+                # from the planner's perspective but still make one model
+                # call.  Cost/evolution telemetry must count the real method.
+                llm_calls += max(0, int(result.get("_model_calls") or 0))
                 stalled = stalled + 1 if _progress_score(result) == 0 else 0
                 if not result.get("ok", True):
                     step_failures[step.id] = str(result.get("error", "") or result.get("content", "") or "unknown")[:300]
@@ -1220,13 +1418,18 @@ class PlanExecutor:
             if (results.get(dep) or {}).get("ok") is False
         ]
         if failed_deps:
-            # If ALL deps failed, skip this step entirely
-            if len(failed_deps) == len(step.depends_on):
+            referenced_failed_deps = _referenced_failed_dependencies(step.parameters, failed_deps)
+            # A direct template reference is a hard data dependency.  Do not
+            # create an empty artifact merely because an unrelated design
+            # dependency succeeded.
+            if len(failed_deps) == len(step.depends_on) or referenced_failed_deps:
                 logger.warning(
-                    "[STEP %s/%s] %s skipped: all dependencies failed (%s)",
-                    ordinal or "?", total_steps, step.id, ", ".join(failed_deps),
+                    "[STEP %s/%s] %s skipped: required dependencies failed (%s)",
+                    ordinal or "?", total_steps, step.id,
+                    ", ".join(referenced_failed_deps or failed_deps),
                 )
-                result = {"ok": False, "error": f"skipped: all dependencies failed ({', '.join(failed_deps)})"}
+                required_failed = referenced_failed_deps or failed_deps
+                result = {"ok": False, "error": f"skipped: required dependencies failed ({', '.join(required_failed)})"}
                 # Emit step_complete for skipped steps so the pipeline shows them
                 await self._emit_progress(ctx, {
                     "phase": "step_complete",
@@ -1272,6 +1475,12 @@ class PlanExecutor:
             # and _dependency_content fallback (below) will still collect available data.
         runtime_parameters = _resolve_runtime_value(step.parameters, ctx)
         params = _normalize_step_params(step.event_type, _resolve_value(runtime_parameters, results), results)
+        if isinstance(params, dict):
+            # Agent handlers execute a HarnessStep while ``ctx.event`` still
+            # describes the enclosing batch-plan event. Preserve the concrete
+            # step type so generate_code validation/routing is actually used.
+            params = dict(params)
+            params["_harness_event_type"] = step.event_type
         if isinstance(params, dict) and step.event_type == "atomic_send_user_text":
             if not str(params.get("text") or "").strip():
                 params = dict(params)
@@ -1292,7 +1501,10 @@ class PlanExecutor:
                         "step_id": step.id,
                         "depends_on": step.depends_on,
                     })
-        if isinstance(params, dict) and step.event_type != "select_context":
+        # ``extract`` is a closed-input operation: injecting selected Partner
+        # documents here contaminates source-grounded extraction and lets the
+        # model attribute unrelated context to the supplied source files.
+        if isinstance(params, dict) and step.event_type not in {"select_context", "extract"}:
             try:
                 from ..governance.context_selector import select_context
                 from ..governance.storage import instance_id as _governance_instance_id
@@ -1513,6 +1725,10 @@ class PlanExecutor:
                 })
         result.setdefault("ok", True)
         result.setdefault("event_type", step.event_type)
+        if spec.execution_method in {"llm", "agent"}:
+            # ``attempt`` starts at zero and increments before each retry, so
+            # this records real invocations rather than one logical LLM step.
+            result.setdefault("_model_calls", max(1, int(attempt) + 1))
         result_path = _write_step_result_json(ctx, step, result, ordinal, total_steps, description)
         if result_path:
             result.setdefault("result_json_path", result_path)
@@ -1526,7 +1742,7 @@ class PlanExecutor:
         if path and path not in produced_files:
             produced_files.append(path)
         elapsed = time.time() - start_ts
-        summary = _step_result_summary(result)
+        summary = _step_result_summary(result, step.event_type)
         logger.info("[STEP %s/%s] 完成: %s 耗时 %.1fs 产出: %s", ordinal or "?", total_steps, step.id, elapsed, produced_files)
         if ctx.task_instance:
             ctx.task_instance.append_log("plan_executor_step_completed", {
@@ -1625,6 +1841,15 @@ def _step_description(step: HarnessStep) -> str:
         desc = "读取当前任务状态"
     elif step.event_type == "atomic_list_project_files":
         desc = "列出当前任务文件"
+    elif step.event_type == "read_file":
+        filename = os.path.basename(str(params.get("path") or params.get("filename") or ""))
+        desc = "读取共享运行配置" if filename == "partner_config.json" else f"读取文件 {filename or ''}".strip()
+    elif step.event_type == "write_design":
+        desc = "整理任务设计"
+    elif step.event_type in {"run_command", "execute_code"}:
+        desc = "执行本地检查或计算"
+    elif step.event_type == "atomic_compose_structured_result":
+        desc = "整理本轮实际结果"
     else:
         if agent_name and "agent" in step.event_type:
             desc = f"{step.event_type} (Agent: {agent_name})"
@@ -1635,7 +1860,7 @@ def _step_description(step: HarnessStep) -> str:
     return desc
 
 
-def _step_result_summary(result: JsonDict) -> str:
+def _step_result_summary(result: JsonDict, event_type: str = "") -> str:
     if not isinstance(result, dict):
         return ""
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
@@ -1657,6 +1882,10 @@ def _step_result_summary(result: JsonDict) -> str:
         if "count" in json_obj:
             sources = ", ".join(str(x) for x in json_obj.get("sources") or [] if str(x).strip())
             return f"得到 {json_obj.get('count')} 条结果" + (f"；来源：{sources}" if sources else "")
+    if result.get("path") and event_type in {"atomic_inspect_file", "read_file"}:
+        size = result.get("size")
+        suffix = f"（{size} 字节）" if isinstance(size, int) else ""
+        return f"已读取 {os.path.basename(str(result.get('path')))}{suffix}"
     if result.get("path"):
         return f"生成文件 {os.path.basename(str(result.get('path')))}"
     if result.get("files"):
@@ -2215,8 +2444,79 @@ def _safe_project_path(ctx: HarnessContext, raw: str) -> str:
     return full
 
 
+def _safe_inspect_path(ctx: HarnessContext, raw: str) -> str:
+    """Resolve a read-only inspection path against explicit safe roots.
+
+    Task artifacts remain confined to the task working directory.  Instances
+    03-05 also need to inspect the Partner source tree and the shared external
+    knowledge library, so read-only inspection has a deliberately narrower
+    allow-list instead of granting arbitrary absolute filesystem reads.
+    """
+    path = str(raw or "").strip()
+    if not path:
+        raise ValueError("missing path")
+
+    task_root = os.path.realpath(str(ctx.working_dir or ""))
+    instance_workspace = os.path.realpath(str(getattr(ctx, "workspace", "") or ""))
+    try:
+        from ..workspace.workspace_layout import workspace_root_from_instance
+
+        shared_root = os.path.realpath(workspace_root_from_instance(instance_workspace))
+    except Exception:
+        shared_root = instance_workspace
+    repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    allowed_roots = [
+        task_root,
+        os.path.join(repo_root, "partner"),
+        os.path.join(repo_root, "tests"),
+        os.path.join(repo_root, "docs"),
+        os.path.join(shared_root, "external", "code"),
+        os.path.join(shared_root, "external", "literature"),
+        # Cross-instance learning must consume governed, immutable evidence or
+        # governance records—not another instance's mutable task directory.
+        os.path.join(shared_root, "share", "evidence"),
+        os.path.join(shared_root, "share", "mind", "governance"),
+        os.path.join(shared_root, "share", "projects"),
+        # Compatibility bridge for receipts created before evidence archival:
+        # outgoing contains delivered, immutable-by-convention copies and is
+        # read-only here. New receipts point to share/evidence instead.
+        os.path.join(shared_root, "files", "outgoing"),
+        # Explicit same-instance handoff artifacts are valid project inputs.
+        # This does not permit cross-instance mutable task reads.
+        os.path.join(instance_workspace, "state", "tasks"),
+    ]
+    allowed_roots = [os.path.realpath(root) for root in allowed_roots if root]
+
+    candidates: list[str] = []
+    if os.path.isabs(path):
+        candidates.append(os.path.realpath(path))
+    else:
+        candidates.append(os.path.realpath(os.path.join(task_root, path)))
+        if path == "partner" or path.startswith(f"partner{os.sep}"):
+            candidates.append(os.path.realpath(os.path.join(repo_root, path)))
+        if path == "tests" or path.startswith(f"tests{os.sep}"):
+            candidates.append(os.path.realpath(os.path.join(repo_root, path)))
+        if path == "docs" or path.startswith(f"docs{os.sep}"):
+            candidates.append(os.path.realpath(os.path.join(repo_root, path)))
+        if path == "external" or path.startswith(f"external{os.sep}"):
+            candidates.append(os.path.realpath(os.path.join(shared_root, path)))
+        if path == "share" or path.startswith(f"share{os.sep}"):
+            candidates.append(os.path.realpath(os.path.join(shared_root, path)))
+
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        for root in allowed_roots:
+            try:
+                if os.path.commonpath([candidate, root]) == root:
+                    return candidate
+            except ValueError:
+                continue
+    raise ValueError("inspect path is missing or outside allowed read-only roots")
+
+
 def _atomic_inspect_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
-    path = _safe_project_path(ctx, str(params.get("path") or ""))
+    path = _safe_inspect_path(ctx, str(params.get("path") or ""))
     max_chars = int(params.get("max_chars") or 4000)
     with open(path, "rb") as f:
         data = f.read(max_chars)
@@ -2533,6 +2833,23 @@ async def _atomic_execute_skill(ctx: HarnessContext, params: JsonDict) -> JsonDi
             agent_params=agent_params,
             progress_callback=ctx.progress_callback,
         )
+
+        if (
+            not result.ok and not preferred_agent
+            and "cli not found" in str(result.error or "").lower()
+            and agent_name != "hermes"
+        ):
+            logger.warning("[HARNESS] auto-selected agent %s unavailable; falling back to hermes", agent_name)
+            agent_name = "hermes"
+            result = await execute_agent_task(
+                workspace=ctx.workspace,
+                agent=agent_name,
+                task=task,
+                task_instance=ctx.task_instance,
+                allow_web=bool(params.get("allow_web", event_name == "web_search")),
+                agent_params=agent_params,
+                progress_callback=ctx.progress_callback,
+            )
     except Exception as exc:
         logger.warning("[HARNESS] call_agent_skill failed agent=%s task=%s error=%s", agent, task[:80], exc)
         return {"ok": False, "error": str(exc)}
@@ -3205,7 +3522,31 @@ def _maybe_trigger_self_reflect_after_write(ctx, path: str, content: str) -> Non
         log_evolution("report_delivered", detail={"path": str(path), "ext": ext, "content_len": len(content)})
     except Exception:
         pass
-    return
+    # Manual tasks are one bounded user-triggered execution.  This hook used
+    # to append a synthetic user message even though strict_reflect itself was
+    # disabled, leaving noisy failed tasks and violating the production ADR.
+    # Fail closed if runtime configuration cannot be resolved.
+    try:
+        from partner.state.config import manual_stable_mode, runtime_capability_enabled
+
+        runtime_workspace = str(getattr(ctx, "workspace", "") or "")
+        if manual_stable_mode(runtime_workspace):
+            return
+        if not runtime_capability_enabled(runtime_workspace, "automatic_self_heal"):
+            return
+    except Exception:
+        return
+    # Campaign continuation and self-evolution are owned by the persisted
+    # Receipt -> NextAction -> RL controller.  Injecting the legacy
+    # strict_reflect/next_iteration message while a Campaign file is being
+    # written races the current WorkItem, creates unrelated TaskInstances and
+    # bypasses the two-slot/experiment gates.
+    task_instance = getattr(ctx, "task_instance", None)
+    task_request = str(getattr(task_instance, "user_message", "") or "")
+    if "[PARTNER_CAMPAIGN " in task_request:
+        return
+    # ── 2026-08-24 cron 修复：删除早期 `return`，使下方 inbox 注入逻辑重新可达 ──
+    # 之前返回致 5 实例 self_evolution_trigger 数 = 0、迭代链沉默。今恢复。
     # 优先从 path 推导 ws（最可靠，path 必有 /instances/{id}/）
     ws = ""
     m = _re.search(r"^(/.+/instances/[^/]+)/state/", path)
@@ -3222,6 +3563,25 @@ def _maybe_trigger_self_reflect_after_write(ctx, path: str, content: str) -> Non
         m2 = _re.search(r"/instances/(\d{2})/", path)
         if m2:
             ws = path[:m2.end()]
+    if not ws:
+        # ── 2026-08-24 cron 04:43 修复：Bug #34.2 PDF outgoing path 不含 /instances/
+        # 原 Bug #34 钩子用 out_path 推导 ws，但 campaign 把 PDF 输出到
+        # /files/outgoing/20260824_*_*.pdf（无 /instances/），regex 全失败 → return
+        # 实证：最近 17 个 PDF 中 8 个 outgoing-path，0 个 inbox 注入。
+        # 修复：从 ctx.task_instance.workspace 直接兜底推 ws（PDF 是 task 内生成的，
+        # task_instance 必有 workspace）
+        ti2 = getattr(ctx, "task_instance", None)
+        if ti2 is not None:
+            ws2 = getattr(ti2, "workspace", "") or ""
+            if ws2 and "/instances/" in ws2:
+                ws = ws2
+    if not ws:
+        # ── 最后兜底：从 ctx.working_dir 推导
+        wd = getattr(ctx, "working_dir", "") or ""
+        if wd:
+            m3 = _re.search(r"(/mnt/[^/]+/partner_workspace/instances/\w+)", wd)
+            if m3:
+                ws = m3.group(1)
     if not ws:
         return
     # 从 ws 推 instance id
@@ -3794,6 +4154,76 @@ def _atomic_compose_structured_result(ctx: HarnessContext, params: JsonDict) -> 
     if not isinstance(findings, list):
         findings = []
     content = str(params.get("content") or params.get("message") or params.get("artifact_content") or "").strip()
+    # ``data`` is the normal input key for LLM/planner steps.  Accept it as an
+    # alias here so a deterministic compose step cannot silently discard
+    # already-resolved dependency results merely because the planner selected
+    # ``data`` instead of ``sources``.
+    source_value = params.get("sources")
+    if source_value is None:
+        source_value = params.get("data")
+    if not content and source_value is not None:
+        sources = source_value
+        if isinstance(sources, dict):
+            for key in ("markdown", "artifact_content", "content", "text", "parsed", "json"):
+                value = sources.get(key)
+                if value not in (None, "", [], {}):
+                    content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+                    break
+            if not content and sources:
+                content = json.dumps(sources, ensure_ascii=False, indent=2)
+        elif isinstance(sources, (list, tuple)):
+            content = json.dumps(sources, ensure_ascii=False, indent=2)
+        else:
+            content = str(sources or "").strip()
+    if content and str(params.get("output_format") or "").lower() in {"md", "markdown"}:
+        try:
+            structured_source = content
+            if isinstance(structured_source, str):
+                fenced = re.fullmatch(
+                    r"\s*```(?:json)?\s*(.*?)\s*```\s*",
+                    structured_source,
+                    flags=re.DOTALL | re.I,
+                )
+                if fenced:
+                    structured_source = fenced.group(1)
+            structured = json.loads(structured_source) if isinstance(structured_source, str) else structured_source
+
+            def public_structure(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {
+                        key: public_structure(item)
+                        for key, item in value.items()
+                        if not str(key).startswith("_")
+                    }
+                if isinstance(value, list):
+                    return [public_structure(item) for item in value]
+                return value
+
+            structured = public_structure(structured)
+
+            def render_markdown(value: Any, level: int = 2) -> list[str]:
+                lines: list[str] = []
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if isinstance(item, (dict, list)):
+                            lines.append(f"{'#' * min(level, 6)} {key}")
+                            lines.extend(render_markdown(item, level + 1))
+                        else:
+                            lines.append(f"- **{key}**：{item}")
+                elif isinstance(value, list):
+                    for index, item in enumerate(value, 1):
+                        if isinstance(item, (dict, list)):
+                            lines.append(f"{'#' * min(level, 6)} 条目 {index}")
+                            lines.extend(render_markdown(item, level + 1))
+                        else:
+                            lines.append(f"- {item}")
+                else:
+                    lines.append(str(value))
+                return lines
+
+            content = "# 结构化核对结果\n\n" + "\n\n".join(render_markdown(structured))
+        except (json.JSONDecodeError, TypeError):
+            pass
     files_value = params.get("files")
     if not files_value:
         files_value = params.get("artifacts") or params.get("file_paths")
@@ -4044,6 +4474,98 @@ def _get_event_execution_method(event_name: str) -> str:
 
 # ── Generic LLM event handler ──
 
+def _strict_json_from_model_text(text: str) -> Any:
+    """Parse the complete model payload, never a convenient nested fragment."""
+    candidate = str(text or "").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, flags=re.DOTALL | re.I)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    return json.loads(candidate)
+
+
+def _validate_grounded_quotes(value: Any, source_text: str) -> list[str]:
+    errors: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "evidence_quote":
+                quote = str(item or "").strip()
+                if quote and quote != "not_found" and quote not in source_text:
+                    errors.append(f"evidence_quote not found in supplied source: {_clip(quote, 100)}")
+            else:
+                errors.extend(_validate_grounded_quotes(item, source_text))
+    elif isinstance(value, list):
+        for item in value:
+            errors.extend(_validate_grounded_quotes(item, source_text))
+    return errors
+
+
+def _flatten_source_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return "\n".join(_flatten_source_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_flatten_source_text(item) for item in value)
+    return str(value or "")
+
+
+def _deterministic_named_source_extract(params: JsonDict) -> JsonDict | None:
+    """Build the narrow source/quote schema without an unnecessary model call.
+
+    This path is deliberately limited to named, already-read source text with
+    matching source paths.  It prevents long reasoning-only model responses
+    from dropping exact evidence while leaving all semantic synthesis to the
+    following report step.
+    """
+    data = params.get("data")
+    source_paths = params.get("source_paths")
+    fields = {str(item).strip().lower() for item in (params.get("fields") or [])}
+    if not (isinstance(data, dict) and isinstance(source_paths, dict)):
+        return None
+    if not {"source_path", "evidence_quote"}.issubset(fields):
+        return None
+    if not data or set(data) != set(source_paths):
+        return None
+
+    extracted: dict[str, dict[str, str]] = {}
+    stale_capability_claim = re.compile(
+        r"(?:(?:没有|未挂载|不可用|未知).{0,24}(?:shell|file[-_ ]?write|写入工具|工具状态)"
+        r"|(?:shell|file[-_ ]?write|写入工具|工具状态).{0,24}(?:没有|未挂载|不可用|未知))",
+        re.I,
+    )
+    for name, value in data.items():
+        source_text = _flatten_source_text(value)
+        if not source_text.strip():
+            return {"ok": False, "error": f"named source {name} has no resolved content", "retryable": False}
+        candidates: list[str] = []
+        for raw_line in source_text.splitlines():
+            line = raw_line.strip()
+            if len(line) < 30 or len(line) > 240:
+                continue
+            if line.startswith(("#", "<", "```", "|", "![", "[!", "- [")):
+                continue
+            if stale_capability_claim.search(line):
+                continue
+            if sum(character.isalpha() for character in line) < 20:
+                continue
+            candidates.append(line)
+        quote = candidates[0] if candidates else source_text.strip()[:200].strip()
+        if len(quote) < 20:
+            return {"ok": False, "error": f"named source {name} has no 20-character quote", "retryable": False}
+        extracted[str(name)] = {
+            "conclusion": quote,
+            "source_path": str(source_paths[name]),
+            "evidence_quote": quote,
+            "source_excerpt": source_text[:4000],
+        }
+    content = json.dumps(extracted, ensure_ascii=False, indent=2)
+    return {
+        "ok": True,
+        "content": content,
+        "json": extracted,
+        "parsed": extracted,
+        "deterministic": True,
+        "findings": [f"确定性提取 {len(extracted)} 个命名来源的路径、逐字引文与受限摘录"],
+    }
+
 async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     """Generic handler for LLM-driven events (extract, if_condition, validate, etc.).
     
@@ -4053,8 +4575,22 @@ async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     if not ctx.adapter:
         return {"ok": False, "error": "missing adapter"}
 
-    event_name = getattr(ctx.event, "type", None)
+    event_name = params.get("_harness_event_type") or getattr(ctx.event, "type", None)
     event_name = str(event_name.value if hasattr(event_name, "value") else event_name)
+
+    if event_name == "extract":
+        deterministic = _deterministic_named_source_extract(params)
+        if deterministic is not None:
+            return deterministic
+
+    if event_name == "extract":
+        supplied = {
+            key: params.get(key)
+            for key in ("data", "content", "sources")
+            if params.get(key) not in (None, "", [], {})
+        }
+        if not _flatten_source_text(supplied).strip():
+            return {"ok": False, "error": "extract has no resolved source content", "retryable": False}
 
     # Build the instruction from params
     instruction = str(params.get("prompt") or params.get("instruction") or params.get("task") or "").strip()
@@ -4062,15 +4598,29 @@ async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
         instruction = f"执行 {event_name} 操作，基于提供的参数：{json.dumps(params, ensure_ascii=False)[:2000]}"
     
     # Use action prompt builder if available
+    serialized_params = json.dumps(params, ensure_ascii=False)[:30000]
     if ctx.build_action_prompt:
         base_prompt = ctx.build_action_prompt(ctx.event, ctx.title, ctx.state_md, ctx.artifact_path)
-        prompt = f"## 当前步骤指令\n\n{instruction}\n\n## 执行上下文\n\n{base_prompt}"
+        prompt = (
+            f"## 当前步骤指令\n\n{instruction}"
+            f"\n\n## 当前步骤参数\n\n{serialized_params}"
+            f"\n\n## 执行上下文\n\n{base_prompt}"
+        )
     else:
-        prompt = f"## 指令\n\n{instruction}\n\n## 参数\n\n{json.dumps(params, ensure_ascii=False)[:3000]}"
+        # Source-grounded comparison commonly carries two medium-sized source
+        # excerpts.  The former 12k character cut silently removed the second
+        # source and encouraged unsupported completion from model memory.
+        prompt = f"## 指令\n\n{instruction}\n\n## 参数\n\n{serialized_params}"
 
     # Add output format guidance
     if event_name in ("extract",):
-        prompt += "\n\n请以JSON结构化格式输出提取结果。"
+        prompt += (
+            "\n\n请以JSON结构化格式输出提取结果。只能依据参数中显式提供的 data/content/sources；"
+            "不得使用记忆、常识、检索结果或其他上下文补充事实。每条结论必须附 source_path 和 "
+            "evidence_quote（来自输入、最多 200 字符的逐字连续短原文）；逐字意味着必须保留原文中的 "
+            "Markdown 链接、标点、空格与大小写，禁止改写、删词或添加省略号；输入没有依据时写 "
+            "not_found，不得推断。只输出一个完整 JSON 值，不要输出思考过程。"
+        )
     elif event_name in ("if_condition", "switch"):
         prompt += "\n\n请输出你的判断决策（只输出判断结果，不要额外解释）。"
     elif event_name in ("validate", "check_quality"):
@@ -4085,11 +4635,19 @@ async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
             robust = await ctx.robust_executor.execute(
                 event_name=event_name,
                 task_instance=ctx.task_instance,
-                operation=lambda: ctx.adapter.chat(prompt, purpose="action"),
+                operation=lambda: ctx.adapter.chat(prompt, purpose="action_think"),
                 on_timeout="generate_placeholder",
                 on_failure="generate_placeholder",
             )
             if robust.status == "fallback_success":
+                if event_name == "extract":
+                    return {
+                        "ok": False,
+                        "status": "fallback_rejected",
+                        "error": "extract timeout/failure fallback is not grounded evidence",
+                        "content": "",
+                        "retryable": True,
+                    }
                 return {
                     "ok": True,
                     "status": "fallback_success",
@@ -4101,10 +4659,96 @@ async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
                 return {"ok": False, "status": robust.status, "error": robust.error, "content": ""}
             raw = robust.value
         else:
-            raw = await asyncio.to_thread(ctx.adapter.chat, prompt, purpose="action")
+            # This is the lightweight/no-TaskInstance path used by direct
+            # callers and unit adapters. Production Harness calls carry a
+            # RobustExecutor above, which owns the timeout/thread boundary.
+            # Calling a synchronous stub directly here also keeps the pure
+            # handler usable in thread-restricted sandboxes.
+            chat = ctx.adapter.chat
+            raw = (
+                await chat(prompt, purpose="action_think")
+                if inspect.iscoroutinefunction(chat)
+                else chat(prompt, purpose="action_think")
+            )
 
-        parsed = ctx.parse_structured_response(raw or "") if ctx.parse_structured_response else None
-        result = {"ok": True, "content": _clip(raw, 3000)}
+        cleaned_raw = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.DOTALL | re.I).strip()
+        if not cleaned_raw:
+            return {"ok": False, "error": f"{event_name} returned no usable content"}
+        if event_name == "extract":
+            try:
+                parsed = _strict_json_from_model_text(cleaned_raw)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                return {"ok": False, "error": f"extract returned incomplete or invalid JSON: {exc}", "retryable": True}
+            source_value = {
+                key: params.get(key)
+                for key in ("data", "content", "sources")
+                if params.get(key) not in (None, "", [], {})
+            }
+            source_text = _flatten_source_text(source_value)
+            quote_errors = _validate_grounded_quotes(parsed, source_text)
+            data_sources = params.get("data")
+            if isinstance(parsed, dict) and isinstance(data_sources, dict):
+                for source_name, source_content in data_sources.items():
+                    if source_name in parsed:
+                        scoped_errors = _validate_grounded_quotes(
+                            parsed[source_name], _flatten_source_text(source_content),
+                        )
+                        quote_errors.extend(
+                            f"{source_name}: {error}" for error in scoped_errors
+                        )
+            if quote_errors:
+                return {"ok": False, "error": "; ".join(quote_errors[:3]), "retryable": True}
+            requested_fields = [str(item).strip() for item in (params.get("fields") or []) if str(item).strip()]
+            lowered_fields = {field.lower() for field in requested_fields}
+            if isinstance(data_sources, dict) and "evidence_quote" in lowered_fields:
+                missing_grounding: list[str] = []
+                for source_name, source_content in data_sources.items():
+                    if not _flatten_source_text(source_content).strip():
+                        missing_grounding.append(f"{source_name}: source content is empty")
+                        continue
+                    source_result = parsed.get(source_name) if isinstance(parsed, dict) else None
+                    if not isinstance(source_result, dict):
+                        missing_grounding.append(f"{source_name}: result object is missing")
+                        continue
+                    conclusion = str(source_result.get("conclusion") or "").strip().lower()
+                    quote = str(source_result.get("evidence_quote") or "").strip().lower()
+                    if conclusion in {"", "not_found", "null", "none"}:
+                        missing_grounding.append(f"{source_name}: conclusion is not grounded")
+                    if quote in {"", "not_found", "null", "none"}:
+                        missing_grounding.append(f"{source_name}: evidence_quote is not grounded")
+                if missing_grounding:
+                    return {
+                        "ok": False,
+                        "error": "extract omitted required grounded evidence: " + "; ".join(missing_grounding[:4]),
+                        "retryable": True,
+                    }
+                # ``source_paths`` is trusted planner/runtime metadata tied to
+                # the already-read inputs. Do not let the model shorten it to
+                # an alias or basename: downstream reports and receipt checks
+                # need the exact auditable path.
+                source_paths = params.get("source_paths")
+                if isinstance(parsed, dict) and isinstance(source_paths, dict):
+                    for source_name, source_path in source_paths.items():
+                        source_result = parsed.get(source_name)
+                        if isinstance(source_result, dict) and str(source_path or "").strip():
+                            source_result["source_path"] = str(source_path).strip()
+            report_fields = [field for field in requested_fields if "report" in field.lower() or "markdown" in field.lower()]
+            if report_fields and isinstance(parsed, dict):
+                invalid_reports = []
+                for field in report_fields:
+                    report_value = str(parsed.get(field) or "").strip()
+                    if report_value.lower() in {"", "not_found", "null", "none"} or len(report_value) < 120:
+                        invalid_reports.append(field)
+                if invalid_reports:
+                    return {
+                        "ok": False,
+                        "error": "extract returned no substantive report for: " + ", ".join(invalid_reports),
+                        "retryable": True,
+                    }
+            cleaned_raw = json.dumps(parsed, ensure_ascii=False, indent=2)
+        else:
+            parsed = ctx.parse_structured_response(cleaned_raw) if ctx.parse_structured_response else None
+        result = {"ok": True, "content": cleaned_raw, "content_preview": _clip(cleaned_raw, 1000)}
         if parsed:
             result["parsed"] = parsed
         if event_name in ("if_condition", "switch"):
@@ -4118,13 +4762,45 @@ async def _llm_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
 
 # ── Generic Agent event handler ──
 
+def _clean_generated_python(content: str) -> tuple[str, str]:
+    """Return executable Python or an explicit rejection reason.
+
+    Cheap external agents occasionally return a thinking/tool-call transcript
+    where code was requested. Writing that transcript to ``.py`` merely moves
+    the failure to ``run_command`` and creates a misleading source artifact.
+    """
+    import ast as _ast
+
+    raw = str(content or "").strip()
+    if not raw:
+        return "", "generate_code returned empty content"
+    fenced = re.search(r"```(?:python|py)?\s*\n(.*?)```", raw, re.DOTALL | re.I)
+    candidate = fenced.group(1).strip() if fenced else raw
+    candidate = re.sub(r"^\[[A-Za-z0-9_.-]+\]\s*", "", candidate)
+    candidate = re.sub(r"<think>.*?</think>", "", candidate, flags=re.DOTALL | re.I).strip()
+    transcript_markers = ("<tool_call", "<function_calls", "<invoke ", "]<]minimax[>")
+    if any(marker in candidate for marker in transcript_markers):
+        return "", "generate_code returned a tool-call transcript instead of Python"
+    try:
+        tree = _ast.parse(candidate)
+    except SyntaxError as exc:
+        return "", f"generate_code returned invalid Python: {exc.msg} at line {exc.lineno}"
+    meaningful = any(
+        isinstance(node, (_ast.Import, _ast.ImportFrom, _ast.FunctionDef, _ast.AsyncFunctionDef,
+                          _ast.ClassDef, _ast.Assign, _ast.AnnAssign, _ast.Expr))
+        for node in tree.body
+    )
+    if not meaningful:
+        return "", "generate_code returned no executable Python statements"
+    return candidate, ""
+
 async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     """Generic handler for Agent-executed events (web_search, summarize, generate_text, etc.).
     
     Forwards the task to an external Agent via AgentDispatcher.
     Uses the event name to select the best agent via auto-selection.
     """
-    event_name = str(getattr(ctx.event, "type", "") or "")
+    event_name = str(params.get("_harness_event_type") or getattr(ctx.event, "type", "") or "")
     if hasattr(event_name, "value"):
         event_name = event_name.value
 
@@ -4144,6 +4820,19 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
         task = str(getattr(ctx.event, "title", "") or ctx.title or "").strip()
     if not task:
         return {"ok": False, "error": f"missing task for {event_name}"}
+    detailed_prompt = str(params.get("prompt") or params.get("instruction") or "").strip()
+    if detailed_prompt and detailed_prompt != task:
+        task += "\n\n详细要求：\n" + detailed_prompt
+    supplied_context = {
+        key: params.get(key)
+        for key in ("data", "content", "sources", "inputs", "source_paths")
+        if params.get(key) not in (None, "", [], {})
+    }
+    if supplied_context:
+        task += (
+            "\n\n以下是上游步骤已经读取/验证的真实输入，只能据此执行：\n"
+            + json.dumps(supplied_context, ensure_ascii=False)[:24000]
+        )
 
     # Try auto-selection: find best agent for this event's capabilities
     preferred_agent = params.get("agent", "")
@@ -4172,7 +4861,10 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
             agent_name = "hermes"
 
     # Forward remaining parameters as agent_params
-    agent_params = {k: v for k, v in params.items() if k not in ("agent", "task", "query", "user_request", "allow_web", "prompt", "instruction")}
+    agent_params = {k: v for k, v in params.items() if k not in (
+        "agent", "task", "query", "user_request", "allow_web", "prompt", "instruction",
+        "_harness_event_type",
+    )}
 
     try:
         import time as _ws_time
@@ -4240,6 +4932,113 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
         output = result.output or {}
         content = output.get("content") or ""
 
+        if event_name in {"generate_text", "write_report", "summarize"}:
+            def _clean_text(value: Any) -> str:
+                cleaned = re.sub(r"^\[[A-Za-z0-9_.-]+\]\s*", "", str(value or "").strip())
+                cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.I).strip()
+                fenced = re.fullmatch(r"```(?:markdown|md|text)?\s*\n(.*?)\n```", cleaned, flags=re.DOTALL | re.I)
+                return fenced.group(1).strip() if fenced else cleaned
+
+            def _text_rejection_reason(value: str) -> str:
+                if not value:
+                    return "returned only reasoning noise"
+                false_capability_patterns = (
+                    r"(?:本环境|当前环境|我)(?:尚)?(?:未配置|没有|缺少).{0,24}(?:文件)?写入(?:工具|能力)",
+                    r"(?:本环境|当前环境|本回合|当前回合|我).{0,24}(?:没有|缺少|无可用|不可用|无法).{0,36}(?:shell|file[-_ ]?write|write_to_file|写文件|文件写入|写入工具|执行通道)",
+                    r"请(?:用户)?提供.{0,24}(?:文件)?写入(?:工具|能力)",
+                    r"(?:this environment|I)\s+(?:cannot|can't|is unable to).{0,30}write.{0,20}file",
+                    r"File-mutation verifier:.{0,240}(?:NOT modified|Failed to write file)",
+                )
+                if any(re.search(pattern, value, flags=re.I | re.S) for pattern in false_capability_patterns):
+                    return "falsely claims that file-writing capability is unavailable"
+                # An action promise is not the requested artifact.  This is a
+                # frequent failure mode for CLI agents asked to compose a file.
+                promise_patterns = (
+                    r"^(?:我将|我会|接下来我会|下面我将|现在我将).{0,80}(?:撰写|生成|整理|完成|写入)",
+                    r"^(?:I will|I'll|I am going to).{0,80}(?:write|create|generate|compose)",
+                )
+                if any(re.search(pattern, value, flags=re.I | re.S) for pattern in promise_patterns):
+                    return "returned an action promise instead of the requested final text"
+                requested_min = 0
+                requirement_text = "\n".join(
+                    str(params.get(key) or "") for key in ("task", "prompt", "instruction")
+                )
+                for pattern in (
+                    r"不少于\s*(\d+)\s*(?:个)?(?:中文)?(?:字|字符)",
+                    r"至少\s*(\d+)\s*(?:个)?(?:中文)?(?:字|字符)",
+                    r"(?:at least|minimum)\s*(\d+)\s*(?:words|characters)",
+                ):
+                    match = re.search(pattern, requirement_text, flags=re.I)
+                    if match:
+                        requested_min = max(requested_min, int(match.group(1)))
+                baseline = 30 if event_name == "summarize" else 80
+                required = max(baseline, requested_min)
+                if len(value) < required:
+                    return f"returned only {len(value)} characters; required at least {required}"
+                if re.search(r"evidence_quote|逐字(?:连续)?(?:摘录|引文|引用)", requirement_text, re.I):
+                    expected_pairs = 0
+                    data = params.get("data")
+                    if isinstance(data, dict):
+                        for key, raw_sources in data.items():
+                            if not str(key).startswith("verified_sources"):
+                                continue
+                            parsed_sources = raw_sources
+                            if isinstance(raw_sources, str):
+                                try:
+                                    parsed_sources = json.loads(raw_sources)
+                                except (ValueError, TypeError):
+                                    parsed_sources = None
+                            if isinstance(parsed_sources, dict):
+                                expected_pairs += len(parsed_sources)
+                    if not expected_pairs and isinstance(params.get("source_paths"), dict):
+                        expected_pairs = len(params["source_paths"])
+                    source_count = len(re.findall(r"(?im)^\s*(?:[-*>]\s*)?`?source_path`?\s*[:：]", value))
+                    quote_count = len(re.findall(r"(?im)^\s*(?:[-*>]\s*)?`?evidence_quote`?\s*[:：]", value))
+                    if expected_pairs and min(source_count, quote_count) < expected_pairs:
+                        return (
+                            f"returned only {min(source_count, quote_count)} source/evidence pairs; "
+                            f"required {expected_pairs}"
+                        )
+                return ""
+
+            content = _clean_text(content)
+            rejection = _text_rejection_reason(content)
+            if rejection:
+                corrective_task = (
+                    task
+                    + "\n\n纠偏：上一次输出未通过验收（"
+                    + rejection
+                    + "）。现在直接输出完整成品正文；不要描述你将做什么，不要调用工具，"
+                      "不要只给提纲或写文件承诺，也不要输出思考过程。"
+                )
+                retry = await execute_agent_task(
+                    workspace=ctx.workspace,
+                    agent=agent_name,
+                    task=corrective_task,
+                    task_instance=ctx.task_instance,
+                    allow_web=False,
+                    agent_params=agent_params,
+                    progress_callback=ctx.progress_callback,
+                )
+                if not retry.ok:
+                    return {"ok": False, "skill": agent_name,
+                            "error": f"{event_name} retry failed after non-substantive output: {retry.error or rejection}"}
+                output = retry.output or {}
+                content = _clean_text(output.get("content") or "")
+                rejection = _text_rejection_reason(content)
+                if rejection:
+                    return {"ok": False, "skill": agent_name, "error": f"{event_name} {rejection}"}
+            output = dict(output)
+            output["content"] = content
+
+        if event_name == "generate_code":
+            content, code_error = _clean_generated_python(str(content))
+            if code_error:
+                logger.warning("[HARNESS] rejected invalid generate_code output: %s", code_error)
+                return {"ok": False, "skill": agent_name, "error": code_error, "content": ""}
+            output = dict(output)
+            output["content"] = content
+
         # ── generate_code: auto-write returned code to a file ──
         # The planner may generate a plan like: generate_code → run_command(path/to/file.py)
         # But generate_code only returns code as text — nobody writes it to disk.
@@ -4306,10 +5105,23 @@ def _local_read_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     path = str(params.get("path") or params.get("filename") or "").strip()
     if not path:
         return {"ok": False, "error": "missing path"}
+    if not os.path.exists(path) and os.path.basename(path) == "partner_config.json":
+        try:
+            from ..workspace.workspace_layout import workspace_root_from_instance
+
+            root = workspace_root_from_instance(ctx.workspace)
+            canonical = os.path.join(root, "config", "partner_config.json")
+            if os.path.isfile(canonical):
+                path = canonical
+        except Exception:
+            pass
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-        return {"ok": True, "content": content, "size": len(content)}
+        # Preserve the resolved path so user-visible progress can report the
+        # read operation itself instead of echoing arbitrary (and potentially
+        # stale or misleading) prose from inside the source document.
+        return {"ok": True, "content": content, "path": path, "size": len(content)}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -4576,6 +5388,12 @@ def _local_create_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     if content is None:
         content = ""
     content_str = str(content)
+    if not content_str.strip():
+        return {"ok": False, "error": f"create_file resolved empty content for {path}"}
+    if re.fullmatch(r"\$\{[^{}]+\}", content_str.strip()):
+        return {"ok": False, "error": f"create_file contains unresolved step reference for {path}"}
+    if content_str.strip().lower() in {"not_found", "null", "none"}:
+        return {"ok": False, "error": f"create_file contains only a missing-value sentinel for {path}"}
 
     # ── Python file: extract clean code from Markdown-wrapped output ──
     # LLMs often return Python code embedded in Markdown (with Chinese comments,
@@ -4609,11 +5427,12 @@ def _local_create_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
                 break
             if _code_start > 0:
                 content_str = "\n".join(_lines[_code_start:])
-            # Try to validate again; if still fails, log warning but keep content
+            # Try to validate again; never persist an invalid Python artifact.
             try:
                 _ast_mod.parse(content_str)
             except SyntaxError as _se:
-                logger.warning("[HARNESS] Python file %s has syntax error after cleanup: %s", path, _se)
+                logger.warning("[HARNESS] rejecting Python file %s after cleanup: %s", path, _se)
+                return {"ok": False, "error": f"invalid Python content for {path}: {_se}"}
 
     # Create file
     try:

@@ -296,6 +296,12 @@ def _run_instance_mode(argv: list[str]):
             pass
 
     def _push_to_last_user(content: str):
+        from partner.core.delivery_context import local_delivery_target
+
+        local_target = local_delivery_target(workspace)
+        if local_target:
+            _append_proactive_history(content, local_target, kind="message")
+            return True
         ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
         try:
             with open(ctx_path, "r", encoding="utf-8") as f:
@@ -325,6 +331,17 @@ def _run_instance_mode(argv: list[str]):
     def _push_file_to_last_user(file_data: bytes, filename: str = "", caption: str = ""):
         attachment = _history_file_attachment(file_data, filename)
         attachments = [attachment] if attachment else []
+        from partner.core.delivery_context import local_delivery_target
+
+        local_target = local_delivery_target(workspace)
+        if local_target:
+            _append_proactive_history(
+                caption or filename or "Partner 阶段汇报",
+                local_target,
+                kind="file",
+                attachments=attachments,
+            )
+            return True
         ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
         try:
             with open(ctx_path, "r", encoding="utf-8") as f:

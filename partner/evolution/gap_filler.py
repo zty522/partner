@@ -92,6 +92,17 @@ def _download_extract(url: str, kind: str, dest_sub: str) -> bool:
         return False
 
 
+
+def _ws_to_instance(workspace: str) -> str:
+    """从 workspace 路径提取实例 ID（如 /.../instances/02/state/tasks/xxx → '02'）。
+    Bug #29.3 fix 2026-08-23：fill_gap_start / gap_present / gap_fill_failed 三类事件
+    detail 无 path/working_dir 字段, helper 无法归类 → 改为调用方主动传 instance 参数。
+    """
+    if not workspace:
+        return ""
+    m = re.search(r"/instances/([A-Za-z0-9_-]+)/", workspace)
+    return m.group(1) if m else ""
+
 def fill_gap(workspace: str, tool_key: str) -> dict:
     """自动补缺：检测 → 自动下载（支持时）→ 记录。绝不抛异常。
 
@@ -100,7 +111,8 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
     """
     ts = datetime.now().isoformat(timespec="seconds")
 
-    log_evolution("fill_gap_start", detail={"gap_key": tool_key})
+    _inst = _ws_to_instance(workspace)
+    log_evolution("fill_gap_start", instance=_inst, detail={"gap_key": tool_key})
     result = {"ok": False, "status": "unsupported", "path": "", "message": "", "ts": ts, "tool": tool_key}
 
     path = detect_tool(tool_key)
@@ -108,7 +120,7 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
         result.update({"ok": True, "status": "already_present", "path": path,
                        "message": f"{tool_key} 已就绪: {path}"})
         _record(result, workspace)
-        log_evolution("gap_present", detail={"gap_key": tool_key, "path": path})
+        log_evolution("gap_present", instance=_inst, detail={"gap_key": tool_key, "path": path})
         return result
 
     src = _KNOWN_TOOL_SOURCES.get(tool_key, {})
@@ -130,9 +142,9 @@ def fill_gap(workspace: str, tool_key: str) -> dict:
 
     _record(result, workspace)
     if result.get("status") == "filled":
-        log_evolution("gap_filled", detail={"gap_key": tool_key, "path": result.get("path", "")})
+        log_evolution("gap_filled", instance=_inst, detail={"gap_key": tool_key, "path": result.get("path", "")})
     else:
-        log_evolution("gap_fill_failed", detail={"gap_key": tool_key, "status": result.get("status")})
+        log_evolution("gap_fill_failed", instance=_inst, detail={"gap_key": tool_key, "status": result.get("status")})
     return result
 
 

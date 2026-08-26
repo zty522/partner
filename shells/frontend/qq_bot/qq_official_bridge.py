@@ -122,6 +122,7 @@ class QQQfficialBridge:
         self._singleton_lock_path = os.path.join(state_dir, "qq_bridge.lock")
         self._recent_message_file = os.path.join(state_dir, "qq_recent_messages.json")
         self._qq_chat_history_file = os.path.join(state_dir, "qq_chat_history.jsonl")
+        self._delivery_state_file = os.path.join(state_dir, "qq_delivery_state.json")
         self._recent_reply_keys: Dict[str, float] = {}
         self._interaction_orchestrator: Optional[InteractionOrchestrator] = None
 
@@ -184,6 +185,7 @@ class QQQfficialBridge:
 
         self._running = True
         self._stats["start_time"] = datetime.now().isoformat()
+        self._write_delivery_state(False, "starting")
 
         logger.info("Starting QQ Official Bridge...")
         logger.info(f"  Workspace: {self.workspace}")
@@ -233,8 +235,47 @@ class QQQfficialBridge:
         """Stop the bridge."""
         logger.info("Stopping QQ Official Bridge...")
         self._running = False
+        self._write_delivery_state(False, "stopped")
         if self._bot:
             self._bot.stop()
+
+    def _write_delivery_state(self, ready: bool, status: str, error: str = ""):
+        """Expose delivery readiness without leaking credentials."""
+        payload = {
+            "schema_version": 1,
+            "delivery_ready": bool(ready),
+            "status": str(status),
+            "error_type": str(error),
+            "updated_at": datetime.now().isoformat(),
+        }
+        temporary = self._delivery_state_file + ".tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            os.replace(temporary, self._delivery_state_file)
+        except OSError:
+            pass
+
+    def _expire_stale_delivery_startup(self, timeout_sec: float | None = None) -> bool:
+        """Turn a bridge that never reached READY into an explicit error."""
+        if timeout_sec is None:
+            try:
+                timeout_sec = float(os.environ.get("PARTNER_QQ_READY_TIMEOUT_SEC", "90"))
+            except ValueError:
+                timeout_sec = 90.0
+        try:
+            with open(self._delivery_state_file, "r", encoding="utf-8") as handle:
+                state = json.load(handle)
+            if state.get("delivery_ready") or state.get("status") != "starting":
+                return False
+            updated_at = datetime.fromisoformat(str(state.get("updated_at") or ""))
+            if (datetime.now() - updated_at).total_seconds() < max(0.0, float(timeout_sec)):
+                return False
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+        self._write_delivery_state(False, "error", "ReadyTimeoutError")
+        return True
 
     def _start_notification_poller(self):
         """Start a background thread that checks for pending notifications."""
@@ -244,6 +285,7 @@ class QQQfficialBridge:
             pending_file = os.path.join(self.workspace, "state", "pending_notifications.json")
             while self._running:
                 try:
+                    self._expire_stale_delivery_startup()
                     # Load existing pending notifications
                     pending_notifs = []
                     if os.path.exists(pending_file):
@@ -296,6 +338,7 @@ class QQQfficialBridge:
     def _handle_ready(self, bot_info: QQBotInfo):
         """Called when bot successfully connects and is ready."""
         logger.info(f"Bot ready: {bot_info.name} ({bot_info.id})")
+        self._write_delivery_state(True, "ready")
         self.journal.log(JournalEntry(
             task_id="qq_bridge",
             task_type="system",
@@ -306,6 +349,7 @@ class QQQfficialBridge:
     def _handle_error(self, error: Exception):
         """Called when an error occurs."""
         logger.error(f"QQ Bot error: {error}")
+        self._write_delivery_state(False, "error", type(error).__name__)
 
     def _handle_message(self, msg: QQMessage):
         """Handle an incoming QQ message.

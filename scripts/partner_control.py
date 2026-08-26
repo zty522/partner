@@ -24,7 +24,7 @@ def _systemctl(action: str, instance_ids: list[str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("pause", "resume", "switch", "status"))
+    parser.add_argument("action", choices=("pause", "resume", "restart", "switch", "status"))
     parser.add_argument("instances", nargs="*", default=[])
     args = parser.parse_args()
     ids = ALL if not args.instances or "all" in args.instances else args.instances
@@ -42,13 +42,23 @@ def main() -> int:
             assert_start_allowed(ROOT, value)
         state = set_paused(ROOT, ids, False)
         _systemctl("start", ids)
+    elif args.action == "restart":
+        scheduler = load_scheduler(ROOT)
+        assigned = set(scheduler.get("active_slots") or [])
+        outside = sorted(set(ids) - assigned)
+        if outside:
+            parser.error(f"restart only accepts current active slots: {', '.join(sorted(assigned)) or 'none'}")
+        _systemctl("restart", ids)
+        state = load_control(ROOT)
     elif args.action == "switch":
         if not args.instances or "all" in args.instances:
             parser.error("switch requires one or two explicit instance IDs")
         previous = set(load_scheduler(ROOT).get("active_slots", []))
         set_active_slots(ROOT, ids, reason="manual slot switch")
         _systemctl("stop", sorted(previous - set(ids)))
-        _systemctl("start", ids)
+        # Restart selected slots as well: a no-op `start` leaves already active
+        # instances on stale imported code after a manual-mode repair.
+        _systemctl("restart", ids)
         state = load_control(ROOT)
     else:
         state = load_control(ROOT)

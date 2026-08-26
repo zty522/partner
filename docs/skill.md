@@ -1,5 +1,14 @@
 # Partner Agent 功能清单
 
+## 2026-08-26 新增：Episode 级离线学习与受控 Canary（实验）
+
+- 可把一个持久 task 的 planner/model/tool/artifact/Receipt/交付证据归约为 Episode Trace v3。
+- 可计算 truth、business progress、handoff、observability、efficiency、safety 六维奖励。
+- 可在 shadow 聚类失败、登记版本化 Candidate Skill，并把历史 baseline 投影与真实 canary 分开统计。
+- 手动任务终态自动 best-effort 归约；失败任务也保留。Candidate 不能自动修改或晋升 production。
+- 首个 preflight 候选已有 10 个 baseline Episode 与 17 个真实 candidate Episode，其中 4 次完整合格；
+  当前 arm 尚未 feature-isolated，所以仍为 `status=canary`、`production_effective=false`。
+
 ## 一、核心能力
 
 ### 1. 自主任务规划与执行
@@ -70,11 +79,11 @@
 **实例**:
 | ID | QQ App ID | 用途 |
 |----|-----------|------|
-| 01 | 1904072984 | 可见浏览器与逐步视觉回执（active） |
-| 02 | 1904082527 | 分子评估与连续研究（active） |
+| 01 | 1904072984 | 可见浏览器与逐步视觉回执（当前暂停） |
+| 02 | 1904082527 | 分子评估与连续研究（当前暂停） |
 | 03 | 1904095253 | Partner 框架与前端优化（inactive） |
-| 04 | 1904095257 | 文献/GitHub 拉取、复现与学习（inactive） |
-| 05 | 1904110644 | Agent 自进化探索与验证（inactive） |
+| 04 | 1904095257 | 文献/GitHub 拉取、复现与学习（当前受控槽） |
+| 05 | 1904110644 | Agent 自进化探索与验证（当前受控槽） |
 
 ---
 
@@ -156,6 +165,9 @@
 | 能力盘点 | `evolution/self_review.py` | 会什么/缺口/学习计划（token 匹配，缺口 19→真实缺口） |
 | 治理状态机 | `governance/evolution_loop.py` | Issue 去重→候选实验→标准验证→promotion/rollback |
 | 运行信号 | `governance/signal_detector.py` | 从明确失败、缺产物、缺交付和重复事件中产生可核验证据 |
+| Episode reducer | `governance/episode_trace.py` | observe-first 原始事件归约、失败分类与六维不可补偿奖励 |
+| Candidate registry | `governance/candidate_skills.py` | 版本、来源、适用边界、反例、回滚与显式晋升合同 |
+| Shadow replay | `governance/shadow_replay.py` | 历史反事实投影与真实 candidate canary 分臂统计 |
 
 ## 四、上下文与实例治理
 
@@ -165,6 +177,10 @@
 - `scripts/partner_control.py switch 01 02` 是切换双实例槽位的运维入口。
 - `governance/campaign.py` 把数小时/整夜目标拆成可恢复 WorkItem，执行租约、双槽、预算、watchdog、QQ 报告和项目/进化返回路径。
 - `scripts/partner_campaign.py start ... --detach` 让 Campaign 脱离外部 Agent 会话继续运行。
+- Campaign 完成业务 WorkItem 后把产物归档为 EvidenceManifest，并由 Receipt 提出可执行 NextAction；
+  RL v2 会实际选择 baseline/candidate 下一事件，达到双臂证据门后才允许 PromotionDecision。
+- Campaign 直接业务路径具备确定性的 started/executed/finished 用户进度回执；文件投递合同统一归一化后再生成收尾结论，缺阶段回执时验收失败。
+- continuous 项目报告按实例使用领域 renderer；公共 PDF 能力只提供封面、层级、代码块、页眉和页码，避免固定模板覆盖业务表达。
 
 ---
 
@@ -208,4 +224,4 @@
 
 ---
 
-*最后更新: 2026-08-23*
+*最后更新: 2026-08-26（Episode/Shadow/Canary 五阶段）*

@@ -266,6 +266,11 @@ async def atomic_strict_reflect(ctx, params: JsonDict) -> JsonDict:
         round (int, 可选)
     返回: {ok, reflection, file, verdict}
     """
+    from partner.state.config import manual_stable_mode, runtime_capability_enabled
+    workspace = _workspace_of(ctx)
+    if manual_stable_mode(workspace) or not runtime_capability_enabled(workspace, "automatic_iteration"):
+        return {"ok": False, "status": "disabled_in_manual_stable", "retryable": False,
+                "error": "自动反思/迭代已暂停；等待用户明确的新指令"}
     meta = _read_iter_meta(ctx)
 
     iter_dir = _iter_dir(ctx)
@@ -393,6 +398,11 @@ async def atomic_next_iteration(ctx, params: JsonDict) -> JsonDict:
         round (int, 可选): 当前已完成轮次
     返回: {ok, status: "done"(目标达成) | "started"(已启动下一轮) | "max_reached", next_content, inbox_file}
     """
+    from partner.state.config import manual_stable_mode, runtime_capability_enabled
+    workspace = _workspace_of(ctx)
+    if manual_stable_mode(workspace) or not runtime_capability_enabled(workspace, "automatic_iteration"):
+        return {"ok": False, "status": "disabled_in_manual_stable", "retryable": False,
+                "error": "自动下一轮已暂停；等待用户明确的新指令"}
     meta = _read_iter_meta(ctx)
 
     iter_dir = _iter_dir(ctx)

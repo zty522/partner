@@ -40,7 +40,13 @@ def _artifact_handoff(previous: IterationReceipt | None, inputs: list[str]) -> b
     normalized_inputs = {str(Path(value).expanduser()) for value in inputs}
     previous_names = {Path(value).name for value in previous.artifacts}
     input_names = {Path(value).name for value in normalized_inputs}
-    return bool(normalized_inputs.intersection(previous.artifacts) or previous_names.intersection(input_names))
+    if normalized_inputs.intersection(previous.artifacts) or previous_names.intersection(input_names):
+        return True
+    # Legacy QQ delivery copies preserve the original basename after a
+    # timestamp prefix. Keep this identical to the manual pre-gate so the
+    # lower-level Receipt validator does not reject a migration-safe handoff.
+    return any(input_name.endswith("_" + previous_name)
+               for previous_name in previous_names for input_name in input_names)
 
 
 def record_iteration(workspace: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -151,6 +157,15 @@ def record_action_state(
         action.updated_at = now_iso()
         data = action.to_dict()
         append_jsonl(project_governance_dir(workspace, project_id) / "action_history.jsonl", data)
+        if action.status in {"completed", "blocked", "cancelled"}:
+            remaining = request_next_action(workspace, {"project_id": project_id})
+            if remaining.get("status") == "no_proposed_action":
+                state = load_project_state(workspace, project_id)
+                if state:
+                    state.status = "blocked" if action.status == "blocked" else "completed"
+                    state.blocked_reason = action.blocked_reason if action.status == "blocked" else ""
+                    state.updated_at = now_iso()
+                    save_project_state(workspace, state)
         return {"ok": True, "status": action.status, "action": data}
     except (OSError, ValueError) as exc:
         return {"ok": False, "status": "invalid_action_transition", "error": str(exc), "retryable": False}

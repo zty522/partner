@@ -132,6 +132,8 @@ from .governance_events import (
     atomic_start_evolution_experiment,
     atomic_decide_evolution_experiment,
     atomic_observe_evolution_signals,
+    atomic_review_manual_evolution_evidence,
+    atomic_decide_manual_canary,
 )
 from .campaign_events import (
     atomic_campaign_status,
@@ -140,6 +142,7 @@ from .campaign_events import (
     atomic_pause_campaign,
     atomic_cancel_campaign,
 )
+from .continuous_project_events import atomic_continuous_project_step
 
 
 def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
@@ -360,6 +363,10 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_decide_evolution_experiment, {"external_call": False}),
         ("observe_evolution_signals", "从事件失败、当前任务无产物、交付缺回执和连续重复事件中提取高信号 Issue；不根据模糊文字猜测问题。", "local",
          atomic_observe_evolution_signals, {"external_call": False}),
+        ("review_manual_evolution_evidence", "审查01-04真实手动任务轨迹的样本数、结果新颖性、Receipt和来源异构性；过门只建立candidate实验，绝不自动晋升。参数: project_id(可选)", "local",
+         atomic_review_manual_evolution_evidence, {"external_call": False, "produces_artifact": True}),
+        ("decide_manual_canary", "仅在baseline/candidate各至少3样本且已有真实回归证明时汇总指定实验并写显式PromotionDecision。参数: experiment_id", "local",
+         atomic_decide_manual_canary, {"external_call": False, "produces_artifact": True}),
         ("campaign_status", "读取持久 Campaign、WorkItem 和 Lease 状态；service/heartbeat 不冒充任务进度。", "local",
          atomic_campaign_status, {"external_call": False}),
         ("create_campaign", "创建有期限、双槽、重试/失败/模型/成本预算的长期 Campaign；只持久化，需 runner 才会 dispatch。", "local",
@@ -370,6 +377,8 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_pause_campaign, {"external_call": False}),
         ("cancel_campaign", "取消 Campaign 并保留全部审计记录。参数: reason", "local",
          atomic_cancel_campaign, {"external_call": False}),
+        ("continuous_project_step", "执行由 Receipt 与 RL canary 选择的有界业务增量步骤。参数: strategy_id", "local",
+         atomic_continuous_project_step, {"external_call": True, "produces_artifact": True}),
 
     ]
     return events

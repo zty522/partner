@@ -115,7 +115,12 @@ Partner 持续从外部前沿工作学习并转化为自身能力：
 | ERA（Nature, AI 科研系统） | 树搜索式的自主实验推进 |
 | Polar（Agentic RL on Any Harness） | API Proxy 架构 |
 | VeriSkill | 技能生成后的验证机制 |
+| DeepSeek Harness | durable/live 事件分离、可重放会话与工具生命周期（仅设计参考） |
+| OpenAI Codex | 原始证据后归约、模型可见/运行时分离与策略边界（仅设计参考） |
 | PocketFlow / CytoBridge / ViSNet / AI2BMD / Amber | 生物信息学工具链集成 |
+
+固定 revision、许可证及“未复制源码”的边界见
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 ## 常用命令
 

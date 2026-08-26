@@ -1,5 +1,9 @@
 # 五实例双槽位调度
 
+> 当前使用方式是手动换槽，不自动轮转。执行
+> `python scripts/partner_control.py switch 03 04` 等命令时，移出的实例停止、选中的实例重启；
+> Campaign scheduler 当前暂停，不能自行改变槽位。
+
 ## 约束
 
 - 可管理实例：01–05。

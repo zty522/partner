@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "partner/delivery_readiness.schema.json",
+  "title": "DeliveryReadiness",
+  "type": "object",
+  "required": ["schema_version", "delivery_ready", "status", "error_type", "updated_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "delivery_ready": {"type": "boolean"},
+    "status": {"enum": ["starting", "ready", "error", "stopped"]},
+    "error_type": {"type": "string"},
+    "updated_at": {"type": "string"}
+  },
+  "additionalProperties": false
+}

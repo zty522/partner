@@ -3,6 +3,11 @@
 > ⚠️ **维护纪律**：Partner 自进化/自愈引擎每次触发时自动读取这些文档。
 > 修改任何 Partner 代码后，必须同步更新对应文档。文档是 Partner 自我认知的唯一来源。
 
+> **当前运行基线（2026-08-26）**：生产默认为 `manual_stable`。用户手动发消息，
+> 实例确认收到、逐步汇报并在一次有界任务后停止。Campaign、自动迭代、Research Loop、RL
+> 自主循环和自主 cron 仍暂停；04 的一个最终成品真值门已通过受控 canary 显式晋升，但不会自动续轮。先读
+> [`architecture/manual_stable_core.md`](architecture/manual_stable_core.md)。
+
 ---
 
 ## 零、当前进度入口
@@ -15,10 +20,9 @@
 
 ---
 
-## 一、自进化与自愈能力范围
+## 一、自进化与自愈能力范围（历史实验能力，当前默认关闭）
 
-Partner 的自进化引擎 (`evolution/self_heal.py`, `evolution/tree_search.py`, `evolution/self_evolve_engine.py`)
-和自愈机制可以改进两个层面：
+这些模块仍保留用于研究和追溯，但不能在 `manual_stable` 下自动触发，也不能作为普通用户消息的旁路。
 
 ### 层面 1：改进 Partner 本身的代码和机制
 
@@ -64,9 +68,12 @@ Partner 在自进化和研究过程中，从以下来源获取知识：
 docs/
 ├── README.md                    ← 【本文件】顶层说明：能力范围、知识来源、文档地图
 ├── current_status.md            ← 🔴 当前权威基线：运行状态、实机证据、限制、下一步
+├── product_principles.md        ← 🔴 L1 产品原则：过程可见、领域报告、连续推进与防回退
 ├── catalog.yaml                 ← L0 机器目录：层级、权威性、标签、实例和预算
 ├── contracts/                   ← Project/Receipt/Issue/Experiment/Context JSON Schema
 ├── architecture/                ← 知识、项目迭代、自进化和双槽调度的当前设计
+│   ├── user_observability_and_reports.md ← 三阶段消息、领域报告与验收硬门
+│   ├── manual_stable_core.md       ← 当前生产路径：手动触发、逐步消息、单轮结束、双槽轮换
 ├── handoff/                     ← 新模型阅读顺序、改动协议与验真规则
 ├── operations/                  ← Campaign 启动、恢复和长跑验收手册
 ├── decisions/                   ← 当前架构决策记录（ADR）
@@ -81,12 +88,12 @@ docs/
 │
 ├── change_log.md                ← 问题→修复记录（持续追加）
 │
-├── external_learning.md         ← 外部知识借鉴
-│   ├── PocketFlow / CytoBridge 工具集成
-│   ├── SESA → Skill Bank 借鉴
-│   ├── ERA (Nature) → 树搜索借鉴
-│   ├── Polar (NVIDIA) → API Proxy 借鉴
-│   └── VeriSkill → 技能验证借鉴
+├── external_learning.md         ← 外部资料 present/indexed/integrated 证据边界
+├── architecture/harness_reference_adoption.md ← DeepSeek/Codex/OpenClaw/Hermes 固定版本、统一设计与禁用边界
+├── decisions/0006-unified-harness-episode-learning.md ← 四 Harness→Episode v3→Shadow 的统一决策
+├── architecture/rl_evolution.md ← 轨迹、可验证奖励、候选策略与晋升门
+├── architecture/project_portfolio.md ← 五项目输入指纹轮转、双槽与 05 波次门
+├── operations/campaign_2h_audit_2026-08-23.md ← 两小时失败证据与修复
 │
 ├── sprint1_基础架构.md          ← 历史 sprint
 ├── sprint2_核心架构.md
@@ -98,6 +105,9 @@ docs/
 ├── sprint8_设计.md             ← 历史 sprint（Research Loop + 深度研究闭环）
 ├── sprint9_自我认知与自主学习.md  ← 历史 sprint（强制写设计 + 能力盘点）
 ├── sprint10_严格测试.md        ← 历史 sprint（分层工程测试）
+├── sprint11_执行型持续迭代.md  ← 历史 sprint（五实例执行 profile）
+├── sprint12_单项目证据闭环.md  ← 当前 sprint（02 TargetDiff 五阶段→05 里程碑 RL）
+├── sprint14_手动受控Canary与真值门晋升.md ← 04/05 六样本实验、显式 PromotionDecision
 ├── testing_report_sprint10.md ← Sprint 10 测试记录 + 最新回归附录
 │
 ├── architecture_review.md      ← 架构审视：闭环后的差距分析
@@ -149,4 +159,4 @@ docs/
 
 ---
 
-*最后更新: 2026-08-23*
+*最后更新: 2026-08-26（四 Harness 统一、Episode v3、Reward Vector 与首个 Shadow；生产自治仍暂停）*

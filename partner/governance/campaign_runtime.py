@@ -11,6 +11,16 @@ from .scheduler import load_scheduler, set_active_slots
 from .storage import workspace_root
 
 
+def runtime_instance_ready(workspace: str, instance_id: str) -> bool:
+    """Return true only when the instance's real delivery bridge is ready."""
+    path = workspace_root(workspace) / "instances" / str(instance_id) / "state" / "qq_delivery_state.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return payload.get("delivery_ready") is True and payload.get("status") == "ready"
+
+
 def dispatch_to_instance(workspace: str, item: WorkItem, instruction: str) -> str:
     """Append one uniquely identified task to an instance inbox."""
     root = workspace_root(workspace)
@@ -21,7 +31,12 @@ def dispatch_to_instance(workspace: str, item: WorkItem, instruction: str) -> st
     # Retries must be distinct inbox messages. Reusing the first attempt's id
     # lets the instance-level deduplicator consume the retry without executing
     # it, while the controller incorrectly believes it was queued.
-    message_id = f"campaign_{item.campaign_id}_{item.work_item_id}_attempt_{max(1, item.attempt)}"
+    recoveries = sum(str(value).startswith("transport_recovery=") for value in item.evidence)
+    recovery_suffix = f"_recovery_{recoveries}" if recoveries else ""
+    message_id = (
+        f"campaign_{item.campaign_id}_{item.work_item_id}_attempt_{max(1, item.attempt)}"
+        f"{recovery_suffix}"
+    )
     entry = {
         "id": message_id,
         "message_id": message_id,

@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-08-23"
+updated_at: "2026-08-26"
 authority_order: [canonical, current, reference, historical]
 tiers:
   L0: always-load routing metadata only
@@ -13,6 +13,20 @@ documents:
     tier: L1
     authority: canonical
     tags: [status, instances, priorities, evidence]
+    instances: [all]
+    max_chars: 7000
+  - id: product_principles
+    path: docs/product_principles.md
+    tier: L1
+    authority: canonical
+    tags: [identity, product, user-experience, continuity, anti-regression]
+    instances: [all]
+    max_chars: 8000
+  - id: manual_stable_core
+    path: docs/architecture/manual_stable_core.md
+    tier: L1
+    authority: canonical
+    tags: [manual, runtime, user-message, progress, five-instance, anti-regression]
     instances: [all]
     max_chars: 7000
   - id: self_awareness
@@ -43,6 +57,20 @@ documents:
     tags: [project, iteration, receipt, next-action, resume]
     instances: [all]
     max_chars: 7000
+  - id: user_observability_reports
+    path: docs/architecture/user_observability_and_reports.md
+    tier: L2
+    authority: canonical
+    tags: [campaign, progress, qq, report, pdf, user-experience]
+    instances: [all]
+    max_chars: 7000
+  - id: preserve_user_visible_behavior_decision
+    path: docs/decisions/0003-preserve-user-visible-behavior.md
+    tier: L2
+    authority: canonical
+    tags: [decision, user-experience, progress, report, anti-regression]
+    instances: [all]
+    max_chars: 4000
   - id: evolution_loop
     path: docs/architecture/evolution_loop.md
     tier: L2
@@ -50,6 +78,48 @@ documents:
     tags: [evolution, issue, hypothesis, experiment, rollback]
     instances: ["03", "05", all]
     max_chars: 8000
+  - id: rl_evolution
+    path: docs/architecture/rl_evolution.md
+    tier: L2
+    authority: canonical
+    tags: [evolution, rl, trajectory, reward, policy, experiment]
+    instances: ["03", "04", "05", all]
+    max_chars: 8000
+  - id: sprint14_manual_canary_promotion
+    path: docs/sprint14_手动受控Canary与真值门晋升.md
+    tier: L2
+    authority: current
+    tags: [manual, canary, rl, promotion, truth-audit, instance-04, instance-05]
+    instances: ["04", "05", all]
+    max_chars: 7000
+  - id: external_learning
+    path: docs/external_learning.md
+    tier: L2
+    authority: current
+    tags: [external, literature, github, rl, polar, rlvr, sesa, provenance]
+    instances: ["02", "03", "04", "05", all]
+    max_chars: 8000
+  - id: harness_reference_adoption
+    path: docs/architecture/harness_reference_adoption.md
+    tier: L2
+    authority: current
+    tags: [external, harness, deepseek, codex, openclaw, hermes, event-log, episode, trace, provenance]
+    instances: ["03", "04", "05", all]
+    max_chars: 7000
+  - id: unified_harness_episode_learning_decision
+    path: docs/decisions/0006-unified-harness-episode-learning.md
+    tier: L2
+    authority: canonical
+    tags: [decision, harness, episode, reward-vector, shadow, evolution, rl]
+    instances: ["03", "04", "05", all]
+    max_chars: 5000
+  - id: sprint15_harness_shadow_evolution
+    path: docs/sprint15_四Harness统一与Shadow自进化.md
+    tier: L2
+    authority: current
+    tags: [sprint, harness, episode, shadow, evolution, rl, truth]
+    instances: ["03", "04", "05", all]
+    max_chars: 6000
   - id: instance_scheduler
     path: docs/architecture/instance_scheduler.md
     tier: L2
@@ -60,10 +130,17 @@ documents:
   - id: continuous_campaign
     path: docs/architecture/continuous_campaign.md
     tier: L2
-    authority: canonical
-    tags: [campaign, continuous, overnight, long-running, 持续运行, 长期运行, 恢复]
+    authority: historical
+    tags: [experimental, paused, campaign, continuous, overnight, long-running, 持续运行, 长期运行, 恢复]
     instances: [all]
     max_chars: 7000
+  - id: project_portfolio
+    path: docs/architecture/project_portfolio.md
+    tier: L2
+    authority: canonical
+    tags: [portfolio, campaign, five-project, rotation, fingerprint, dual-slot, rl]
+    instances: [all]
+    max_chars: 6000
   - id: autonomous_scheduler
     path: docs/architecture/autonomous_scheduler.md
     tier: L2
@@ -92,6 +169,41 @@ documents:
     tags: [campaign, operations, overnight, soak, 运维, 长跑]
     instances: [all]
     max_chars: 5000
+  - id: campaign_2h_audit_20260823
+    path: docs/operations/campaign_2h_audit_2026-08-23.md
+    tier: L2
+    authority: current
+    tags: [campaign, audit, two-hour, failure, evidence, rl]
+    instances: [all]
+    max_chars: 8000
+  - id: campaign_clean_canary_20260823
+    path: docs/operations/campaign_clean_canary_2026-08-23.md
+    tier: L2
+    authority: current
+    tags: [campaign, canary, five-instance, qq, rl, evidence]
+    instances: [all]
+    max_chars: 8000
+  - id: campaign_6h_audit_20260824
+    path: docs/operations/campaign_6h_audit_2026-08-24.md
+    tier: L2
+    authority: current
+    tags: [campaign, audit, six-hour, scout, rl, evidence]
+    instances: [all]
+    max_chars: 6000
+  - id: sprint11_execution_iteration
+    path: docs/sprint11_执行型持续迭代.md
+    tier: L2
+    authority: current
+    tags: [sprint, execution, iteration, code, run, analysis, rl]
+    instances: [all]
+    max_chars: 9000
+  - id: sprint12_single_project_evidence_loop
+    path: docs/sprint12_单项目证据闭环.md
+    tier: L2
+    authority: current
+    tags: [sprint, molecular, targetdiff, grouped-split, evidence, iteration, rl]
+    instances: ["02", "05"]
+    max_chars: 9000
   - id: xiaohongshu_playbook
     path: docs/playbooks/xiaohongshu_browser.md
     tier: L2

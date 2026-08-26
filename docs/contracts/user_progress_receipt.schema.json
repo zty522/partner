@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://partner.local/contracts/user_progress_receipt.schema.json",
+  "title": "UserProgressReceipt",
+  "type": "object",
+  "required": ["phase", "message", "delivered", "ok"],
+  "properties": {
+    "phase": {"enum": ["started", "executed", "finished"]},
+    "message": {"type": "string", "minLength": 1},
+    "delivered": {"type": "boolean"},
+    "ok": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
