@@ -3,7 +3,7 @@
 > ⚠️ **维护纪律**：Partner 自进化/自愈引擎每次触发时自动读取这些文档。
 > 修改任何 Partner 代码后，必须同步更新对应文档。文档是 Partner 自我认知的唯一来源。
 
-> **当前运行基线（2026-08-26）**：生产默认为 `manual_stable`。用户手动发消息，
+> **当前运行基线（2026-08-28）**：生产默认为 `manual_stable`。用户手动发消息，
 > 实例确认收到、逐步汇报并在一次有界任务后停止。Campaign、自动迭代、Research Loop、RL
 > 自主循环和自主 cron 仍暂停；04 的一个最终成品真值门已通过受控 canary 显式晋升，但不会自动续轮。先读
 > [`architecture/manual_stable_core.md`](architecture/manual_stable_core.md)。
@@ -14,6 +14,8 @@
 
 当前运行状态、已完成闭环、实机证据、已知边界和下一阶段优先级统一见
 [`current_status.md`](current_status.md)。其他 Sprint 文档均按历史记录理解，不应用来判断当前服务状态。
+
+**2026-08-28 进展**: 11 个 framework bug 修复（#38-#50） + 13 个 ADR（0007-0019） + commit d536870 已 push 到 origin/main。03 + 05 自主能力从 50%/40% 提升到 75%/85%（9 轮任务验证）。pytest 333 → 351 passed。详见 `current_status.md` 的 2026-08-28 节。
 
 新模型或新开发会话必须先读仓库根目录 `AGENTS.md`，再按
 [`handoff/reading_order.md`](handoff/reading_order.md) 加载；禁止一次性把全部历史文档塞进上下文。

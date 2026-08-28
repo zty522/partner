@@ -1638,3 +1638,40 @@ result.ok = True, content = "--- BEGIN /path1 ---\n...\n--- END /path1 ---\n\n--
 | 真发 QQ | ✅ | ✅ |
 | 诚实边界 | ✅ 拒绝编造 | ✅ 拒绝编造 |
 | **自主度** | **75%** | **85%** |
+
+## 2026-08-28 — Phase 8: Bug #44 完整修复 + ABC 收尾
+
+### ADR 0019 — Bug #44 execution-path prompt injection
+
+- **问题**: 03 第六轮任务暴露——`${step1.result.content}` braces形式在 generate_text prompt 里**没替换为真上游 content**——LLM 收到字面 `${step1.result.content}` 字符串，认为上游 step 没真读文件
+- **根因**: `_agent_event_handler`（harness.py:4797）没调用 `_resolve_step_variables`——只有 atomic_write_artifact + atomic_create_file 路径调用
+- **修复**: 加 `_normalize_step_aliases` helper（`${step1}` / `{{step1}}` 标准化为 `$step_1`，strip "step" 前缀）+ `_agent_event_handler` 注入：先 `task = _normalize_step_aliases(task)` + `task = _resolve_step_variables(task, ctx.task_instance)`，再处理 supplied_context 同样递归替换
+- **测试**: `test_normalize_step_aliases_handles_braces_form`（5 个 assertion）——全量 `351 passed in 12.18s`（333 + 4 + 1 + 1 + 3 + 1 + 1 + 1 + 1 + 2 + 2 + 1 = 351，0 回归）
+
+### 03 + 05 第九轮 + Bug #44 fix verified
+
+- **03 finding_report.md（3340 B）真发到 QQ**：3 对 verbatim source_path + evidence_quote 双行引用（来自 step1 真读 harness.py），诚实标注 "step2 grep 计数：上游未提供 → proposed"（不编造）
+- **05 cross_instance_review_v9.md 真发到 QQ**：3 对 verbatim evidence_quote（来自真读 Aether/SESA/CytoBridge），独立 PromotionDecision "保留 candidate 等待明确决策；promotion=false 状态下不宣称晋级"
+- **Bug #44 fix 真生效**：LLM 能 verbatim 抽 step1 真读内容，不再说"上游事实无法被验证"
+
+### git commit + push
+
+- **commit d536870**: fix(framework): 11 framework bugs (#38-#50) + 19 ADRs + 351 passed
+- **pushed to origin/main**: 1aa5569..d536870 ✓
+- 包含 13 个新 ADR (0007-0019) + Bug 修复代码 + 18 个新测试
+
+### 文档同步更新
+
+- **docs/current_status.md**: 加 2026-08-28 最新状态章节（11 个 bug + 13 个 ADR + 03/05 自主度 + commit d536870）
+- **docs/README.md**: 基线日期 2026-08-26 → 2026-08-28，加 2026-08-28 进展段落
+- **docs/catalog.yaml**: 注册 ADR 0007-0019 全部 13 个 entry
+
+### 最终状态
+
+- pytest: 351 passed (dashboard verified)
+- 13 ADR: 0007-0019（注册到 catalog）
+- git: d536870 pushed to origin/main
+- 01 + 02 active + healthy（xiaohongshu + molecular_generation）
+- 03 + 05 inactive（等下一轮 inbox）
+- 04 stale 9h57m（待用户决定清理）
+- 03 自主度 75%，05 自主度 85%

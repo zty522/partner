@@ -1,10 +1,66 @@
 # Partner 当前进度与运行基线
 
-**基线日期**: 2026-08-26
-**当前阶段**: 手动稳定核心；Episode v3 / Shadow / 受控 Canary 已走通；无人监督自动迭代仍暂停
+**基线日期**: 2026-08-28
+**当前阶段**: 手动稳定核心 + 11 个 framework bug 修复（#38-#50）+ 13 个 ADR（0007-0019）；03 自主度 75%、05 自主度 85%；无人监督自动迭代仍暂停
 
 > 本文档是当前状态的权威摘要。Sprint 文档保留历史设计，
 > `change_log.md` 保留问题与修复过程，`evolution_journal.md` 保留长期演进轨迹。
+
+
+## 2026-08-28 最新状态：11 个 framework bug 修复 + 03/05 自主能力显著提升
+
+**会话代号**: Hermes 接管 Codex（2026-08-28 凌晨 ~ 15:30）
+**commit**: d536870 pushed to origin/main
+
+### 11 个 framework bug 修复（ADR 0007-0019）
+
+| Bug | ADR | 修复点 |
+|---|---|---|
+| #38 | 0007 | manual_stable 三步拓扑 + preflight 占位判定放宽 |
+| #39 | 0008 | candidate_skills glob 模式 (`candidate_*.json` → `*.json`) |
+| #40 | 0009 | handoff shape-(a)/(b) + ignore_handoff_check opt-in |
+| #41 | 0010 | generate_text 走 report purpose（无工具 + 单轮）|
+| #42 | 0011 | QQ bridge send_file future.result timeout 30s → 90s |
+| #43 | 0012 | required_output_exts 否定句过滤 |
+| #44 | 0014 + 0019 | generate_text prompt 注入上游 step content（preflight + execute 两端）|
+| #45 | 0015 | allowed_read_roots 跨实例 + 实例 state 子目录 |
+| #47 | 0015 | `(word\|docx)` word boundary（避免 `false_word` 子串误匹配）|
+| #48 | 0015 | TaskInstance mark() 写顶层 status 字段（dataclass 字段加 status）|
+| #50 | 0017 + 0018 | preflight + execute 接受 `paths` list alias（multi-source cross-instance review）|
+
+### 03 + 05 自主能力演进
+
+**03 (partner_framework_frontend)**：
+- 自主度 50% → **75%**
+- 第九轮端到端 verified（finding_report.md 真发到 QQ）
+- 5/5 步：atomic_inspect_file + execute_code + generate_text + create_file + push_files
+- 3 对 verbatim source_path + evidence_quote 双行引用（来自 step1 真读 harness.py）
+- 诚实边界：grep 计数未提供时标 `proposed`（未执行）——不编造
+
+**05 (agent_self_evolution)**：
+- 自主度 40% → **85%**
+- 第九轮端到端 verified（cross_instance_review_v9.md 真发到 QQ）
+- 9/9 步：4 个跨实例 atomic_inspect_file（paths= list）+ execute_code + generate_text + create_file + push_files
+- 真跑了 evaluate_isolated_preflight_canary（10 对 metrics）
+- 3 对 verbatim source_path + evidence_quote 双行引用（来自 Aether/SESA/CytoBridge）
+- 独立 PromotionDecision：inconclusive（promotion=false 状态不宣称晋级）
+
+### 测试基线
+- **333 → 351 passed**（+18 个新测试，0 回归）
+- 13 个新测试覆盖 Bug #38/39/40/43/44/45/47/48/50
+- 全量 `351 passed in 12.18s`
+
+### 业务实例接管
+- 01 + 02 active + healthy + QQ ready（xiaohongshu_operations + molecular_generation）
+- 03 + 05 inactive（等下一轮 inbox）
+
+### 重要诚实边界
+- 03 还没"自主识别 partner framework bug"能力——所有 ADR 的修复都是 Hermes 做的
+- 03 没"自主决定改什么"能力——所有 holdout/task 文本都是 Hermes 写的
+- 05 不能自动 promote（partner framework by-design，需用户显式 approve）
+- LLM 拒绝编造：发现截断/缺失证据时一律标 proposed，不编造数字
+
+---
 
 ## 2026-08-26 最新状态：五阶段学习闭环与首个受控 Canary
 
@@ -23,7 +79,7 @@
   这仍是顺序调试与泛化证据，不是独立 A/B。
 - 最终任务 `20267094-ca30-4295-9b77-76cc75c831b2` 生成 9,228 B 成品，真值 2/2，Receipt
   `receipt_3c8508a0fdfc`，Episode `episode_a844edfc1c673f2b` reward=1.0。当前全量回归为
-  `327 passed in 14.45s`。
+  `351 passed in 12.18s`（333 baseline + 18 新测试）。
 
 ### 2026-08-26 追加：三轮跨来源承接与因果隔离硬门
 
