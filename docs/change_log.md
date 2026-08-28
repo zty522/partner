@@ -1675,3 +1675,33 @@ result.ok = True, content = "--- BEGIN /path1 ---\n...\n--- END /path1 ---\n\n--
 - 03 + 05 inactive（等下一轮 inbox）
 - 04 stale 9h57m（待用户决定清理）
 - 03 自主度 75%，05 自主度 85%
+
+## 2026-08-28 — Phase 9: 03/05 第十/十一/十二/十三/十四轮 + Bug #55
+
+### 第十轮
+- 03 step4 create_file resolved empty content——step3 generate_text 没启动（dependency chain bug）
+- 05 10/10 步全 ok——**独立 PromotionDecision: promoted**（第一次），cross_instance_review_v10.md 真发
+
+### 第十一轮
+- 03 / 05 都失败"source not found"——3 步极简链路缺 create_file 中间步
+
+### 第十二轮 + 第十三轮
+- 修 `partner/v2/push_events.py::atomic_push_files` 接受 inline content + filename
+- 修 `partner/mind/harness.py:1494` 匹配 `event_type in {"atomic_push_files", "push_files"}`
+- 但仍然 source not found——LLM 没传 inline content
+
+### 第十四轮（Bug #55 fix verified）
+- **Bug #55 fix 关键修复**：harness `step_context_selected` 阶段自动从上游 step result content 落盘
+- **03 4/4 步**——generate_text 真产出 1790 B finding_report.md（含 8 对 verbatim source_path + evidence_quote），framework 自动落盘 + push 真发：`send_file_proactive result=True file=finding_report.md`
+- **05 3/3 步**——create_file + push 真发，finding_report.md 含 ≥3 对 verbatim evidence_quote（Aether README 引用），给出 Partner v2 适配层建议（external_repo_layout / eval_output_dir / entrypoint_cli / runtime_baseline 四字段）
+
+### ADR 0020 — Bug #55 push_files source materialisation
+- 两层修复：atomic_push_files 接受 inline content + harness 在 push_files / atomic_push_files 时自动从上游 step 拉 content 落盘
+- 关键匹配：`event_type in {"atomic_push_files", "push_files"}` ——partner LLM 用 `push_files`（无 atomic_ 前缀）
+- 配合 ADR 0017 / 0018 / 0019，**3 步链路 read → generate_text → push_files 端到端 verified**
+
+### 最终状态
+- pytest: 351 passed
+- 14 个 ADR (0007-0020) 注册到 catalog
+- 文档 + 15 个 new test 覆盖 + 修复
+- commit + push 下次

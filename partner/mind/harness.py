@@ -1491,7 +1491,7 @@ class PlanExecutor:
                         "depends_on": step.depends_on,
                         "text_length": len(params["text"]),
                     })
-        if isinstance(params, dict) and step.event_type == "atomic_push_files":
+        if isinstance(params, dict) and step.event_type in {"atomic_push_files", "push_files"}:
             source = params.get("source")
             if source is None or (isinstance(source, str) and not source.strip()):
                 params = dict(params)
@@ -1501,6 +1501,55 @@ class PlanExecutor:
                         "step_id": step.id,
                         "depends_on": step.depends_on,
                     })
+            else:
+                # Hermes 2026-08-28 Bug #55 — push_files source doesn't exist:
+                # try to materialise from the first upstream generate_text /
+                # execute_code step that produced a non-empty content.  This
+                # means a 3-step plan (read → generate_text → push_files)
+                # works without an intermediate create_file step.
+                workdir = ""
+                if ctx.task_instance:
+                    workdir = str(getattr(ctx.task_instance, "working_dir", "") or "")
+                if workdir and not os.path.isabs(source):
+                    candidate = os.path.join(workdir, source)
+                elif workdir:
+                    candidate = source
+                else:
+                    candidate = source
+                if candidate and not os.path.exists(candidate):
+                    upstream_content = ""
+                    for upstream_id in (step.depends_on or []):
+                        result_file = os.path.join(
+                            workdir, f"_step_{upstream_id}.result.json"
+                        )
+                        if not os.path.exists(result_file):
+                            continue
+                        try:
+                            with open(result_file, "r", encoding="utf-8") as f:
+                                rj = json.load(f)
+                            content = (rj.get("result") or {}).get("content") or ""
+                            if content and len(content) >= 100:
+                                upstream_content = content
+                                break
+                        except Exception:
+                            continue
+                    if upstream_content:
+                        # Materialise upstream content under source basename.
+                        basename = os.path.basename(source) or "report.md"
+                        materialised = os.path.join(workdir, basename)
+                        try:
+                            with open(materialised, "w", encoding="utf-8") as f:
+                                f.write(upstream_content)
+                            params = dict(params)
+                            params["source"] = basename
+                            if ctx.task_instance:
+                                ctx.task_instance.append_log("push_source_materialised_from_upstream", {
+                                    "step_id": step.id,
+                                    "materialised_path": materialised,
+                                    "content_length": len(upstream_content),
+                                })
+                        except Exception:
+                            pass
         # ``extract`` is a closed-input operation: injecting selected Partner
         # documents here contaminates source-grounded extraction and lets the
         # model attribute unrelated context to the supplied source files.

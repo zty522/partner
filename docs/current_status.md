@@ -1,7 +1,7 @@
 # Partner 当前进度与运行基线
 
 **基线日期**: 2026-08-28
-**当前阶段**: 手动稳定核心 + 11 个 framework bug 修复（#38-#50）+ 13 个 ADR（0007-0019）；03 自主度 75%、05 自主度 85%；无人监督自动迭代仍暂停
+**当前阶段**: 手动稳定核心 + 12 个 framework bug 修复（#38-#50 + #55）+ 14 个 ADR（0007-0020）；03 自主度 75%、05 自主度 85%；无人监督自动迭代仍暂停
 
 > 本文档是当前状态的权威摘要。Sprint 文档保留历史设计，
 > `change_log.md` 保留问题与修复过程，`evolution_journal.md` 保留长期演进轨迹。
@@ -27,6 +27,7 @@
 | #47 | 0015 | `(word\|docx)` word boundary（避免 `false_word` 子串误匹配）|
 | #48 | 0015 | TaskInstance mark() 写顶层 status 字段（dataclass 字段加 status）|
 | #50 | 0017 + 0018 | preflight + execute 接受 `paths` list alias（multi-source cross-instance review）|
+| #55 | 0020 | push_files 自动从上游 step result 落盘（3 步链路 read → generate_text → push_files 端到端 verified）|
 
 ### 03 + 05 自主能力演进
 

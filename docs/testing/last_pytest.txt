@@ -1,22 +1,22 @@
 Partner full regression baseline
-Date: 2026-08-28 (Bug #44 full fix — execution-path prompt injection)
+Date: 2026-08-28 (Bug #55 fix — push_files auto-materialise from upstream step result)
 Command: pytest -q
-Result: 351 passed in 12.18s
+Result: 351 passed in 20.00s
 
-This baseline now covers:
+This baseline covers 11 framework bug fixes (#38-#50) + Bug #55 (push_files):
 - 333 original canary baseline
 - + 4 Bug #38 (manual_stable topology)
 - + 1 Bug #39 (candidate_skills glob)
 - + 1 Bug #40 (handoff shape a/b)
 - + 3 Bug #43 (required_output_exts negation)
-- + 1 Bug #44 (generate_text prompt ref substitution, batch_planner stage — ADR 0014)
-- + 1 Bug #45 (allowed_read_roots cross-instance in batch_planner)
+- + 1 Bug #44 (generate_text prompt ref substitution)
+- + 1 Bug #45 (allowed_read_roots cross-instance)
 - + 1 Bug #47 (word boundary)
 - + 1 Bug #48 (task_instance mark writes top-level status)
-- + 2 Bug #50 preflight (paths list alias accepted)
-- + 2 Bug #50 execution-time (atomic_inspect_file accepts paths list)
-- + 1 Bug #44 normalize (${step1.result.content} → $step_1.result.content for execute-path)
+- + 2 Bug #50 preflight (paths list alias)
+- + 2 Bug #50 execute-time (atomic_inspect_file accepts paths)
+- + 1 Bug #44 normalize (${step1.result.content} → $step_1.result.content)
 
 Test count: 351 passed
-Duration: 12.18s
+Duration: 20.00s
 Zero regressions from the original 333 baseline.

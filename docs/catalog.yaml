@@ -239,6 +239,13 @@ documents:
     tags: [decision, framework-fix, generate-text, prompt-injection, step-aliases, bug-44, full-fix]
     instances: ["03", "04", "05", all]
     max_chars: 4000
+  - id: bug55_push_files_source_materialisation_decision_0020
+    path: docs/decisions/0020-bug55-push-files-source-materialisation.md
+    tier: L2
+    authority: canonical
+    tags: [decision, framework-fix, push-files, materialise-from-upstream, content-injection, bug-55, dependency-chain]
+    instances: ["03", "04", "05", all]
+    max_chars: 4000
   - id: architecture_review
     path: docs/architecture_review.md
     tier: L2

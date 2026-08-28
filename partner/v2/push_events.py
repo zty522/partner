@@ -61,11 +61,32 @@ def atomic_push_files(ctx, params: dict) -> dict:
 
     Auto-discovery is intentionally limited to the current task directory. An
     older task's artifact requires an explicit path.
+
+    Bug #55 (Hermes 2026-08-28): if ``source`` doesn't exist on disk but the
+    caller passed ``content`` + ``filename`` inline (typical of a
+    generate_text → push_files chain), materialise the file in the task
+    working_dir first so push_files works without an intermediate create_file.
     """
     source, provenance = _resolve_source(ctx, str(params.get("source") or ""))
     caption = str(params.get("caption") or "")
+    inline_content = str(params.get("content") or "")
+    inline_filename = str(params.get("filename") or "")
     if not source:
-        return {"ok": False, "pushed": 0, "total": 0, "status": "missing", "error": provenance}
+        # Hermes 2026-08-28 Bug #55: inline content + filename fallback.
+        if inline_content and inline_filename:
+            workdir = _working_dir(ctx)
+            if workdir and os.path.isdir(workdir):
+                materialised = os.path.join(workdir, inline_filename)
+                try:
+                    with open(materialised, "w", encoding="utf-8") as f:
+                        f.write(inline_content)
+                    source = materialised
+                    provenance = "inline_content_materialised"
+                except Exception as exc:
+                    return {"ok": False, "pushed": 0, "total": 0, "status": "missing",
+                            "error": f"inline materialise failed: {exc}"}
+        if not source:
+            return {"ok": False, "pushed": 0, "total": 0, "status": "missing", "error": provenance}
     if not os.path.exists(source):
         return {"ok": False, "pushed": 0, "total": 0, "status": "missing", "error": f"source not found: {source}"}
 
