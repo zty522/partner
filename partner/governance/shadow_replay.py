@@ -19,6 +19,9 @@ ADDRESSABLE_PREFLIGHT = (
     "unfilled template",
 )
 
+ISOLATED_PREFLIGHT_CANDIDATE = "candidate_preflight_contract_v2"
+ISOLATED_PREFLIGHT_BASELINE = "baseline_current_preflight_v1"
+
 
 def _states(root: Path, project_id: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -165,3 +168,132 @@ def evaluate_preflight_shadow(workspace: str, *, project_id: str,
         "rollback": "retain current planner and semantic repair path",
     })
     return {"ok": True, **result, "path": str(path), "candidate_skill": skill.get("candidate")}
+
+
+def evaluate_isolated_preflight_canary(
+    workspace: str,
+    *,
+    project_id: str,
+    experiment_id: str,
+    minimum_pairs: int = 3,
+) -> dict[str, Any]:
+    """Evaluate independently executed match-key pairs with route proof."""
+    root = workspace_root(workspace)
+    trajectories = _trajectory_actions(root)
+    grouped: dict[str, dict[str, dict[str, Any]]] = {}
+    rejected: list[dict[str, str]] = []
+    for state in _states(root, project_id):
+        task_id = str(state.get("task_id") or "")
+        trajectory = trajectories.get(task_id, {})
+        action = trajectory.get("action") if isinstance(trajectory.get("action"), dict) else {}
+        if action.get("experiment_id") != experiment_id:
+            continue
+        arm = str(action.get("policy_arm") or "")
+        match_key = str(action.get("match_key") or "")
+        strategy = str(action.get("strategy_id") or "")
+        proof = state.get("experiment_intervention") or {}
+        expected_strategy = (
+            ISOLATED_PREFLIGHT_CANDIDATE if arm == "candidate" else ISOLATED_PREFLIGHT_BASELINE
+        )
+        proof_ok = bool(
+            match_key
+            and arm in {"baseline", "candidate"}
+            and strategy == expected_strategy
+            and proof.get("experiment_id") == experiment_id
+            and proof.get("policy_arm") == arm
+            and proof.get("strategy_id") == strategy
+            and proof.get("match_key") == match_key
+            and proof.get("route") == (
+                "candidate_prompt_contract_v2" if arm == "candidate" else "baseline_current_contract"
+            )
+            and bool(proof.get("active")) == (arm == "candidate")
+        )
+        if not proof_ok:
+            rejected.append({"task_id": task_id, "reason": "missing_or_invalid_intervention_proof"})
+            continue
+        repairs = sum(
+            1 for value in state.get("model_calls") or []
+            if value.get("purpose") == "batch_planner_semantic_repair"
+        )
+        values = (state.get("reward_vector") or {}).get("values") or {}
+        arm_rows = grouped.setdefault(match_key, {})
+        existing = arm_rows.get(arm) or {}
+        executed_at = str(trajectory.get("created_at") or state.get("reduced_at") or "")
+        if existing and str(existing.get("_executed_at") or "") >= executed_at:
+            continue
+        arm_rows[arm] = {
+            "task_id": task_id,
+            "episode_id": state.get("episode_id"),
+            "strategy_id": strategy,
+            "route": proof.get("route"),
+            "status": state.get("status"),
+            "truth": float(values.get("truth") or 0.0),
+            "observability": float(values.get("observability") or 0.0),
+            "semantic_repair_calls": repairs,
+            "reward": float((state.get("reward_vector") or {}).get("scalar") or 0.0),
+            "policy_eligible": bool((state.get("reward_vector") or {}).get("policy_eligible")),
+            "_executed_at": executed_at,
+        }
+    pairs = [
+        {"match_key": key, "baseline": arms["baseline"], "candidate": arms["candidate"]}
+        for key, arms in sorted(grouped.items())
+        if set(arms) == {"baseline", "candidate"}
+        and arms["baseline"]["task_id"] != arms["candidate"]["task_id"]
+    ]
+    for pair in pairs:
+        pair["baseline"].pop("_executed_at", None)
+        pair["candidate"].pop("_executed_at", None)
+    pair_count = len(pairs)
+    baseline = [pair["baseline"] for pair in pairs]
+    candidate = [pair["candidate"] for pair in pairs]
+
+    def mean(rows: list[dict[str, Any]], key: str) -> float:
+        return round(sum(float(row[key]) for row in rows) / len(rows), 4) if rows else 0.0
+
+    metrics = {
+        "baseline_completed": sum(row["status"] == "completed" for row in baseline),
+        "candidate_completed": sum(row["status"] == "completed" for row in candidate),
+        "baseline_truth_passes": sum(row["truth"] == 1.0 for row in baseline),
+        "candidate_truth_passes": sum(row["truth"] == 1.0 for row in candidate),
+        "baseline_observability_passes": sum(row["observability"] == 1.0 for row in baseline),
+        "candidate_observability_passes": sum(row["observability"] == 1.0 for row in candidate),
+        "baseline_semantic_repair_calls": sum(row["semantic_repair_calls"] for row in baseline),
+        "candidate_semantic_repair_calls": sum(row["semantic_repair_calls"] for row in candidate),
+        "baseline_mean_reward": mean(baseline, "reward"),
+        "candidate_mean_reward": mean(candidate, "reward"),
+    }
+    sample_gate = pair_count >= max(1, int(minimum_pairs))
+    quality_gate = bool(
+        sample_gate
+        and metrics["candidate_completed"] == pair_count
+        and metrics["candidate_truth_passes"] == pair_count
+        and metrics["candidate_observability_passes"] >= metrics["baseline_observability_passes"]
+        and metrics["candidate_semantic_repair_calls"] <= metrics["baseline_semantic_repair_calls"]
+        and metrics["candidate_mean_reward"] >= metrics["baseline_mean_reward"]
+    )
+    result = {
+        "schema_version": 1,
+        "mode": "matched_executed_isolated_canary",
+        "project_id": project_id,
+        "experiment_id": experiment_id,
+        "baseline_strategy_id": ISOLATED_PREFLIGHT_BASELINE,
+        "candidate_strategy_id": ISOLATED_PREFLIGHT_CANDIDATE,
+        "intervention_isolated": pair_count > 0,
+        "independent_task_ids": all(
+            pair["baseline"]["task_id"] != pair["candidate"]["task_id"] for pair in pairs
+        ),
+        "pairs": pair_count,
+        "minimum_pairs": minimum_pairs,
+        "sample_gate_passed": sample_gate,
+        "quality_gate_passed": quality_gate,
+        "promotion": False,
+        "decision": "ready_for_explicit_decision" if quality_gate else "inconclusive",
+        "metrics": metrics,
+        "pairs_detail": pairs,
+        "rejected_executions": rejected,
+        "created_at": now_iso(),
+    }
+    directory = root / "share/mind/governance/rl/shadow_evaluations"
+    path = directory / f"{experiment_id}_isolated_preflight.json"
+    atomic_json(path, result)
+    return {"ok": True, **result, "path": str(path)}

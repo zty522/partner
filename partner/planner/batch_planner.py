@@ -28,11 +28,44 @@ _MANUAL_BLOCKED_EVENTS = {
     "strict_reflect", "next_iteration", "create_campaign", "enqueue_campaign_work",
     "pause_campaign", "cancel_campaign", "self_heal", "tree_search_heal",
     "continuous_project_step", "record_iteration",
+# Hermes 2026-08-27 marker test
 }
 _MANUAL_UNSTABLE_EVENTS = {"analyze", "check_quality"}
 
+_ISOLATED_PREFLIGHT_CANDIDATE = "candidate_preflight_contract_v2"
 
-def _manual_environment_contract(workspace: str, working_dir: str) -> str:
+
+def _manual_experiment_intervention(user_message: str) -> dict[str, Any]:
+    """Resolve an explicitly marked planner arm without changing production."""
+    text = str(user_message or "")
+
+    def marker(name: str) -> str:
+        match = re.search(rf"\[{re.escape(name)}=([^\]]+)\]", text)
+        return match.group(1).strip() if match else ""
+
+    arm = marker("policy_arm")
+    strategy_id = marker("strategy_id")
+    experiment_id = marker("experiment_id")
+    match_key = marker("match_key")
+    marked = bool(arm in {"baseline", "candidate"} and strategy_id and experiment_id)
+    active = bool(marked and arm == "candidate" and strategy_id == _ISOLATED_PREFLIGHT_CANDIDATE)
+    route = "production_current"
+    if marked:
+        route = "candidate_prompt_contract_v2" if active else "baseline_current_contract"
+    return {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "match_key": match_key,
+        "policy_arm": arm,
+        "strategy_id": strategy_id,
+        "marked": marked,
+        "active": active,
+        "route": route,
+        "intervention": "candidate planner prompt contract" if active else "none",
+    }
+
+
+def _manual_environment_contract(workspace: str, working_dir: str, user_message: str = "") -> str:
     """Describe the actual path and capability boundary to the planner."""
     from ..workspace.workspace_layout import workspace_root_from_instance
 
@@ -54,6 +87,15 @@ def _manual_environment_contract(workspace: str, working_dir: str) -> str:
             )
     except (OSError, ValueError, TypeError):
         promoted_contract = ""
+    intervention = _manual_experiment_intervention(user_message)
+    candidate_contract = ""
+    if intervention["active"]:
+        candidate_contract = (
+            "- [候选实验专属] 对多个明确文件生成带逐字证据的 Markdown/TXT 时，首个计划必须直接使用："
+            "每个文件一个 atomic_inspect_file → 单个命名源 extract → 单个 generate_text → 单个文件 writer；"
+            "generate_text 必须直接依赖 extract，writer 必须直接依赖 generate_text。"
+            "不得使用 atomic_compose_structured_result、二次 extract 或无关目录扫描。\n"
+        )
     return (
         "\n执行环境硬约束：\n"
         f"- task_working_dir={working_dir}\n"
@@ -72,7 +114,34 @@ def _manual_environment_contract(workspace: str, working_dir: str) -> str:
         "- 不得使用可用 event_type 列表之外的操作；不要使用 analyze/check_quality 作为 event_type。\n"
         "- 多个命名来源需要逐字 evidence_quote 时，只使用一个 extract：data 为按来源名组织的对象，source_paths 为同名路径对象；不要先分别 extract 再二次 extract。\n"
         "- 不要规划 strict_reflect、next_iteration、Campaign、self_heal、tree search 或 record_iteration；项目 Receipt 由最终验收后统一生成。\n"
+        # Hermes 2026-08-27 fix (Bug #45 documentation): clarify cross-instance
+        # read capability.  allowed_read_roots already includes both the
+        # per-instance state/ root and the shared instances/ root, so a
+        # reviewer instance can read another instance's task working_dir,
+        # dialog_history, or inbox.  Document it here so the planner LLM
+        # knows cross-instance atomic_inspect_file calls are valid without
+        # falling back to list_directory workarounds.
+        + "- 跨实例审阅（如 05 评估 04 的 holdout 产物）可直接用 atomic_inspect_file 读取其他实例的 state/tasks/*、dialog_history、recommendations 路径——已在 allowed_read_roots 白名单内。\n"
         + promoted_contract
+        + candidate_contract
+        # 普通任务也必须用"读 → 写" 的两步拓扑：read → generate_text → writer，
+        # 不能用 create_file/atomic_write_artifact 内嵌静态模板字符串。
+        # 这条规则对非 candidate 的 manual_stable 任务同样生效——
+        # 不依赖 experiment marker，理由是 2026-08-27 03 任务 1/3
+        # 实证：planner 默认生成 read+create_file(static) 的 plan，
+        # 被 preflight 拒绝。Codex 8/27 的 candidate_contract 已经修了
+        # candidate 臂的同类问题；这里把同款修复扩到所有 manual 任务。
+        + (
+            "- [manual_stable 通用] 当任务是\"读一个或多个文件并生成 Markdown/TXT 报告\"时，\n"
+            "  必须使用 read → generate_text → writer 三步拓扑：\n"
+            "    1) atomic_inspect_file 读取每个真实输入文件；\n"
+            "    2) generate_text 把 read 的 result.content 整理为完整报告正文；\n"
+            "    3) atomic_write_artifact / create_file 写 writer，content 必须是\n"
+            "       ${generate_text_step_id}.result.content 引用，**不能**内联静态字符串。\n"
+            "  不要用 create_file/atomic_write_artifact 直接写分析报告正文。\n"
+            "  例外：当用户消息明确只读（包含\"只读\"、\"诊断\"、\"不修改\"、\"不写文件\" 等关键词），\n"
+            "  可以只规划 atomic_inspect_file / atomic_list_project_files，不写任何 writer。\n"
+        )
     )
 
 
@@ -109,7 +178,11 @@ def _manual_preflight_plan(
         truth_policy_active = False
     truth_quote_required = bool(
         truth_policy_active
-        and re.search(r"evidence_quote|逐字(?:连续)?(?:摘录|引文|引用)", str(user_message or ""), re.I)
+        and re.search(
+            r"evidence_quote|逐字(?:连续)?(?:摘录|引文|引用)|source_path|source证据|真值引用|真值审计|truth_quote|truth_audit|真值|逐字|原文|原话",
+            str(user_message or ""),
+            re.I,
+        )
     )
     allowed_read_roots = [
         os.path.realpath(working_dir),
@@ -125,6 +198,12 @@ def _manual_preflight_plan(
         # recover older Receipts created before manual evidence archival.
         os.path.realpath(os.path.join(shared_root, "files", "outgoing")),
         os.path.realpath(os.path.join(workspace, "state", "tasks")),
+        # Hermes 2026-08-27 fix (Bug #45): allow cross-instance reads for review
+        # tasks.  Without this, instance 05 cannot read instance 04's holdout
+        # outputs to write an independent RecommendationRecord.  Also widen
+        # the per-instance state/ to cover the dialog / inbox / etc subpaths.
+        os.path.realpath(os.path.join(workspace, "state")),
+        os.path.realpath(os.path.join(shared_root, "instances")),
     ]
     planned_steps = list(micro_plan.plan)
     # The executor owns the user-visible receipt, per-step progress and final
@@ -192,6 +271,48 @@ def _manual_preflight_plan(
                 source_paths[source_name] = path
             first_extract.parameters["data"] = data
             first_extract.parameters["source_paths"] = source_paths
+
+    # Candidate-only deterministic binding.  Some planners correctly choose
+    # the requested read→extract topology but pass the literal source path as
+    # extract data.  Bind only explicitly read paths to their read result;
+    # baseline and unmarked production plans remain untouched for causal
+    # comparison and rollback.
+    if _manual_experiment_intervention(user_message)["active"]:
+        reads_by_path = {
+            os.path.realpath(str(
+                (step.parameters or {}).get("path")
+                or (step.parameters or {}).get("file_path")
+                or ""
+            )): str(step.id)
+            for step in planned_steps
+            if str(step.event_type or "") in {"atomic_inspect_file", "read_file"}
+        }
+        for step in planned_steps:
+            if str(step.event_type or "") != "extract":
+                continue
+            params = dict(step.parameters or {})
+            data = dict(params.get("data") or {}) if isinstance(params.get("data"), dict) else {}
+            source_paths = dict(params.get("source_paths") or {}) \
+                if isinstance(params.get("source_paths"), dict) else {}
+            changed = False
+            for source_name, value in list(data.items()):
+                raw_path = ""
+                if isinstance(value, str) and os.path.isabs(value):
+                    raw_path = value
+                elif isinstance(value, dict):
+                    raw_path = str(value.get("source_path") or value.get("path") or "")
+                if not raw_path:
+                    raw_path = str(source_paths.get(source_name) or "")
+                read_id = reads_by_path.get(os.path.realpath(raw_path)) if raw_path else ""
+                if not read_id:
+                    continue
+                data[source_name] = f"${read_id}.result.content"
+                source_paths[source_name] = raw_path
+                changed = True
+            if changed:
+                params["data"] = data
+                params["source_paths"] = source_paths
+                step.parameters = params
 
     # Governance decision events are deterministic, idempotent artifact
     # producers.  Cheap planners sometimes surround them with invented
@@ -603,37 +724,58 @@ def _manual_preflight_plan(
                 )
 
         if event_type in {"atomic_inspect_file", "read_file", "list_directory"}:
+            # Hermes 2026-08-28 fix (Bug #50): accept either `path` (single)
+            # or `paths` (list) — the planner sometimes emits `paths=[...]`
+            # for cross-instance multi-source reads and the preflight was
+            # silently treating the step as pathless.
             if not str(params.get("path") or "").strip():
                 alias = "file_path" if event_type in {"atomic_inspect_file", "read_file"} else "directory"
                 if str(params.get(alias) or "").strip():
                     params["path"] = params[alias]
-            raw_path = str(params.get("path") or "").strip()
-            if not raw_path:
+            raw_paths: list[str] = []
+            if str(params.get("path") or "").strip():
+                raw_paths.append(str(params.get("path") or "").strip())
+            alt = params.get("paths")
+            if isinstance(alt, (list, tuple)):
+                for item in alt:
+                    s = str(item or "").strip()
+                    if s and s not in raw_paths:
+                        raw_paths.append(s)
+            elif isinstance(alt, str) and alt.strip():
+                if alt.strip() not in raw_paths:
+                    raw_paths.append(alt.strip())
+            raw_path = raw_paths[0] if raw_paths else ""
+            if not raw_paths:
                 issues.append(f"{step.id}: {event_type} requires path")
-            elif not raw_path.startswith("$"):
-                candidates = []
-                if os.path.isabs(raw_path):
-                    candidates.append(os.path.realpath(raw_path))
-                else:
-                    candidates.append(os.path.realpath(os.path.join(working_dir, raw_path)))
-                    for prefix, base in (
-                        ("partner", repo_root), ("tests", repo_root), ("docs", repo_root),
-                        ("external", shared_root), ("share", shared_root),
-                    ):
-                        if raw_path == prefix or raw_path.startswith(prefix + os.sep):
-                            candidates.append(os.path.realpath(os.path.join(base, raw_path)))
+            else:
                 want_directory = event_type == "list_directory"
                 existing = ""
-                for candidate in candidates:
-                    exists = os.path.isdir(candidate) if want_directory else os.path.isfile(candidate)
-                    if not exists:
+                for raw_path in raw_paths:
+                    if raw_path.startswith("$"):
                         continue
-                    try:
-                        allowed = any(os.path.commonpath([candidate, root]) == root for root in allowed_read_roots)
-                    except ValueError:
-                        allowed = False
-                    if allowed:
-                        existing = candidate
+                    candidates = []
+                    if os.path.isabs(raw_path):
+                        candidates.append(os.path.realpath(raw_path))
+                    else:
+                        candidates.append(os.path.realpath(os.path.join(working_dir, raw_path)))
+                        for prefix, base in (
+                            ("partner", repo_root), ("tests", repo_root), ("docs", repo_root),
+                            ("external", shared_root), ("share", shared_root),
+                        ):
+                            if raw_path == prefix or raw_path.startswith(prefix + os.sep):
+                                candidates.append(os.path.realpath(os.path.join(base, raw_path)))
+                    for candidate in candidates:
+                        exists = os.path.isdir(candidate) if want_directory else os.path.isfile(candidate)
+                        if not exists:
+                            continue
+                        try:
+                            allowed = any(os.path.commonpath([candidate, root]) == root for root in allowed_read_roots)
+                        except ValueError:
+                            allowed = False
+                        if allowed:
+                            existing = candidate
+                            break
+                    if existing:
                         break
                 # A read-back validation step may legitimately inspect a file
                 # produced earlier in this same plan. It does not exist during
@@ -775,9 +917,30 @@ def _manual_preflight_plan(
                     content = str(params["content"])
             if not content:
                 issues.append(f"{step.id}: output content is empty")
-            if raw_path.lower().endswith((".md", ".py")) and content and not content.startswith("$") and len(content) < 100:
+            # Hermes 2026-08-27 fix (round 2): 把"短内容强制拒绝"改成"短内容 OR 占位关键词 拒绝"，
+            # 让合法的真实分析报告（≥200 字、非占位）能通过 preflight。
+            # Round 2 改进：原修复用 `not content.startswith("$")` 检查会把
+            # content 内部嵌入 `${step_id.result.field}` 引用的合法模板也判成 placeholder。
+            # 修复：检查 content 是否含合法的 dependency result 引用（$ 或 ${ 形式），
+            # 含引用即视为合法模板。
+            placeholder_pattern = re.compile(
+                r"(?:待补充|output product|placeholder|在此填写|TODO|由.+步骤填入|<来自|<同>)",
+                re.I,
+            )
+            has_dependency_reference = bool(
+                re.search(r"\$\{?[A-Za-z0-9_-]+\.result\.[A-Za-z0-9_.-]+\}?", content)
+            )
+            content_is_placeholder = bool(
+                content
+                and not has_dependency_reference
+                and (
+                    len(content) < 100
+                    or placeholder_pattern.search(content)
+                )
+            )
+            if raw_path.lower().endswith((".md", ".py")) and content_is_placeholder:
                 issues.append(f"{step.id}: output content is a short placeholder")
-            if dependency_ids and content and not content.startswith("$"):
+            if dependency_ids and content and not has_dependency_reference and content_is_placeholder:
                 issues.append(
                     f"{step.id}: evidence-dependent output must reference a dependency result, "
                     "not embed a static template"
@@ -1079,7 +1242,9 @@ class BatchPlanner:
                     f"实例编号：{instance_id}\n实例工作区：{self.workspace}\n"
                     f"共享配置：{os.path.join(root, 'config', 'partner_config.json')}\n"
                     f"任务工作目录：{task_instance.working_dir}\n"
-                    + _manual_environment_contract(self.workspace, task_instance.working_dir) +
+                    + _manual_environment_contract(
+                        self.workspace, task_instance.working_dir, str(user_message)
+                    ) +
                     f"步骤数：{min_steps}-{max_steps}；严格服从用户要求的步骤数和输出类型。\n"
                     "不要添加 write_design、strict_reflect、next_iteration、Campaign、自愈或仅用于发进度消息的步骤；"
                     "运行时会自动发送每步开始和完成。\n"
@@ -1091,6 +1256,10 @@ class BatchPlanner:
             logger.debug("[BATCH_PLANNER] compact manual prompt unavailable: %s", exc)
 
         robust = RobustExecutor(load_harness_config(self.workspace))
+        intervention = _manual_experiment_intervention(str(user_message))
+        task_instance.metadata["planner_experiment_intervention"] = intervention
+        task_instance.save()
+        task_instance.append_log("planner_experiment_intervention", intervention)
         unavailable_retries = max(0, int(self.config.get("unavailable_retries") or 0))
         retry_delay = max(0.0, float(self.config.get("unavailable_retry_delay_sec") or 0))
         planner_calls = 0
@@ -1457,7 +1626,9 @@ class BatchPlanner:
                     repair_prompt = (
                         "你是 Partner 手动任务规划器。上一个计划在执行前语义检查失败。\n"
                         f"失败原因：{str(exc)[:1400]}\n"
-                        + _manual_environment_contract(self.workspace, task_instance.working_dir)
+                        + _manual_environment_contract(
+                            self.workspace, task_instance.working_dir, str(user_message)
+                        )
                         + "\n只能使用以下 event_type：\n"
                         + registry.describe_for_prompt()[:9000]
                         + "\n用户原始任务：\n"

@@ -2482,8 +2482,11 @@ def _safe_inspect_path(ctx: HarnessContext, raw: str) -> str:
         # read-only here. New receipts point to share/evidence instead.
         os.path.join(shared_root, "files", "outgoing"),
         # Explicit same-instance handoff artifacts are valid project inputs.
-        # This does not permit cross-instance mutable task reads.
         os.path.join(instance_workspace, "state", "tasks"),
+        # Hermes 2026-08-28 fix (Bug #45 enforcement at execution time): cross-instance
+        # review needs shared instances/ root authorised here too, not just in
+        # batch_planner preflight (ADR 0014+0015).
+        os.path.join(shared_root, "instances"),
     ]
     allowed_roots = [os.path.realpath(root) for root in allowed_roots if root]
 
@@ -2516,16 +2519,51 @@ def _safe_inspect_path(ctx: HarnessContext, raw: str) -> str:
 
 
 def _atomic_inspect_file(ctx: HarnessContext, params: JsonDict) -> JsonDict:
-    path = _safe_inspect_path(ctx, str(params.get("path") or ""))
+    raw_paths: list[str] = []
+    primary = str(params.get("path") or "").strip()
+    if primary:
+        raw_paths.append(primary)
+    alt = params.get("paths")
+    if isinstance(alt, (list, tuple)):
+        for item in alt:
+            s = str(item or "").strip()
+            if s and s not in raw_paths:
+                raw_paths.append(s)
+    elif isinstance(alt, str) and alt.strip():
+        if alt.strip() not in raw_paths:
+            raw_paths.append(alt.strip())
+    if not raw_paths:
+        raise ValueError("inspect path is missing or outside allowed read-only roots")
+    single = len(raw_paths) == 1
+    multi = not single
     max_chars = int(params.get("max_chars") or 4000)
-    with open(path, "rb") as f:
-        data = f.read(max_chars)
-    text = data.decode("utf-8", "replace")
+    per_file_chars = max(max_chars // len(raw_paths), 1024) if not single else max_chars
+    sections: list[str] = []
+    last_path = ""
+    total_bytes = 0
+    last_text = ""
+    for rp in raw_paths:
+        try:
+            path = _safe_inspect_path(ctx, rp)
+        except ValueError as exc:
+            if multi:
+                return {"ok": False, "error": f"path {rp}: {exc}"}
+            raise
+        with open(path, "rb") as f:
+            data = f.read(per_file_chars)
+        text = data.decode("utf-8", "replace")
+        last_text = text
+        if not single:
+            sections.append(f"--- BEGIN {path} ---\n{text}\n--- END {path} ---")
+        last_path = path
+        total_bytes += os.path.getsize(path)
+    content_value = last_text if single else "\n\n".join(sections)
     return {
         "ok": True,
-        "path": path,
-        "content": text,
-        "size": os.path.getsize(path),
+        "path": last_path,
+        "paths": raw_paths,
+        "content": content_value,
+        "size": total_bytes,
         "hex64": data[:64].hex(),
     }
 
@@ -4794,6 +4832,96 @@ def _clean_generated_python(content: str) -> tuple[str, str]:
         return "", "generate_code returned no executable Python statements"
     return candidate, ""
 
+
+def _preserve_candidate_verified_sources(user_message: str, data: Any, content: str) -> str:
+    """Deterministically retain verified source pairs for the isolated canary.
+
+    This is deliberately unavailable to baseline and unmarked production. The
+    model may organize prose, but it must not rewrite already verified paths or
+    quotes in this candidate experiment.
+    """
+    text = str(user_message or "")
+    active = all(token in text for token in (
+        "[strategy_id=candidate_preflight_contract_v2]",
+        "[policy_arm=candidate]",
+        "[experiment_id=",
+        "[match_key=",
+    ))
+    if not active or not isinstance(data, dict):
+        return content
+    pairs: list[tuple[str, str]] = []
+    for key, raw_sources in data.items():
+        if not str(key).startswith("verified_sources"):
+            continue
+        parsed = raw_sources
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except (TypeError, ValueError):
+                continue
+        if not isinstance(parsed, dict):
+            continue
+        for record in parsed.values():
+            if not isinstance(record, dict):
+                continue
+            source_path = str(record.get("source_path") or "").strip()
+            raw_quote = str(record.get("evidence_quote") or "").strip()
+            quote = next((line.strip() for line in raw_quote.splitlines() if len(line.strip()) >= 20), raw_quote)
+            if source_path and len(quote) >= 20 and (source_path, quote) not in pairs:
+                pairs.append((source_path, quote))
+    if not pairs:
+        return content
+    cleaned_lines = [
+        line for line in str(content or "").splitlines()
+        if not re.match(r"(?i)^\s*(?:[-*>]\s*)?`?(?:source_path|evidence_quote)`?\s*[:：]", line)
+    ]
+    footer = ["", "## 实验逐源证据（确定性保留）", ""]
+    for source_path, quote in pairs:
+        footer.extend([f"source_path: {source_path}", f"evidence_quote: {quote}", ""])
+    return "\n".join(cleaned_lines).rstrip() + "\n" + "\n".join(footer).rstrip() + "\n"
+
+
+def _normalize_step_aliases(text: str) -> str:
+    """Normalise ``${step1}`` / ``{{step1}}`` aliases to ``$step_1`` form.
+
+    The batch planner exposes upstream step references in two styles:
+    - ``$step1.result.content`` (no underscore — partner convention)
+    - ``${step1.result.content}`` (braces — used inside longer prompts)
+    - ``{{step1.result.content}}`` (Jinja style)
+
+    Partner's runtime resolver `_resolve_step_variables` only recognises
+    the ``$step_<id>`` shape (with the underscore), so we rewrite the
+    brace forms into the underscore form.  Plain ``$step1`` is left
+    alone because the regex tolerates it.
+    """
+    if not isinstance(text, str) or ("$" not in text and "{{" not in text):
+        return text
+    import re as _re
+    # ${step1.result.content} → $step_1.result.content (strip "step" prefix).
+    def _strip_step_prefix(name: str) -> str:
+        n = str(name or "").strip()
+        if n.startswith("step_"):
+            return n[len("step_"):]
+        if n.startswith("step"):
+            return n[len("step"):]
+        return n
+    def _make_alias(name: str, tail: str | None) -> str:
+        clean = _strip_step_prefix(name)
+        suffix = f".result.{tail}" if tail else ".result.content"
+        return f"$step_{clean}{suffix}"
+    text = _re.sub(
+        r"\$\{([A-Za-z0-9_-]+)(?:\.result\.([A-Za-z0-9_.-]+))?\}",
+        lambda m: _make_alias(m.group(1), m.group(2)),
+        text,
+    )
+    text = _re.sub(
+        r"\{\{\s*([A-Za-z0-9_-]+)(?:\.result\.([A-Za-z0-9_.-]+))?\s*\}\}",
+        lambda m: _make_alias(m.group(1), m.group(2)),
+        text,
+    )
+    return text
+
+
 async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDict:
     """Generic handler for Agent-executed events (web_search, summarize, generate_text, etc.).
     
@@ -4823,15 +4951,38 @@ async def _agent_event_handler(ctx: HarnessContext, params: JsonDict) -> JsonDic
     detailed_prompt = str(params.get("prompt") or params.get("instruction") or "").strip()
     if detailed_prompt and detailed_prompt != task:
         task += "\n\n详细要求：\n" + detailed_prompt
+    # Hermes 2026-08-28 fix (Bug #44 — execution-path): resolve
+    # ``${step_X.result.content}`` placeholders embedded inside ``task``
+    # before forwarding to the agent.  Also normalise ``${step1}`` /
+    # ``{{step1}}`` braces-style aliases into ``$step_1`` so the
+    # existing _resolve_step_variables regex can pick them up.
+    task = _normalize_step_aliases(task)
+    if ctx.task_instance:
+        task = _resolve_step_variables(task, ctx.task_instance)
     supplied_context = {
         key: params.get(key)
         for key in ("data", "content", "sources", "inputs", "source_paths")
         if params.get(key) not in (None, "", [], {})
     }
     if supplied_context:
+        # Recursively resolve placeholders inside supplied_context so the
+        # downstream LLM sees actual upstream content rather than literal
+        # ``${step1.result.content}`` strings.
+        normalised_context: dict[str, Any] = {}
+        for key, value in supplied_context.items():
+            try:
+                if isinstance(value, str):
+                    resolved_value = _normalize_step_aliases(value)
+                    if ctx.task_instance:
+                        resolved_value = _resolve_step_variables(resolved_value, ctx.task_instance)
+                    normalised_context[key] = resolved_value
+                else:
+                    normalised_context[key] = value
+            except Exception:
+                normalised_context[key] = value
         task += (
             "\n\n以下是上游步骤已经读取/验证的真实输入，只能据此执行：\n"
-            + json.dumps(supplied_context, ensure_ascii=False)[:24000]
+            + json.dumps(normalised_context, ensure_ascii=False)[:24000]
         )
 
     # Try auto-selection: find best agent for this event's capabilities

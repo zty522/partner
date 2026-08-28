@@ -218,6 +218,27 @@ documents:
     tags: [molecular, 分子生成, 分子, rdkit, qed, sa, diversity, 多样性, benchmark, 实验]
     instances: ["02"]
     max_chars: 8000
+  - id: bug50_preflight_paths_list_alias_decision_0017
+    path: docs/decisions/0017-bug50-preflight-paths-list-alias.md
+    tier: L2
+    authority: canonical
+    tags: [decision, framework-fix, preflight, multi-source, paths-list-alias, bug-50]
+    instances: ["03", "04", "05", all]
+    max_chars: 4000
+  - id: bug50_execution_time_fix_decision_0018
+    path: docs/decisions/0018-bug50-execution-time-fix.md
+    tier: L2
+    authority: canonical
+    tags: [decision, framework-fix, execution-time, atomic-inspect-file, safe-inspect-path, paths-list-alias, bug-50, bug-45-enforcement]
+    instances: ["03", "04", "05", all]
+    max_chars: 4000
+  - id: bug44_execution_prompt_injection_decision_0019
+    path: docs/decisions/0019-bug44-execution-prompt-injection.md
+    tier: L2
+    authority: canonical
+    tags: [decision, framework-fix, generate-text, prompt-injection, step-aliases, bug-44, full-fix]
+    instances: ["03", "04", "05", all]
+    max_chars: 4000
   - id: architecture_review
     path: docs/architecture_review.md
     tier: L2

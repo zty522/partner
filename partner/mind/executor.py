@@ -2412,27 +2412,41 @@ def _required_output_exts(user_request: str, event_type: str = "", event_kind: s
         required.add(".pdf")
     if re.search(r"(图片|截图|图像|png|jpg|jpeg|webp)", text, re.I):
         required.update({".png", ".jpg", ".jpeg", ".webp"})
-    if re.search(r"(word|docx)", text, re.I):
+    if re.search(r"\b(word|docx)\b", text, re.I):
         required.add(".docx")
     # A filename mentioned as an input is not an output contract.  Concrete
     # source extensions require an output/edit verb near the filename.
     output_verb = r"(?:生成|创建|编写|输出|保存|写入|修改|实现|产出|交付|制作|补充|更新)"
-    py_output = re.search(
-        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.py",
-        text, re.I,
-    )
+    # Hermes 2026-08-27 fix (Bug #43): negative phrases like "不要直接修改 X.py"
+    # were matching the output_verb + filename regex, which falsely added X.py
+    # to required_exts and caused ArtifactValidator to fail otherwise valid
+    # tasks.  Skip matches where the output_verb is preceded by a negation
+    # within 12 characters.
+    negation_prefix = r"(?:不要|不需(?:要)?|无需|禁止|别|不生成|不输出|不制作|不直接)"
+    # Clause connectors that break the negation scope: the negation applies
+    # only to the verb immediately following it, not to verbs across a
+    # connector.
+    clause_break = r"(?:但|而|并|又|且|然后|之后|随后|再|才|就)"
+    def _positive_match(pattern: str) -> bool:
+        for m in re.finditer(pattern, text, re.I):
+            verb_start = m.start()
+            preceding = text[max(0, verb_start - 12):verb_start]
+            if not re.search(negation_prefix, preceding, re.I):
+                return True
+            # negation found before verb — check if a clause break appears
+            # between them. If so, the negation belongs to an earlier clause.
+            neg_match = re.search(negation_prefix, preceding, re.I)
+            between = preceding[neg_match.end():]
+            if re.search(clause_break, between, re.I):
+                return True
+        return False
+    py_output = _positive_match(rf"{output_verb}.{{0,48}}[^\s`\'\"，、。；：:()（）]+\.py")
     if py_output or re.search(r"Python\s*源码|Python\s*脚本", text, re.I):
         required.add(".py")
-    json_output = re.search(
-        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.json",
-        text, re.I,
-    )
+    json_output = _positive_match(rf"{output_verb}.{{0,48}}[^\s`\'\"，、。；：:()（）]+\.json")
     if json_output or re.search(r"机器可读\s*JSON|JSON\s*结果", text, re.I):
         required.add(".json")
-    md_output = re.search(
-        rf"{output_verb}.{{0,48}}[^\s`'\"，、。；：:()（）]+\.md",
-        text, re.I,
-    )
+    md_output = _positive_match(rf"{output_verb}.{{0,48}}[^\s`\'\"，、。；：:()（）]+\.md")
     if md_output or re.search(r"Markdown", text, re.I):
         required.add(".md")
     return required
@@ -2540,7 +2554,7 @@ def _requested_output_groups(user_request: str) -> dict[str, set[str]]:
             groups["report"] = {".md"}
         else:
             groups["report"] = {".pdf"}
-    if re.search(r"(word|docx)", text, re.I):
+    if re.search(r"\b(word|docx)\b", text, re.I):
         groups["doc"] = {".docx"}
     return groups
 
@@ -9632,6 +9646,15 @@ async def _handle_stop_project(event: MindEvent):
             try:
                 from ..governance.manual_runtime import record_manual_task_outcome
 
+                # Hermes 2026-08-27 fix: inbox-triggered standalone tasks carry
+                # `inputs=[]` by design and cannot satisfy the strict
+                # previous-artifact handoff contract. Surface the opt-in
+                # flag to `record_manual_task_outcome` so the contract
+                # becomes an info-severity record instead of a hard reject.
+                # See ADR 0009 / partner/governance/manual_runtime.py.
+                _is_inbox_triggered = bool(
+                    payload.get("inbox_message_id") or payload.get("trigger_source") == "inbox"
+                )
                 governance_result = record_manual_task_outcome(_workspace, {
                     "task_id": payload.get("task_id"),
                     "goal": payload.get("root_user_request") or title,
@@ -9642,6 +9665,7 @@ async def _handle_stop_project(event: MindEvent):
                     "next_action": payload.get("next_action") or "",
                     "delivery_confirmed": payload.get("delivery_confirmed"),
                     "completion_ok": payload.get("completion_ok"),
+                    "ignore_handoff_check": _is_inbox_triggered,
                 })
                 try:
                     from ..harness_core import TaskInstance

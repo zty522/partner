@@ -61,7 +61,10 @@ async def execute_agent_task(
         return SkillResult(False, error="empty task")
 
     if agent in _GENERAL_AGENTS:
-        return await _call_general_agent(agent, workspace, task, task_instance, allow_web, agent_params)
+        return await _call_general_agent(
+            agent, workspace, task, task_instance, allow_web, agent_params,
+            purpose=agent_params.get("purpose", "action") if agent_params else "action",
+        )
     else:
         return await _call_specialized_agent(agent, workspace, task, task_instance, agent_params, progress_callback)
 
@@ -73,8 +76,21 @@ async def _call_general_agent(
     task_instance: Any,
     allow_web: bool,
     agent_params: dict | None = None,
+    *,
+    purpose: str = "action",
 ) -> SkillResult:
-    """Call a general agent through adapter.chat()."""
+    """Call a general agent through adapter.chat().
+
+    Hermes 2026-08-27 fix (Bug #41): accept an explicit `purpose` so
+    callers can route pure-text generation events (generate_text /
+    write_report / summarize / analyze) through the no-tool `report`
+    purpose instead of the default `action` purpose that exposes
+    `terminal,file,web` tools. The action toolset confuses the model
+    into wrapping its response in a `write_file` tool_call JSON
+    envelope, which the partner framework then writes verbatim to
+    the destination .md file. The `report` purpose runs single-turn
+    with no tools so the model returns plain text.
+    """
     adapter = _make_adapter(agent, workspace)
 
     prompt = _build_task_prompt(task, allow_web=allow_web)
@@ -98,13 +114,24 @@ async def _call_general_agent(
             _timeout_sec = None
 
         if _timeout_sec is not None:
-            os.environ["PARTNER_ACTION_AGENT_TIMEOUT_SEC"] = str(_timeout_sec)
-            try:
-                reply = adapter.chat(prompt, purpose="action")
-            finally:
-                os.environ.pop("PARTNER_ACTION_AGENT_TIMEOUT_SEC", None)
+            # If the caller passed a different purpose (e.g. "report" for
+            # pure-text generation), use that env var so the adapter can
+            # load the right timeout. The action-purpose timeout is the
+            # default; the "report" purpose reads from its own env var.
+            if purpose == "report":
+                os.environ["PARTNER_REPORT_TIMEOUT_SEC"] = str(_timeout_sec)
+                try:
+                    reply = adapter.chat(prompt, purpose=purpose)
+                finally:
+                    os.environ.pop("PARTNER_REPORT_TIMEOUT_SEC", None)
+            else:
+                os.environ["PARTNER_ACTION_AGENT_TIMEOUT_SEC"] = str(_timeout_sec)
+                try:
+                    reply = adapter.chat(prompt, purpose=purpose)
+                finally:
+                    os.environ.pop("PARTNER_ACTION_AGENT_TIMEOUT_SEC", None)
         else:
-            reply = adapter.chat(prompt, purpose="action")
+            reply = adapter.chat(prompt, purpose=purpose)
     except Exception as exc:
         logger.warning("[CALL_AGENT] %s chat failed for task=%s: %s", agent, task[:80], exc)
         return SkillResult(False, error=str(exc))

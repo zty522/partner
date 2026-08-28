@@ -57,8 +57,17 @@ def record_iteration(workspace: str, params: dict[str, Any]) -> dict[str, Any]:
         inputs = [str(value) for value in params.get("inputs") or []]
         if previous and iteration <= previous.iteration:
             raise ValueError("iteration must advance beyond latest receipt")
+        # Hermes 2026-08-27 fix: inbox-triggered standalone tasks (shape a in
+        # manual_runtime) carry `inputs=[]` by design. Without an opt-in the
+        # record_iteration path would still raise below and propagate
+        # `invalid_iteration_receipt`, defeating the manual_runtime fix. The
+        # opt-in is the same flag the caller already passes upstream; it
+        # documents that the call is intentionally an unlinked iteration.
         if previous and not _artifact_handoff(previous, inputs):
-            raise ValueError("new iteration must reference at least one previous artifact")
+            if params.get("ignore_handoff_check"):
+                pass
+            else:
+                raise ValueError("new iteration must reference at least one previous artifact")
         receipt = IterationReceipt(
             project_id=project_id,
             iteration=iteration,

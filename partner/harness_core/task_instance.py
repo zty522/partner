@@ -35,6 +35,11 @@ class TaskInstance:
     working_dir: str
     expected_artifacts: list[JsonDict] = field(default_factory=list)
     completion_status: str = "pending"
+    # Hermes 2026-08-27 fix (Bug #48): mirror completion_status with the
+    # canonical top-level status field.  asdict() persists both, so
+    # downstream monitors can rely on task_instance.json["status"] to
+    # know whether the task has finished (was previously always None).
+    status: str = "pending"
     continue_from_project: str = ""
     metadata: JsonDict = field(default_factory=dict)
 
@@ -144,6 +149,12 @@ class TaskInstance:
     def mark(self, status: str, data: JsonDict | None = None) -> None:
         if status not in {"pending", "partial", "done", "failed"}:
             raise ValueError(f"invalid task status: {status}")
+        # Hermes 2026-08-27 fix (Bug #48): mirror the status into the top-level
+        # self.status field.  Previously only self.completion_status was
+        # written, so persisted task_instance.json had status=None for every
+        # completed task, making downstream monitors and reviewers unable to
+        # distinguish "in flight" from "done".
+        self.status = status
         self.completion_status = status
         self.save()
         self.append_log("completion_status_updated", {"status": status, **dict(data or {})})

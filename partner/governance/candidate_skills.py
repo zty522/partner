@@ -69,7 +69,21 @@ def register_candidate_skill(workspace: str, payload: dict[str, Any]) -> dict[st
 def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
     root = workspace_root(workspace) / "share/mind/governance/rl/candidate_skills"
     rows: list[dict[str, Any]] = []
-    for path in sorted(root.glob("candidate_*.json")):
+    # Hermes 2026-08-27 fix: glob all candidate-skill files, not just the
+    # `candidate_*.json` pattern. The directory holds one file per
+    # `register_candidate_skill` call keyed by `safe_id(candidate_id)`,
+    # and that prefix is not guaranteed to start with `candidate_`.
+    # The previous pattern silently dropped every non-default id
+    # (e.g. caller-supplied `candidate_id="manual_stable_truth_audit_v2"`),
+    # which manifested as 0 matches even after a successful registration.
+    # Real-world verification: registering `my-custom-candidate-id`
+    # writes `my-custom-candidate-id.json` to disk, but the old glob
+    # returned only the Codex 8/27 entries (both starting with `candidate_`).
+    # `revisions.jsonl` is the canonical append-only audit log and is read
+    # separately; this glob is for loading the latest active record.
+    for path in sorted(root.glob("*.json")):
+        if path.name == "revisions.jsonl":
+            continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):

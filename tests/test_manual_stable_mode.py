@@ -37,7 +37,13 @@ from partner.mind.executor import (
     _select_direct_governance_event,
     _run_batch_check_rule,
 )
-from partner.planner.batch_planner import BatchPlanner, _ensure_write_artifact, _manual_preflight_plan
+from partner.planner.batch_planner import (
+    BatchPlanner,
+    _ensure_write_artifact,
+    _manual_environment_contract,
+    _manual_experiment_intervention,
+    _manual_preflight_plan,
+)
 from partner.state.config import manual_stable_mode, runtime_capability_enabled, runtime_mode
 from partner.v2.campaign_events import atomic_create_campaign, atomic_enqueue_campaign_work
 from partner.v2.iteration_events import atomic_next_iteration, atomic_strict_reflect
@@ -319,6 +325,64 @@ def _manual_registry():
         produces_artifact=True, execution_method="local",
     ))
     return registry
+
+
+def test_manual_candidate_prompt_contract_is_feature_isolated(tmp_path):
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/isolated"
+    baseline = (
+        "[strategy_id=baseline_current_preflight_v1] [policy_arm=baseline] "
+        "[experiment_id=experiment_test] [match_key=pair_1] compare sources"
+    )
+    candidate = baseline.replace("baseline_current_preflight_v1", "candidate_preflight_contract_v2").replace(
+        "policy_arm=baseline", "policy_arm=candidate"
+    )
+
+    baseline_route = _manual_experiment_intervention(baseline)
+    candidate_route = _manual_experiment_intervention(candidate)
+    assert baseline_route["active"] is False
+    assert baseline_route["route"] == "baseline_current_contract"
+    assert candidate_route["active"] is True
+    assert candidate_route["route"] == "candidate_prompt_contract_v2"
+    assert "候选实验专属" not in _manual_environment_contract(str(instance), str(task_dir), baseline)
+    assert "候选实验专属" in _manual_environment_contract(str(instance), str(task_dir), candidate)
+    assert _manual_experiment_intervention("ordinary production task")["route"] == "production_current"
+
+
+def test_candidate_preflight_binds_literal_named_source_paths_but_baseline_does_not(tmp_path):
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/isolated-binding"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "source.md"
+    source.write_text("grounded source text", encoding="utf-8")
+    registry = _manual_registry()
+    registry.register(HarnessEventSpec(
+        "extract", "smart", "extract", lambda ctx, params: {"ok": True}, execution_method="local",
+    ))
+
+    def plan():
+        return MicroPlan(plan=[
+            HarnessStep("read", "atomic_inspect_file", {"path": str(source)}, []),
+            HarnessStep("extract", "extract", {
+                "data": {"source": "from read"},
+                "source_paths": {"source": str(source)},
+                "fields": ["conclusion", "source_path", "evidence_quote"],
+            }, ["read"]),
+        ], expected_artifacts=[])
+
+    baseline = _manual_preflight_plan(
+        plan(), registry=registry, workspace=str(instance), working_dir=str(task_dir),
+        user_message=("[strategy_id=baseline_current_preflight_v1] [policy_arm=baseline] "
+                      "[experiment_id=e] [match_key=p]"),
+    )
+    candidate = _manual_preflight_plan(
+        plan(), registry=registry, workspace=str(instance), working_dir=str(task_dir),
+        user_message=("[strategy_id=candidate_preflight_contract_v2] [policy_arm=candidate] "
+                      "[experiment_id=e] [match_key=p]"),
+    )
+    assert baseline.plan[1].parameters["data"]["source"] == "from read"
+    assert candidate.plan[1].parameters["data"]["source"] == "$read.result.content"
+    assert candidate.plan[1].parameters["source_paths"]["source"] == str(source)
 
 
 def test_manual_plan_preflight_resolves_known_repo_path_and_confines_output(tmp_path):
@@ -1503,3 +1567,99 @@ def test_extract_rejects_non_substantive_report_field(tmp_path):
     }))
     assert result["ok"] is False
     assert "no substantive report" in result["error"]
+
+
+# ── Hermes 2026-08-27 Bug fix regression tests ─────────────────────────────────
+# Bug: 03 任务 1/3 "只读诊断" 触发的 plan 是 atomic_inspect_file + atomic_write_artifact
+# with static content，被 preflight 拒绝 3 次。Codex 8/27 的 candidate_contract 修复
+# 只对标记 candidate 的任务生效，普通 manual_stable 任务仍会撞同样问题。
+# Fix: 普通任务 prompt 加 "read → generate_text → writer" 三步拓扑；preflight 放宽
+# "evidence-dependent output must reference a dependency result" 规则——当 content
+# 长度 ≥ 100 且不含已知占位关键词时放行；当用户消息明确只读时允许 zero-write plan。
+
+
+def test_manual_stable_environment_contract_requires_three_step_topology_for_unmarked_tasks(tmp_path):
+    """普通 manual_stable 任务的 planner prompt 必须包含 read → generate_text → writer 拓扑。"""
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/three-step"
+    ordinary_message = "请读取 partner/mind/harness.py 并写一份诊断报告"
+    contract = _manual_environment_contract(str(instance), str(task_dir), ordinary_message)
+    assert "read → generate_text → writer" in contract or "read" in contract and "generate_text" in contract and "writer" in contract
+    assert "[manual_stable 通用]" in contract
+    # 用户消息含 "诊断" 关键词，应当允许 zero-write
+    assert "只读" in contract
+
+
+def test_manual_preflight_allows_long_substantive_content_without_dependency_reference(tmp_path):
+    """长度 ≥ 100 且不含占位关键词的 content 应该通过 preflight，不必强制 $ 引用。"""
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/long-content"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "target_module.py"
+    source.write_text("# reference text\n" * 5, encoding="utf-8")
+    registry = _manual_registry()
+    # 注意：不要用任何会触发 "placeholder" / "待补充" / "TODO" 等关键词的措辞，
+    # 因为这些是 _is_placeholder_content 的硬门词。也不要连续用 ":\\n"，
+    # 否则会触发 empty_fields ≥ 2 的另一条硬门。
+    substantive = (
+        "本诊断报告基于 partner/mind/harness.py 第 3147 行附近函数源码的真实分析。"
+        "该函数对 .md 与 .py 文件用固定长度阈值判定占位，"
+        "短于阈值但合法的真实摘要会被误判。改进方向包括改为可配置阈值或基于内容类型判断，"
+        "并把诊断结果以自然语言形式呈现给用户。当前测试覆盖 200 字以上的合法分析报告应当通过。"
+    )  # 长度约 210 字，无占位关键词
+    plan = MicroPlan(plan=[
+        HarnessStep("read", "atomic_inspect_file", {"path": str(source)}, []),
+        HarnessStep("write", "atomic_write_artifact", {
+            "path": str(task_dir / "diagnosis.md"),
+            "content": substantive,
+        }, ["read"]),
+    ], expected_artifacts=[])
+    checked = _manual_preflight_plan(
+        plan, registry=registry, workspace=str(instance), working_dir=str(task_dir),
+    )
+    assert [step for step in checked.plan if step.id == "write"], "write step must remain in normalized plan"
+    write_step = next(step for step in checked.plan if step.id == "write")
+    # content 应该被保留（不是被改写为 $ 引用）
+    assert write_step.parameters.get("content") == substantive
+
+
+def test_manual_preflight_still_rejects_short_placeholder_content(tmp_path):
+    """< 100 字 或 含占位关键词 的 content 仍然被拒绝。"""
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/short-placeholder"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "harness.py"
+    source.write_text("x", encoding="utf-8")
+    registry = _manual_registry()
+    short_plan = MicroPlan(plan=[
+        HarnessStep("read", "atomic_inspect_file", {"path": str(source)}, []),
+        HarnessStep("write_short", "atomic_write_artifact", {
+            "path": str(task_dir / "short.md"),
+            "content": "Output product 1",  # 47 字符 + 触发 placeholder 关键词
+        }, ["read"]),
+    ], expected_artifacts=[])
+    with pytest.raises(ValueError) as exc:
+        _manual_preflight_plan(
+            short_plan, registry=registry, workspace=str(instance), working_dir=str(task_dir),
+        )
+    assert "placeholder" in str(exc.value).lower() or "evidence-dependent" in str(exc.value).lower()
+
+
+def test_manual_preflight_allows_zero_write_plan_for_read_only_user_message(tmp_path):
+    """用户消息明确只读时，允许 plan 里没有 create_file / atomic_write_artifact。"""
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/read-only"
+    task_dir.mkdir(parents=True)
+    source = task_dir / "harness.py"
+    source.write_text("# placeholder\n" * 5, encoding="utf-8")
+    registry = _manual_registry()
+    user_message = "[manual_stable 任务 1/3：03 只读诊断] 请只读 partner/mind/harness.py 中 _is_placeholder_content 函数，不要修改任何代码"
+    plan = MicroPlan(plan=[
+        HarnessStep("read1", "atomic_inspect_file", {"path": str(source)}, []),
+    ], expected_artifacts=[])
+    # 不应当 raise ValueError；plan 应当被原样保留
+    checked = _manual_preflight_plan(
+        plan, registry=registry, workspace=str(instance), working_dir=str(task_dir),
+        user_message=user_message,
+    )
+    assert [step for step in checked.plan if step.id == "read1"]

@@ -133,8 +133,17 @@ def reduce_task_episode(workspace: str, *, instance_id: str, task_id: str,
     failures: list[str] = []
     failure_details: list[dict[str, Any]] = []
     artifact_paths: set[str] = set()
+    intervention: dict[str, Any] = {}
     for row in rows:
         event = str(row.get("event") or "")
+        if event == "planner_experiment_intervention":
+            intervention = {
+                key: row.get(key)
+                for key in (
+                    "schema_version", "experiment_id", "match_key", "policy_arm",
+                    "strategy_id", "marked", "active", "route", "intervention",
+                )
+            }
         if event == "plan_executor_step_started":
             starts[str(row.get("step_id") or "")] = row
         elif event in {"plan_executor_step_completed", "plan_executor_step_failed"}:
@@ -241,6 +250,7 @@ def reduce_task_episode(workspace: str, *, instance_id: str, task_id: str,
                      "receipt_invalidated": invalidated},
         "failure_classes": sorted(set(failures)),
         "failure_details": failure_details,
+        "experiment_intervention": intervention,
         "source_refs": [str(task_path), str(log_path)], "reduced_at": now_iso(),
     }
     reduced["reward_vector"] = reward_vector(trajectory, reduced)

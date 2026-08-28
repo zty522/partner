@@ -184,6 +184,7 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
     policy_decision = _marker(goal, "policy_decision")
     policy_arm = _marker(goal, "policy_arm")
     experiment_id = _marker(goal, "experiment_id")
+    match_key = _marker(goal, "match_key")
     row = {
         "schema_version": 2,
         "trajectory_id": trajectory_id,
@@ -201,6 +202,7 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
             "policy_decision": policy_decision,
             "policy_arm": policy_arm,
             "experiment_id": experiment_id,
+            "match_key": match_key,
         },
         "outcome": {
             "status": outcome_status, "artifacts": artifacts,
@@ -260,8 +262,13 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
 
     policy_arm = _marker(effective_goal, "policy_arm")
     truth_audit: dict[str, Any] | None = None
+    experiment_id = _marker(effective_goal, "experiment_id")
+    match_key = _marker(effective_goal, "match_key")
+    matched_experiment = bool(
+        experiment_id and match_key and policy_arm in {"baseline", "candidate"}
+    )
     should_truth_audit = bool(
-        policy_arm in {"candidate", "production"}
+        policy_arm in {"baseline", "candidate", "production"}
         and inputs
         and any(Path(value).suffix.lower() in {".md", ".txt"} for value in artifacts)
     )
@@ -306,22 +313,120 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             return {"ok": False, "status": "manual_evidence_archive_failed",
                     "error": str(exc)[:1000]}
 
-    previous = latest_receipt(workspace, project_id)
-    if previous and previous.artifacts and not _handoff_present(previous.artifacts, inputs):
-        issue = record_issue(workspace, {
-            "summary": f"manual task missing previous artifact handoff: {task_id}",
-            "category": "context",
-            "severity": "high",
-            "evidence": [f"latest_receipt_id={previous.receipt_id}", f"task_id={task_id}", *inputs],
-            "instance_id": iid,
+    # Matched canary observations are deliberately not project iterations.
+    # Advancing the project's latest Receipt after the first arm would make
+    # the second arm consume a different handoff and destroy matching.  Both
+    # arms still pass the same completion, delivery, archive, and truth gates;
+    # they are persisted as trajectories/Episodes in an experiment ledger.
+    if matched_experiment:
+        observation_id = "observation_" + hashlib.sha256(
+            f"{experiment_id}|{match_key}|{policy_arm}|{task_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        receipt = {
+            "receipt_id": observation_id,
             "project_id": project_id,
-        })
-        return {
-            "ok": False,
-            "status": "unlinked_previous_receipt",
-            "latest_receipt_id": previous.receipt_id,
-            "issue": issue.get("issue"),
+            "iteration": 0,
+            "goal": goal,
+            "inputs": inputs,
+            "actions_executed": actions or ["batch_plan"],
+            "artifacts": artifacts,
+            "findings": findings or ["matched experiment observation passed shared hard gates"],
+            "next_actions": [],
+            "stop_reason": "bounded matched experiment observation completed",
+            "delivery_confirmed": delivery_confirmed,
+            "created_at": now_iso(),
         }
+        trajectory = _record_manual_trajectory(
+            workspace, iid=iid, project_id=project_id, task_id=task_id,
+            receipt=receipt, inputs=inputs, artifacts=artifacts,
+            actions=actions or ["batch_plan"],
+            findings=findings or ["matched experiment observation passed shared hard gates"],
+            goal=effective_goal, truth_audit=truth_audit,
+        )
+        observation_path = (
+            workspace_root(workspace) / "share" / "mind" / "governance"
+            / "experiment_observations" / experiment_id / f"{observation_id}.json"
+        )
+        observation_path.parent.mkdir(parents=True, exist_ok=True)
+        observation_path.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "observation_id": observation_id,
+                "experiment_id": experiment_id,
+                "match_key": match_key,
+                "policy_arm": policy_arm,
+                "task_id": task_id,
+                "receipt": receipt,
+                "truth_audit": truth_audit or {},
+                "trajectory_id": (trajectory.get("trajectory") or {}).get("trajectory_id", ""),
+                "project_state_mutated": False,
+                "created_at": now_iso(),
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "status": "experiment_observation_recorded",
+            "manual_task_id": task_id,
+            "receipt": receipt,
+            "trajectory": trajectory,
+            "truth_audit": truth_audit or {},
+            "evidence_archive": evidence_archive,
+            "project_state_mutated": False,
+            "observation_path": str(observation_path),
+            "next_action_auto_enqueued": False,
+        }
+
+    previous = latest_receipt(workspace, project_id)
+    ignore_handoff_check = bool(params.get("ignore_handoff_check", False))
+    if previous and previous.artifacts and not _handoff_present(previous.artifacts, inputs):
+        # Hermes 2026-08-27 fix: the previous handoff contract was a hard
+        # reject that broke legitimate inbox-triggered standalone tasks.
+        # Two failure shapes were conflated:
+        #   (a) Task carries `inputs=[]` because the user message arrived via
+        #       desktop_inbox after a long Campaign pause and there is no
+        #       prior receipt to link to. Pure self-contained task.  Old
+        #       behavior: `unlinked_previous_receipt` reject, but the task
+        #       had `delivery_confirmed=True` and was a real user request.
+        #   (b) Task carries non-empty `inputs` that intentionally omit every
+        #       previous-artifact path.  This is the "previous artifact
+        #       handoff missing" case the contract was designed to catch.
+        # New behavior: shape (a) → opt-in skip via
+        # `params["ignore_handoff_check"]=True`; shape (b) keeps the old
+        # hard reject so the shadow-replay audit still catches real handoff
+        # regressions. Both shapes still emit an IssueRecord (severity
+        # `info` for (a), `high` for (b)) so 05's independent review can
+        # surface either.
+        shape_b_reject = bool(inputs)
+        if shape_b_reject:
+            issue = record_issue(workspace, {
+                "summary": f"manual task missing previous artifact handoff: {task_id}",
+                "category": "context",
+                "severity": "high",
+                "evidence": [f"latest_receipt_id={previous.receipt_id}", f"task_id={task_id}", *inputs],
+                "instance_id": iid,
+                "project_id": project_id,
+            })
+            return {
+                "ok": False,
+                "status": "unlinked_previous_receipt",
+                "latest_receipt_id": previous.receipt_id,
+                "issue": issue.get("issue"),
+            }
+        if not ignore_handoff_check:
+            record_issue(workspace, {
+                "summary": f"manual task without previous artifact handoff: {task_id}",
+                "category": "context",
+                "severity": "info",
+                "evidence": [
+                    f"latest_receipt_id={previous.receipt_id}",
+                    f"task_id={task_id}",
+                    "shape=empty_inputs",
+                    "hint=set ignore_handoff_check=true for inbox-triggered standalone tasks",
+                ],
+                "instance_id": iid,
+                "project_id": project_id,
+            })
 
     next_action = str(params.get("next_action") or "").strip()
     next_actions = []
@@ -355,6 +460,10 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
         "project_status": "completed" if not next_actions else "active",
         "delivery_confirmed": delivery_confirmed,
         "requires_delivery": bool(artifacts),
+        # Hermes 2026-08-27 fix: forward the opt-in flag from the upstream
+        # shape-(a) check. Without this propagation, the manual_runtime
+        # handoff downgrade is silently undone by record_iteration.
+        "ignore_handoff_check": bool(params.get("ignore_handoff_check", False)),
     })
     result["manual_task_id"] = task_id
     result["next_action_auto_enqueued"] = False

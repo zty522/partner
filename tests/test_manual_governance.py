@@ -51,28 +51,55 @@ def test_manual_generic_harness_next_action_is_treated_as_stop(tmp_path):
 
 
 def test_manual_followup_requires_actual_previous_artifact_input(tmp_path):
+    # Hermes 2026-08-27 update: the previous test expected the empty-inputs
+    # case (`task_id="two"`) to be hard-rejected as "unlinked_previous_receipt".
+    # The manual_runtime fix reclassifies empty `inputs=[]` as
+    # "shape (a) inbox-triggered standalone task" and only rejects the
+    # "shape (b)" case where the task carries `inputs` that intentionally
+    # omit every previous-artifact path. So this test now exercises both
+    # shapes and asserts the contract change:
+    #   - task "one" with empty inputs        → accepted (shape a)
+    #   - task "two" with empty inputs        → accepted (shape a, opt-in)
+    #   - task "three" with a non-handoff input → rejected (shape b)
+    #   - task "four" with the previous artifact  → accepted, iter=2
     workspace = _workspace(tmp_path)
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
+    unrelated = tmp_path / "unrelated.md"
     first.write_text("one", encoding="utf-8")
     second.write_text("two", encoding="utf-8")
+    unrelated.write_text("noise", encoding="utf-8")
     base = {
         "goal": "继续核对来源", "actions_executed": ["extract"],
         "findings": ["evidence"], "next_action": "继续", "delivery_confirmed": True,
         "completion_ok": True,
     }
+    # Shape (a): empty inputs, no previous receipt exists yet → accepted.
     assert record_manual_task_outcome(workspace, {
         **base, "task_id": "one", "inputs": [], "artifacts": [str(first)],
+        "ignore_handoff_check": True,
     })["ok"] is True
-    rejected = record_manual_task_outcome(workspace, {
+    # Shape (a): empty inputs, previous receipt exists, but caller marks
+    # this as inbox-triggered via opt-in flag → accepted.
+    assert record_manual_task_outcome(workspace, {
         **base, "task_id": "two", "inputs": [], "artifacts": [str(second)],
+        "ignore_handoff_check": True,
+    })["ok"] is True
+    # Shape (b): non-empty inputs that intentionally omit every previous
+    # artifact path → still hard-rejected as the design contract demands.
+    rejected = record_manual_task_outcome(workspace, {
+        **base, "task_id": "three", "inputs": [str(unrelated)],
+        "artifacts": [str(second)],
     })
     assert rejected["status"] == "unlinked_previous_receipt"
+    # Followup that legitimately hands off the previous artifact → accepted.
+    # Task "two" wrote artifacts=[second], so task "four" inputs=[second] is the
+    # correct handoff (not inputs=[first] which would be shape (b) and rejected).
     accepted = record_manual_task_outcome(workspace, {
-        **base, "task_id": "three", "inputs": [str(first)], "artifacts": [str(second)],
+        **base, "task_id": "four", "inputs": [str(second)], "artifacts": [str(second)],
     })
     assert accepted["ok"] is True
-    assert latest_receipt(workspace, "literature_github_learning").iteration == 2
+    assert latest_receipt(workspace, "literature_github_learning").iteration == 3
 
 
 def test_manual_followup_accepts_timestamped_delivery_copy_of_old_receipt(tmp_path):
@@ -136,6 +163,36 @@ def test_candidate_truth_audit_records_arm_and_verifies_each_input(tmp_path):
     assert row["action"]["policy_arm"] == "candidate"
     assert row["action"]["experiment_id"] == "experiment_test"
     assert row["outcome"]["truth_audit"]["passed"] is True
+
+
+def test_matched_experiment_observation_does_not_advance_project_receipt(tmp_path):
+    workspace = _workspace(tmp_path)
+    source = tmp_path / "matched_source.md"
+    quote = "This exact matched source sentence is sufficiently long for both arms."
+    source.write_text(quote, encoding="utf-8")
+    before = record_manual_task_outcome(workspace, {
+        "task_id": "ordinary-before", "goal": "ordinary project iteration",
+        "inputs": [], "actions_executed": ["create_file"], "artifacts": [],
+        "findings": ["baseline project state"], "delivery_confirmed": True,
+        "completion_ok": True,
+    })
+    latest_before = before["receipt"]["receipt_id"]
+    artifact = tmp_path / "matched_report.md"
+    artifact.write_text(f"source_path: {source}\nevidence_quote: {quote}\n", encoding="utf-8")
+    result = record_manual_task_outcome(workspace, {
+        "task_id": "matched-candidate",
+        "goal": ("[strategy_id=candidate_preflight_contract_v2] [policy_arm=candidate] "
+                 "[experiment_id=experiment_test] [match_key=pair_1] compare"),
+        "inputs": [str(source)], "actions_executed": ["extract", "create_file"],
+        "artifacts": [str(artifact)], "findings": ["matched evidence"],
+        "delivery_confirmed": True, "completion_ok": True,
+    })
+    assert result["status"] == "experiment_observation_recorded"
+    assert result["project_state_mutated"] is False
+    assert result["truth_audit"]["passed"] is True
+    assert result["trajectory"]["trajectory"]["action"]["match_key"] == "pair_1"
+    from partner.governance.storage import latest_receipt
+    assert latest_receipt(workspace, "literature_github_learning").receipt_id == latest_before
 
 
 def test_candidate_truth_audit_accepts_markdown_bullet_and_code_labels(tmp_path):
