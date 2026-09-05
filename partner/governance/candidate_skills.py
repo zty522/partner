@@ -260,4 +260,5 @@ def project_candidate_decision(
 # self_evolve_annotation: candidate_id=repair_to_pr_f7923034ac33acdc failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_10ebfabea00260c4 failure_class=tool.atomic_http_get.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_129104a43a95216f failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_1d5ec10869634030 failure_class=tool.molecular_diversity_benchmark.failed intervention=mechanism_specific_bounded_repair
     return record
