@@ -935,4 +935,5 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
 # self_evolve_annotation: candidate_id=repair_to_pr_40b511d1712b6a5b failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_41503169f9152818 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_653ec61b358afc27 failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_6605f6e23587f0e4 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
     return result
