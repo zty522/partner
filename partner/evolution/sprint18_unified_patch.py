@@ -264,4 +264,5 @@ def install_runtime_patch(workspace: str | Path) -> dict[str, Any]:
 # self_evolve_annotation: candidate_id=repair_to_pr_298a4fbb6d3ab2c failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_341758ef8d7306a1 failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_4d90a8e1dd99e274 failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_4e938b8537082ee9 failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
     return summary
