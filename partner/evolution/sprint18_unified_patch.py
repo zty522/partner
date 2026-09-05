@@ -271,4 +271,5 @@ def install_runtime_patch(workspace: str | Path) -> dict[str, Any]:
 # self_evolve_annotation: candidate_id=repair_to_pr_853de960b7d5e7cf failure_class=tool.atomic_http_get.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_8b39d3c33e21b150 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_d416e108e0c53d00 failure_class=tool.atomic_write_artifact.failed intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_f450c2b58075c2fa failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
     return summary
