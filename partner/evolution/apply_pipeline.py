@@ -751,4 +751,5 @@ __all__ = [
 # self_evolve_annotation: candidate_id=repair_to_pr_5d818ad85dcdc11 failure_class=tool.create_file.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_6843773f312659e0 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_7b1d8195ed2aedee failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_8c427e360f704cea failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
 ]
