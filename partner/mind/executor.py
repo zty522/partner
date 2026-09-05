@@ -12757,4 +12757,5 @@ async def _handle_wake_up(event: MindEvent):
 # self_evolve_annotation: candidate_id=repair_to_pr_3dff90e121e1d74 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_56a8c251ae8189c8 failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_5c7dd3a80056727a failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_95c2b09b3bccbfaf failure_class=runtime.timeout intervention=mechanism_specific_bounded_repair
     logger.info(f"[MIND] DONE event_type=wake_up, id={event.id[:8]}")
