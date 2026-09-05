@@ -601,4 +601,5 @@ def run_decision_loop(
 # self_evolve_annotation: candidate_id=repair_to_pr_8f3ac3b5b85e062a failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_b289c02012f59001 failure_class=tool.molecular_diversity_benchmark.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_bde6398155d6508 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_cbb326a344e63aec failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
 __all__ = ["run_decision_loop", "LoopResult", "VALID_NEXT_ACTIONS"]
