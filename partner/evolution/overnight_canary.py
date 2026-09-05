@@ -112,4 +112,5 @@ def run_loop(workspace_root: Path | str, *, interval_seconds: int = 60,
 # self_evolve_annotation: candidate_id=repair_to_pr_d0a05ffac6567276 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_f28283fb10495c7f failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_12a1632a66b2f265 failure_class=tool.app_focus.failed intervention=mechanism_specific_bounded_repair
+# self_evolve_annotation: candidate_id=repair_to_pr_1da77208f413327a failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
 __all__ = ["run_once", "run_loop"]
