@@ -206,7 +206,7 @@ def atomic_targetdiff_project_slice(ctx: Any, params: dict) -> dict:
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf = working / f"targetdiff_stage_{stage}_report.pdf"
     pdf_result = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": str(pdf),
-        "title": f"TargetDiff Stage {stage}: {STAGE_META[stage][0]}", "quality_profile": "detailed",
+        "title": f"TargetDiff Stage {stage}: {STAGE_META[stage][0]}", "report_style": "research", "quality_profile": "detailed",
         "min_content_chars": 1200, "min_sections": 6})
     if not pdf_result.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf_result.get("error"),

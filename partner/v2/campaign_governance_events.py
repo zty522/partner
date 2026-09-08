@@ -11,7 +11,7 @@ from typing import Any
 
 from partner.governance.external_catalog import build_external_catalog
 from partner.governance.evolution_loop import record_issue, start_experiment
-from partner.governance.rl_evolution import run_offline_rl_update
+from partner.governance.experience_policy import run_offline_policy_learning_update
 from partner.governance.storage import governance_log, workspace_root
 
 
@@ -50,7 +50,7 @@ def _pdf(ctx: Any, content: str, working: Path, stem: str, title: str) -> tuple[
 def atomic_framework_campaign_audit(ctx: Any, params: dict) -> dict:
     root, working = _paths(ctx)
     code = Path(os.environ.get("PARTNER_CODE_ROOT") or root.parent / "partner")
-    command = [sys.executable, "-m", "pytest", "tests/test_campaign.py", "tests/test_rl_evolution.py", "-q"]
+    command = [sys.executable, "-m", "pytest", "tests/test_campaign.py", "tests/test_experience_policy.py", "-q"]
     try:
         proc = subprocess.run(command, cwd=code, text=True, capture_output=True, timeout=120, check=False)
         test_output = (proc.stdout + "\n" + proc.stderr).strip()
@@ -61,7 +61,7 @@ def atomic_framework_campaign_audit(ctx: Any, params: dict) -> dict:
 
 ## 审计目标
 
-本轮不使用泛化规划器猜测是否成功，而是在当前 Partner 代码上执行 Campaign 和离线 RL 的针对性合同测试。这些测试覆盖最多两实例、持久化恢复、交付验收、预算边界、最终报告和候选策略不自动晋升。
+本轮不使用泛化规划器猜测是否成功，而是在当前 Partner 代码上执行 Campaign 和离线经验策略学习 的针对性合同测试。这些测试覆盖最多两实例、持久化恢复、交付验收、预算边界、最终报告和候选策略不自动晋升。
 
 ## 真实执行
 
@@ -82,7 +82,7 @@ def atomic_framework_campaign_audit(ctx: Any, params: dict) -> dict:
 Campaign 测试核验同时活动实例不超过两个、暂停时不派发、重启后从持久化任务日志恢复、
 产物和交付回执缺失时不冒充完成、受控 blocked 保留 resume_event，以及失败预算达到后取消未开始业务项并只派发最终日报。
 
-离线 RL 测试核验一条 WorkItem 能生成带来源的奖励轨迹，产物和真实送达会改变奖励分量，
+离线经验策略学习 测试核验一条 WorkItem 能生成带来源的奖励轨迹，产物和真实送达会改变奖励分量，
 一个正样本不足以获得 canary 资格，且 candidate policy 显式禁止自动 production promotion。
 
 ## 风险判读
@@ -118,7 +118,7 @@ def atomic_external_learning_slice(ctx: Any, params: dict) -> dict:
         f"- `{row['source_id']}`：`{row['path']}`，SHA256 `{row['sha256'][:16]}`，用于 {', '.join(row['use_for'])}。"
         for row in present
     )
-    report = f"""# Partner 外部资料学习切片：自进化与 RL
+    report = f"""# Partner 外部资料学习切片：自进化与经验策略学习
 
 ## 真实索引结果
 
@@ -153,10 +153,10 @@ Partner 先实现离线、保守的 contextual bandit：从 Campaign WorkItem �
             "pdf_quality": pdf_result.get("quality")}
 
 
-def atomic_offline_rl_evolution(ctx: Any, params: dict) -> dict:
+def atomic_offline_experience_policy(ctx: Any, params: dict) -> dict:
     root, working = _paths(ctx)
     campaign_id = str(params.get("campaign_id") or "")
-    result = run_offline_rl_update(str(root), campaign_id)
+    result = run_offline_policy_learning_update(str(root), campaign_id)
     if not result.get("ok"):
         return result
     actions = list(result["policy"].get("actions") or [])
@@ -173,7 +173,7 @@ def atomic_offline_rl_evolution(ctx: Any, params: dict) -> dict:
     }
     if _is_evidence_backed_low_reward(weakest):
         issue_result = record_issue(str(root), {
-            "summary": f"离线 RL 识别低收益动作: {weakest['action_key']}",
+            "summary": f"离线经验策略学习 识别低收益动作: {weakest['action_key']}",
             "category": "verification", "severity": "high",
             "evidence": [f"campaign_id={campaign_id}", f"mean_reward={weakest.get('mean_reward')}",
                          f"samples={weakest.get('samples')}", result["trajectory_path"], result["policy_path"]],
@@ -198,7 +198,7 @@ def atomic_offline_rl_evolution(ctx: Any, params: dict) -> dict:
                          "samples": weakest.get("samples")},
             "success_criteria": ["at least 3 canary samples", "mean reward improves by >=0.30",
                                  "delivery success >=0.67", "no budget or two-slot violation"],
-            "tests": ["tests/test_campaign.py", "tests/test_rl_evolution.py"],
+            "tests": ["tests/test_campaign.py", "tests/test_experience_policy.py"],
             "project_id": "agent_self_evolution",
         })
     action_lines = "\n".join(
@@ -206,7 +206,7 @@ def atomic_offline_rl_evolution(ctx: Any, params: dict) -> dict:
         f"成功率 {row['success_rate']}，置信下界 {row['lower_confidence_bound']}，"
         f"canary 资格={row['eligible_for_canary']}。" for row in actions
     ) or "- 暂无可用轨迹。"
-    report = f"""# Partner 离线 RL 自进化审计
+    report = f"""# Partner 离线经验策略学习 自进化审计
 
 ## 轨迹转换
 
@@ -234,12 +234,12 @@ Issue 状态：`{issue_result.get('status')}`，Issue ID：`{issue.get('issue_id
 
 奖励明确区分了真实可验证动作与泛化规划/写文档循环。05 的失败不再递归生成新的高优先级自进化 WorkItem；它们只能回填源 Issue 和影响候选策略。
 """
-    md = working / "offline_rl_evolution_audit.md"
-    snapshot = working / "offline_rl_evolution_snapshot.json"
+    md = working / "offline_experience_policy_audit.md"
+    snapshot = working / "offline_experience_policy_snapshot.json"
     md.write_text(report, encoding="utf-8")
-    snapshot.write_text(json.dumps({"rl": result, "issue": issue_result, "experiment": experiment_result},
+    snapshot.write_text(json.dumps({"policy_learning": result, "issue": issue_result, "experiment": experiment_result},
                                    ensure_ascii=False, indent=2), encoding="utf-8")
-    pdf, pdf_result = _pdf(ctx, report, working, "offline_rl_evolution_audit", "Partner 离线 RL 自进化审计")
+    pdf, pdf_result = _pdf(ctx, report, working, "offline_experience_policy_audit", "Partner 离线经验策略学习 自进化审计")
     files = [str(md), str(snapshot)] + ([pdf] if pdf else [])
     return {"ok": bool(pdf) and bool(experiment_result.get("ok", True)),
             "status": ("candidate_experiment" if experiment_result.get("experiment") else
@@ -252,5 +252,5 @@ Issue 状态：`{issue_result.get('status')}`，Issue ID：`{issue.get('issue_id
 HANDLERS = {
     "framework_campaign_contract_audit": atomic_framework_campaign_audit,
     "external_learning_index_slice": atomic_external_learning_slice,
-    "offline_rl_self_evolution": atomic_offline_rl_evolution,
+    "offline_policy_learning_self_evolution": atomic_offline_experience_policy,
 }

@@ -275,9 +275,9 @@ def test_project_id_for_uses_scheduler_roles():
     """
     assert pd._project_id_for("01") == "xiaohongshu_operations"
     assert pd._project_id_for("02") == "molecular_generation"
-    assert pd._project_id_for("03") == "partner_framework_frontend"
+    assert pd._project_id_for("03") == "molecular_dynamics_study"
     assert pd._project_id_for("04") == "literature_github_learning"
-    assert pd._project_id_for("05") == "agent_self_evolution"
+    assert pd._project_id_for("05") == "hermes_partner_explore"
     assert pd._project_id_for("99") == ""
 
 
@@ -293,13 +293,13 @@ def test_snapshot_includes_paused_projects_for_unstarted_roles(tmp_path, monkeyp
                 status="blocked", current_iteration=4,
                 blocked_reason="missing activity data",
                 resume_event="molecular_target_data_available")
-    _governance(workspace, "partner_framework_frontend", owner_instance="03",
+    _governance(workspace, "molecular_dynamics_study", owner_instance="03",
                 status="paused", current_iteration=0,
                 resume_event="user_slot_assignment")
     _governance(workspace, "literature_github_learning", owner_instance="04",
                 status="paused", current_iteration=0,
                 resume_event="user_slot_assignment")
-    _governance(workspace, "agent_self_evolution", owner_instance="05",
+    _governance(workspace, "hermes_partner_explore", owner_instance="05",
                 status="paused", current_iteration=0,
                 resume_event="user_slot_assignment")
 
@@ -324,9 +324,9 @@ def test_snapshot_includes_paused_projects_for_unstarted_roles(tmp_path, monkeyp
     assert statuses["05"] == "paused"
 
     project_ids = {row["instance_id"]: row["project_id"] for row in snapshot["instances"]}
-    assert project_ids["03"] == "partner_framework_frontend"
+    assert project_ids["03"] == "molecular_dynamics_study"
     assert project_ids["04"] == "literature_github_learning"
-    assert project_ids["05"] == "agent_self_evolution"
+    assert project_ids["05"] == "hermes_partner_explore"
 
 def test_healthy_flag_flips_for_stale_or_crashing_instances(tmp_path, monkeypatch):
     """An active service whose heartbeat is stale (>= 600s old) or whose

@@ -48,6 +48,20 @@ Campaign 消息带 `[PARTNER_CAMPAIGN campaign_id=... work_item_id=...]`。Resea
 
 ## 完成语义
 
+### 完成信号驱动（2026-09-01，ADR 0054）
+
+显式授权的长期 Campaign 不再轮询 5 分钟后才接续。权威 Task 终态会追加
+`state/campaigns/task_terminal_events.jsonl`，并通过 workspace 隔离的 named FIFO 唤醒 controller；
+controller 立即 reconcile 后派发该实例下一项。默认 30 秒等待只承担 lost-signal/crash watchdog。
+
+`batch_plan` 产物验证的 `done` 是中间 checkpoint，不发终态唤醒。Claim、delivery、Receipt 治理结束后的
+`manual_stop_project_finalization` 才是权威终态。成功的 local observation 也以该 finalization 回收槽位，
+不要求额外伪造 `iteration_llm_check`。
+
+QQ 不可用时，只有明确标记且用户已授权的研究 Campaign 可以把尚未开始的 WorkItem 改为
+`requires_delivery=false`。本地 observation 仍写 Episode/Reward，但 readiness 的真实业务门独立要求
+`delivery_confirmed=true`，因此这种降级不会把“本地完成”冒充为“用户收到”。
+
 - dispatch 必须返回真实 message/task ID。
 - 同一 WorkItem 的每次 attempt 使用不同 message/task ID，防止实例去重器吞掉重试。
 - 要求产物时，产物必须实际存在。
@@ -59,7 +73,8 @@ Campaign 消息带 `[PARTNER_CAMPAIGN campaign_id=... work_item_id=...]`。Resea
 - 三轮事件与产物内容签名完全相同会触发熔断和 Issue。
 - 重复签名熔断只适用于业务/进化 WorkItem；report 固定复用 `campaign_report_delivery`，不得因同签名失败。
 
-`completion_status=done` 只是单次执行边界，不是最终完成。Controller 只在其后出现最终 LLM 验收通过时恢复为 completed。
+`completion_status=done` 通常只是单次执行边界，不是最终完成。通用任务仍等待最终 LLM 验收；受 Claim/
+Receipt 治理的实验任务以 `manual_stop_project_finalization` 为权威最终结果。
 取消 Campaign 时，所有未终态 WorkItem 会转为 cancelled，活动 Lease 会 released，并恢复启动前的双槽组合。
 
 ## 边界
@@ -102,3 +117,23 @@ waiting 是正确的安全状态。跨项目持续运行应由上层 portfolio s
 ## 用户可观察性补充（2026-08-24）
 
 Campaign 的直接确定性事件不是“无界面后台作业”。业务 WorkItem 在执行前、实际处理后和文件投递后各产生一次渠道确认的进度回执；Scout 使用低频 compact 文案。报告内容按项目领域生成，公共 PDF 层只负责排版。详细合同见 `user_observability_and_reports.md`，决策见 ADR-0003。
+
+## 04 已晋升策略的长期生产 canary（2026-08-30）
+
+04 lane 的输入指纹由外部 Harness/文献来源指纹与已晋升 policy/Candidate 指纹组合。这样
+`candidate_preflight_contract_v2` 的激活会被视为一次新的有界输入变化，经过两个稳定 tick 后派发真实 04
+生产 WorkItem；不需要修改外部仓库或重复旧指纹来伪造新业务。
+
+当前运行 `campaign_abf9e34bf6af`（4 小时、五 lane、最多双槽）。01–04 仍按真实输入和槽位轮转，05
+等待准入业务 wave 终态后才汇总 Episode、主动选择下一实验并更新离线 RL；服务 active、Scout no-change、
+诊断成功和报告生成均不能替代 business_progress。
+
+## 终态真值与学习波次屏障（2026-08-30）
+
+确定性 Campaign Event 的成功必须把 `completion_ok`、`delivery_confirmed`、事件和文件显式传入
+`STOP_PROJECT`；禁止终态处理器仅因字段缺省把已验证成功改成失败。直达权限同时要求持久 Campaign 标记与
+“直接执行确定性事件”精确指令，普通手动消息仍走稳定 Harness 路径。
+
+项目完成可能改变自身输入指纹。累计至少两个新业务终态、当前无活动业务且本轮 outcome 尚未学习时，
+Controller 暂停准入新的变化指纹，先为 05 创建一个离线学习 WorkItem。05 入队后屏障立即释放；这是一轮
+有限 barrier，不是停止业务，也不是让 05 接管项目。

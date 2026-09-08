@@ -104,6 +104,11 @@ class RemediationHandler:
             return []
         paths: list[str] = []
         for item in missing or []:
+            # Some legacy validators expose a human-readable missing reason
+            # instead of an artifact contract.  It can be reported, but must
+            # never be treated as a dict-shaped file specification.
+            if not isinstance(item, dict):
+                continue
             if str(item.get("type") or "").strip().lower() != "file":
                 continue
             rel = self._artifact_name_from_pattern(str(item.get("pattern") or ""))
@@ -216,11 +221,41 @@ class RemediationHandler:
             lines.extend(f"- {path}" for path in accepted_fallbacks)
         else:
             lines.append("- None")
+        # ADR 0043 P0-A.6: error reports must NOT blame the user when the
+        # failure came from internal output-reference contract, retry loop, or
+        # event-handler bugs.  Determine the predominant failure_owner across
+        # all failures and route the recovery message accordingly.
+        owner_counts = {}
+        for _f in failures or []:
+            owner_counts[_f.get("failure_owner") or ""] = owner_counts.get(_f.get("failure_owner") or "", 0) + 1
+        predominant_owner = max(owner_counts.items(), key=lambda x: x[1])[0] if owner_counts else ""
+        if predominant_owner in ("output_reference", "planner_contract"):
+            recovery_msg = (
+                "Partner 内部生成产物引用合同未解析（task 输入已正确）。"
+                "已在 harness 层引入 typed reference 和任务目录沙箱化解析；"
+                "若仍失败，说明需要新一轮 bounded repair，请把本任务交由主动学习诊断。"
+            )
+        elif predominant_owner == "environment":
+            recovery_msg = (
+                "运行环境异常导致失败，请检查工作目录、依赖与权限；"
+                "不是用户输入引起的，Partner 无法自动恢复此类故障。"
+            )
+        elif predominant_owner == "delivery":
+            recovery_msg = (
+                "产物已生成但未送达用户通道，请检查网络和发送通道；"
+                "不是用户输入引起的，Partner 无法自动恢复此类故障。"
+            )
+        else:
+            recovery_msg = (
+                "已生成部分产物（如 Markdown），但 PDF 阶段失败。"
+                "本错误归因为内部 reference 或 event-handler，不是用户输入问题；"
+                "若需补充数据，请先确认中间产物确实存在再发送。"
+            )
         lines.extend([
             "",
             "## Manual Recovery",
             "",
-            "请补充缺失数据源或稍后重试外部调用；本任务不会继续全局重新规划，以避免失败循环。",
+            recovery_msg,
         ])
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines).rstrip() + "\n")

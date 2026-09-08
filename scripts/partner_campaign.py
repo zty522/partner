@@ -28,6 +28,7 @@ from partner.governance.campaign_storage import (
     active_campaign_id, campaign_dir, load_campaign, save_campaign,
 )
 from partner.governance.models import now_iso
+from partner.governance.completion_signal import TaskTerminalReceiver
 
 
 DEFAULT_ROOT = "/mnt/e/work/partner_workspace"
@@ -66,18 +67,25 @@ def _run(root: str, campaign_id: str, interval: int, once: bool = False) -> int:
             return 2
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)
-        while _running:
-            result = tick_campaign(
-                root,
-                campaign_id,
-                dispatch=lambda item, text: dispatch_to_instance(root, item, text),
-                switch_slots=lambda ids: switch_runtime_slots(root, ids),
-                runtime_ready=lambda instance_id: runtime_instance_ready(root, instance_id),
-            )
-            print(json.dumps(result, ensure_ascii=False), flush=True)
-            if once or result.get("status") in {"completed", "cancelled", "missing_campaign"}:
-                break
-            time.sleep(max(2, interval))
+        with TaskTerminalReceiver(root) as terminal_events:
+            while _running:
+                result = tick_campaign(
+                    root,
+                    campaign_id,
+                    dispatch=lambda item, text: dispatch_to_instance(root, item, text),
+                    switch_slots=lambda ids: switch_runtime_slots(root, ids),
+                    runtime_ready=lambda instance_id: runtime_instance_ready(root, instance_id),
+                )
+                print(json.dumps(result, ensure_ascii=False), flush=True)
+                if once or result.get("status") in {"completed", "cancelled", "missing_campaign"}:
+                    break
+                # Normal advancement is completion-signal driven.  The
+                # timeout is only a crash/lost-datagram watchdog, not a task
+                # scheduling cycle; terminal events wake this wait instantly.
+                signal_event = terminal_events.wait(max(2, interval))
+                if signal_event:
+                    print(json.dumps({"event": "task_terminal_wakeup",
+                                      "task": signal_event}, ensure_ascii=False), flush=True)
     return 0
 
 

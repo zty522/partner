@@ -143,15 +143,18 @@ def test_issue_dedup_and_evolution_promotion_gate(tmp_path):
     assert promoted["promoted"] is True
 
 
-def test_two_slot_scheduler_is_a_hard_gate(tmp_path):
+def test_resource_scheduler_is_a_hard_gate(tmp_path, monkeypatch):
+    # The live resource decision is the hard gate; it is not intrinsically two.
+    monkeypatch.setattr("partner.governance.scheduler.effective_max_active",
+                        lambda *_args, **_kwargs: 2)
     root = str(tmp_path / "workspace")
     state = set_active_slots(root, ["03", "05"], reason="test")
     assert state["active_slots"] == ["03", "05"]
     assert_start_allowed(root, "03")
     with pytest.raises(RuntimeError):
         assert_start_allowed(root, "01")
-    with pytest.raises(ValueError):
-        set_active_slots(root, ["01", "02", "03"])
+    with pytest.raises(ValueError, match="at most 2"):
+        set_active_slots(root, ["01", "02", "03"], reason="test")
 
 
 def test_runtime_signal_detector_only_records_explicit_failures():
@@ -264,11 +267,11 @@ def test_load_candidate_skills_returns_non_default_candidate_ids(tmp_path):
 def test_load_candidate_skills_ignores_corrupt_and_revisions_jsonl(tmp_path):
     from partner.governance.candidate_skills import load_candidate_skills
     # workspace_root(workspace) strips the `instances/<id>` suffix and
-    # looks for share/mind/governance/rl/candidate_skills at the root.
+    # looks for share/mind/governance/experience_guided_policy/candidate_skills at the root.
     workspace_root_dir = tmp_path / "partner_workspace"
     workspace = str(workspace_root_dir / "instances" / "03")
     Path(workspace).mkdir(parents=True, exist_ok=True)
-    skills_dir = workspace_root_dir / "share" / "mind" / "governance" / "rl" / "candidate_skills"
+    skills_dir = workspace_root_dir / "share" / "mind" / "governance" / "experience_guided_policy" / "candidate_skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     (skills_dir / "valid_skill.json").write_text(
@@ -606,4 +609,3 @@ def test_normalize_step_aliases_handles_braces_form():
     assert _normalize_step_aliases("${step3}") == "$step_3.result.content"
     # Non-step tokens left alone.
     assert _normalize_step_aliases("hello $world") == "hello $world"
-

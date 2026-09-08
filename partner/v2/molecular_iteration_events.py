@@ -52,7 +52,8 @@ def atomic_molecular_synth_baseline_benchmark(ctx, params: dict) -> dict:
     seeds = ["c1ccccc1", "c1ccncc1", "C1CCCCC1", "c1ccoc1", "c1ccsc1"]
     prefixes = ["C", "CC", "CCC", "CO", "CCO", "CN", "CCN", "O", "N", "F", "Cl", "Br",
                 "C#N", "CC#N", "C(=O)O", "CC(=O)O", "OC", "COC", "C(F)(F)F", "S(=O)(=O)N"]
-    rng = random.Random(20260822)
+    experiment_seed = int(params.get("experiment_seed") or 20260822)
+    rng = random.Random(experiment_seed)
     stochastic = []
     attempts = 0
     while len(stochastic) < target and attempts < target * 10:
@@ -71,7 +72,7 @@ def atomic_molecular_synth_baseline_benchmark(ctx, params: dict) -> dict:
                 "uniqueness": round(len({row["canonical_smiles"] for row in items}) / len(items), 6),
                 "mean_qed": round(mean(row["qed"] for row in items), 6),
                 "mean_sa": round(mean(row["sa_score"] for row in items), 6)}
-    metrics = {"source_file": source, "stochastic_seed": 20260822,
+    metrics = {"source_file": source, "stochastic_seed": experiment_seed,
                "stochastic_attempts": attempts, "rule": summarize("rule"),
                "stochastic": summarize("stochastic")}
     csv_path = os.path.join(wd, "molecular_synth_comparison.csv")
@@ -140,7 +141,7 @@ def atomic_molecular_synth_baseline_benchmark(ctx, params: dict) -> dict:
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf_path = os.path.join(wd, "molecular_synth_baseline_report.pdf")
     pdf = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": pdf_path,
-        "title": "分子生成第三轮：合成可及性与概率基线", "image_paths": [chart_path]})
+        "title": "分子生成第三轮：合成可及性与概率基线", "report_style": "research", "image_paths": [chart_path]})
     if not pdf.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf.get("error"), "quality": pdf.get("quality")}
     return {"ok": True, "status": "generated", "metrics": metrics, "quality": pdf.get("quality"),
@@ -241,7 +242,7 @@ def atomic_molecular_goal_optimization_benchmark(ctx, params: dict) -> dict:
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf_path = os.path.join(wd, "molecular_optimization_report.pdf")
     pdf = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": pdf_path,
-        "title": "分子生成第四轮：QED/SA 多目标候选选择", "image_paths": [chart_path]})
+        "title": "分子生成第四轮：QED/SA 多目标候选选择", "report_style": "research", "image_paths": [chart_path]})
     if not pdf.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf.get("error"), "quality": pdf.get("quality")}
     return {"ok": True, "status": "generated", "metrics": metrics, "quality": pdf.get("quality"),
@@ -406,6 +407,7 @@ def atomic_molecular_data_readiness_audit(ctx, params: dict) -> dict:
         "content": report,
         "output_path": pdf_path,
         "title": "分子项目第五轮：目标与活性数据接入就绪度审计",
+        "report_style": "research",
     })
     if not pdf.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf.get("error"),

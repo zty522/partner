@@ -1,5 +1,21 @@
 """Support 'python -m partner' entry point (main module)."""
 
+# ---- Module-level sys.path + cwd guard (Sprint18 §6 follow-up) ----
+# Without this, hermes background launches that don't chdir into the partner
+# repo cause ModuleNotFoundError for `partner.state.config` and shells/*.
+import os as _os_init
+import sys as _sys_init
+_partner_root = _os_init.path.dirname(_os_init.path.abspath(__file__))  # partner/
+_project_root = _os_init.path.dirname(_partner_root)  # /mnt/e/work/partner
+if _project_root not in _sys_init.path:
+    _sys_init.path.insert(0, _project_root)
+try:
+    if _os_init.getcwd() != _project_root:
+        _os_init.chdir(_project_root)
+except Exception:
+    pass
+# ---- end module-level guard ----
+
 import argparse
 import json
 import os
@@ -93,6 +109,7 @@ def correct_extension(file_data: bytes, filename: str) -> str:
 
 
 def _run_instance_mode(argv: list[str]):
+    # cwd + sys.path are guaranteed by the module-level guard at import time.
     parser = argparse.ArgumentParser(prog="python -m partner")
     parser.add_argument("--instance-id", default=os.environ.get("PARTNER_INSTANCE_ID", "default"))
     parser.add_argument("--workspace", default=os.environ.get("PARTNER_WORKSPACE", ""))
@@ -105,6 +122,16 @@ def _run_instance_mode(argv: list[str]):
 
     workspace = args.workspace or str(resolve_instance_workspace(args.instance_id))
     ensure_instance_layout(workspace)
+    # Recover this bot application's own user target from its own inbound
+    # history. QQ Official OpenIDs are app-scoped and must never be copied
+    # across the five instance bots.
+    try:
+        from partner.evolution.sprint18_unified_patch import restore_instance_openid
+        touched = restore_instance_openid(workspace)
+        if touched:
+            print(f"{args.instance_id}: instance-scoped QQ target recovered", flush=True)
+    except Exception as exc:
+        print(f"{args.instance_id}: QQ target recovery skipped: {exc}", flush=True)
     from partner.monitoring.run_control import is_instance_paused
     if is_instance_paused(workspace, args.instance_id):
         print(f"Partner instance '{args.instance_id}' is persistently paused; startup skipped.", flush=True)
@@ -129,12 +156,12 @@ def _run_instance_mode(argv: list[str]):
                 os.remove(pid_file)
             except Exception:
                 pass
-            # Also clean stale lock if no process holds it
-            lock_file = os.path.join(workspace, "state", "instance_runtime.lock")
-            try:
-                os.remove(lock_file)
-            except Exception:
-                pass
+            # Do not unlink instance_runtime.lock here.  PID visibility is not
+            # reliable across WSL/container namespaces: an active process can
+            # appear dead to ``os.kill(pid, 0)``.  Unlinking its locked inode
+            # lets a second process lock a newly-created file and both consume
+            # the same inbox.  flock on the stable path is the authority;
+            # stale unlocked files are harmless and acquired below.
     try:
         from partner.monitoring.instance_lock import InstanceAlreadyRunning, acquire_instance_lock
 
@@ -200,6 +227,53 @@ def _run_instance_mode(argv: list[str]):
     partner.start()
     partner.start_mind()
 
+    # Defensive: pre-define ``_qq_bridge`` and ``cfg`` so the Sprint18 §6
+    # background bridge thread block below does not raise UnboundLocalError
+    # in the manual_stable instance_mode path.
+    _qq_bridge = None
+    cfg = ""
+
+    # ---- Sprint18 §6 follow-up: start QQ bridge in background thread -------
+    # Without this, push_text_now returns ok=False silently because the
+    # bridge object exists in this process but never had start() called.
+    # The 5 instances used to fall back to writing dialog_history only,
+    # so users saw no QQ messages for months.  Starting the bridge here
+    # gives each instance its own WebSocket to the QQ Official Platform,
+    # which dedups per app_id at the platform level.
+    # Ensure _qq_bridge exists as a name in this function scope before the
+    # bridge thread block runs (line ~220) — defensive for instance mode.
+    _qq_bridge = None
+    try:
+        from shells.frontend.qq_bot.qq_official_bridge import create_bridge
+        if _qq_bridge is None and os.path.exists(cfg) and QQQOfficialBridge is not None:
+            qq_bridge_obj = create_bridge(workspace, config_path=cfg)
+            import threading as _qq_thread
+            _qq_thread.Thread(target=qq_bridge_obj.start, daemon=True,
+                              name="qq-bridge-launcher").start()
+            _qq_bridge = qq_bridge_obj
+            set_push_callback(_push_to_last_user)  # re-register now that bridge is live
+            print(f"{args.instance_id}: QQ bridge thread started", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"{args.instance_id}: QQ bridge thread start failed: {exc}", flush=True)
+    # ---- BDK-driven learn trigger poller (opt-in) ------------------------
+    # When PARTNER_LEARN_TRIGGER_ENABLE=1 AND instance is 04 (literature),
+    # start a background poller that watches desktop_inbox.jsonl for
+    # `{source: learn_trigger, text: /learn_from_hermes}` markers and runs
+    # partner.learn.learn_from_hermes.main() when found.  This lets 04
+    # self-trigger external learning from its own inbox.
+    if os.environ.get("PARTNER_LEARN_TRIGGER_ENABLE") == "1" and args.instance_id == "04":
+        try:
+            from partner.learn.inbox_trigger import start_learn_trigger_poller
+            thread = start_learn_trigger_poller(
+                workspace=workspace,
+                inbox_path=os.path.join(workspace, "instances", "04", "state",
+                                          "desktop_inbox.jsonl"),
+            )
+            print(f"04 instance learn-trigger poller started (thread={thread.name}, daemon={thread.daemon})", flush=True)
+        except Exception as exc:
+            print(f"Learn-trigger poller failed to start: {type(exc).__name__}: {exc}", flush=True)
+    # ----------------------------------------------------------------------
+
     # Auto-sync skills from central registry on startup
     try:
         from partner.skills.skill_center import sync_skills_to_instance
@@ -208,19 +282,49 @@ def _run_instance_mode(argv: list[str]):
     except Exception as exc:
         print(f"Skill sync skipped: {exc}", flush=True)
 
-    cfg = os.path.join(_config_root(workspace), "qq_config.json")
-    _qq_instance_id = None
-    if os.path.exists(cfg):
-        try:
-            with open(cfg) as _fh:
-                _qq_cfg = json.load(_fh)
-            _qq_instance_id = str(_qq_cfg.get("instance_id", "")).strip() or None
-        except (json.JSONDecodeError, OSError):
-            pass
-    if _qq_instance_id and _qq_instance_id != args.instance_id:
-        cfg = os.path.join(workspace, "qq_config.json")
-    elif not os.path.exists(cfg):
-        cfg = os.path.join(workspace, "qq_config.json")
+    # Sprint18 §6 follow-up: ALWAYS resolve qq_config via the canonical
+    # global_config.json. Each instance's qq_config path is declared under
+    # ``instances[<iid>].qq_config`` relative to partner_dir. This way the
+    # bot's app_id / app_secret are sourced from a single file the user
+    # edits, not from per-instance copies.
+    cfg = ""
+    try:
+        from partner.monitoring.instance_root import (
+            resolve_partner_root, resolve_global_config_path,
+        )
+        global_cfg_path = resolve_global_config_path()
+        if global_cfg_path.exists():
+            with open(global_cfg_path) as _gfh:
+                _global_cfg = json.load(_gfh)
+            inst_cfg = (
+                (_global_cfg.get("instances") or {})
+                .get(args.instance_id, {})
+                .get("qq_config")
+            )
+            if inst_cfg:
+                partner_dir = str(resolve_partner_root())
+                candidate = os.path.join(partner_dir, inst_cfg)
+                if os.path.exists(candidate):
+                    cfg = candidate
+                else:
+                    # Relative to workspace root if partner_dir mismatch
+                    ws_candidate = os.path.join(
+                        os.path.dirname(workspace) + "/..", inst_cfg
+                    )
+                    if os.path.exists(ws_candidate):
+                        cfg = ws_candidate
+    except Exception:
+        pass
+    if not cfg or not os.path.exists(cfg):
+        # Fallback: instance state dir copy
+        for fallback in (
+            os.path.join(_config_root(workspace), "qq_config.json"),
+            os.path.join(workspace, "qq_config.json"),
+            os.path.join(workspace, "state", "qq_config.json"),
+        ):
+            if os.path.exists(fallback):
+                cfg = fallback
+                break
     # ── 通用历史记录写入（所有实例都需要，无论有无 QQ） ──
     _qq_bridge = None  # may be set below if QQ config exists
 
@@ -321,7 +425,13 @@ def _run_instance_mode(argv: list[str]):
             ok = _qq_bridge.send_proactive(openid, content, QQMessageType.PRIVATE, bypass_quiet=True)
             if ok:
                 _append_proactive_history(content, openid, kind="message")
-            return ok
+                return True
+            # Fail closed.  A QQ NACK belongs to this instance/bot app and
+            # must remain a delivery failure. Relaying it through instance 03
+            # destroys instance attribution and uses an OpenID from a
+            # different application namespace.
+            _append_proactive_history(content, openid, kind="message")
+            return False
         # No bridge — just write to history
         _append_proactive_history(content, openid, kind="message")
         return False
@@ -373,7 +483,12 @@ def _run_instance_mode(argv: list[str]):
             )
             if ok:
                 _append_proactive_history(text, openid, kind="file", attachments=attachments)
-            return ok
+                return True
+            # Keep the failure attached to this bot application.  Cross-bot
+            # fallback is not a valid acknowledgement for the originating
+            # instance.
+            _append_proactive_history(text, openid, kind="file", attachments=attachments)
+            return False
         # No bridge — just write to history
         _append_proactive_history(text, openid, kind="file", attachments=attachments)
         return False
@@ -381,7 +496,14 @@ def _run_instance_mode(argv: list[str]):
     set_file_push_callback(_push_file_to_last_user)
 
     # ── QQ bridge setup（可选） ──
-    if os.path.exists(cfg) and QQQfficialBridge is not None:
+    # Local/manual validation must remain usable while QQ networking is down.
+    # This opt-in runtime switch does not alter qq_config.json and does not
+    # weaken QQ delivery truth for normal launches; it only skips constructing
+    # the bridge so desktop_inbox and local history can be tested independently.
+    qq_disabled = os.environ.get("PARTNER_DISABLE_QQ", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if os.path.exists(cfg) and QQQfficialBridge is not None and not qq_disabled:
         _qq_bridge = QQQfficialBridge(workspace)
         _qq_bridge.load_config_from_file(cfg)
         try:
@@ -398,7 +520,10 @@ def _run_instance_mode(argv: list[str]):
             sys.exit(0)
         return
 
-    print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}; running without QQ bridge.")
+    if qq_disabled:
+        print(f"Partner instance '{args.instance_id}': QQ disabled for this launch; local inbox remains active.")
+    else:
+        print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}; running without QQ bridge.")
     try:
         while True:
             time.sleep(60)

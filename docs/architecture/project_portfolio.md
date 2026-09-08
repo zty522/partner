@@ -1,5 +1,9 @@
 # 五项目长期轮转
 
+> **2026-08-30 长时域相位门**：组合控制器新增 `long_horizon` 持久归约视图。项目 Receipt NextAction
+> 永远优先；业务证据达到动态配额后才允许一次 05 学习；同 Campaign 且 execution/evaluation Event
+> 合同齐备的 Candidate 才允许一次 bounded 验证。治理工作连续超过门限后必须等待新业务证据。
+
 ## 目标
 
 `portfolio-continuous` 是 Campaign 上层的项目组合调度器。它让 01–05 都有明确通道，运行时最多占用两个实例；新输入、声明式主动探索和低频证据 scout 都能创建 WorkItem。它不按时间机械重跑旧报告。
@@ -12,7 +16,7 @@
 | 02 | TargetDiff `data/` 或 `datasets/` 出现官方 split 候选 | `targetdiff_provenance_audit` | 等待官方拆分；不重跑 Stage 13 |
 | 03 | Campaign/RL/Executor/CLI/测试代码指纹变化 | `framework_campaign_contract_audit` | 等待代码变化 |
 | 04 | 声明的 RL/SESA/ProRL/论文来源指纹变化 | `external_learning_index_slice` | 等待新来源；indexed 不等于 integrated |
-| 05 | 01–04 新准入任务全部终态，且结果集合指纹变化 | `offline_rl_self_evolution` | 等待业务证据，不抢占项目 |
+| 05 | 01–04 新准入任务全部终态，且结果集合指纹变化 | `offline_policy_learning_self_evolution` | 等待业务证据，不抢占项目 |
 
 ## 持久状态与调度
 
@@ -23,6 +27,11 @@
 通道状态包括 `queued/active/waiting_input/waiting_change/waiting_wave/outside_campaign_scope/budget_exhausted`。`status` 命令把这份组合状态与 Campaign、WorkItem、Lease 一起返回。最大并发仍由 Campaign `max_active<=2` 与实例 scheduler 双重限制。
 
 05 的指纹由本 Campaign 中 01–04 终态 WorkItem 的状态、事件、产物和更新时间组成。只要仍有业务任务未终态，05 就保持 `waiting_wave`。RL 只产生 candidate Experiment；样本或回归门不足不得 promoted。
+
+`portfolio_state.json.long_horizon` 还记录业务/学习后的计数、证据指纹、治理密度、下一复核时间和当前相位。
+Candidate 只有同时满足 `source_campaign_id`、`execution_ready`、`evaluation_ready` 与实例 allowlist 才能被
+调度；调度产生普通 `evolution_experiment` WorkItem，要求冻结 baseline/candidate，且明确禁止自动晋升。
+`attempted_candidate_ids` 防止同一 Campaign 对同一 Candidate 重复制造实验。
 
 ## 主动探索与长期 scout
 

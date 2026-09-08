@@ -1,5 +1,9 @@
 # ADR 0009: manual_stable handoff contract — shape (a)/(b) 分类 + opt-in
 
+> **2026-08-30 纠正**：本文按 `inputs=[]` / `inputs!=[]` 区分 standalone 与 continuation 的规则已被
+> ADR 0040 取代。输入表示材料，不表示承接意图；当前权威规则使用显式 `continue_from_project` 或
+> `previous_receipt_id`。本文仅保留为历史问题与第一次修复记录。
+
 **状态**: accepted
 **日期**: 2026-08-27
 **触发**: Bug #40 — 03 任务 1/3 端到端跑通后, governance 报 unlinked_previous_receipt

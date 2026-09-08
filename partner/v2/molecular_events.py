@@ -152,6 +152,7 @@ def atomic_molecular_generation_benchmark(ctx, params: dict) -> dict:
         "content": report,
         "output_path": pdf_path,
         "title": "分子生成基准与自进化验收报告",
+        "report_style": "research",
         "image_paths": [chart_path],
     })
     if not pdf.get("ok"):

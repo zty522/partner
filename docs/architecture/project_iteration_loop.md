@@ -18,6 +18,16 @@
 - 显式 `NextAction`。
 - 无下一步时的 stop reason。
 
+## 承接语义
+
+- `inputs` 只表示本轮读取的材料，不足以证明它承接了上一轮。
+- `continue_from_project` / `previous_receipt_id` 表示显式承接意图。
+- 有承接意图时，inputs 必须包含 latest Receipt 的归档 artifact；缺失则 hard reject。
+- 没有承接意图时，可以读取独立源码、数据或 holdout 并建立新 Receipt，但不得获得
+  `handoff_consumed` 奖励。
+- Receipt 序号单调递增只是存储顺序，不等于语义上消费了上一轮。
+- ADR 0040 前缺少显式 intent 的 trajectory 保持原文件不变；RL policy 读取时扣除不可证明的 handoff bonus。
+
 ## 续跑条件
 
 仅当以下全部成立时自动续跑：

@@ -1,7 +1,7 @@
 # 03 实例最小链渐进任务模板
 
 **日期**：2026-08-27
-**状态**：任务设计完成，等待 03 实机执行
+**状态**：历史任务模板；执行/交付子链已有后续实证，完整治理终态仍需按 ADR 0009 链接 Receipt
 **配套**：Sprint 15 + Codex 5 阶段建议（任务 1/3）
 **前置**：当前 partner 工作区有 18 个 Codex 未提交改动（10 对 canary 配套），
 必须保持不动；本任务不对 partner 框架做任何修改
@@ -69,13 +69,13 @@ partner/mind/harness.py 中 _is_placeholder_content 函数（行号 3147 附近�
 2. 文件里能 grep 到 _is_placeholder_content 真实函数体（不是占位）
 3. partner/mind/harness.py mtime 未变（git diff 显示无修改）
 4. 03 实例 QQ 真实发送"收到/计划/每步完成/最终结果"四条
-5. pytest 全量仍 333 passed
+5. pytest 不低于该任务设计时的 333 基线；当前仓库权威基线为 351 passed
 
 **核验方式**（我看的不是报告内容，是这4 项实物）：
 1. ls -la <working_dir>/placeholder_content_diagnosis.md（文件存在 + 字节数）
 2. grep -c "_is_placeholder_content" <working_dir>/placeholder_content_diagnosis.md（含函数引用）
 3. git -C /mnt/e/work/partner diff partner/mind/harness.py 为空（未修改）
-4. pytest -q --tb=line 全量通过（333 passed in ~16s）
+4. pytest -q --tb=line 全量通过（设计时 333；当前应为 351 passed）
 
 ## 2. 任务 2/3：单文件小修复
 
@@ -99,7 +99,7 @@ partner/mind/harness.py 中 _is_placeholder_content 函数（行号 3147 附近�
 3. 修改 1 个文件，改动控制在 <10 行
 4. 在 partner/tests/test_<name>.py 加 1 个测试覆盖这个 bug
 5. 跑针对性测试：pytest partner/tests/test_<name>.py -q
-6. 跑全量：pytest -q（必须 333 passed 不变）
+6. 跑全量：pytest -q（不得低于当前权威基线 351 passed）
 7. 写修复说明到 <working_dir>/fix_explanation.md
 8. git diff 检查无意外修改
 
@@ -114,7 +114,7 @@ atomic_write_artifact、create_file、run_shell（pytest）、send_user_text、p
 **验收硬门**：
 1. git diff --stat 显示改动控制在 1 个文件 + 1 个新测试文件
 2. pytest partner/tests/test_<name>.py -q PASS（真实 stdout）
-3. pytest -q 全量仍 333 passed
+3. pytest -q 全量不低于当前权威基线 351 passed
 4. fix_explanation.md 含：bug 描述、修改前/后代码对比、为什么这样修、回滚步骤
 5. 03 实例 QQ 真实发送"收到/计划/每步完成/最终结果"四条
 
@@ -135,7 +135,7 @@ atomic_write_artifact、create_file、run_shell（pytest）、send_user_text、p
 2. <FILE_B> 修改 <FUNCTION_B> 或新增小工具：<具体改动>
 3. 在 partner/tests/ 加 2 个测试覆盖新行为
 4. 跑针对性：pytest partner/tests/test_*.py -q
-5. 跑全量：pytest -q（必须 333 passed 不变）
+5. 跑全量：pytest -q（不得低于当前权威基线 351 passed）
 6. 写修复说明 + 回滚方案到 <working_dir>/two_file_fix.md
 7. git diff 自检：只动这两个文件 + 新增测试
 
@@ -145,7 +145,7 @@ atomic_write_artifact、create_file、run_shell（pytest）、send_user_text、p
 **验收硬门**：
 1. git diff --stat 显示只动 2 个源文件 + 新增测试文件
 2. pytest partner/tests/test_*.py -q PASS
-3. pytest -q 全量仍 333 passed
+3. pytest -q 全量不低于当前权威基线 351 passed
 4. two_file_fix.md 含：跨文件影响分析、回滚步骤（具体到 git checkout 命令）
 5. 03 实例 QQ 真实发送"收到/计划/每步完成/最终结果"四条
 
@@ -168,7 +168,7 @@ atomic_write_artifact、create_file、run_shell（pytest）、send_user_text、p
 **失败处理**：
 - LLM 行为限制（content placeholder / thinking-only / 相对路径）：如实记录，不算"修"
 - framework bug（路径安全、endpoint 错配、JSON 截断）：停任务，按 sprint 7/change_log 模式修根因
-- pytest < 333：立即回滚
+- pytest < 当前权威基线（现为 351）：停止并诊断；不得用覆盖用户改动的方式回滚
 
 ## 5. 监督的 7 个观测点
 
@@ -177,7 +177,7 @@ atomic_write_artifact、create_file、run_shell（pytest）、send_user_text、p
 3. 05 任务前的准备：05 不会在本阶段执行，等 03 三轮跑完后才进入
 4. 业务密度 vs 空转密度：03 任务必须产生真实产物
 5. 5 实例真实健康：pgrep + heartbeat + inbox 三信号
-6. pytest 全量基线不被破坏：333 passed 必须保持
+6. pytest 全量基线不被破坏：当前 351 passed 必须保持
 7. 文档纪律同步：change_log.md + ADR（仅在 framework bug 修复时）
 
 ## 6. 不做的事（明确边界）

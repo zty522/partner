@@ -46,6 +46,88 @@ def _content_fingerprint(paths: list[str]) -> str:
     return digest.hexdigest()[:24]
 
 
+_VOLATILE_EVIDENCE = re.compile(
+    r"(?:project_action|receipt|task|episode|candidate|experiment)_[a-z0-9_-]+"
+    r"|(?:[a-z]:)?[/\\][^\s；;,，。]+"
+    r"|\b\d{4}-\d{1,2}-\d{1,2}(?:[t\s][0-9:.+-]+)?\b"
+    r"|(?<![a-z])[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?(?![a-z])",
+    re.I,
+)
+
+
+def _stable_semantic_finding(value: str) -> str:
+    """Strip run identity and raw measurements from one business claim."""
+    text = re.sub(r"\s+", " ", str(value)).strip().lower()
+    text = re.sub(r"[；;]?\s*动作选择[=:：]\s*project_action_[a-z0-9_-]+", "", text,
+                  flags=re.I)
+    text = re.sub(r"[；;]?\s*学习干预[=:：]\s*(?:true|false|是|否)", "", text,
+                  flags=re.I)
+    text = re.sub(r"[；;]?\s*(?:selection_reason|选择原因)[=:：][^；;]+", "", text,
+                  flags=re.I)
+    text = _VOLATILE_EVIDENCE.sub("<volatile>", text)
+    return re.sub(r"(?:<volatile>[\s:：=/_-]*)+", "<volatile>", text).strip()
+
+
+def _explicit_improvement_claim(findings: list[str]) -> bool:
+    joined = " ".join(str(value).lower() for value in findings)
+    return any(token in joined for token in (
+        "improvement_vs_baseline", "counterfactual_passed", "baseline-fail/candidate-pass",
+        "相对基线改善", "相较基线改善", "反事实验证通过",
+    ))
+
+
+def _native_action_selection(root: Path, findings: list[str], *, iid: str = "",
+                             project_id: str = "", actions: list[str] | None = None) -> dict[str, Any]:
+    match = re.search(r"动作选择[=:：]\s*(project_action_[a-z0-9_-]+)",
+                      " ".join(findings), re.I)
+    selection_id = match.group(1) if match else ""
+    canonical = root / "share/mind/governance/experience_guided_policy/native_action_selections"
+    candidates = ([canonical / f"{selection_id}.json"]
+                  if selection_id else [])
+    # Some domain Events predate action-selection fields in their textual
+    # summary (notably the molecular stages). One instance runs one task at a
+    # time, so its newest matching canonical decision is the authoritative
+    # fallback until those Event result contracts are migrated.
+    if not candidates and iid and project_id:
+        candidates = sorted(canonical.glob("*.json"),
+                            key=lambda path: path.stat().st_mtime, reverse=True)[:50]
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+            if (isinstance(value, dict)
+                    and (not iid or str(value.get("instance_id") or "") == iid)
+                    and (not project_id or str(value.get("project_id") or "") == project_id)
+                    and (not actions or str(value.get("event_type") or "") in actions)):
+                return value
+        except (OSError, TypeError, ValueError):
+            continue
+    return {}
+
+
+def _candidate_no_change(paths: list[str]) -> dict[str, Any] | None:
+    """Return durable evidence that a bounded code probe found no new change.
+
+    This is intentionally artifact-based: prose such as ``no_new_candidate``
+    must never be enough to alter reward or project state.
+    """
+    for raw in paths:
+        path = Path(str(raw))
+        if path.suffix.lower() != ".json" or not path.is_file():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        if (str(value.get("decision") or "") == "no_new_candidate"
+                and value.get("production_effective") is False):
+            return {"path": str(path), "candidate_id": str(value.get("candidate_id") or ""),
+                    "existing_production_effective": bool(
+                        value.get("existing_production_effective"))}
+    return None
+
+
 def _source_families(inputs: list[str]) -> list[str]:
     families: list[str] = []
     for value in inputs:
@@ -67,7 +149,7 @@ def _marker(goal: str, key: str) -> str:
 
 
 def _promoted_manual_policy(workspace: str, project_id: str) -> dict[str, str]:
-    path = workspace_root(workspace) / "share" / "mind" / "governance" / "rl" / "control_policy.json"
+    path = workspace_root(workspace) / "share" / "mind" / "governance" / "experience_guided_policy" / "control_policy.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -262,6 +344,9 @@ def preflight_manual_artifact_truth(workspace: str, params: dict[str, Any]) -> d
     iid = instance_id(workspace)
     project_id = str(params.get("project_id") or ROLES.get(iid) or "").strip()
     goal = str(params.get("goal") or "").strip()
+    native_project = bool(
+        "[instance_native=true]" in goal and "[native_kind=project]" in goal
+    )
     inputs = [str(value) for value in params.get("inputs") or [] if str(value).strip()]
     for value in _verified_candidate_sources(workspace, str(params.get("task_id") or "")):
         if value not in inputs:
@@ -274,6 +359,8 @@ def preflight_manual_artifact_truth(workspace: str, params: dict[str, Any]) -> d
         effective_goal += " " + " ".join(f"[{key}={value}]" for key, value in promoted.items())
     policy_arm = _marker(effective_goal, "policy_arm")
     applicable = bool(
+        not native_project
+        and
         policy_arm in {"baseline", "candidate", "production"}
         and (inputs or "execute_candidate" in actions)
         and any(Path(value).suffix.lower() in {".md", ".txt"} for value in artifacts)
@@ -334,13 +421,40 @@ def _task_failure_signature(workspace: str, task_id: str) -> tuple[str, str]:
                 continue
             owner = str(failure.get("failure_owner") or owner)
             mechanism = str(failure.get("mechanism") or mechanism)
-            if owner or mechanism:
+            if mechanism:
                 return owner, mechanism
         owner = str(row.get("failure_owner") or owner)
         mechanism = str(row.get("mechanism") or mechanism)
-        if owner or mechanism:
+        if mechanism:
             return owner, mechanism
+        event_name = str(row.get("event") or "").lower()
+        error_text = str(row.get("error") or "").lower()
+        if event_name == "manual_plan_preflight_failed":
+            return "planner_contract", "planning/semantic_preflight"
+        if event_name in {"harness_batch_plan_failed", "batch_plan_handler_failed"}:
+            if "timeout" in error_text or "time limit" in error_text or "超过" in error_text:
+                return "environment", "planning/batch_planner_timeout"
+            return "planner_contract", "planning/batch_planner_exception"
     return owner, mechanism
+
+
+def _resolve_project_id(workspace: str, iid: str, params: dict[str, Any]) -> str:
+    """Resolve project identity from the task before consulting old role defaults."""
+    explicit = str(params.get("project_id") or "").strip()
+    if explicit:
+        return explicit
+    goal = str(params.get("goal") or "")
+    marked = _marker(goal, "project_id")
+    if marked:
+        return marked
+    try:
+        from .instance_native import load_state
+        current = load_state(workspace_root(workspace), iid).project_id
+        if current:
+            return current
+    except Exception:
+        pass
+    return str(ROLES.get(iid) or "")
 
 
 def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task_id: str,
@@ -353,9 +467,10 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
                               continuation_requested: bool = False,
                               handoff_consumed: bool = False,
                               failure_owner: str = "", failure_mechanism: str = "",
-                              monitor_only: bool = False) -> dict[str, Any]:
+                              monitor_only: bool = False,
+                              learning_only: bool = False) -> dict[str, Any]:
     root = workspace_root(workspace)
-    path = root / "share" / "mind" / "governance" / "rl" / "trajectories.jsonl"
+    path = root / "share" / "mind" / "governance" / "experience_guided_policy" / "trajectories.jsonl"
     trajectory_id = "traj_manual_" + hashlib.sha256(f"{iid}|{task_id}".encode()).hexdigest()[:16]
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -377,14 +492,70 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
                      "targetdiff_uncertainty_candidate", "research_adoption_context_shadow"}
         for value in meaningful
     )
-    isolated_learning = bool(_marker(goal, "sprint18")) and research_learning
+    isolated_learning = bool(
+        (bool(_marker(goal, "sprint18"))
+         or ("[instance_native=true]" in goal and "[native_kind=learning]" in goal))
+        and research_learning
+    )
+    generic_findings = {
+        "已完成本地微计划执行", "任务通过 harness 与交付硬门",
+        "isolated learning observation completed",
+    }
+    substantive_findings = [value for value in findings if value.strip().lower() not in generic_findings]
+    native_runtime_task = "[instance_native=true]" in goal
+    selection = _native_action_selection(
+        root, substantive_findings,
+        iid=(iid if native_runtime_task else ""),
+        project_id=(project_id if native_runtime_task else ""), actions=actions,
+    )
+    native_action_id = str(
+        selection.get("arm_id")
+        or (selection.get("parameters") or {}).get("strategy_id")
+        or selection.get("event_type") or ""
+    )
+    semantic_findings = {
+        _stable_semantic_finding(value)
+        for value in substantive_findings if str(value).strip()
+    }
+    semantic_signature = hashlib.sha256(
+        json.dumps({"action": native_action_id or actions,
+                    "claims": sorted(semantic_findings)}, ensure_ascii=False,
+                   sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    duplicate_outcome = False
+    if semantic_findings and path.is_file():
+        try:
+            prior_rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[-500:]]
+        except (OSError, TypeError, ValueError):
+            prior_rows = []
+        for prior in reversed(prior_rows):
+            if str(prior.get("project_id") or "") != project_id:
+                continue
+            prior_action = str((prior.get("action") or {}).get("native_action_id") or "")
+            if native_action_id and prior_action and prior_action != native_action_id:
+                continue
+            if not native_action_id and list((prior.get("action") or {}).get("event_types") or []) != list(actions):
+                continue
+            if str((prior.get("outcome") or {}).get("status") or "") != "completed":
+                continue
+            prior_findings = {
+                _stable_semantic_finding(value)
+                for value in (prior.get("outcome") or {}).get("evidence") or []
+                if str(value).strip() and not str(value).startswith("receipt_id=")
+            }
+            if semantic_findings == prior_findings:
+                duplicate_outcome = True
+                break
+    if duplicate_outcome and _explicit_improvement_claim(substantive_findings):
+        duplicate_outcome = False
     business_progress = bool(
         not monitor_only and outcome_status == "completed"
-        and not isolated_learning and artifacts and findings and meaningful and fingerprint
+        and not isolated_learning and not learning_only and not duplicate_outcome
+        and artifacts and substantive_findings and meaningful and fingerprint
     )
     learning_progress = bool(
         not monitor_only and outcome_status == "completed" and research_learning
-        and evidence_refs and findings and meaningful and fingerprint
+        and not duplicate_outcome and evidence_refs and findings and meaningful and fingerprint
     )
     accepted = outcome_status == "completed"
     full_artifact_contract = bool(accepted and artifacts)
@@ -404,11 +575,15 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
     }
     reward = (0.0 if monitor_only else (
         round(min(1.0, sum(reward_components.values())), 4) if (business_progress or learning_progress)
-        else round(-0.45 + reward_components["partial_artifact"], 4)
+        else (-0.1 if accepted and duplicate_outcome
+              else round(-0.45 + reward_components["partial_artifact"], 4))
     ))
-    strategy_id = _marker(goal, "strategy_id") or "manual_stable_grounded_v1"
-    policy_decision = _marker(goal, "policy_decision")
-    policy_arm = _marker(goal, "policy_arm")
+    strategy_id = (_marker(goal, "strategy_id") or native_action_id
+                   or "manual_stable_grounded_v1")
+    policy_decision = (_marker(goal, "policy_decision")
+                       or str(selection.get("policy_decision_key") or ""))
+    policy_arm = (_marker(goal, "policy_arm")
+                  or ("experience_guided_policy" if selection else ""))
     experiment_id = _marker(goal, "experiment_id")
     match_key = _marker(goal, "match_key")
     if failure_mechanism:
@@ -438,6 +613,8 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
             "policy_arm": policy_arm,
             "experiment_id": experiment_id,
             "match_key": match_key,
+            "native_action_id": native_action_id,
+            "action_selection_id": str(selection.get("selection_id") or ""),
         },
         "outcome": {
             "status": outcome_status, "artifacts": artifacts, "evidence_refs": evidence_refs,
@@ -445,6 +622,8 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
             "outcome_fingerprint": fingerprint, "monitor_only": bool(monitor_only),
             "business_progress": business_progress, "learning_progress": learning_progress,
             "novel_evidence": bool(business_progress or learning_progress),
+            "duplicate_outcome": bool(duplicate_outcome),
+            "semantic_signature": semantic_signature,
             "handoff_consumed": bool(handoff_consumed),
             "false_success": (bool(false_success) if false_success is not None
                               else bool(truth_audit is not None and not truth_audit.get("passed"))),
@@ -461,7 +640,7 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         ),
         "learning_observation_eligible": bool(
             iid in {"01", "02", "03", "04", "05"}
-            and (policy_decision or experiment_id or research_learning)
+            and (outcome_status == "failed" or policy_decision or experiment_id or research_learning)
             and action_identity != "generic_or_unobserved"
         ),
         "created_at": now_iso(),
@@ -472,7 +651,7 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
 
 def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[str, Any]:
     iid = instance_id(workspace)
-    project_id = str(params.get("project_id") or ROLES.get(iid) or "").strip()
+    project_id = _resolve_project_id(workspace, iid, params)
     task_id = str(params.get("task_id") or "").strip()
     artifacts = [str(value) for value in params.get("artifacts") or [] if str(value).strip()]
     evidence_refs = []
@@ -549,12 +728,23 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             for value in actions
         )
     )
+    native_learning_action = bool(
+        "[instance_native=true]" in goal
+        and "[native_kind=learning]" in goal
+        and any(value.startswith("agent_active_learning_") for value in actions)
+    )
+    native_project_action = bool(
+        "[instance_native=true]" in goal
+        and "[native_kind=project]" in goal
+        and any(value in {"continuous_project_step", "molecular_generation_step"}
+                for value in actions)
+    )
     # A matched experiment is an offline observation, not a user delivery.  A
     # flaky external channel must not turn a truthful, durably archived arm
-    # into a negative RL example.  Production/manual work still requires its
+    # into a negative EGPL example.  Production/manual work still requires its
     # real delivery acknowledgement exactly as before.
     local_observation_confirmed = bool(
-        (matched_experiment or isolated_learning_action) and artifacts
+        (matched_experiment or isolated_learning_action or native_learning_action) and artifacts
         and all(Path(value).is_file() and Path(value).stat().st_size > 0 for value in artifacts)
     )
     # Truth is evaluated before delivery acceptance.  A file rejected by the
@@ -563,6 +753,7 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
     truth_audit: dict[str, Any] | None = None
     should_truth_audit = bool(
         not campaign_monitor
+        and not native_project_action
         and policy_arm in {"baseline", "candidate", "production"}
         and (truth_inputs or "execute_candidate" in actions)
         and any(Path(value).suffix.lower() in {".md", ".txt"} for value in artifacts)
@@ -628,7 +819,7 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
         effective_goal += " " + " ".join(f"[{key}={value}]" for key, value in promoted.items())
     policy_arm = _marker(effective_goal, "policy_arm")
     delivery_failure_only = (
-        not completion_ok
+        bool(params.get("execution_ok", completion_ok))
         and bool(real_artifacts)
         and not delivery_confirmed
         and not local_observation_confirmed
@@ -685,15 +876,14 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             "project_id": project_id,
         })
         result = {"ok": False, "status": "manual_outcome_rejected", "issue": issue.get("issue")}
-        if _marker(effective_goal, "experiment_id"):
-            result["trajectory"] = _record_manual_trajectory(
-                workspace, iid=iid, project_id=project_id, task_id=task_id,
-                receipt={}, inputs=inputs, artifacts=artifacts, actions=actions or ["batch_plan"],
-                findings=findings or ["manual acceptance failed"], goal=effective_goal,
-                outcome_status="failed", false_success=bool(artifacts),
-                continuation_requested=continuation_requested,
-                failure_owner=failure_owner, failure_mechanism=failure_mechanism,
-            )
+        result["trajectory"] = _record_manual_trajectory(
+            workspace, iid=iid, project_id=project_id, task_id=task_id,
+            receipt={}, inputs=inputs, artifacts=artifacts, actions=actions or ["batch_plan"],
+            findings=findings or ["manual acceptance failed"], goal=effective_goal,
+            outcome_status="failed", false_success=bool(artifacts),
+            continuation_requested=continuation_requested,
+            failure_owner=failure_owner, failure_mechanism=failure_mechanism,
+        )
         account_canary(accepted=False, false_success=bool(artifacts))
         return result
 
@@ -820,6 +1010,96 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             "production_effective": False,
             "next_action_auto_enqueued": False,
         }
+
+    # A native metacognitive interruption belongs only to the learning
+    # ledger. It may resume the suspended project after its terminal, but it
+    # must never increment that project's IterationReceipt or earn business
+    # progress reward.
+    if native_learning_action:
+        observation_id = "native_learning_" + hashlib.sha256(
+            f"{iid}|{task_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        observation = {
+            "receipt_id": observation_id, "project_id": project_id,
+            "delivery_confirmed": delivery_confirmed,
+            "local_observation_confirmed": local_observation_confirmed,
+        }
+        trajectory = _record_manual_trajectory(
+            workspace, iid=iid, project_id=project_id, task_id=task_id,
+            receipt=observation, inputs=inputs, artifacts=artifacts,
+            evidence_refs=list(dict.fromkeys([*evidence_refs, *artifacts])), actions=actions,
+            findings=findings or ["bounded native learning interruption completed"],
+            goal=effective_goal, truth_audit=truth_audit,
+            continuation_requested=False,
+        )
+        return {
+            "ok": True, "status": "native_learning_observation_recorded",
+            "manual_task_id": task_id, "receipt": observation,
+            "trajectory": trajectory, "project_state_mutated": False,
+            "local_observation_confirmed": local_observation_confirmed,
+            "production_effective": False, "next_action_auto_enqueued": False,
+        }
+
+    # A bounded Candidate probe which proves that the allow-listed repair is
+    # already installed is useful learning evidence, but it did not invent or
+    # apply a new behavior. Keep it out of ProjectState and business reward.
+    no_change = _candidate_no_change(artifacts) if native_project_action else None
+    if no_change:
+        observation_id = "candidate_no_change_" + hashlib.sha256(
+            f"{iid}|{task_id}".encode("utf-8")
+        ).hexdigest()[:16]
+        observation = {
+            "receipt_id": observation_id, "project_id": project_id,
+            "delivery_confirmed": delivery_confirmed,
+            "local_observation_confirmed": bool(artifacts),
+            **no_change,
+        }
+        learning_actions = [*actions, "learning_candidate_no_change"]
+        trajectory = _record_manual_trajectory(
+            workspace, iid=iid, project_id=project_id, task_id=task_id,
+            receipt=observation, inputs=inputs, artifacts=artifacts,
+            evidence_refs=artifacts, actions=learning_actions,
+            findings=findings or ["bounded Candidate probe found no new behavior"],
+            goal=effective_goal, truth_audit=truth_audit,
+            continuation_requested=False, learning_only=True,
+        )
+        return {
+            "ok": True, "status": "candidate_no_change_observation_recorded",
+            "manual_task_id": task_id, "receipt": observation,
+            "trajectory": trajectory, "project_state_mutated": False,
+            "production_effective": False, "next_action_auto_enqueued": False,
+            "evidence_archive": evidence_archive,
+        }
+
+    # Autonomous project rounds must prove a real action before they may
+    # mutate ProjectState.  A generated report and a generic finding are not
+    # business progress and instead become an active-learning observation.
+    if "[instance_native=true]" in goal:
+        from .real_action_contract import assess as assess_real_action
+        progress = assess_real_action(
+            workspace_root_path=workspace_root(workspace), project_id=project_id,
+            findings=findings, actions_executed=actions, artifacts=artifacts,
+            max_repeat_findings=2, require_external_artifact=True,
+        )
+        if not progress.get("ok"):
+            mechanism = "project/" + str(progress.get("violation") or "report_only_progress")
+            issue = record_issue(workspace, {
+                "summary": f"native project round lacked real progress: {task_id}",
+                "category": "verification", "severity": "high",
+                "evidence": [f"task_id={task_id}", json.dumps(progress, ensure_ascii=False)],
+                "instance_id": iid, "project_id": project_id,
+            })
+            trajectory = _record_manual_trajectory(
+                workspace, iid=iid, project_id=project_id, task_id=task_id,
+                receipt={}, inputs=inputs, artifacts=artifacts,
+                actions=actions or ["batch_plan"], findings=findings or ["real action contract failed"],
+                goal=effective_goal, outcome_status="failed", false_success=bool(artifacts),
+                continuation_requested=continuation_requested,
+                failure_owner="verification", failure_mechanism=mechanism,
+            )
+            return {"ok": False, "status": "native_real_action_rejected",
+                    "issue": issue.get("issue"), "progress_assessment": progress,
+                    "trajectory": trajectory}
 
     previous = latest_receipt(workspace, project_id)
     ignore_handoff_check = bool(params.get("ignore_handoff_check", False))

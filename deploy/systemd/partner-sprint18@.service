@@ -1,0 +1,14 @@
+[Unit]
+Description=Persistent Partner Sprint 18 active-learning controller %i
+After=default.target network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/e/work/partner
+ExecStart=/home/os/miniconda3/bin/python /mnt/e/work/partner/scripts/run_sprint18_active_campaign.py --workspace /mnt/e/work/partner_workspace --campaign-id %i --watchdog-seconds 30
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

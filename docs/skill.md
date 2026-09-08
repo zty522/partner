@@ -1,5 +1,30 @@
 # Partner Agent 功能清单
 
+## 2026-09-01 新增：完成信号驱动的受控持续学习
+
+- 显式 Campaign 中，一个 Task 最终治理结束后可立即唤醒 controller 并派发同实例下一项；不再把 5 分钟
+  定时器当调度时钟，仍保留 30 秒 lost-signal watchdog。
+- 04/05 可各自串行、合计最多双槽地执行多主题 baseline/candidate matched 任务；当前模型只用
+  MiniMax-M3，DeepSeek 无隐式 fallback。
+- 每轮真实写 Task、Claim audit、Episode、Reward 和 Campaign evidence；失败与 rejected 实验保留。
+- QQ 不可用时，显式研究 Campaign 可记录 local observation，但这不是文件/消息送达，不计生产业务门。
+- readiness 可自动复审并在全门满足时走 Event-first activation；当前仍 blocked，不是默认自动 promotion。
+
+## 2026-08-31 新增：多源证据采用 Candidate（shadow）
+
+- 可把已审计的互补 code+paper 证据与 Partner 本地实现指纹编译为白名单 Event Candidate；单源或 Claim
+  不完整时拒绝生成。
+- `research_adoption_context_shadow` 会保护最新 Receipt、检索同项目 trajectory、附真实研究摘录并遵守
+  总字符预算；不会读取其他项目轨迹。
+- 已完成五项目真实快照 baseline/candidate 对照；只证明上下文准备改善，不自动 promotion 或续轮。
+
+## 2026-08-31 新增：真实源码/论文主动学习（受限 shadow）
+
+- 04 可对允许目录内的 GitHub 源码和论文执行来源核验、信息价值选择、证据摘录和跨轮后验更新。
+- 已读问题/来源会降低 novelty；同一 matched experiment 幂等复核，不覆盖旧实验。
+- 消息逐步说明核验、选择、发现和 shadow 决策，不只发送机器 JSON 文件名。
+- 成功记为 `learning_progress` 而非 `business_progress`；不自动生成代码、不自动 promotion、不自动续轮。
+
 ## 2026-08-26 新增：Episode 级离线学习与受控 Canary（实验）
 
 - 可把一个持久 task 的 planner/model/tool/artifact/Receipt/交付证据归约为 Episode Trace v3。
@@ -212,6 +237,10 @@
 
 ## 七、当前限制
 
+ADR 0049 的 `research_adoption_context_shadow` 是 Event Candidate，不是生产 Skill。三类本地下游任务
+通过只证明证据可被本地消费者使用；在显式 PromotionDecision 前不得注册为长期 Skill，也不得修改默认
+上下文策略。外部 LLM 对照仍需明确的数据外发授权或本地模型。
+
 | 限制 | 说明 |
 |------|------|
 | 模型 | 文本和长生成按 purpose 路由；读图使用 qwen 视觉模型，视觉结论仍需结构化证据交叉验证 |
@@ -224,4 +253,4 @@
 
 ---
 
-*最后更新: 2026-08-26（Episode/Shadow/Canary 五阶段）*
+*最后更新: 2026-08-31（Event Candidate 下游 shadow 验证）*

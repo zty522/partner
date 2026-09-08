@@ -94,6 +94,8 @@ def select_context(
     project_id: str = "",
     budget_chars: int = 16000,
     requested_ids: list[str] | None = None,
+    boosted_ids: list[str] | None = None,
+    reserve_receipt_chars: int = 0,
     allow_history: bool = False,
     semantic_selector: Callable[[str], str] | None = None,
     catalog_path: str | Path = DEFAULT_CATALOG,
@@ -102,9 +104,18 @@ def select_context(
     budget_chars = max(1000, min(int(budget_chars), 100_000))
     catalog = load_catalog(catalog_path)
     requested = {str(value) for value in requested_ids or []}
+    boosted = {str(value) for value in boosted_ids or []}
     query_tokens = _tokens(query)
     eligible = [item for item in catalog["documents"] if _eligible(item, instance_id, allow_history)]
-    eligible.sort(key=lambda item: _rank(item, query_tokens, requested), reverse=True)
+    # A bounded boost changes ranking without giving cognition-derived IDs the
+    # hard priority of an explicit user request.  Default callers are exactly
+    # unchanged; Gate C uses this only in its isolated candidate route.
+    eligible.sort(
+        key=lambda item: (_rank(item, query_tokens, requested)[0]
+                          + (10 if str(item.get("id")) in boosted else 0),
+                          _rank(item, query_tokens, requested)[1]),
+        reverse=True,
+    )
 
     llm_ids: list[str] = []
     if semantic_selector and eligible:
@@ -127,9 +138,12 @@ def select_context(
         if doc_id not in ordered_ids:
             ordered_ids.append(doc_id)
     by_id = {str(item["id"]): item for item in eligible}
-    has_targeted_context = bool(requested or llm_ids or any(_rank(item, query_tokens, requested)[0] > 40 for item in eligible if item.get("id") not in MANDATORY_IDS))
+    has_targeted_context = bool(requested or boosted or llm_ids or any(_rank(item, query_tokens, requested)[0] > 40 for item in eligible if item.get("id") not in MANDATORY_IDS))
     mandatory_cap = max(800, int(budget_chars * (0.65 if has_targeted_context else 1.0) / len(MANDATORY_IDS)))
 
+    receipt = latest_receipt(workspace, project_id) if project_id else None
+    reserved = max(0, min(int(reserve_receipt_chars), budget_chars)) if receipt else 0
+    document_budget = budget_chars - reserved
     selected: list[dict[str, Any]] = []
     chunks: list[str] = []
     used = 0
@@ -139,7 +153,8 @@ def select_context(
             continue
         # Non-mandatory unrelated documents do not consume the remaining budget.
         score, _ = _rank(item, query_tokens, requested)
-        if doc_id not in MANDATORY_IDS and doc_id not in requested and doc_id not in llm_ids and score <= 40:
+        if (doc_id not in MANDATORY_IDS and doc_id not in requested and doc_id not in boosted
+                and doc_id not in llm_ids and score <= 40):
             continue
         path = (REPO_ROOT / str(item["path"])).resolve()
         try:
@@ -148,7 +163,9 @@ def select_context(
             if doc_id in MANDATORY_IDS:
                 raise ValueError(f"mandatory context missing: {path}")
             continue
-        remaining = budget_chars - used
+        prefix = f"\n<!-- context:{doc_id} source:{item['path']} tier:{item['tier']} -->\n"
+        suffix = "\n"
+        remaining = document_budget - used - len(prefix) - len(suffix)
         if remaining <= 0:
             break
         per_doc_limit = int(item.get("max_chars") or remaining)
@@ -157,7 +174,8 @@ def select_context(
         limit = min(per_doc_limit, remaining)
         clipped = content[:limit]
         reason = "mandatory L1" if doc_id in MANDATORY_IDS else (
-            "explicit request" if doc_id in requested else "semantic selection" if doc_id in llm_ids else "tag/rule match"
+            "explicit request" if doc_id in requested else "semantic selection" if doc_id in llm_ids
+            else "cognition soft boost" if doc_id in boosted else "tag/rule match"
         )
         selected.append({
             "document_id": doc_id,
@@ -166,24 +184,31 @@ def select_context(
             "reason": reason,
             "chars": len(clipped),
         })
-        chunks.append(f"\n<!-- context:{doc_id} source:{item['path']} tier:{item['tier']} -->\n{clipped}\n")
-        used += len(clipped)
+        rendered = f"{prefix}{clipped}{suffix}"
+        chunks.append(rendered)
+        # Budget the exact serialized bundle, including provenance markers.
+        # Previously only body text was counted, so every bundle exceeded its
+        # declared cap by the wrapper length.
+        used += len(rendered)
 
-    if project_id and used < budget_chars:
-        receipt = latest_receipt(workspace, project_id)
-        if receipt:
-            raw = json.dumps(receipt.to_dict(), ensure_ascii=False, indent=2)
-            clipped = raw[: budget_chars - used]
-            if clipped:
-                selected.append({
-                    "document_id": f"latest_receipt:{receipt.receipt_id}",
-                    "path": f"runtime://projects/{project_id}/latest_receipt",
-                    "tier": "L3",
-                    "reason": "latest project handoff",
-                    "chars": len(clipped),
-                })
-                chunks.append(f"\n<!-- context:latest_receipt tier:L3 -->\n```json\n{clipped}\n```\n")
-                used += len(clipped)
+    if receipt and used < budget_chars:
+        raw = json.dumps(receipt.to_dict(), ensure_ascii=False, indent=2)
+        prefix = "\n<!-- context:latest_receipt tier:L3 -->\n```json\n"
+        suffix = "\n```\n"
+        receipt_limit = min(max(0, budget_chars - used - len(prefix) - len(suffix)),
+                            reserved or max(0, budget_chars - used - len(prefix) - len(suffix)))
+        clipped = raw[:receipt_limit]
+        if clipped:
+            selected.append({
+                "document_id": f"latest_receipt:{receipt.receipt_id}",
+                "path": f"runtime://projects/{project_id}/latest_receipt",
+                "tier": "L3",
+                "reason": "latest project handoff",
+                "chars": len(clipped),
+            })
+            rendered = f"{prefix}{clipped}{suffix}"
+            chunks.append(rendered)
+            used += len(rendered)
 
     selection = ContextSelection(
         query=query,
@@ -195,3 +220,5 @@ def select_context(
     )
     append_jsonl(governance_log(workspace, "context_selections"), selection.to_dict())
     return selection, "".join(chunks).strip()
+
+# 03_instance_selfdrive_marker 2026-09-05T20:00:06.588569+08:00

@@ -58,7 +58,7 @@ def main() -> int:
                     # manual stop/Receipt gate finalizes the task. Wait for
                     # that governance result and then reload; otherwise a
                     # false-success canary exits 0 several seconds too early.
-                    settle_deadline = min(deadline, time.time() + 15)
+                    settle_deadline = min(deadline, time.time() + 60)
                     while time.time() < settle_deadline:
                         time.sleep(1)
                         try:

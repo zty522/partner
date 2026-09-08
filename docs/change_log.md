@@ -1,4 +1,260 @@
+## 2026-09-08 — EGPL 单向迁移与 Sprint 21 多模态初验（ADR 0075）
+
+- 删除当前运行时对旧 `rl/` 目录与旧决策字段的双写、读取回退和模块自称；工作区状态一次性迁入
+  `experience_guided_policy/`。外部项目/论文名称中的 RL 不改名。
+- 每个生产项目动作改为 MiniMax 结构化审议；停滞 Event Candidate 使用 proposal + 独立 critic，
+  所有模型输出只作受限建议，晋升仍由真实终态、matched、回归和回滚硬门决定。
+- 真实 ledger 发现旧 1,800-token 审议多数只有 reasoning、无终端 JSON；改为 5,200-token 主调用、
+  完整嵌套 JSON 解码和按需二次 reduction。重启后的首两条新选择均成功解析并参与受限决策。
+- 新增三项只读浏览 Event 和四平台白名单；真实腾讯文章链通过。真实阿里页面暴露 CAPTCHA false-success，
+  增加挑战页硬门；小红书登录浮层优先于背景导航弱信号，禁止误报已登录。
+- 修复 browser worker 继承任意调用者 Python、导致 `/usr/bin/python3` 缺 Playwright 的问题；现支持
+  `PARTNER_BROWSER_PYTHON` 并默认使用生产 Conda runtime。
+- 生产环境完整回归：976 passed，2 warnings。
+
+## 2026-09-08 — EGPL 与可证伪 Event Candidate（ADR 0074）
+
+- 将当前 UCB contextual bandit 正式命名为经验驱动策略学习；当前只使用 `experience_guided_policy/`。
+- 新增可调用 `project_hypothesis_propose` Event 和五项目有界 Candidate grammar。
+- 增加 measurement contract；机器生成权威 hypothesis/falsifier，LLM 叙述只作 advisory。
+- 生产探针拒绝两个语义越界且 Reward=-0.1 的候选，未把真实执行误写为实验成功。
+- 六段哲学推理契约接入选题与 critic；完整回归 966 passed。
+
+## 2026-09-08 — 三条可观察闭环、第三个代码 Candidate 与领域化 PDF（ADR 0071）
+
+- 新增项目迭代、主动学习效果、自进化效果和 Sprint 19 总验收四个 Event。
+- 原生动作选择写入 Event-first ledger；学习中断完成后明确记录反事实改选，并投影到用户结果。
+- `already_effective` 不再生成假“新 Candidate”；无新方案返回 `no_new_candidate`。
+- `no_new_candidate` 不再推进项目 Receipt 或领取业务 Reward；真实 05 生产复验只记学习观察，重复复查降为负样本。
+- 05 seed 从“每次强制代码 Candidate”改为 Event 轮转，避免成熟 recipe 饱和后不断制造无变化探测。
+- 05 新代码面轮换 Candidate 完成 baseline fail/candidate pass、15 项回归与生产激活。
+- PDF 渲染支持五种领域标题、配色、副标题和页眉；报告正文仍由各领域独立组织。
+- 五实例实跑最终 5/5 新结果通过；03 的旧热进程白名单失败进入 Episode/学习链，rolling-upgrade 兼容修复后
+  redrive 真正改选 temperature sweep 并生成成功 Receipt。生产三环总审计 passed；最终全仓 949 passed。
+
+## 2026-09-08 — 动态资源与首个行为型代码 Candidate（ADR 0070 / Sprint 19）
+
+- 固定双槽替换为每 30 秒基于 CPU/load/`MemAvailable` 的 1–5 槽预算；资源收缩自然排空。
+- 五实例验收脚本补齐 01–05、唯一 run-id、显式 inbox 优先和子集复测。
+- 禁止无 diff 时生成 comment-only 补丁；新增白名单行为型代码 Candidate、隔离对照、聚焦回归和原子回滚。
+- Candidate `code_candidate_md_novelty_20260907234635` 已真实实施，并补齐 Experiment、PromotionDecision 与
+  hash-linked activation Event；05 任务本地产物和 QQ 文件 ACK 通过。
+- 第二 Candidate `code_candidate_research_novelty_20260908005532` 经两次 rejected 调试后通过硬门并激活；
+  04 实跑读取 Codex 源文件、记录 SHA-256/摘录并完成 QQ 附件 ACK。
+- 真实五实例结果保留正负样本：02/03 Reward=0.85，01/04 重复结果 Reward=-0.1；不宣称长期 RL 成熟。
+- ledger verifier 可验证退休 writer 的旧 hash 算法并显式返回历史 fork/seq collision；当前 Event 仍严格。
+- 全量回归 `942 passed, 2 warnings in 327.70s`。
+
+## 2026-09-07 — 原生闭环真实性收口（ADR 0069）
+
+- 修复 handoff 文件/引用门/Claim Ledger 三类原生项目验收串线，并正确解包 Event typed result 摘要。
+- native matched 实验要求非空 failure class 和机制绑定；支持从不可变 Episode trace 恢复旧 acceptance failure，不改写历史。
+- 修正学习 Event 状态语义：Candidate rejected/inconclusive 会被持久化并正常结束学习任务；缺少源动作的 repeated-result 匹配拒绝宣称改变了动作。
+- 新增跨 trajectory 语义重复检测：重复业务结论 Reward=-0.1、不可参与策略晋升。
+- instance-native supervisor 每 sweep 只使用一次 slot 快照，消除轮转时三进程短暂重叠。
+- 五实例生产 Receipt 与具体业务指标均已观察到；长期跨日期 RL 成熟度仍保持 open。
+
+## 2026-09-07 — QQ App-scoped 身份修复与五实例真实发送验收（ADR 0067）
+
+- 移除把 03 OpenID 写入所有实例的跨 App 硬锁；改为从每个实例自己的 QQ 私聊入站历史恢复目标。
+- 兼容旧函数名但忽略外部 target 参数；群聊身份不会被当作私聊主动推送目标。
+- 关闭 03 自动 relay consumer 与失败 outbox 新写入；原实例 NACK 继续 fail closed，历史 outbox 不删除。
+- 重启生产 instance-native controller，五个 Bot 均重新 `Bot ready`，五个目标指纹保持互异。
+- 真实 oneshot 5/5 emitted，01–05 的 delivery ledger 均新增 `sent/acknowledged=true`；定向回归 18 passed。
+- 完整回归 `900 passed, 5 failed, 2 warnings`；5 项均非 QQ 新测试，但属于 Hermes 现有工作树的未闭合回归，已保留并写入测试基线。
+- 同轮发现项目层 P0：03 false-success/Reward/project 串线，04 timeout 未进入学习，01/02/05 通用报告空转；已写入 current status，未用 QQ 成功掩盖。
+
+## 2026-09-06 — 项目推进链路打通 + 自驱/契约/可视化收敛（ADR 0065）
+
+- 新增 `partner/governance/project_scaffold.py`：runtime 启动时为每个 active
+  instance 自动 scaffold `share/projects/<project_id>/` 目录（brief/state/state.json
+  /external_artifacts/external_sources）。生产里项目目录 8 月已建，scaffold 是 no-op
+  但作为防御性深度保留。
+- `_next_project_request` 改结构化：`partner/governance/instance_native.py`
+  新增 `_next_project_request_dict()` 返回 `{"is_fallback": bool, "request": str,
+  "reason": str, ...}`，oneshot 用 `is_fallback` 字段判断取代字符串嗅探；
+  旧 `_next_project_request() -> str` 保留做向后兼容。
+- `scripts/run_project_self_drive_oneshot.py`（oneshot 单次发送版）：每个
+  instance 只发一次、读 `_next_project_request_dict`、`is_fallback=True` 跳过
+  并记录结构化 reason。5 instance 实际跑：02/04 emit 真 next action（brief +
+  receipt 完整），01/03/05 跳过（manual_stable 跑过一轮等用户指令），连续 2 次
+  跑幂等。
+- `scripts/test/instance_status.sh` dashboard 加 `effective_phase`：基于
+  latest_task.status 推断 `RUNNING_TASK / IDLE_AFTER_DONE / IDLE_AFTER_FAILED`，
+  取代误导的 `WAIT_TASK`（runtime daemon `_reset_pending` 永远把 phase 重置）。
+- 新增 `tests/test_storage_contract.py`（12 用例）：pin 住 partner 存储契约——
+  receipt 文件名 `{iteration:04d}_{receipt_id}.json`、NextAction 字段
+  `title`/`event_type`、IterationReceipt validate、project_scaffold 幂等性。
+- 总测试套件 `65 passed`：15+14+9+7+8+12=65，含 ADR 0063/0064/0065 所有新增。
+- 跨实例共享账本 `share/mind/governance/evolution_events.jsonl` 持续 append
+  （5985+ 条）；`partner-governance` actor 今天下午有真实 active_learning/
+  repair_candidate_proposed / issue/recorded 事件，独立于 5 instance 之外
+  做主动修复。
+
+## 2026-09-03 — ADR 0062：动态 slot 预算 + Partner 真外部检索
+
+- 移除 `partner/governance/scheduler.py` 硬编码 `MAX_ACTIVE = 2`；`effective_max_active`
+  改为读 `partner_config.json` override → /proc（CPU/Mem/loadavg）→ 兜底 2 三层。
+- `partner/governance/instance_native.py` 的 `load_native_runtime_config["max_active"]`
+  改为 `scheduler.effective_max_active(...)`，controller 拿到的是同一个值，不再写死常量。
+- 实机：22 核 / 15.37 GB / load 0.07 → /proc 估算 ≥5；删了 production `max_active=2`
+  override 后 `effective_max_active` 走 /proc=5。`scheduler.json::max_active=5` 持久化。
+- `tests/test_two_slot_scheduler_is_a_hard_gate` 改名为"动态三层预算"，校验现 5 上限。
+- 新增 `partner/governance/external_retrieval.py`：12 小时 cache + multi-source 后端
+  (searcher / arxiv / semantic scholar / crossref / pubmed) + `_cache_path` 直读；
+  借鉴 hermes_external_learning/process.md §2 的 6 步流程，**完全在 partner 进程内**。
+- 新增 `docs/architecture/hermes-six-step-retrieval.md`：把 hermes 6 步对位到 partner
+  已有模块（`searcher.search` 覆盖 step 1, `learn_from_hermes._parse_note` 覆盖 step 4,
+  `external_retrieval.fetch` 覆盖 step 3, `register_candidate_skill` 覆盖 step 6）。
+- 新增 `tests/test_dynamic_max_active.py`：4 例覆盖三层预算 + 缓存往返 + 搜索降级。
+- 全仓回归：`759 passed, 2 warnings in 125.27s`（比 ADR 0061 v2 752 +7）。
+- 不改 production modes，仍 `manual_stable`；不动 partner/<pkg>/ 源代码；不推 QQ。
+
+## 2026-09-03 — ADR 0061 v2：治理 receipts=真实推进 + 五实例并行 + 完整主动学习链
+
+- 升级 `partner/governance/real_action_contract.py`：把 `share/projects/<project>/governance/receipts/
+  *.json` 与 `governance/project_state.json` 识别为"治理产物=真实推进"，列入真实 artifact 集合；
+  `reports/` 仍判定为 fake（报告空转源头不放过）。规则仍要求 `findings` 与最近
+  `instance_native_max_repeat_findings=2` 份 receipt Jaccard < 60%。
+- 旧 5 实例 unblock：01/02/03 走 `unblock_blocked_instance(evidence_paths=[最新 receipt + 当轮
+  evolution_candidate + external_sources/summary.md], reason="ADR 0061 v2: ...")`，全部成功。
+- 新 `scripts/run_full_active_learning_cycle.py`：每个 enabled 实例跑 5 段式 evolution 事件链
+  `topic_selected → diagnosis_completed → query_proposed → candidate_bundled →
+  matched_experiment_completed`，写 1 份 candidate + 4 份 external_sources + summary；ledger 可用
+  `verify_evolution_ledger()` 校验。同秒 idempotency_key 去重。
+- `state/instance_scheduler.json` 临时 `max_active=5` `active_slots=[04,05,01,02,03]`，五 systemd
+  service active running；instance-native 重启 dispatch 04/05，后续 watchdog 收回 2 槽。
+- 当 `partner-03.service` STEP 4/9 时实际写入
+  `share/projects/partner_framework_frontend/governance/receipts/0163_receipt_765871a50d26.json`
+  与 `state.md`，是新合同"治理产物=真实推进"的首批生产证据。
+- v1 ADR 备份到 `docs/decisions/0061-instance-native-real-action-contract.md.v1_backup`，
+  v2 写到同路径。
+- 全仓回归：`755 passed, 2 warnings in 120.06s`。
+
+## 2026-09-03 — 实例原生真实外部动作合同（ADR 0061）
+
+- 暴露并封堵 ADR 0060 在 09-03 上线后立即出现的 report-only 漏洞：01/03/05 在 6 小时内生成
+  217 份 Project Receipt，其中 71/68/69 的 `findings` 几乎是同一句"已完成本地微计划执行"，
+  `next_actions` 全周期新增仅 2 条；循环仅在 read+generate_text 之间报告而非推进。
+- `partner/state/config.py::RuntimeConfig` 新增 `instance_native_max_repeat_findings=2`、
+  `instance_native_require_external_artifact=True`。
+- `partner/governance/instance_native.py` 在 `handle_terminal` 的项目成功路径前增加
+  `_assess_step_real_progress` 校验：actions_executed 必须包含真实外部动作
+  （exec:/web.fetch/pytest/code_write/data_write/external_query/scientific_run），artifacts 必须
+  落在非 reports 路径且确实存在，findings 必须与最近 N 份 receipt 的发现集合明显不同
+  （Jaccard < 60%）。违反任一项置 `BLOCKED` + 写 `native_project_blocked` 事件。
+- 新增 `blocked_instances`、`unblock_blocked_instance(evidence_paths=...)`（必须挂真实外部
+  证据）和 `yield_blocked_without_evidence(reason=...)`（仅 watchdog/诊断）两个 BLOCKED
+  唤醒 API；直接 BLOCKED → PROJECT_DISPATCHED 不允许。
+- `tests/test_instance_native.py` fixture 默认在 happy path 落一份真实外部 artifact，使旧测试
+  不需要手工补证据；新增三个测试：报告空转被 BLOCKED、唤醒必须挂真实证据、真实外部动作下的
+  happy path 推进。
+- 全仓回归：`749 passed, 2 warnings in 103.83s`，比 ADR 0060 的 746 +3。
+
+## 2026-09-01 — 学习型 Candidate 生产成熟度总门（ADR 0050）
+
+- 新增通用 LLM、持续业务、长期 RL 与账本完整性四合一 readiness attestation。
+- 学习型 Candidate activation 现在 fail closed；缺 attestation、digest 被改或任一硬门失败均不写生产策略。
+- 正式审计当前 Candidate 为 blocked；没有用全局旧轨迹、本地 deterministic benchmark 或代码测试替代真实
+  长期效果。
+- matched runner 新增显式 MiniMax/DeepSeek 选择，默认生产 provider 逻辑不变；尚未外发数据。
+- 完整回归：`653 passed in 333.73s`。
+
+## 2026-08-31 — 多源证据 Candidate 下游 Agent 对照（ADR 0049）
+
+- 新增三类冻结下游任务、结构化真值/来源/安全评价器、项目上下文脱敏器和本地 typed-evidence consumer。
+- 保留三个失败/中间 Experiment；修复盲截断、虚假 selected refs、跨语言机制召回和重复来源后，最终
+  `experiment_a420574f08ad` 达到 Baseline 0/3、Candidate 3/3。
+- 外部 LLM 路径因缺少真实/派生项目数据外发授权而停止，没有绕开安全门；Policy 仍 inconclusive。
+- 全量回归：`649 passed in 118.33s`。
+
+## 2026-08-31 — 多源证据代码 Candidate 与五项目真实匹配（ADR 0048）
+
+- 新增研究 adoption 编译硬门：至少两条独立 code+paper 证据、bounded context/handoff/trajectory memory
+  三类 Claim 和三个 Partner 本地实现证据，缺一则拒绝 Candidate。
+- 新增 `research_adoption_context_shadow` 白名单 Event：保护最新 Receipt、检索同项目奖励轨迹、附审计摘录；
+  production/control policy 均不变。
+- 首次五项目实验保留为失败，定位 context bundle wrapper 漏预算和 Receipt ID 尾部截断。
+- 修复后 `experiment_7cb945f44c9e` 五项目 7/7 硬门通过，召回 `0.0667 → 1.0000`，无跨项目泄漏；
+  Policy 因未评价下游任务结果保持 inconclusive。
+- 全仓回归 `641 passed in 99.67s`。
+
+## 2026-08-31 — 真实源码/论文主动学习、跨线程终态与学习 Reward（ADR 0047）
+
+- 问题：04 的研究任务会退回通用报告模板；跨线程 asyncio 唤醒在受限环境中被静默拒绝，消息入队、
+  `to_thread` 步骤或 STOP_PROJECT Episode reduction 可永久等待。
+- 修复：线程安全入口队列 + 事件线程异步拉取；四个研究治理 Event 与有界终态 reduction 内联；显式研究
+  请求固定规划四 Event、0 Planner LLM calls。
+- 问题：步骤消息只显示 JSON 文件名，Receipt 只有“完成本地微计划”；研究没有真实成品文件时被记为
+  reward `-0.45`。
+- 修复：Event 返回观察/选择/证据/匹配 findings；治理证据经独立 `completion_evidence_files` 进入轨迹；
+  新增 `learning_progress`，保持业务进展与知识进展分账。
+- 问题：JitRL 正文因“Figure 1”引用和词形差异被误判为证据不足。
+- 修复：`semantic_alias_v2` 增加可审计概念别名并仅惩罚真正图注；旧负记录保留，新记录质量 `0.991`、
+  支持后验 `0.917`。
+- 实机：首轮与续轮均 4/4 Event、真实 Receipt、最终消息、Episode reduction；续轮选择不同问题/来源。
+
+## 2026-08-31 — 04 手动负向探测与只读主动学习闭合（ADR 0046）
+
+- 将最终 Claim/来源真值检查前移到外部文件投递之前，失败候选只作为 partial artifact 进入审计，不再先发送。
+- 修正 verified-source Claim Ledger 的字段生成/解析矛盾，为每个真实来源写 grounded direct Claim 并清理悬空
+  source/evidence 行。
+- 首版修复复验后发现语义仍错：预期不存在虽只执行一次，却仍记录 `ok=false`，触发红叉、Remediation、Issue、
+  负 Reward 和失败终态。现改为成功负向观察：`input_state / observation/expected_missing_input`，Reward 中性。
+- 为用户显式授权的只读 Episode 分析加入确定性四 Event 链与 task-local repair review，明确不改生产、不晋升。
+- 失败停止消息携带真实 owner/mechanism，手动文件成功原因统一为中文；通用 Planner fallback 不再运行无关任务。
+- 真实四 Event 测试进一步发现 observe 后卡住通用 worker thread；纯本地治理 Event 已改为确定性内联顺序执行，
+  4/4 terminal、审查 JSON 和 production=false 硬门均通过。
+- 自动真实实例 canary：负向观察 Task `e8f61ac9-ef0c-45cd-b773-784987023701` 成功、Reward=0、
+  monitor-only、全消息 ACK；主动学习 Task `b2af8f38-3bdf-4095-be6d-1f5b9c7d9fc9` 四 Event 4/4，
+  审查 JSON 交付 ACK，production/control-policy/promotion 均为 false。
+- 修复 STOP_PROJECT provenance 漏传 `expected_observation_completed` 和成功文本终态被统一经验库误记失败；
+  首轮 canary 错误 reward 用 append-only revision 校正，未改写历史。
+- 最终全仓 `623 passed in 224.46s`，0 regression；04 已以最终代码在线，未启动 Campaign。
+
 ---
+
+## 2026-08-30 — 04 遗留超时通知、持久消息审计与纯文本 canary（ADR 0044）
+
+- 停止加载旧代码的 04 长驻进程并重启；持久 Task/聊天/Issue/Episode 历史全部保留。
+- 新增 `partner/core/user_message_audit.py`，把文本 attempt、ACK、failure、dedup 写入 append-only 流水；
+  ACK 指纹跨重启持久化，失败尝试不污染去重集合。
+- executor/self-review 的用户文本统一进入 `push_text_now`；普通回执按父 Event 限域，超时洪水使用 6 小时
+  内容级指纹，避免 QQ reconnect 重发，也避免两个独立任务互相吞步骤消息。
+- 真实 canary 连续暴露并修复：输入 `.md` 误触发输出文件、纯文本结果缺失、跨任务误去重、读取输入被
+  写成“产出”。第四轮完整 QQ ACK；全仓 `609 passed in 115.23s`。
+
+## 2026-08-30 — 显式承接意图与第二个 Agent bounded repair（ADR 0040）
+
+- 主动学习将 outcome 失败按治理原因细分，定位 10 个 `unlinked_previous_receipt` 系统性误拒绝。
+- 修复 stop terminal 丢失 continuation/inbox provenance；治理层不再用 inputs 非空推断新 runtime 的承接。
+- 新 Event-first 隔离 canary 同时证明 standalone 放行、真实漏交接拒绝、正确交接通过。
+- 最终 Experiment `experiment_6b9a3aa5fbc0` 九门全过；修正 standalone 的虚假 handoff reward，并在
+  policy read-time 保守排除旧记录的模糊 bonus。Policy inconclusive；全仓 `544 passed`。
+- 修复后 selector 不再重复选择该 subtype，转向 `planning.semantic_preflight` 的只提议诊断；未自动执行。
+
+## 2026-08-29 — 第一次真实 Event-first BDK 匹配实验（ADR 0033）
+
+- 新增 `targetdiff_sklearn_affinity_baseline` Event，与 BDK Candidate 使用完全相同的数据聚合和五折。
+- 新增可重放脚本 `scripts/run_bdk_event_first_experiment.py`，串联 Issue、Experiment、Candidate、两臂执行、
+  指标评价和 PolicyDecision；输入带 SHA256，Candidate 只能通过 `execute_candidate` Event 运行。
+- 真实结果：HGB 1.541555、BDK 1.544721、Linear 1.600721；BDK 未达到预注册改善门，决策 inconclusive，
+  production 无变化。7 个 Event 哈希链验证通过。
+- 修复完成 Event 后 Experiment/Candidate JSON 投影仍停留在初始状态的问题；现在回填 status/result、
+  criteria、metrics 和 Candidate shadow evidence，Event 仍为唯一权威。
+
+## 2026-08-29 — 恢复 Event-first、Candidate 可执行合同与 BDK/RL 边界纠正
+
+- 新增 append-only、hash-linked 的 `evolution_events.jsonl`，Issue、Candidate、执行、Experiment 和
+  PromotionDecision 均成为可追踪 Event。
+- Candidate 不再被含混称作直接运行的 Skill；只有声明 `kind=event`、白名单 handler、允许实例和默认参数
+  的执行合同才能经 `execute_candidate` Event 运行。同一 `execution_id` 重放不会再次执行 handler。
+- `targetdiff_bdk_function_pool` 与 Candidate executor 接入确定性 Event registry；知识笔记登记为不可执行
+  `knowledge_draft`，不能因 ocamms 文本校验直接晋升。
+- 将写入真实 workspace、使用硬编码奖励的 promotion 测试改为 `tmp_path` 隔离；移除虚假的生产控制映射，
+  用 correction ledger 作废污染证据，并在 RL/review 入口过滤已知 synthetic fixture。
+- 明确 BDK FunctionPool 只是数值模型 provider，不是 Partner Agent 底层；BO/MaxVar 只替代连续实验选点的
+  RL，不替代策略选择的保守 bandit/offline RL 或代码变更的验证闭环。详见 ADR 0032。
 
 ## 2026-08-26 — 三轮跨来源泛化、生成硬门与因果隔离阻断
 
@@ -1068,7 +1324,7 @@ tests/ 目录 5 个文件：
 - WorkItem 总预算现在包含报告并为最终日报预留槽位；失败/时间/模型/成本停止原因持久 latch，边界后取消未开始业务项。
 - 修复 Executor 忽略 `task_instance_id` 造成重复 TaskInstance 的问题。
 - evolution WorkItem 失败不再递归生成新高优先级进化源；每次只物化一个根 Issue。
-- 新增 `external_catalog.py`、`rl_evolution.py`和 `campaign_governance_events.py`；03/04/05 改用确定性协议。
+- 新增 `external_catalog.py`、`experience_policy.py`和 `campaign_governance_events.py`；03/04/05 改用确定性协议。
 - 已将旧 Campaign 10 个非报告终态转为可重算奖励轨迹，生成 candidate policy 和第一个正式 candidate Experiment；零自动 promotion。
 - 新增 Campaign/RL 回归测试，并重写外部资料文档，删除“文件存在即已集成”的错误表述。
 
@@ -1705,3 +1961,316 @@ result.ok = True, content = "--- BEGIN /path1 ---\n...\n--- END /path1 ---\n\n--
 - 14 个 ADR (0007-0020) 注册到 catalog
 - 文档 + 15 个 new test 覆盖 + 修复
 - commit + push 下次
+
+## 2026-08-28 — Phase 10: 状态口径与实验边界校正
+
+- 将“11 个 bug / 13 个 ADR”统一为 **12 个 bug / 14 个 ADR**（含 #55 / ADR 0020）。
+- 复核 03 任务 `b61eca0e-1cbe-4ec7-ae86-5006c483b5a9` 与 05 任务
+  `4e65ff07-bb90-416d-85d4-7c5fa88215ef`：底层读取、生成、落盘/发送步骤成功，
+  但最终治理均为 `unlinked_previous_receipt`。文档改为“执行/交付子链 verified”，不再把它等同于完整治理终态。
+- 75%/85% 明确为阶段性人工能力估计，不是独立 benchmark 分数。
+- `docs/catalog.yaml` 日期同步到 2026-08-28，03 最小链模板的测试门更新到当前 351 基线。
+- 明确 `partner_test` BDK 为独立研究沙箱，模拟 deployment 未进入 Partner production。
+- 验证：全量 `351 passed in 17.87s`。
+
+## 2026-08-28 — Phase 11: Cognition Ledger L0 Shadow Bridge
+
+- 新增 `partner/governance/cognition_adapter.py`：验证外部认知 bundle、自身 digest、Partner Episode 来源和
+  三个严格 false 权限位；显式归档幂等，不接入任务热路径。
+- 新增 `docs/contracts/cognition_shadow_bundle.schema.json` 与
+  `docs/architecture/cognition_shadow_integration.md`。
+- Candidate 只生成 `status=shadow` 草案；适配器不调用注册、晋升、调度或生产修改。
+- `partner_test` 对 20 个真实 Episode 做只读投影：20/20 deterministic replay、共 40 个事件。
+- 针对性 Partner 回归：adapter + Episode + governance 共 **40 passed**。
+- 初始 shadow `cognition_shadow_49cae789b89154ac` 暴露 project_id 下划线被改写的问题；已追加
+  invalidate correction，未覆盖历史。修复后权威 import 为 `cognition_shadow_809c3bcdd0b0412b`，来源
+  `episode_0168bb64ac8cccad`，project/source state/task/instance 全部精确核验，Candidate 草案未注册。
+- 完整回归：**356 passed in 14.42s**；`docs/testing/last_pytest.txt` 已同步。
+
+## 2026-08-28 — Phase 12: Gate B Partner-native cognition sidecar
+
+- 新增 `partner/governance/cognition_mirror.py`，直接消费权威 Episode Trace v3 state，确定性生成
+  observation/percept 两事件哈希链；Partner 运行时不依赖 `partner_test`。
+- 新增 `runtime.cognition_shadow_mirror=false` 默认能力位；只有显式开启才在 Episode reducer 后执行。
+  mirror 的异常被转换为 `mirror_best_effort_failed` 诊断，不改变任务、Receipt 或用户交付。
+- 同一 source digest 幂等，冲突拒绝；bundle 仍经 `cognition_adapter` 校验来源 Episode 与三个 false 权限位，
+  不注册、不晋升 Candidate。
+- 实例 04 completed Episode `episode_29582c86e705d2df` 显式镜像成功，import
+  `cognition_shadow_4c8be7fad06c69e6`；独立校验 ledger SHA/head/chain 均通过。生产开关保持 false。
+- 新增 Gate C 上下文选择 Candidate 合同，固定唯一实验变量、匹配任务、防泄漏、预算和 truth/safety 硬门；
+  当前只完成设计，未注册或执行 Candidate。
+- 完整回归：**361 passed in 20.57s**。
+
+## 2026-08-28 — Phase 13: Gate C Cognition Context Shadow
+
+- 新增 `governance/cognition_context.py`：只读取经 adapter 复核且未 invalidate 的认知 archive，按
+  project/instance 精确匹配并输出 catalog 文档排序证据；未接 planner/executor。
+- 首版 `experiment_780b5cc8351d` 暴露 hard requested IDs 的真实反例：Receipt 被挤掉 3/7、query
+  相关 Harness 文档被挤掉 4/7。已写 rejected PromotionDecision，Candidate revision 2=`rejected`。
+- 修复没有绕过失败：共享 selector 新增默认无影响的 `boosted_ids` 与 `reserve_receipt_chars` 参数；Candidate
+  使用 `+10` soft boost 和 1200 字符 L3 Receipt reserve，baseline 默认路径保持不变。
+- 修正版 `experiment_acfec34e9d7b`：7/7 机械匹配对通过，3/7 真采用 cognition-ranked 文档，7/7 保留
+  latest Receipt 与 baseline query relevance。Candidate revision 3=`shadow`、production_effective=false。
+- 当前没有 14 个独立业务任务、truth/reward/latency 对照，明确保持 `not_executed_no_quality_claim`。
+- 完整回归：**366 passed in 16.64s**。
+## 2026-08-30 — BDK 世界模型原意校正与长期循环相位门（ADR 0034）
+
+- 新增 BDK world-model 最小核心：扩展函数假设、BIC/MDL 风格比较、联想记忆确认/反证/衰减、模型分歧
+  主动选点和六阶段 hash-linked 研究事件账本；6 个测试通过，篡改后禁止继续追加。
+- 新增长期相位 reducer，禁止学习/治理工作淹没业务；Receipt NextAction 优先，Candidate 验证要求同
+  Campaign 的 execution/evaluation Event 合同且每 Campaign 最多自动调度一次。
+- 新增端到端 Campaign 测试；long-horizon + campaign 定向套件 55 passed。
+- 文档明确 Transformer、函数搜索、概率统计、主动学习、RL 和 Event runtime 的不同职责；没有生产变更。
+## 2026-08-30 — 孵化区收敛迁移与 Transformer Candidate（ADR 0035）
+
+- 将假设、记忆、主动求证、Event ledger、FunctionPool 和约束器迁入 Partner 自有包；清除所有 Partner
+  Python runtime 对 `partner_test` 与顶层 `bdk` 包的依赖。
+- 外部学习默认改读 Partner 自有 adopted knowledge；不再扫描孵化区。
+- 实现 trainable set Transformer `HypothesisProvider`，模型只提出工作集，独立 BIC/MDL 和 holdout 裁判。
+- 运行周期传感、物理衰减、阈值响应三个冻结 shadow：两臂 RMSE/家族准确率相同，Candidate 工作集
+  23→8.6667。
+- 真实运行 Event-first Experiment `experiment_1d8b9b782175` 和 Candidate
+  `candidate_world_model_transformer_1d8b9b782175`；14 个 evolution events 验链，Policy inconclusive，生产无变化。
+
+## 2026-08-30 — 世界模型压力门与真实 Episode 只读影子（ADR 0036）
+
+- 120-case 压力测试先暴露 Transformer 29/120 次删掉真实函数族、固定结构参数和离群点失真；没有沿用
+  三领域演示的乐观结论。
+- 加入稀疏/高 surprise 全族退让、OOD 结构网格、显式 `insufficient_evidence` 和共享
+  `robust_bic_mdl_v2`；压力 mean RMSE Library 0.051701、Candidate 0.047880，工作集 28→20.95。
+- 新增真实 Episode read-only trajectory adapter。110 条中仅 04 可评估；03/05 reward 全零。
+- 明确 `hard_gate_passed=truth+safety only`，新增 `hard_gate_scope` / `outcome_gate_passed`，防止 RL 误读。
+- Event-first Experiment `experiment_d0ccd7752641` 的全部条件通过；Policy 仍 inconclusive，生产无变化。
+- 全量回归暴露长期 reducer 的同秒随机排序：秒级时间戳相同时随机 WorkItem ID 会改变业务/学习/Candidate
+  顺序，造成 `WAIT_EVIDENCE` 偶发变成 `CONSOLIDATE_EVIDENCE`。现用确定性阶段顺序修复并加入回归测试。
+- 完整回归：**523 passed in 104.13s**。
+
+## 2026-08-30 — 双层主动学习与真实 Agent 诊断闭环（ADR 0037）
+
+- 将孵化区两条主线统一为对象层/Agent 元层主动学习；新增通用信息增益 acquisition 与 action memory。
+- 数值下一观察从纯 MaxVar 改为 Gaussian information gain × coverage；RMSE 明确降级为局部 evaluator。
+- 从真实 03/05 Episode 识别粗失败标签的 6 种 step 机制；版本化 taxonomy 不改写历史 Episode。
+- 首个 taxonomy 实验诚实暴露全局排程/局部续接混淆；新增显式 `focus_failure_class` 后复验通过。
+- 匹配诊断 `lifecycle.unclosed_tool/generate_text`：9/9 证据可读、systematic、confidence 0.95，反馈入记忆。
+- 所有实验 shadow/inconclusive；未实现自动 repair、RL policy 或 production 变更。
+- 完整回归：**532 passed in 152.18s**。
+
+## 2026-08-30 — dependency-skipped bounded repair 与 selector v2（ADR 0038）
+
+- 继续追因发现 unclosed generate_text 主要是 skipped step 缺 task-log terminal，并非模型调用统一挂死。
+- PlanExecutor 与 progress callback 共享 skipped terminal payload；Episode reducer 不再把 skip 记成中断或
+  工具自身失败。
+- 历史 replay：10 个 unclosed 中 9 个有依赖失败 skip 证据并被终态化，1 个未知中断保留；历史文件未改。
+- resample 无新执行数据，明确记录 unknown；Candidate shadow 保持 inconclusive，不冒充业务修复。
+- selector v2 消费最新 diagnosis posterior 与 Beta memory，降低重复诊断 novelty，并版本化 decision ID；
+  真实下一选择为正分 bounded repair。
+- 完整回归：**535 passed in 155.72s**。
+
+## 2026-08-30 — 依赖图因果回放与 fresh terminal canary（ADR 0039）
+
+- 复核最后 1 个未知中断：独立 sibling 模型成功不是 generate_text 调用；其真实路径仍是 required input
+  failure 后 skip，只因整体 artifact 成功而没有 remediation。
+- repair evaluator v2 回放 plan DAG、参数引用、上游 failed/skipped terminal，正式纠正 9/10 为 10/10；
+  旧 v1 结果保留。
+- 新增隔离 fresh PlanExecutor Event canary：失败分支级联两个 skip，成功 sibling 分支继续产出；handler 不被
+  误调、每步唯一 terminal、模型调用为 0。
+- Experiment `experiment_25880910b688` 六项全过，ledger 100 events 验链；Policy inconclusive、生产未变。
+- 完整回归：**537 passed in 202.27s**。
+
+## 2026-08-30 — Semantic Preflight 晋升与长期 Campaign 闭环（ADR 0041–0042）
+
+- `planning.semantic_preflight` 从 13 个真实 Episode 收敛到 input-path contract；修复 verified-source 接线、
+  无扩展名来源、控制面 Event 误路由和 matched observation 渠道污染。
+- 三组真实 Harness 文件任务 matched experiment：Candidate 3/3、Baseline 1/3，逐对 reward gain
+  `[0.9, 0.9, 0.0]`；经 `policy/promoted` 与独立 `policy/activated` Event 限域激活到 04。
+- 两次长跑真实暴露确定性 Event 路由和 STOP_PROJECT 成功字段丢失；失败 Campaign 与 Episode 全部保留，
+  修复后正式 `campaign_abf9e34bf6af` 完成五 lane 双槽轮转。
+- 新增有限学习波次屏障，05 不再被业务自更新指纹饿死；05 已三次消费真实终态做离线策略更新。
+- 分离学习观察与晋升资格：可归因的 blocked/failed 业务动作进入负 reward 分布，但不能获得 canary 或晋升。
+- 01 PDF 质量失败未降门，补入验收/恢复条件后恢复 canary 通过。完整回归：**560 passed in 112.32s**。
+## 2026-08-30 — Claim 真值、Reward 修正与失败自动学习（ADR 0045）
+
+- 将 04 文件证据报告从 `source_path + literal quote` 升级为显式 Claim Ledger 和保守语义硬门。
+- PDF 下游解析 typed output 与 Task-local 相对路径；确定性 output-reference 错误不再原样重试。
+- failed 轨迹不再获得 completed/artifact 奖励；历史 04 轨迹以 append-only revision 校正并标注机制级 action。
+- 手动失败自动落盘 selection、diagnosis 和 repair proposal；匹配实验 4/4 硬门通过，仅 Candidate validated。
+- 全仓回归：**615 passed in 235.99s**。
+
+## 2026-09-01 — MiniMax 单模型、真实业务 Candidate 与诚实 RL 边界（ADR 0051）
+
+- 仅按用户授权调用 MiniMax-M3；移除默认/隐式 DeepSeek fallback，DeepSeek 本阶段零调用。
+- 两次独立脱敏 MiniMax 实验形成 6 个 matched pair、3 类任务，单模型通用门通过。
+- 将 Research-Adoption baseline/candidate 编译成确定性 Event-first 计划，Planner LLM 调用为 0。
+- 修复 Candidate typed source provenance、PDF 规范化、Claim 中英语义轴、统一交付前真值门。
+- 修复 `generate_text` 8,000 字符截断与残缺 Claim 默认 `not_found` 的 false pass。
+- 修复带空格 PDF 输入路径尾部 `Updates.pdf` 被错误当作输出合同。
+- 保留 Canary-11、pair-13、pair-14 等失败；pair-14 的错误轴成为下一 Candidate 约束，未降低硬门。
+- 严格 pair-15：baseline Reward -0.4，Candidate Reward 0.8，双源与 10 Claim 全通过；生产未变。
+- readiness 仍 blocked：完整渠道送达 3/6、单项目/单时间窗，长期 RL 与回滚门未通过。
+- 完整回归：**666 passed in 153.82s**。
+
+## 2026-09-01 — 受限生产 Canary 与真实日期长期 RL 采样（ADR 0052）
+
+- 在 shadow 与 full promotion 之间新增独立 `control_policy.canaries`：限实例、意图、真实输入、任务数、
+  到期时间和自动回退；不污染 `promoted`，Candidate 投影仍为 `production_effective=false`。
+- 新增 Event-first `policy/canary_activated` / `policy/canary_rolled_back`，真实完成激活→路由→回退演练。
+- 普通 04/05 双源研究请求可确定性编译成 Candidate canary，不要求用户手写实验 marker。
+- 终态结果自动计数；Claim 失败、false-success 或连续失败会关闭 canary，历史负轨迹保留。
+- 新增跨 `literature_github_learning` / `agent_self_evolution` 的每日 matched 采样器；严格使用真实日期、
+  MiniMax-only、最多双槽，不直接写 Reward/trajectory/promotion。
+- 首日登记 5 baseline + 5 candidate；04 首个 Candidate 通过，05 旧进程暴露两个真实 false-success 负例。
+- 修复 reduced root goal 丢失 typed `source_paths` 后误要求 `Updates.pdf`；修复 DrvFS orphan runtime lock。
+- 04/05 已在真实 QQ/MiniMax 网络运行；完整 readiness 继续 fail closed，长期成熟不得提前宣告。
+- 完整回归：**676 passed in 156.41s**。
+
+## 2026-09-01 — 即时串行队列与真实失败修复闭环（ADR 0053）
+
+- 实验/长期采样 USER_MESSAGE 不再互相合并；04/05 各自 FIFO，终态后立即接续，不等 scheduler 周期。
+- 新增可恢复的串行实验运行器；旧假 pending 以事件队列机制失败关闭后 redrive，不篡改历史成功状态。
+- 修复串行重试被 60 秒内容去重吞掉、留下新 pending 的问题。
+- v4 真实失败暴露跨来源 Claim 拼接；收紧 Candidate 单 source_path 合同，不降低 Claim 硬门。
+- 清理宿主旧 04/05 双消费者；05 的旧合同、重复消息和 `Updates.pdf` 污染不再复现。
+- 长期 supervisor 改为每 5 分钟幂等复审；同日不重复派发，下一真实日期不再额外等待 6 小时。
+- v5 两项目 matched 均得到 baseline `-0.4`、Candidate `+0.8`；完整长期 readiness 仍 blocked。
+- 完整回归：**679 passed, 2 warnings in 150.29s**。
+
+## 2026-09-01 — 完成信号驱动持续学习（ADR 0054 / Sprint 17）
+
+- 新增 durable Task terminal ledger 与 workspace 隔离 named FIFO；终态后立即 reconcile/dispatch，30 秒只作 watchdog。
+- 新建 04/05、7 天、56 WorkItem 的多主题 matched Campaign；每项目首窗 14 pair，MiniMax-M3 only。
+- 新增真实日期补窗、readiness 自动复审与全门通过后的 Event-first 条件激活；未过门不改 production。
+- 修复 `execute_candidate` 包装器和 no-LLM baseline selector 被通用 worker pool 卡住。
+- 修复受限启动环境导致 MiniMax DNS 不可达；真实运行必须使用具备外部 API 网络的实例进程。
+- 修复成功 manual observation 不释放 Campaign 槽位，以及 batch-plan 中间 done 产生重复终态信号。
+- 纯文本生成改用单轮无工具 `report`；runtime report timeout 60→180 秒，避免长 MiniMax 请求被过早
+  截断后再启动 fallback。首个 05 实跑 23.7 秒、单调用完成。
+- QQ 故障时只允许未开始的显式研究项使用 local observation；不写 delivery credit，不冒充用户已收到。
+- MiniMax 通用门现由 2 accepted + 3 rejected 实验共同通过；完整长期 RL/readiness 仍 blocked。
+- 完整回归基线见 `docs/testing/last_pytest.txt`。
+- 补齐连续 Candidate 的确定性 Claim Ledger 桥：支持列表形 `verified_source_evidence`，并清除任意标题
+  层级/中文序号/标题后缀下的模型账本，只保留机器核验路径与逐字引文；baseline 行为不变。
+- MiniMax 报告 timeout 由 180 秒再调至 300 秒；依据是真实 181 秒超时，目的为避免同一任务重复 fallback，
+  不改变完成信号驱动的即时调度。
+- Sprint 17 终态校正为首日期队列已耗尽：51 completed、37 blocked、0 active；长期 RL 仍因单日期窗、
+  Candidate false-success 和成功率下界不足而 blocked。新增 Sprint 18 Planned，明确主动课程、双资格
+  Observation、RepairRecipe、跨日期 anchor 和 Event-first canary/promotion 的实施合同。
+- 将 Sprint 18 升级为 v2 可执行规格：新增完整数据/Event 合同、R0–R4 自动修复权限、可复算 acquisition
+  与 policy update、三个非玩具真实项目、匹配统计门、三日期抗遗忘、故障注入、bounded canary、文档纪律
+  和 A–K 看板。状态保持 Specification Ready，未把文档设计冒充实现完成。
+
+## 2026-09-01 — Sprint 18 主动课程核心与真实跨领域闭环（ADR 0055）
+
+- 新增 `sprint18_learning.py`：双资格 LearningObservation、可复算 selector/critic、机制级
+  RepairRecipe、CandidateBundle 和含最小探索的 Beta policy update。
+- 迁移 652 条真实轨迹：586 可学习、89 可晋升、421 正样本、231 负样本；不丢 false-success。
+- 新增六个 Event-first 入口，仅 Sprint18 持久 Campaign 身份允许在 manual_stable 中运行隔离学习链。
+- TargetDiff 改为真实样本主动选择；official split 上三轮等预算保留 v2/v3 负结果，
+  v4 RMSE 2.376959 优于 MaxVar 2.440746 和 random 2.512266。
+- 启动 `campaign_74833fad4af8`：02/04/05 轮转、最多双槽、48 小时、MiniMax-M3 only。
+- 在线首轮发现并修复 Sprint Event preflight 禁用、旧 production canary 路由污染、systemd 重复 start。
+- 全仓回归 `698 passed, 2 warnings`；三日期/20-per-arm/Wilson/anchor/rollback 仍是未降低的长期硬门。
+
+### Sprint 18 首个稳健性否证与 Reward 归因修正
+
+- 修复终态证据收集仅识别 `research_learning` 的缺口；`active_learning`、TargetDiff 和 05 matched Event
+  现在进入真实 LearningObservation/Reward，不再把有证据的成功误记负奖。
+- 02/04/05 已完成轨迹均采用 append-only revision=2 纠正为 `reward=+0.55`；原始错误行保留，生产资格仍 false。
+- TargetDiff 新增显式 seed 与三 seed 稳健性 Event。原 v4 只赢 1/3，按预注册门正式
+  `rejected_not_robust`；下一假设转为不确定性校准和密度/误差切片，而非继续调权重报喜。
+- 长期控制器新增有限信息探针课程：两条未读 Harness 组合、两个独立真实池、稳健性决策和后验复算；
+  耗尽后诚实 WAITING_EVIDENCE，不重复任务伪造运行。
+- Campaign 下一项 `work_caa905a2ecae` 已持久排队；当前宿主控制器未能由本次 Codex 会话重启，原因是
+  执行额度拒绝，而非 Partner 任务失败。
+- 稳健性 rejection 现直接进入 LearningObservation，触发 R0 OOB slice-calibration Candidate；真实三 seed
+  0/3 胜出后再次 rejected，后验更新并停止重复选题。全仓回归 `707 passed, 2 warnings in 161.93s`。
+
+## 2026-09-01 — 不确定性 Candidate 与学习/项目账本隔离（ADR 0056）
+
+- 新增 TargetDiff uncertainty reliability diagnosis：冻结 official split、三 seed、预算与预测模型，test label
+  只用于后验评分。raw tree variance 的平均 Spearman `-0.0625`、top-error recall `0.2381`，三门全败，
+  结论为 `uncertainty_weak_or_miscalibrated`，停止继续盲调 acquisition 权重。
+- 将该负结果投影为可学习 Observation，自动匹配 `recipe_uncertainty_estimator_comparison_v1`；新增
+  labelled-only cross-fitted residual uncertainty matched Event。Candidate 三 seed 赢 `2/3`，Spearman
+  `-0.1306 → -0.0181`、top-error recall `0.2381 → 0.3333`，仅接受进入 acquisition shadow。
+- 修复 Campaign 只认 task-local 产物导致共享学习 Event 假失败的问题；只允许已知 Event 的 output-like 字段
+  且必须位于 governance learning namespace，输入路径不能冒充输出。
+- Campaign report 固定为 reward-neutral control-plane monitor；隔离学习本地产物不再被 QQ delivery 失败误判，
+  同时不得获得 delivery/business/policy credit。
+- 修复内层 isolated learning 被 Campaign 外层写成 Project Receipt 并触发 continuation。历史错误 Receipt、
+  trajectory 与 WorkItem 采用 append-only invalidation/revision/correction，真实额外业务产物仍保留。
+- 04 context Candidate v3 绑定有效业务 Receipt `receipt_4fd68f29fc41`、两份固定 digest Harness 证据和三条
+  同项目轨迹；它只证明上下文准备可执行，不冒充下游持续业务改善。
+- Campaign `campaign_74833fad4af8` 本轮最终为 `22 completed / 7 blocked / 0 active`，29 项全终态后进入
+  `WAITING_EVIDENCE` 并停止控制器。生产 `manual_stable` 与 `control_policy.json` 未改变。
+- 全仓回归：`716 passed, 2 warnings in 140.78s`。三真实日期、20/arm、Wilson、anchor、零 false-success、
+  bounded canary 与 rollback 仍是未降低的长期门。
+- 新增 `partner-sprint18@.service` 专用持久控制器入口，避免误用只负责普通队列的通用 Campaign runner；
+  终态信号即时推进、无新证据时等待，Campaign deadline 与模型/成本预算继续硬生效。
+
+## 2026-09-01 — Sprint 18 持久运行与 monitor 统计纠偏（ADR 0057）
+
+- 启用 `partner-sprint18@campaign_74833fad4af8.service`；实测 active、零重启，多 watchdog 周期无工作时
+  零槽位、零新增 LLM 调用。
+- 修复 Campaign report 渠道/治理双终态：manual 层固定中性完成；渠道问题由 report ledger 单独记录。
+- report delivery issue 不再消耗业务失败/重试预算，也不创建业务 Issue；首个历史误投影 append-only 修正。
+- Observation ingestion 现在响应最新 trajectory revision，并尊重显式 `learning_observation_eligible=false`；
+  75 条旧错误资格被纠正，campaign monitor 成为 neutral。
+- 最新 Campaign `23 completed / 7 blocked / 0 active`；Observation `678 total / 539 learning / 94 promotion /
+  435 positive / 234 negative / 9 neutral`；全仓 `720 passed, 2 warnings in 151.96s`。
+## 2026-09-02 — 真实日期续跑与长期统计去重（ADR 0058）
+
+- Sprint18 常驻控制器新增真实日期幂等窗口；第二日期自动创建 04/05 共 4 个 matched pair，完成后立即归档，
+  不伪造未来日期、不直接写 Reward/策略。
+- 第二日期 baseline 0/4、Candidate 4/4；Campaign 累计 42 项、17 次模型调用，当前零 active，服务继续在线。
+- matched 外层不再写 Project Receipt 或触发 continuation；历史污染 Receipt append-only invalidation，未执行
+  continuation 明确 cancelled。
+- matched trajectory 允许进入学习观察但不获得生产晋升资格。
+- readiness 先按 `trajectory_id` 取 append-only ledger 最新 revision，避免 correction 虚增样本和保留已纠正
+  false-success。修正后长期门仍 blocked：26/29 samples、Wilson 0.6545、5 false-success、2/3 日期。
+- 全仓回归 `726 passed, 2 warnings in 108.22s`；生产 `manual_stable`、control policy 与 promotion 均未改变。
+## 2026-09-02 — 停止周期 Campaign 消息，回归实例原生事件循环（ADR 0059）
+
+- 真实消息审计确认 02 的周期内容是每小时 `Campaign 定时进度摘要`，并非项目新结果。
+- 停止并禁用旧 Sprint18 systemd 服务，保留历史账本。
+- Campaign interval 现在允许 0 表示静默；Sprint18 runner 默认 0，watchdog 不再产生用户消息。
+- 确立 project→metacognitive interrupt→bounded learning→verify→project 的实例原生迁移方向；当前尚未冒充上线。
+- Campaign 静默/既有报告行为定向回归 `68 passed`；全仓 `727 passed, 2 warnings in 104.14s`。
+
+## 2026-09-02 — 五项目实例原生长期运行接入生产（ADR 0060）
+
+- 新增 per-instance 持久状态机和 `partner-instance-native.service`；项目终态即时续跑，失败时插入一次
+  Episode-grounded 四 Event 学习，完成后回原项目。
+- 五实例完成信号轮转、最多双槽；修复重启后已选槽服务未启动和孤儿 TaskInstance 永久 pending。
+- 学习任务不再被业务 citations 门误杀；学习前强制 Episode 归约；失败 Episode 无工具类时使用受治理 outcome fallback。
+- native planner 超时同参数重试归零、JSON/semantic repair 有界；planner `filename` 产物合同自动补显式 writer。
+- 04 两次真实学习恢复已通过并交付；生产扩展为 04/05 首双槽，随后按完成信号轮转 01/02/03。
+- 全仓回归 `742 passed, 2 warnings in 143.60s`。
+
+## 2026-09-03 — 五实例生产轮转验收与防独占收口（ADR 0060）
+
+- 实跑完成 04→05→01→02→03 调度覆盖；05 两次项目成功后让槽，01/02/03 均完成失败 Episode、一次
+  Event-first 学习和业务项目恢复。
+- 修复学习成功但业务重试仍失败时继续无限触发学习的问题：单次失败链最多一次学习中断，重试仍失败即持久化
+  证据并让槽，避免一个实例长期占用双槽。
+- 修复原生控制器重启时硬选配置前两个实例、打断当前在途槽位的问题；启动现在保留所有未让出的持久槽。
+- 旧 Campaign 服务继续 inactive/disabled；新服务 enabled/active。全仓回归 `746 passed, 2 warnings in 259.83s`。
+## 2026-09-07 — ADR 0068 原生项目真实 Event 与机制匹配学习
+
+- 原生五项目按持久轮次确定性选择真实 Event，停止把自主续跑交给通用 LLM 生成报告型计划。
+- 新增 03 velocity-Verlet 数值实验与 05 Hermes/Partner 源码合同聚焦回归。
+- native matched 实验增加 Episode/项目/Candidate Event 机制绑定；学习观察仍不直接晋升生产。
+- 双槽重新授予时复位上一量子的失败预算；append-only inbox 已读项不再制造永久 pending，重新投递使用新 ID；全仓 `920 passed`、0 failed。
+## 2026-09-08 — ADR 0072 LLM 引导外部主动学习与自进化判断
+
+- 新增 04 `external_knowledge_scout`：三次 MiniMax 关键判断 + GitHub/论文真实抓取、源码/PDF 读取、novelty/失败索引和外部 insight。
+- 自进化行为型 Candidate 增加 LLM diagnosis/critic；生产仍仅由隔离对照、pytest、rollback 和 Event-first 决策生效。
+- API 日志新增 token usage；修复 `external_knowledge_scout` real-action 假阴性；QQ 默认只发送 PDF，无 PDF 的机器 sidecar 仅本地保留。
+- 生产取得 ECC/deer-flow 与论文证据；相关性较弱和历史误选保留为负例。该结果不宣称长期 RL 或外部知识采用已经成熟。
+## 2026-09-08 — ADR 0073 语义 Reward、生产 Bandit 与自进化诊断收紧
+
+- 新颖性由整句比较改为 action-aware 稳定语义签名，屏蔽 ID、路径、时间和裸数值刷分。
+- 01–05 原生项目动作接入真实终态 Reward 的 UCB bandit；选择记录可反查 trajectory。
+- 相近动作可由 LLM critic 受限二选一；内部自进化 diagnose 加入 LLM 因果/反证建议，硬门不变。
+- 单次 duplicate 先驱动反事实 action，不立即执行固定自进化链；遗留 Event 名明确为兼容层。
+- 生产短跑验证了 Reward 驱动改选与一次 LLM tie-break；同时修复控制面字段刷 novelty、跨 action 失败计数串线。
+- 最终完整回归 `962 passed, 2 warnings in 113.34s`；原生服务已恢复运行。

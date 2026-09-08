@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -31,8 +32,209 @@ _MANUAL_BLOCKED_EVENTS = {
 # Hermes 2026-08-27 marker test
 }
 _MANUAL_UNSTABLE_EVENTS = {"analyze", "check_quality"}
+_MANUAL_CONTROL_PLANE_PREFIXES = ("agent_active_learning_", "research_active_learning_")
 
 _ISOLATED_PREFLIGHT_CANDIDATE = "candidate_preflight_contract_v2"
+_RESEARCH_ADOPTION_CANDIDATE = "candidate_evidence_trajectory_context_v1"
+_RESEARCH_ADOPTION_BASELINE = "baseline_governed_context_v1"
+
+
+def _native_project_execution_plan(
+    workspace: str, user_message: str, working_dir: str,
+) -> MicroPlan | None:
+    """Compile one bounded, project-specific production Event.
+
+    Native continuation is already authorised by the durable runtime marker.
+    Sending that request through the general LLM planner repeatedly produced
+    report-only plans and invented paths. This router keeps the choice in the
+    Event layer and lets the normal Receipt/real-action gates judge it.
+    """
+    text = str(user_message or "")
+    if not ("[instance_native=true]" in text and "[native_kind=project]" in text):
+        return None
+    from ..state.config import runtime_capability_enabled
+    if not runtime_capability_enabled(workspace, "instance_native_autonomy"):
+        return None
+    from ..workspace.workspace_layout import workspace_root_from_instance
+    from ..governance.instance_native import PROJECTS, load_state
+
+    iid = os.path.basename(os.path.normpath(workspace))
+    canonical = PROJECTS.get(iid)
+    marker = re.search(r"\[project_id=([^\]]+)\]", text)
+    if not canonical or not marker or marker.group(1).strip() != canonical[0]:
+        raise ValueError("native project marker does not match the instance project contract")
+    root = workspace_root_from_instance(workspace)
+    state = load_state(root, iid)
+    turn = max(0, int(state.project_steps))
+    routes: dict[str, list[tuple[str, dict[str, Any]]]] = {
+        "01": [
+            ("continuous_project_step", {"strategy_id": "01_claim_evidence_matrix"}),
+            ("continuous_project_step", {"strategy_id": "01_claim_risk_queue"}),
+            ("continuous_project_step", {"strategy_id": "01_editorial_backlog"}),
+            ("continuous_project_step", {"strategy_id": "01_source_fact_check"}),
+        ],
+        "02": [
+            ("molecular_generation_benchmark", {}),
+            ("molecular_diversity_benchmark", {}),
+            ("molecular_synth_baseline_benchmark", {}),
+            ("molecular_goal_optimization_benchmark", {}),
+        ],
+        "03": [
+            ("continuous_project_step", {"strategy_id": "03_md_integrator_smoke"}),
+            ("continuous_project_step", {"strategy_id": "03_md_timestep_stability"}),
+            ("continuous_project_step", {"strategy_id": "03_md_temperature_sweep"}),
+        ],
+        "04": [
+            ("external_knowledge_scout", {"topic": "LLM agent harness active learning and verifiable self-improvement"}),
+            ("continuous_project_step", {"strategy_id": "04_reference_gap_matrix"}),
+            ("continuous_project_step", {"strategy_id": "04_adoption_backlog"}),
+            ("continuous_project_step", {"strategy_id": "04_adapter_contract"}),
+        ],
+        "05": [
+            ("continuous_project_step", {"strategy_id": "05_event_contract_inventory"}),
+            ("continuous_project_step", {"strategy_id": "05_failure_path_regression"}),
+            ("continuous_project_step", {"strategy_id": "05_candidate_gap_matrix"}),
+            ("continuous_project_step", {"strategy_id": "05_code_candidate_autonomous"}),
+        ],
+    }
+    options = routes[iid]
+    selection = None
+    if iid == "02":
+        instance_root = Path(workspace)
+        task_root = instance_root / "state/tasks"
+        candidates = list(task_root.glob("*/molecular_candidates.csv"))
+        diversity = list(task_root.glob("*/molecular_diversity_metrics.json"))
+        synthesis = list(task_root.glob("*/molecular_synth_comparison.csv"))
+        optimized = list(task_root.glob("*/molecular_optimized_candidates.csv"))
+        if not candidates:
+            event_type, params = options[0]
+        elif not diversity:
+            event_type, params = options[1]
+        elif not synthesis:
+            event_type, params = options[2]
+        elif not optimized:
+            event_type, params = options[3]
+        else:
+            # Once one complete dependency arc exists, verified terminal
+            # rewards choose the next experiment instead of modulo rotation.
+            from ..governance.project_action_selector import select_project_action
+            selection = select_project_action(
+                root, instance_id=iid, project_id=canonical[0], options=options,
+                project_steps=turn,
+                learning_interruptions=int(state.learning_interruptions),
+            )
+            event_type = str(selection["event_type"])
+            params = dict(selection["parameters"])
+    else:
+        from ..governance.project_action_selector import select_project_action
+        selection = select_project_action(
+            root, instance_id=iid, project_id=canonical[0], options=options,
+            project_steps=turn,
+            learning_interruptions=int(state.learning_interruptions),
+        )
+        event_type = str(selection["event_type"])
+        params = dict(selection["parameters"])
+    if selection is not None:
+        params["action_selection_id"] = selection["selection_id"]
+        params["learning_intervention_applied"] = bool(
+            selection["learning_intervention_applied"])
+        params["action_selection_reason"] = str(selection["selection_reason"])
+    # Explicit implementation intent overrides the ordinary 05 rotation index.
+    # It still compiles to one allow-listed Event, preserving Event-first.
+    if (iid == "05" and re.search(
+            r"(?:生产代码|production.code).{0,20}Candidate|Candidate.{0,20}(?:生产代码|production.code)",
+            text, re.I | re.S)):
+        event_type, params = "continuous_project_step", {
+            "strategy_id": "05_code_candidate_autonomous",
+        }
+    if (iid == "04" and re.search(
+            r"(?:外部|新).{0,24}(?:GitHub|仓库).{0,40}(?:论文|文献)|"
+            r"(?:论文|文献).{0,40}(?:GitHub|仓库).{0,24}(?:主动学习|检索)",
+            text, re.I | re.S)):
+        event_type, params = "external_knowledge_scout", {
+            "topic": "LLM agent harness active learning and verifiable self-improvement",
+        }
+    params = {**params, "native_project_id": canonical[0], "native_turn": turn + 1}
+    from ..evolution.generated_candidate_policy import enrich_project_params
+    params = enrich_project_params(canonical[0], str(event_type), turn + 1, params)
+    return MicroPlan(
+        plan=[HarnessStep("native_project_action", event_type, params, [])],
+        expected_artifacts=[],
+    )
+
+
+def _manual_expected_missing_probe(user_message: str) -> str:
+    """Return the explicitly named path for an intentional missing-file probe."""
+    text = str(user_message or "")
+    if not re.search(r"预期.{0,12}不存在|文件.{0,12}(?:是否存在|不存在)", text):
+        return ""
+    if not re.search(r"不生成|不得生成|不写文件", text):
+        return ""
+    paths = re.findall(r"/(?:[^\s\]\[`'\"<>|，。；;])+", text)
+    return paths[0].rstrip("`'\"，、；;。)）") if paths else ""
+
+
+def _manual_readonly_active_learning_episode(user_message: str) -> str:
+    """Recognize a user-authorized, non-mutating Episode review request."""
+    text = str(user_message or "")
+    episode = re.search(r"\bepisode_[A-Za-z0-9_-]+\b", text)
+    if not episode or not re.search(r"主动学习|active[ _-]?learning", text, re.I):
+        return ""
+    readonly = bool(re.search(r"只读|不修改(?:生产代码|control_policy)|production_effective\s*=\s*false", text, re.I))
+    no_promotion = bool(re.search(r"不执行\s*promotion|不晋升|不自动晋升", text, re.I))
+    return episode.group(0) if readonly and no_promotion else ""
+
+
+def _native_active_learning_episode(workspace: str, user_message: str) -> str:
+    """Resolve a production-authorized native learning interruption to its Episode."""
+    text = str(user_message or "")
+    if not ("[instance_native=true]" in text and "[native_kind=learning]" in text):
+        return ""
+    from ..state.config import runtime_capability_enabled
+    if not runtime_capability_enabled(workspace, "instance_native_autonomy"):
+        return ""
+    task = re.search(r"\[learning_for_task=([A-Za-z0-9_-]+)\]", text)
+    if not task:
+        return ""
+    from ..workspace.workspace_layout import workspace_root_from_instance
+    root = Path(workspace_root_from_instance(workspace)) / "share/mind/governance/episodes"
+    for path in root.glob("episode_*/state.json") if root.exists() else []:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        if str(value.get("task_id") or "") == task.group(1):
+            return path.parent.name
+    return ""
+
+
+def _manual_research_active_learning_request(user_message: str) -> dict[str, Any]:
+    """Parse an explicitly authorized four-Event research-learning chain."""
+    text = str(user_message or "")
+    required = (
+        "research_active_learning_observe", "research_active_learning_select",
+        "research_active_learning_investigate", "research_active_learning_matched",
+    )
+    if not all(value in text for value in required):
+        return {}
+    project = re.search(r"project_id\s*=\s*([A-Za-z0-9_.-]+)", text, re.I)
+    goal = re.search(r"goal\s*=\s*(.*?)\s*,\s*questions\s*=", text, re.I | re.S)
+    questions = re.search(r"questions\s*=\s*\[(.*?)\]\s*,\s*source_paths\s*=", text, re.I | re.S)
+    sources = re.search(r"source_paths\s*=\s*\[(.*?)\]\s*[)）]", text, re.I | re.S)
+    if not (project and goal and questions and sources):
+        return {}
+
+    def values(raw: str) -> list[str]:
+        return [item.strip().strip("\"'") for item in raw.split(",")
+                if item.strip().strip("\"'")]
+
+    parsed = {
+        "project_id": project.group(1), "goal": goal.group(1).strip().strip("\"'"),
+        "questions": values(questions.group(1)), "source_paths": values(sources.group(1)),
+    }
+    if not parsed["questions"] or len(parsed["source_paths"]) < 2:
+        return {}
+    return parsed
 
 
 def _manual_experiment_intervention(user_message: str) -> dict[str, Any]:
@@ -48,10 +250,15 @@ def _manual_experiment_intervention(user_message: str) -> dict[str, Any]:
     experiment_id = marker("experiment_id")
     match_key = marker("match_key")
     marked = bool(arm in {"baseline", "candidate"} and strategy_id and experiment_id)
-    active = bool(marked and arm == "candidate" and strategy_id == _ISOLATED_PREFLIGHT_CANDIDATE)
+    active = bool(marked and arm == "candidate" and strategy_id in {
+        _ISOLATED_PREFLIGHT_CANDIDATE, _RESEARCH_ADOPTION_CANDIDATE,
+    })
     route = "production_current"
     if marked:
-        route = "candidate_prompt_contract_v2" if active else "baseline_current_contract"
+        if active and strategy_id == _RESEARCH_ADOPTION_CANDIDATE:
+            route = "research_adoption_event_candidate_v1"
+        else:
+            route = "candidate_prompt_contract_v2" if active else "baseline_current_contract"
     return {
         "schema_version": 1,
         "experiment_id": experiment_id,
@@ -61,7 +268,217 @@ def _manual_experiment_intervention(user_message: str) -> dict[str, Any]:
         "marked": marked,
         "active": active,
         "route": route,
-        "intervention": "candidate planner prompt contract" if active else "none",
+        "intervention": (("research adoption Event Candidate"
+                          if strategy_id == _RESEARCH_ADOPTION_CANDIDATE
+                          else "candidate planner prompt contract") if active else "none"),
+    }
+
+
+def _deterministic_research_candidate_plan(user_message: str, working_dir: str,
+                                           workspace: str = "") -> MicroPlan | None:
+    """Compile a fully specified research Candidate request without an LLM planner."""
+    intervention = _manual_effective_intervention(workspace, user_message) if workspace \
+        else _manual_experiment_intervention(user_message)
+    if not (intervention.get("active") is True
+            and intervention.get("strategy_id") == _RESEARCH_ADOPTION_CANDIDATE):
+        return None
+    candidate = re.search(r"Candidate\s*ID\s*=\s*([A-Za-z0-9_.-]+)", user_message, re.I)
+    query = re.search(r"query\s*:\s*(.*?)\s*,\s*project_id\s*:", user_message, re.I | re.S)
+    project = re.search(r"(?:^|[, {])project_id\s*:\s*([A-Za-z0-9_.-]+)", user_message, re.I)
+    research = re.search(r"research_project_id\s*:\s*([A-Za-z0-9_.-]+)", user_message, re.I)
+    instance = re.search(r"instance_id\s*:\s*([0-9]{2})", user_message, re.I)
+    budget = re.search(r"budget_chars\s*:\s*([0-9]+)", user_message, re.I)
+    sources_match = re.search(r"source_paths\s*=\s*\[(.*?)\]", user_message, re.I | re.S)
+    source_paths = []
+    if sources_match:
+        source_paths = [value.strip().strip("\"'") for value in sources_match.group(1).split(",")
+                        if value.strip().strip("\"'")]
+    elif workspace:
+        # Production canary requests are ordinary user messages, not the
+        # experiment runner's typed envelope.  Admit only paths that already
+        # exist; the Candidate and final truth gate will independently reopen
+        # and hash the selected evidence.
+        # Stop at a second absolute path or Chinese/line punctuation, not at
+        # ordinary spaces: paper filenames commonly contain spaces.
+        for raw in re.findall(r"/.*?(?=\s+/|[，。；;\n]|$)", str(user_message or "")):
+            value = raw.strip().rstrip(".,:：)）")
+            if os.path.isfile(value) and value not in source_paths:
+                source_paths.append(value)
+    canary_route = intervention.get("route") == "research_adoption_production_canary_v1"
+    if canary_route:
+        candidate_id = str(intervention.get("candidate_id") or "")
+        iid = os.path.basename(os.path.normpath(workspace)) or "04"
+        project_id = str(intervention.get("project_id") or
+                         ("literature_github_learning" if iid == "04" else "agent_self_evolution"))
+        research_project_id = str(intervention.get("research_project_id") or "")
+        query_text = str(user_message).strip()
+        if not (candidate_id and research_project_id and len(source_paths) >= int(
+                intervention.get("requires_existing_source_paths") or 2)):
+            return None
+    else:
+        if not (candidate and query and project and research):
+            return None
+        candidate_id = candidate.group(1)
+        iid = instance.group(1) if instance else "04"
+        project_id = project.group(1)
+        research_project_id = research.group(1)
+        query_text = query.group(1).strip()
+    output = str(Path(working_dir) / "research_adoption_report.md")
+    prompt = (
+        "根据 data 生成不少于1200中文字的 Markdown 研究报告。只使用 data 中经过验证的来源证据。"
+        "直接输出完整成品正文，不要输出思考过程、行动计划或工具调用。"
+        "报告末尾为每个实质结论输出 Claim Ledger：claim_id、claim_text、claim_axes、source_path、"
+        "source_identity、evidence_quote、support_type、rationale 均逐行书写。support_type 只能是 "
+        "direct/inference/proposed/not_found；source_path 必须是 verified_source_evidence 的绝对路径；"
+        "evidence_quote 必须从 verified_source_evidence 原样复制。两个 verified_source_evidence 来源"
+        "各至少建立一条 direct Claim，不能遗漏 Hermes 源码。当前 PDF 直接摘录描述 WebRL，不是 JitRL；关于 JitRL 的结论"
+        "只能标 inference 或 not_found。跨来源比较只能写在正文，不得创建跨来源 Claim Ledger；"
+        "每个 Claim 的 source_path 必须且只能是一个 verified_source_evidence 绝对路径，禁止逗号、分号"
+        "或列表拼接多个路径。比较结论必须拆成分别绑定单一来源的 direct 前提，不另建综合 Claim。"
+        "不得修改生产策略或宣称 promotion。"
+        "Receipt、轨迹、评分、baseline/candidate 数值不是 verified_source_evidence，不能建立 direct Claim，"
+        "也不得把它们挂到论文或源码 source_path 下。"
+        "语义轴必须服从证据本身：Hermes 的 prune/protect/head/tail/token budget 只能标 "
+        "context_management（若结论只谈工具预剪，可附加 tool_execution），不得标 event_recording；"
+        "WebRL 的 self-evolving curriculum/evolver/critic/training instructions/proficiency 只能标 "
+        "runtime_learning，不得标 task_lifecycle。无法确定轴时将结论降为 inference/not_found，"
+        "不得用牵强 rationale 把 direct Claim 塞进别的轴。"
+    )
+    return MicroPlan(plan=[
+        HarnessStep("candidate_context", "execute_candidate", {
+            "candidate_id": candidate_id,
+            "mode": "canary" if canary_route else "shadow",
+            "event_params": {
+                "query": query_text, "project_id": project_id,
+                "research_project_id": research_project_id,
+                "instance_id": iid,
+                "budget_chars": int(budget.group(1)) if budget else 9000,
+                "source_paths": source_paths,
+            },
+        }, []),
+        HarnessStep("generate_report", "generate_text", {
+            "data": "$candidate_context.result", "prompt": prompt,
+        }, ["candidate_context"]),
+        HarnessStep("write_report", "create_file", {
+            "path": output, "content": "$generate_report.result.content", "format": "markdown",
+        }, ["generate_report"]),
+        HarnessStep("deliver_report", "push_files", {
+            "source": "$write_report.result.path",
+            "caption": "Research-Adoption Candidate 真实业务 canary 报告",
+        }, ["write_report"]),
+    ], expected_artifacts=[{
+        "type": "file", "pattern": "*.md", "description": "Research-Adoption report", "required": True,
+    }])
+
+
+def _deterministic_research_baseline_plan(user_message: str, working_dir: str) -> MicroPlan | None:
+    """Compile the matched current-policy arm without an LLM planner.
+
+    The arm receives the same query, budget, MiniMax report generator and
+    final source/quote hard gate as the Candidate.  Its only intervention
+    difference is deliberate: it uses the current governed context selector
+    and therefore has no research-evidence/trajectory bridge.
+    """
+    intervention = _manual_experiment_intervention(user_message)
+    if not (intervention.get("marked") is True
+            and intervention.get("policy_arm") == "baseline"
+            and intervention.get("strategy_id") == _RESEARCH_ADOPTION_BASELINE):
+        return None
+    query = re.search(r"query\s*:\s*(.*?)\s*,\s*project_id\s*:", user_message, re.I | re.S)
+    project = re.search(r"(?:^|[, {])project_id\s*:\s*([A-Za-z0-9_.-]+)", user_message, re.I)
+    instance = re.search(r"instance_id\s*:\s*([0-9]{2})", user_message, re.I)
+    budget = re.search(r"budget_chars\s*:\s*([0-9]+)", user_message, re.I)
+    sources_match = re.search(r"source_paths\s*=\s*\[(.*?)\]", user_message, re.I | re.S)
+    source_paths = []
+    if sources_match:
+        source_paths = [value.strip().strip("\"'") for value in sources_match.group(1).split(",")
+                        if value.strip().strip("\"'")]
+    if not (query and project):
+        return None
+    output = str(Path(working_dir) / "research_adoption_report.md")
+    prompt = (
+        "根据 data 生成不少于1200中文字的 Markdown 研究报告。不得使用 data 之外的事实。"
+        "直接输出完整成品正文，不要输出思考过程、行动计划或工具调用。"
+        "对每个实质结论在末尾输出完整 Claim Ledger，逐行包含 claim_id、claim_text、claim_axes、"
+        "source_path、source_identity、evidence_quote、support_type、rationale。"
+        "support_type 只能是 direct/inference/proposed/not_found。没有可核验直接来源时必须诚实标为 "
+        "not_found，不得编造路径、引文、JitRL、WebRL 或 Hermes 机制。不得修改生产策略或宣称 promotion。"
+    )
+    return MicroPlan(plan=[
+        HarnessStep("baseline_context", "select_context", {
+            "query": query.group(1).strip(), "project_id": project.group(1),
+            "instance_id": instance.group(1) if instance else "04",
+            "budget_chars": int(budget.group(1)) if budget else 9000,
+            "use_llm": False,
+            # The baseline selector deliberately ignores these files as
+            # context, but the shared truth gate freezes them as the exact
+            # named-source contract.  Keeping typed paths also supports PDF
+            # names containing spaces without prose regex extraction.
+            "source_paths": source_paths,
+        }, []),
+        HarnessStep("generate_report", "generate_text", {
+            "data": "$baseline_context.result", "prompt": prompt,
+        }, ["baseline_context"]),
+        HarnessStep("write_report", "create_file", {
+            "path": output, "content": "$generate_report.result.content", "format": "markdown",
+        }, ["generate_report"]),
+    ], expected_artifacts=[{
+        "type": "file", "pattern": "*.md", "description": "Research-Adoption baseline report",
+        "required": True,
+    }])
+
+
+def _manual_effective_intervention(workspace: str, user_message: str) -> dict[str, Any]:
+    """Resolve explicit experiment routing, then an explicitly promoted policy."""
+    explicit = _manual_experiment_intervention(user_message)
+    if explicit["marked"]:
+        return explicit
+    # Sprint 18 Campaign work is an explicitly isolated learning lane.  A
+    # previously active production canary must not rewrite its planner or
+    # make the new Candidate appear production-effective.
+    if "[sprint18=true]" in user_message and "[PARTNER_CAMPAIGN" in user_message:
+        return {**explicit, "route": "sprint18_isolated_candidate",
+                "intervention": "none", "active": False}
+    if workspace:
+        try:
+            from ..governance.production_canary import resolve_production_canary
+            iid = os.path.basename(os.path.normpath(workspace))
+            canary = resolve_production_canary(
+                workspace, instance_id=iid, user_message=user_message)
+            if canary.get("active") is True:
+                return {
+                    **explicit, **canary,
+                    "marked": True,
+                    "experiment_id": str(canary.get("canary_id") or ""),
+                    "match_key": "",
+                    "intervention": "bounded Event-first production canary",
+                }
+        except Exception as exc:
+            logger.warning("production canary resolution failed closed: %s", exc)
+    from ..workspace.workspace_layout import workspace_root_from_instance
+
+    root = workspace_root_from_instance(workspace)
+    path = os.path.join(root, "share", "mind", "governance", "experience_guided_policy", "control_policy.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            control = json.load(handle)
+        strategy = str((control.get("promoted") or {}).get(
+            "literature_github_learning:planning.semantic_preflight") or "")
+    except (OSError, ValueError, TypeError):
+        strategy = ""
+    active = bool(
+        os.path.basename(os.path.normpath(workspace)) == "04"
+        and strategy == _ISOLATED_PREFLIGHT_CANDIDATE
+    )
+    if not active:
+        return explicit
+    return {
+        **explicit,
+        "policy_arm": "production",
+        "strategy_id": strategy,
+        "active": True,
+        "route": "production_candidate_prompt_contract_v2",
+        "intervention": "promoted candidate planner prompt contract",
     }
 
 
@@ -73,28 +490,68 @@ def _manual_environment_contract(workspace: str, working_dir: str, user_message:
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     promoted_contract = ""
     try:
-        control_path = os.path.join(shared_root, "share", "mind", "governance", "rl", "control_policy.json")
+        control_path = os.path.join(shared_root, "share", "mind", "governance", "experience_guided_policy", "control_policy.json")
         with open(control_path, "r", encoding="utf-8") as handle:
             control = json.load(handle)
+        promoted = control.get("promoted") or {}
         if (os.path.basename(os.path.normpath(workspace)) == "04"
-                and (control.get("promoted") or {}).get(
-                    "literature_github_learning:manual_final_artifact_truth"
-                ) == "manual_stable_truth_audit_v2"):
+                and (promoted.get("literature_github_learning:manual_final_artifact_truth")
+                     == "manual_stable_truth_audit_v2"
+                     or promoted.get("literature_github_learning:planning.semantic_preflight")
+                     == "candidate_preflight_contract_v2")):
             promoted_contract = (
-                "- 已晋升的 04 最终成品真值合同：凡读取一个或多个文件并生成 Markdown/TXT 成品，"
-                "必须为每个实际输入分别写连续两行 source_path: <绝对路径> 与 "
-                "evidence_quote: <该文件中逐字连续且至少20字符的原文>；治理层会重新打开源文件核验。\n"
+                "- 已晋升的 04 claim-level 真值合同：凡读取文件并生成 Markdown/TXT 成品，"
+                "对每个实质结论都必须在成品末尾写一个显式 Claim Ledger 块，每个块使用以下单行字段：\n"
+                "  claim_id: <唯一ID>\n"
+                "  claim_text: <实质结论>\n"
+                "  claim_axes: <event_recording|task_lifecycle|context_management|tool_execution|failure_recovery 中的一个或多个>\n"
+                "  source_path: <用户命名输入的绝对路径>\n"
+                "  source_identity: <源文件名>\n"
+                "  evidence_quote: <该文件中逐字连续的非标题、非模板原文>\n"
+                "  support_type: <direct|inference|proposed|not_found>\n"
+                "  rationale: <原文如何支持结论；推断必须标 inference>\n"
+                "  治理层会重新打开源文件，同时检查引文成员关系、来源归属、证据与结论的语义相关性；"
+                "标题、横线、frontmatter 或不相关原文不能作为 direct 证据。\n"
             )
     except (OSError, ValueError, TypeError):
         promoted_contract = ""
-    intervention = _manual_experiment_intervention(user_message)
+    intervention = _manual_effective_intervention(workspace, user_message)
     candidate_contract = ""
     if intervention["active"]:
+        allowed_roots = [
+            os.path.realpath(os.path.join(repo_root, "partner")),
+            os.path.realpath(os.path.join(repo_root, "tests")),
+            os.path.realpath(os.path.join(repo_root, "docs")),
+            os.path.realpath(os.path.join(shared_root, "external")),
+            os.path.realpath(os.path.join(shared_root, "share")),
+            os.path.realpath(os.path.join(shared_root, "instances")),
+        ]
+        verified_inputs: list[str] = []
+        for raw in re.findall(r"/(?:[^\s\]\[\"'，。；;])+", str(user_message or "")):
+            candidate = os.path.realpath(raw.rstrip(".,:：)）"))
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                allowed = any(os.path.commonpath([candidate, root]) == root
+                              for root in allowed_roots)
+            except ValueError:
+                allowed = False
+            if allowed and candidate not in verified_inputs:
+                verified_inputs.append(candidate)
+        verified_manifest = ""
+        if verified_inputs:
+            verified_manifest = (
+                "- [候选实验专属] verified_input_manifest（已在规划前检查存在且位于只读白名单）：\n"
+                + "".join(f"  - {value}\n" for value in verified_inputs)
+                + "  atomic_inspect_file 必须把上述单个绝对路径放在 path 字段；"
+                  "不得删改目录层级或只猜 basename。\n"
+            )
         candidate_contract = (
             "- [候选实验专属] 对多个明确文件生成带逐字证据的 Markdown/TXT 时，首个计划必须直接使用："
             "每个文件一个 atomic_inspect_file → 单个命名源 extract → 单个 generate_text → 单个文件 writer；"
             "generate_text 必须直接依赖 extract，writer 必须直接依赖 generate_text。"
             "不得使用 atomic_compose_structured_result、二次 extract 或无关目录扫描。\n"
+            + verified_manifest
         )
     return (
         "\n执行环境硬约束：\n"
@@ -112,6 +569,7 @@ def _manual_environment_contract(workspace: str, working_dir: str, user_message:
         f"  {os.path.join(workspace, 'state', 'tasks')}（仅用户明确点名且真实存在的历史任务产物）\n"
         "- 只读取用户明确指定或目录列举后真实存在的文件；禁止猜测、编造输入文件名。\n"
         "- 不得使用可用 event_type 列表之外的操作；不要使用 analyze/check_quality 作为 event_type。\n"
+        "- agent_active_learning_* 是控制面实验事件，只能由治理调度器直接发起；业务计划即使带实验标记也不得调用。\n"
         "- 多个命名来源需要逐字 evidence_quote 时，只使用一个 extract：data 为按来源名组织的对象，source_paths 为同名路径对象；不要先分别 extract 再二次 extract。\n"
         "- 不要规划 strict_reflect、next_iteration、Campaign、self_heal、tree search 或 record_iteration；项目 Receipt 由最终验收后统一生成。\n"
         # Hermes 2026-08-27 fix (Bug #45 documentation): clarify cross-instance
@@ -131,6 +589,14 @@ def _manual_environment_contract(workspace: str, working_dir: str, user_message:
         # 实证：planner 默认生成 read+create_file(static) 的 plan，
         # 被 preflight 拒绝。Codex 8/27 的 candidate_contract 已经修了
         # candidate 臂的同类问题；这里把同款修复扩到所有 manual 任务。
+        # Bug #62 (ADR 0067): final-artifact truth gate requires an
+        # explicit Claim Ledger block in the .md/.txt the writer
+        # produces, otherwise the governance audit returns
+        # failed_claims=["claim_ledger_missing"] and rejects the
+        # whole task.  Production survey 2026-09-07 04 task shows
+        # 7/7 steps all green but governance.ok=False because no
+        # claim ledger was emitted.  Force the prompt to instruct
+        # the LLM to write one.
         + (
             "- [manual_stable 通用] 当任务是\"读一个或多个文件并生成 Markdown/TXT 报告\"时，\n"
             "  必须使用 read → generate_text → writer 三步拓扑：\n"
@@ -141,6 +607,27 @@ def _manual_environment_contract(workspace: str, working_dir: str, user_message:
             "  不要用 create_file/atomic_write_artifact 直接写分析报告正文。\n"
             "  例外：当用户消息明确只读（包含\"只读\"、\"诊断\"、\"不修改\"、\"不写文件\" 等关键词），\n"
             "  可以只规划 atomic_inspect_file / atomic_list_project_files，不写任何 writer。\n"
+            "- [manual_stable 报告必须包含 Claim Ledger] final-artifact truth gate\n"
+            "  会扫描 writer 输出的 .md/.txt，要求里面至少一个 explicit Claim block，\n"
+            "  形如：\n"
+            "    ### Claim claim_1\n"
+            "    - claim_id: claim_1\n"
+            "    - claim_text: <一句话陈述>\n"
+            "    - claim_axes: [context_management]\n"
+            "    - support_type: proposed\n"
+            "    - source_path: <占位路径或真实路径>\n"
+            "    - source_identity: <占位 ID 或真实来源名>\n"
+            "    - evidence_quote: <逐字原文 ≥ 12 字，若无则诚实写 'no real evidence yet'>\n"
+            "    - rationale: <简要说明依据>\n"
+            "  CRITICAL: support_type 必须是下列四种之一：\n"
+            "    - direct: 有真实文件可逐字引用，evidence_quote 必须在该文件里出现\n"
+            "    - inference: 从上游数据推断\n"
+            "    - proposed: 拟议/前瞻性建议，没有真实证据（first-iteration 必须用这个）\n"
+            "    - not_found: 表示该 claim 找不到证据\n"
+            "  support_type 写成 'evidence_quote'、'source_path'、'source_identity'、\n"
+            "  'quote' 等其它任何值都会被拒收。\n"
+            "  没有 Claim Ledger 块 governance.ok=False 整个 task 被拒收。\n"
+            "  在 generate_text step 的 prompt 里要求 LLM 把上述块写进报告。\n"
         )
     )
 
@@ -165,7 +652,7 @@ def _manual_preflight_plan(
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     truth_policy_active = False
     try:
-        control_path = os.path.join(shared_root, "share", "mind", "governance", "rl", "control_policy.json")
+        control_path = os.path.join(shared_root, "share", "mind", "governance", "experience_guided_policy", "control_policy.json")
         with open(control_path, "r", encoding="utf-8") as handle:
             control = json.load(handle)
         truth_policy_active = bool(
@@ -206,6 +693,338 @@ def _manual_preflight_plan(
         os.path.realpath(os.path.join(shared_root, "instances")),
     ]
     planned_steps = list(micro_plan.plan)
+    expected_missing_path = _manual_expected_missing_probe(user_message)
+    readonly_episode = _manual_readonly_active_learning_episode(user_message)
+    native_episode = _native_active_learning_episode(workspace, user_message)
+    native_project_request = (
+        "[instance_native=true]" in user_message
+        and "[native_kind=project]" in user_message
+    )
+    research_request = _manual_research_active_learning_request(user_message)
+    sprint18_campaign_request = (
+        "[sprint18=true]" in user_message
+        and "[PARTNER_CAMPAIGN" in user_message
+        and "campaign_id=" in user_message
+    )
+    experiment_intervention = _manual_effective_intervention(workspace, user_message)
+    candidate_match = re.search(
+        r"(/[^\s]+/active_learning/sprint18/candidates/candidate_s18_[A-Za-z0-9]+\.json)",
+        user_message,
+    )
+    candidate_bundle_path = str(candidate_match.group(1)) if candidate_match else ""
+    candidate_recipe = ""
+    if candidate_bundle_path:
+        try:
+            candidate_resolved = Path(candidate_bundle_path).resolve()
+            candidate_root = Path(shared_root, "share/mind/governance/active_learning/sprint18/candidates").resolve()
+            if candidate_resolved.is_relative_to(candidate_root) and candidate_resolved.is_file():
+                candidate_recipe = str((json.loads(candidate_resolved.read_text(encoding="utf-8"))
+                                        .get("recipe") or {}).get("recipe_id") or "")
+        except (OSError, ValueError, TypeError):
+            candidate_recipe = ""
+    if (sprint18_campaign_request
+            and candidate_recipe == "recipe_uncertainty_estimator_comparison_v1"):
+        planned_steps = [
+            HarnessStep("read_uncertainty_candidate", "atomic_inspect_file",
+                        {"path": candidate_bundle_path}, []),
+            HarnessStep("matched_uncertainty_estimator", "targetdiff_uncertainty_candidate", {
+                "seeds": [20260901, 20260902, 20260903],
+                "labelled_budget": 240,
+                "evaluation_id": "sprint18_targetdiff_crossfit_uncertainty_candidate_v1",
+            }, ["read_uncertainty_candidate"]),
+        ]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "candidate_s18_9f2d6952fb8cd96f.json" in user_message:
+        candidate_path = os.path.join(
+            shared_root, "share/mind/governance/active_learning/sprint18/candidates",
+            "candidate_s18_9f2d6952fb8cd96f.json",
+        )
+        planned_steps = [
+            HarnessStep("read_candidate_bundle", "atomic_inspect_file",
+                        {"path": candidate_path}, []),
+            HarnessStep("diagnose_output_reference", "agent_active_learning_diagnostic_shadow", {
+                "failure_class": "planning.output_reference_contract/typed_reference_unresolved",
+                "evidence_refs": [candidate_path],
+            }, ["read_candidate_bundle"]),
+            HarnessStep("matched_output_reference", "agent_active_learning_manual_failure_matched", {
+                "experiment_id": "sprint18_typed_output_reference_v2",
+            }, ["diagnose_output_reference"]),
+        ]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif (sprint18_campaign_request
+          and "research_active_learning" in user_message
+          and "openai-codex" in user_message and "openclaw" in user_message):
+        sources = [
+            os.path.join(shared_root, "external/code/openai-codex/codex-rs/core/src/compact.rs"),
+            os.path.join(shared_root, "external/code/deepseek-harness/packages/context/session-reference/src/projection.ts"),
+            os.path.join(shared_root, "external/code/hermes-agent/agent/context_compressor.py"),
+            os.path.join(shared_root, "external/code/openclaw/src/agents/agent-compaction-constants.ts"),
+        ]
+        planned_steps = [
+            HarnessStep("observe_four_harnesses", "research_active_learning_observe", {
+                "project_id": "sprint18_four_harness_adoption",
+                "goal": "choose one falsifiable project-continuation, recovery, or context mechanism",
+                "questions": [
+                    "which context boundary best preserves project continuation under a fixed budget",
+                    "which persisted state makes failure recovery auditable without replacing Event-first",
+                    "which mechanism should Partner explicitly reject as incompatible with its root contracts",
+                ],
+                "source_paths": sources,
+            }, []),
+            HarnessStep("select_harness_question", "research_active_learning_select",
+                        {"project_id": "sprint18_four_harness_adoption"},
+                        ["observe_four_harnesses"]),
+            HarnessStep("investigate_harness_source", "research_active_learning_investigate",
+                        {"project_id": "sprint18_four_harness_adoption"},
+                        ["select_harness_question"]),
+            HarnessStep("matched_harness_selector", "research_active_learning_matched",
+                        {"project_id": "sprint18_four_harness_adoption"},
+                        ["investigate_harness_source"]),
+        ]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "targetdiff_active_robustness" in user_message:
+        run_ids_match = re.search(r"run_ids\s*=\s*\[([^\]]+)\]", user_message)
+        run_ids = ([value.strip().strip("'\"") for value in run_ids_match.group(1).split(",")
+                    if value.strip()] if run_ids_match else [])
+        evaluation_match = re.search(r"evaluation_id\s*=\s*([A-Za-z0-9_.-]+)", user_message)
+        planned_steps = [HarnessStep(
+            "targetdiff_seed_robustness", "targetdiff_active_robustness", {
+                "run_ids": run_ids,
+                "evaluation_id": (evaluation_match.group(1) if evaluation_match else
+                                  "sprint18_targetdiff_seed_robustness_v1"),
+            }, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "targetdiff_uncertainty_candidate" in user_message:
+        seeds_match = re.search(r"seeds\s*=\s*\[([^\]]+)\]", user_message)
+        seeds = ([int(value.strip()) for value in seeds_match.group(1).split(",") if value.strip()]
+                 if seeds_match else [20260901, 20260902, 20260903])
+        budget_match = re.search(r"labelled_budget\s*=\s*(\d+)", user_message)
+        evaluation_match = re.search(r"evaluation_id\s*=\s*([A-Za-z0-9_.-]+)", user_message)
+        planned_steps = [HarnessStep(
+            "matched_uncertainty_estimator", "targetdiff_uncertainty_candidate", {
+                "seeds": seeds,
+                "labelled_budget": int(budget_match.group(1)) if budget_match else 240,
+                "evaluation_id": (evaluation_match.group(1) if evaluation_match else
+                                  "sprint18_targetdiff_crossfit_uncertainty_candidate_v1"),
+            }, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "targetdiff_uncertainty_diagnostic" in user_message:
+        seeds_match = re.search(r"seeds\s*=\s*\[([^\]]+)\]", user_message)
+        seeds = ([int(value.strip()) for value in seeds_match.group(1).split(",") if value.strip()]
+                 if seeds_match else [20260901, 20260902, 20260903])
+        budget_match = re.search(r"labelled_budget\s*=\s*(\d+)", user_message)
+        evaluation_match = re.search(r"evaluation_id\s*=\s*([A-Za-z0-9_.-]+)", user_message)
+        planned_steps = [HarnessStep(
+            "targetdiff_uncertainty_reliability", "targetdiff_uncertainty_diagnostic", {
+                "seeds": seeds,
+                "labelled_budget": int(budget_match.group(1)) if budget_match else 240,
+                "evaluation_id": (evaluation_match.group(1) if evaluation_match else
+                                  "sprint18_targetdiff_uncertainty_diagnostic_v1"),
+            }, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "targetdiff_active_learning" in user_message:
+        def _number(name: str, default: int) -> int:
+            match = re.search(rf"{name}\s*=\s*(\d+)", user_message)
+            return int(match.group(1)) if match else default
+        weight_match = re.search(
+            r"active_weights\s*=\s*\[\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\]",
+            user_message,
+        )
+        weights = ([float(weight_match.group(index)) for index in range(1, 4)]
+                   if weight_match else [.55, .30, .15])
+        run_match = re.search(r"run_id\s*=\s*([A-Za-z0-9_.-]+)", user_message)
+        mode_match = re.search(r"active_mode\s*=\s*([A-Za-z0-9_.-]+)", user_message)
+        planned_steps = [HarnessStep(
+            "targetdiff_active_selection", "targetdiff_active_learning", {
+                "run_id": run_match.group(1) if run_match else "sprint18_campaign",
+                "rounds": _number("rounds", 3),
+                "batch_size": _number("batch_size", 40),
+                "active_weights": weights,
+                "seed": _number("seed", 20260901),
+                "active_mode": mode_match.group(1) if mode_match else "raw",
+            }, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "research_adoption_context_shadow" in user_message:
+        planned_steps = [HarnessStep(
+            "four_harness_context_shadow", "research_adoption_context_shadow", {
+                "query": "如何用固定源码证据和历史失败轨迹承接下一轮 Harness 机制采用",
+                "project_id": "literature_github_learning",
+                "research_project_id": "sprint18_four_harness_adoption",
+                "budget_chars": 9000,
+                "instance_id": "04",
+            }, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif sprint18_campaign_request and "sprint18_learning_cycle" in user_message:
+        planned_steps = [HarnessStep(
+            "sprint18_event_first_cycle", "sprint18_learning_cycle", {}, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif expected_missing_path:
+        # This is a negative observation, not a request to repair the plan or
+        # manufacture a report.  One deterministic inspect attempt is enough.
+        planned_steps = [HarnessStep(
+            "check_expected_missing_input", "atomic_inspect_file",
+            {"path": expected_missing_path, "_expected_missing_probe": True}, [],
+        )]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif readonly_episode or native_episode:
+        effective_episode = readonly_episode or native_episode
+        episode_state = Path(shared_root) / "share/mind/governance/episodes" / effective_episode / "state.json"
+        if not episode_state.is_file():
+            raise ValueError(f"manual active-learning episode does not exist: {effective_episode}")
+        try:
+            state = json.loads(episode_state.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError(f"manual active-learning episode is unreadable: {readonly_episode}: {exc}") from exc
+        classes = [str(value) for value in state.get("failure_classes") or [] if str(value)]
+        failure_class = next((value for value in classes if value.startswith("planning.output_reference_contract/")),
+                             classes[0] if classes else "outcome.no_business_progress")
+        source_instance = str(state.get("instance_id") or os.path.basename(os.path.normpath(workspace)) or "04")
+        planned_steps = [
+            HarnessStep("observe_episode", "agent_active_learning_observe_episode",
+                        {"episode_id": effective_episode}, []),
+            HarnessStep("select_diagnostic", "agent_active_learning_select",
+                        {"instance_ids": [source_instance], "focus_failure_class": failure_class},
+                        ["observe_episode"]),
+            HarnessStep("diagnose_episode", "agent_active_learning_diagnostic_shadow",
+                        {"failure_class": failure_class, "evidence_refs": [str(episode_state)]},
+                        ["select_diagnostic"]),
+            HarnessStep("propose_repair", "agent_active_learning_propose_episode_repair",
+                        {"episode_id": effective_episode}, ["diagnose_episode"]),
+        ]
+        if native_episode:
+            # Duplicate outcomes in the 05 architecture lane have a governed,
+            # behaviour-changing code recipe.  Exercise that real Candidate
+            # after diagnosis instead of replaying the unrelated generic
+            # output-reference fixture.  Other mechanisms remain shadow-only.
+            if (source_instance == "05"
+                    and failure_class == "outcome.duplicate_semantic_result"):
+                planned_steps.append(HarnessStep(
+                    "verify_candidate", "continuous_project_step", {
+                        "strategy_id": "05_code_candidate_autonomous",
+                        "native_project_id": "hermes_partner_explore",
+                    }, ["propose_repair"],
+                ))
+            else:
+                planned_steps.append(HarnessStep(
+                    "verify_candidate", "agent_active_learning_manual_failure_matched",
+                    {"experiment_id": f"native_{effective_episode}"}, ["propose_repair"],
+                ))
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[{
+            "type": "file", "pattern": "active_learning_review_*.json",
+            "description": "只读主动学习审查记录", "required": True,
+        }])
+    elif research_request:
+        project_id = research_request["project_id"]
+        planned_steps = [
+            HarnessStep("observe_research_sources", "research_active_learning_observe", {
+                "project_id": project_id, "goal": research_request["goal"],
+                "questions": research_request["questions"],
+                "source_paths": research_request["source_paths"],
+            }, []),
+            HarnessStep("select_research_query", "research_active_learning_select",
+                        {"project_id": project_id}, ["observe_research_sources"]),
+            HarnessStep("investigate_research_source", "research_active_learning_investigate",
+                        {"project_id": project_id}, ["select_research_query"]),
+            HarnessStep("compare_research_selector", "research_active_learning_matched",
+                        {"project_id": project_id}, ["investigate_research_source"]),
+        ]
+        # These Events persist append-only evidence in the governance store.
+        # Requiring a new report/PDF would re-route the experiment back into
+        # the legacy report-generation path.
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=[])
+    elif (experiment_intervention.get("active") is True
+          and experiment_intervention.get("strategy_id") == _RESEARCH_ADOPTION_CANDIDATE):
+        target = next((step for step in planned_steps
+                       if str((step.parameters or {}).get("candidate_id") or "")), None)
+        if target is None:
+            raise ValueError("research adoption Candidate plan must contain an explicit candidate_id step")
+        original = dict(target.parameters or {})
+        candidate_id = str(original.get("candidate_id") or "").strip()
+        event_params = dict(original.get("event_params") or {})
+        if not candidate_id or not event_params:
+            raise ValueError("research adoption Candidate requires candidate_id and event_params")
+        target.event_type = "execute_candidate"
+        target.parameters = {
+            "candidate_id": candidate_id,
+            "execution_id": "exec_manual_" + re.sub(
+                r"[^A-Za-z0-9_-]", "_", os.path.basename(os.path.normpath(working_dir)))[:80],
+            "instance_id": os.path.basename(os.path.normpath(workspace)),
+            "mode": ("canary" if experiment_intervention.get("route")
+                     == "research_adoption_production_canary_v1" else "shadow"),
+            "event_params": event_params,
+        }
+
+        placeholder_ids = {
+            str(step.id) for step in planned_steps
+            if step is not target
+            and str(step.event_type or "") in {"atomic_inspect_file", "read_file"}
+            and target.id in (step.depends_on or [])
+            and (
+                "candidate" in str((step.parameters or {}).get("path") or "").lower()
+                or f"{target.id}.result." in str((step.parameters or {}).get("path") or "")
+            )
+        }
+        if placeholder_ids:
+            planned_steps = [step for step in planned_steps if str(step.id) not in placeholder_ids]
+            for step in planned_steps:
+                dependencies = []
+                for dependency in step.depends_on or []:
+                    value = target.id if str(dependency) in placeholder_ids else str(dependency)
+                    if value not in dependencies:
+                        dependencies.append(value)
+                step.depends_on = dependencies
+                if str(step.event_type or "") in {"generate_text", "write_report", "summarize"} \
+                        and target.id in dependencies:
+                    step.parameters = dict(step.parameters or {})
+                    step.parameters["data"] = f"${target.id}.result.context"
+
+        old_ref = f"${target.id}.result.content"
+        new_ref = f"${target.id}.result.context"
+        def rewrite_candidate_ref(value: Any) -> Any:
+            if isinstance(value, str):
+                return value.replace(old_ref, new_ref)
+            if isinstance(value, list):
+                return [rewrite_candidate_ref(item) for item in value]
+            if isinstance(value, dict):
+                return {key: rewrite_candidate_ref(item) for key, item in value.items()}
+            return value
+        for step in planned_steps:
+            if step is not target:
+                step.parameters = rewrite_candidate_ref(dict(step.parameters or {}))
+                if (str(step.event_type or "") in {"generate_text", "write_report", "summarize"}
+                        and target.id in (step.depends_on or [])):
+                    prompt = str(step.parameters.get("prompt") or "")
+                    step.parameters["prompt"] = prompt + (
+                        "\n[Research-Adoption Candidate 真值合同] 只能依据 data 中的 "
+                        "verified_source_evidence 与上下文写作。成品末尾必须为每个实质结论输出独立 "
+                        "Claim Ledger 块，字段逐行且只使用以下英文枚举：\n"
+                        "claim_id: <唯一ID>\nclaim_text: <结论>\n"
+                        "claim_axes: <event_recording|task_lifecycle|context_management|tool_execution|failure_recovery|runtime_learning|parameter_update>\n"
+                        "source_path: <verified_source_evidence 中的绝对路径，不得写同上、综合或 Receipt ID>\n"
+                        "source_identity: <源文件名>\nevidence_quote: <对应源文件中的逐字连续原文，至少20字符，单行>\n"
+                        "support_type: <direct|inference|proposed|not_found>\n"
+                        "rationale: <证据关系>\n"
+                        "direct 结论必须由同一 source_path 的 evidence_quote 直接支持；"
+                        "跨来源综合只能写在正文，不得建立跨来源 Claim Ledger。每个 Claim 的 source_path "
+                        "必须且只能逐字等于一个 verified_source_evidence 绝对路径；严禁用逗号、分号、"
+                        "数组或任何连接符拼接两个路径。比较所需事实必须拆成两个分别绑定单一来源的 direct "
+                        "前提 Claim，不能再输出第三个综合 Claim。"
+                        "当前 PDF verified quote 直接描述的是 WebRL 自演化课程/critic，而不是 JitRL 自身；"
+                        "只能 direct 声明该摘录对 WebRL 的描述。任何 JitRL 机制结论或 JitRL/Hermes 比较"
+                        "必须标 inference 或 not_found，不得把 WebRL 摘录错写成 JitRL 的直接证据。"
+                    )
+        # Candidate files are delivered by the executor only after the
+        # claim-level pre-delivery gate passes.  A planner-level push_files
+        # would enqueue an invalid report before that gate can reject it.
+        planned_steps = [step for step in planned_steps
+                         if str(step.event_type or "") != "push_files"]
+        micro_plan = MicroPlan(plan=planned_steps, expected_artifacts=micro_plan.expected_artifacts)
     # The executor owns the user-visible receipt, per-step progress and final
     # closure in manual_stable mode.  A planner-authored terminal notification
     # duplicates that protocol and can contradict the verified result.  Drop
@@ -227,13 +1046,16 @@ def _manual_preflight_plan(
         )
     ]
     explicit_inputs = []
-    for match in re.findall(
-        r"/(?:[^\s`'\"<>|，、；。：:)]+/)*[^\s`'\"<>|，、；。：:)]+\.(?:md|pdf|json|csv|py|txt)",
-        str(user_message or ""),
-        re.I,
-    ):
-        path = match.rstrip("`'\"，、；;。)")
-        if os.path.isfile(path) and path not in explicit_inputs:
+    # Do not require a filename suffix: LICENSE, Makefile and similar named
+    # evidence are common real inputs.  Existence plus the read-root boundary
+    # is the authority check; a token merely looking like a path is not.
+    for match in re.findall(r"/(?:[^\s\]\[`'\"<>|，。；;])+", str(user_message or "")):
+        path = os.path.realpath(match.rstrip("`'\"，、；;。)）"))
+        try:
+            allowed = any(os.path.commonpath([path, root]) == root for root in allowed_read_roots)
+        except ValueError:
+            allowed = False
+        if allowed and os.path.isfile(path) and path not in explicit_inputs:
             explicit_inputs.append(path)
     planned_read_paths = {
         os.path.realpath(str((step.parameters or {}).get("path") or (step.parameters or {}).get("file_path") or ""))
@@ -241,7 +1063,7 @@ def _manual_preflight_plan(
         if str(step.event_type or "") in {"atomic_inspect_file", "read_file"}
     }
     missing_explicit_inputs = [path for path in explicit_inputs if os.path.realpath(path) not in planned_read_paths]
-    if missing_explicit_inputs:
+    if missing_explicit_inputs and not research_request and not native_project_request:
         existing_ids = {str(step.id) for step in planned_steps}
         inserted: list[HarnessStep] = []
         for index, path in enumerate(missing_explicit_inputs, start=1):
@@ -277,7 +1099,7 @@ def _manual_preflight_plan(
     # extract data.  Bind only explicitly read paths to their read result;
     # baseline and unmarked production plans remain untouched for causal
     # comparison and rollback.
-    if _manual_experiment_intervention(user_message)["active"]:
+    if _manual_effective_intervention(workspace, user_message)["active"]:
         reads_by_path = {
             os.path.realpath(str(
                 (step.parameters or {}).get("path")
@@ -453,7 +1275,53 @@ def _manual_preflight_plan(
             return value
 
         params = normalize_ref_syntax(params)
-        if event_type in _MANUAL_BLOCKED_EVENTS:
+        authorized_active_events = ({
+            "agent_active_learning_observe_episode",
+            "agent_active_learning_select",
+            "agent_active_learning_diagnostic_shadow",
+            "agent_active_learning_propose_episode_repair",
+            "agent_active_learning_manual_failure_matched",
+            "learning_observation_ingest",
+            "learning_topic_select",
+            "learning_candidate_propose",
+            "learning_policy_update",
+            "sprint18_learning_cycle",
+            "targetdiff_active_learning",
+            "targetdiff_active_robustness",
+            "targetdiff_uncertainty_diagnostic",
+            "targetdiff_uncertainty_candidate",
+            "research_active_learning_observe",
+            "research_active_learning_select",
+            "research_active_learning_investigate",
+            "research_active_learning_matched",
+            "research_adoption_context_shadow",
+        } if sprint18_campaign_request else ({
+            "agent_active_learning_observe_episode",
+            "agent_active_learning_select",
+            "agent_active_learning_diagnostic_shadow",
+            "agent_active_learning_propose_episode_repair",
+            "agent_active_learning_manual_failure_matched",
+        } if (readonly_episode or native_episode) else ({
+            "research_active_learning_observe", "research_active_learning_select",
+            "research_active_learning_investigate", "research_active_learning_matched",
+        } if research_request else set())))
+        native_project_events = {
+            "continuous_project_step", "molecular_generation_benchmark",
+            "molecular_diversity_benchmark", "molecular_synth_baseline_benchmark",
+            "molecular_goal_optimization_benchmark",
+        }
+        blocked_native_exception = bool(
+            native_project_request and event_type in native_project_events
+        )
+        native_learning_candidate_exception = bool(
+            native_episode and event_type == "continuous_project_step"
+        )
+        if (event_type in _MANUAL_BLOCKED_EVENTS
+                and not blocked_native_exception
+                and not native_learning_candidate_exception) or (
+            event_type.startswith(_MANUAL_CONTROL_PLANE_PREFIXES)
+            and event_type not in authorized_active_events
+        ):
             issues.append(f"{step.id}: autonomous event {event_type} is disabled")
         elif event_type in _MANUAL_UNSTABLE_EVENTS:
             issues.append(
@@ -798,16 +1666,79 @@ def _manual_preflight_plan(
                             break
                 if existing:
                     params["path"] = existing
+                elif params.get("_expected_missing_probe"):
+                    candidate = os.path.realpath(
+                        raw_path if os.path.isabs(raw_path) else os.path.join(working_dir, raw_path)
+                    )
+                    try:
+                        allowed_missing = any(
+                            os.path.commonpath([candidate, root]) == root for root in allowed_read_roots
+                        )
+                    except ValueError:
+                        allowed_missing = False
+                    if allowed_missing:
+                        params["path"] = candidate
+                    else:
+                        issues.append(f"{step.id}: expected missing probe is outside allowed roots: {raw_path}")
                 else:
+                    # A path being inside a permitted tree does not make it
+                    # evidence.  Reject invented inputs during preflight so a
+                    # corrected plan can be generated and the failed attempt
+                    # gets a precise planning/input-contract label.
                     issues.append(f"{step.id}: read input is missing or outside allowed roots: {raw_path}")
 
+        if event_type == "list_directory":
+            # Bug #63 (ADR 0067): LLM-generated plans sometimes pass a
+            # truncated or wrong directory to list_directory (e.g.
+            # ``share/projects/molgen_explorati...`` when the real
+            # project id is ``molecular_dynamics_study``).  Without an
+            # existence check the plan passes preflight, the runtime
+            # step fails with FileNotFoundError, and the task gets
+            # status=failed with an empty failure_mechanism.  Force
+            # the directory to exist on disk; otherwise reject the
+            # plan so the planner retry loop generates a corrected
+            # plan.
+            raw_dir = (
+                params.get("path") or params.get("directory") or ""
+            ).strip()
+            if raw_dir and not raw_dir.startswith("$"):
+                candidate_dir = os.path.realpath(
+                    raw_dir if os.path.isabs(raw_dir)
+                    else os.path.join(working_dir, raw_dir))
+                if not os.path.isdir(candidate_dir):
+                    try:
+                        in_root = any(
+                            os.path.commonpath([candidate_dir, root]) == root
+                            for root in allowed_read_roots)
+                    except ValueError:
+                        in_root = False
+                    if in_root:
+                        issues.append(
+                            f"{step.id}: list_directory path does not "
+                            f"exist on disk: {raw_dir}")
+                    else:
+                        issues.append(
+                            f"{step.id}: list_directory path is missing "
+                            f"or outside allowed roots: {raw_dir}")
+
         if event_type == "atomic_list_project_files":
+            # This event is intentionally task-local.  Broad project/source
+            # enumeration uses list_directory with its separate read policy.
             requested_directory = str(params.get("directory") or params.get("path") or "").strip()
             if requested_directory:
-                issues.append(
-                    f"{step.id}: atomic_list_project_files only lists the current task directory; "
-                    "use list_directory for an explicit directory"
-                )
+                candidate_dir = os.path.realpath(
+                    requested_directory if os.path.isabs(requested_directory)
+                    else os.path.join(working_dir, requested_directory))
+                try:
+                    in_allowed_root = any(
+                        os.path.commonpath([candidate_dir, root]) == root
+                        for root in allowed_read_roots)
+                except ValueError:
+                    in_allowed_root = False
+                if candidate_dir != os.path.realpath(working_dir):
+                    issues.append(
+                        f"{step.id}: atomic_list_project_files only lists the current task directory; "
+                        f"use list_directory for: {requested_directory}")
 
         if event_type in {"atomic_write_artifact", "create_file"}:
             path_key = "path" if "path" in params else "filename" if "filename" in params else ""
@@ -1059,17 +1990,92 @@ def _is_unavailable_sentinel(text: str) -> bool:
     ))
 
 
+# ── Bug #56 fix (2026-09-05): distinguish adapter/network errors from
+# unavailable sentinel so batch_planner surfaces the real upstream cause
+# instead of mis-reporting "Batch planner returned invalid JSON" when the
+# upstream LLM adapter actually returned an HTTP 429 / 5xx / connection
+# error string. See ADR 0021.
+#
+# Real failure observed on instance 03 (2026-09-05): Herme­s token plan
+# quota exhausted. Every batch_plan LLM call returned an HTTP 429 error
+# body. The robust executor treated it as a normal result.value, which
+# was then fed to _json_from_llm and produced a confusing
+# `invalid JSON [pos=unknown]` error — masking the real quota problem
+# from operators. This helper flags such error bodies as adapter errors
+# so the caller can route them through the same fail-fast / retry path
+# the unavailable sentinel uses, with an honest error message.
+_ADAPTER_ERROR_TOKENS = (
+    "HTTP 429",
+    "HTTP 500",
+    "HTTP 502",
+    "HTTP 503",
+    "HTTP 504",
+    "API call failed after",
+    "Token Plan 用量上限",
+    "Token Plan 套餐",
+    "Connection reset by peer",
+    "Connection refused",
+    "Connection timed out",
+    "Server error '5",
+    "Bad Gateway",
+    "Internal Server Error",
+    "Service Unavailable",
+    "Gateway Timeout",
+    "All connection attempts failed",
+    "Cannot connect to host",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ETIMEDOUT",
+)
+
+
+def _is_adapter_error_text(text: str) -> bool:
+    """Detect upstream LLM adapter / network error bodies.
+
+    These should NOT be fed to JSON parsing. Treat them like the
+    unavailable sentinel — surface a clear adapter-error message instead.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    return any(token in raw for token in _ADAPTER_ERROR_TOKENS)
+
+
 def _ensure_write_artifact(micro_plan, working_dir: str, user_message: str = ""):
     """If expected_artifacts require files but plan has no write step, add one.
     
     If the plan also lacks an LLM analysis step, add both analysis + write."""
     artifacts = getattr(micro_plan, 'expected_artifacts', None) or []
+    # A source path such as README.md is an input, not a request for a new MD.
+    # Explicit text-only instructions take precedence over the legacy keyword
+    # heuristic below.  Without this guard even "不生成文件" was converted into
+    # a synthetic report.md step and a deterministic retry loop.
+    explicit_text_only = bool(re.search(
+        r"(?:不|不要|无需)(?:生成|创建|写入|输出|保存|修改)[^。；，,]{0,12}(?:文件|报告|pdf|markdown|md)"
+        r"|(?:只|仅)(?:需|要)?(?:回复|发送|输出)(?:文字|文本|消息|结果)"
+        r"|不修改任何文件",
+        str(user_message or ""),
+        flags=re.I,
+    ))
+    if explicit_text_only and not artifacts:
+        return micro_plan
     # If no file artifacts but user message contains output keywords, add a default
     if not artifacts:
         user_msg = user_message
         if any(kw in user_msg for kw in ['产出', '报告', 'benchmark', '分析', 'catalog', '写', '.md', '.csv', '.pdf']):
             artifacts = [{"type": "file", "pattern": "*.md", "description": "分析报告", "required": True}]
             micro_plan.expected_artifacts = artifacts
+    # Models commonly use the documented ``filename`` spelling. Normalize it
+    # before deciding whether a writer is required; otherwise a perfectly
+    # grounded read→generate plan reaches preflight with a file contract but
+    # no explicit writer and is rejected after an expensive repair call.
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        filename = str(artifact.get("filename") or "").strip()
+        if filename and not artifact.get("pattern"):
+            artifact["type"] = "file"
+            artifact["pattern"] = os.path.basename(filename)
     file_artifacts = [a for a in artifacts if a.get("type") == "file" or a.get("pattern")]
     if not file_artifacts:
         return micro_plan
@@ -1201,10 +2207,138 @@ class BatchPlanner:
             # Try to get model from adapter
             llm_model = getattr(adapter, "default_model", None) or getattr(adapter, "model", None)
         if not llm_model:
-            llm_model = "deepseek-v4-flash"  # final fallback
+            try:
+                from ..adapters.direct_api import _resolve_api_json
+                llm_model = str(_resolve_api_json("minimax").get("model") or "MiniMax-M3")
+            except Exception:
+                llm_model = "MiniMax-M3"
 
         max_steps = max(1, int(self.config.get("max_steps") or 8))
         min_steps = max(1, int(self.config.get("min_steps") or 2))
+
+        sprint18_deterministic = (
+            "[sprint18=true]" in str(user_message)
+            and "[PARTNER_CAMPAIGN" in str(user_message)
+            and any(marker in str(user_message) for marker in (
+                "candidate_s18_9f2d6952fb8cd96f.json",
+                "targetdiff_active_learning",
+                "targetdiff_active_robustness",
+                "targetdiff_uncertainty_diagnostic",
+                "targetdiff_uncertainty_candidate",
+                "sprint18_learning_cycle",
+                "research_active_learning",
+                "research_adoption_context_shadow",
+            ))
+        )
+        if sprint18_deterministic:
+            intervention = _manual_effective_intervention(self.workspace, str(user_message))
+            task_instance.metadata["planner_experiment_intervention"] = intervention
+            task_instance.metadata["deterministic_event_route"] = "sprint18_event_first_v1"
+            task_instance.expected_artifacts = []
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "sprint18_event_first_v1", "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                MicroPlan(plan=[], expected_artifacts=[]), registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
+
+        # An explicit, bounded research control chain already is a complete
+        # Event plan.  Sending it through an LLM added latency and, in the
+        # first real canary, replaced the requested Events with the legacy
+        # read→generate-report route.  Authorisation and path validation still
+        # run through the same manual preflight below.
+        if _manual_research_active_learning_request(str(user_message)):
+            intervention = _manual_effective_intervention(self.workspace, str(user_message))
+            task_instance.metadata["planner_experiment_intervention"] = intervention
+            task_instance.metadata["deterministic_event_route"] = "research_active_learning_v1"
+            task_instance.expected_artifacts = []
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "research_active_learning_v1", "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                MicroPlan(plan=[], expected_artifacts=[]), registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
+
+        native_episode = _native_active_learning_episode(self.workspace, str(user_message))
+        if native_episode:
+            task_instance.metadata["deterministic_event_route"] = "instance_native_learning_v1"
+            task_instance.expected_artifacts = []
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "instance_native_learning_v1", "episode_id": native_episode,
+                "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                MicroPlan(plan=[], expected_artifacts=[]), registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
+
+        native_project_plan = _native_project_execution_plan(
+            self.workspace, str(user_message), task_instance.working_dir,
+        )
+        if native_project_plan is not None:
+            task_instance.metadata["deterministic_event_route"] = "instance_native_project_v1"
+            task_instance.expected_artifacts = []
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "instance_native_project_v1",
+                "event_types": [step.event_type for step in native_project_plan.plan],
+                "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                native_project_plan, registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
+
+        deterministic_candidate = _deterministic_research_candidate_plan(
+            str(user_message), task_instance.working_dir, self.workspace,
+        )
+        if deterministic_candidate is not None:
+            intervention = _manual_effective_intervention(self.workspace, str(user_message))
+            task_instance.metadata["planner_experiment_intervention"] = intervention
+            task_instance.metadata["deterministic_event_route"] = "research_adoption_candidate_v1"
+            task_instance.expected_artifacts = list(deterministic_candidate.expected_artifacts)
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "research_adoption_candidate_v1", "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                deterministic_candidate, registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
+
+        deterministic_baseline = _deterministic_research_baseline_plan(
+            str(user_message), task_instance.working_dir,
+        )
+        if deterministic_baseline is not None:
+            intervention = _manual_effective_intervention(self.workspace, str(user_message))
+            task_instance.metadata["planner_experiment_intervention"] = intervention
+            task_instance.metadata["deterministic_event_route"] = "research_adoption_baseline_v1"
+            task_instance.expected_artifacts = list(deterministic_baseline.expected_artifacts)
+            task_instance.save()
+            task_instance.append_log("deterministic_event_route", {
+                "route": "research_adoption_baseline_v1", "llm_calls": 0,
+            })
+            micro_plan = _manual_preflight_plan(
+                deterministic_baseline, registry=registry,
+                workspace=self.workspace, working_dir=task_instance.working_dir,
+                user_message=str(user_message),
+            )
+            return micro_plan, 0
 
         # Build prompt using dynamic builder
         try:
@@ -1256,7 +2390,7 @@ class BatchPlanner:
             logger.debug("[BATCH_PLANNER] compact manual prompt unavailable: %s", exc)
 
         robust = RobustExecutor(load_harness_config(self.workspace))
-        intervention = _manual_experiment_intervention(str(user_message))
+        intervention = _manual_effective_intervention(self.workspace, str(user_message))
         task_instance.metadata["planner_experiment_intervention"] = intervention
         task_instance.save()
         task_instance.append_log("planner_experiment_intervention", intervention)
@@ -1287,6 +2421,25 @@ class BatchPlanner:
             if not result.ok:
                 raise RuntimeError(f"Batch planner LLM call failed: {result.error}")
             raw = str(result.value or "")
+            # ── Bug #56 (ADR 0021): detect upstream adapter/network error
+            # bodies (HTTP 429 quota, 5xx, connection reset, etc.) BEFORE
+            # feeding to JSON parser. Same fail-fast / retry shape as the
+            # unavailable sentinel path, but with an honest error message
+            # that names the real upstream cause instead of the misleading
+            # "Batch planner returned invalid JSON" downstream symptom.
+            if _is_adapter_error_text(raw):
+                logger.error(
+                    "[BATCH_PLANNER] adapter error body detected, raw output (first 500): %s",
+                    raw[:500],
+                )
+                if attempt < unavailable_retries:
+                    logger.warning("[BATCH_PLANNER] adapter error, retrying...")
+                    if retry_delay:
+                        await asyncio.sleep(retry_delay)
+                    continue
+                raise RuntimeError(
+                    f"Batch planner LLM adapter error (likely upstream HTTP/network): {raw[:500]}"
+                )
             if not _is_unavailable_sentinel(raw):
                 break
             logger.warning("[BATCH_PLANNER] unavailable sentinel, raw output (first 500): %s", raw[:500])
@@ -1336,7 +2489,12 @@ class BatchPlanner:
             # retries bring success rate from ~33% to ~85% without crossing
             # the 3-attempt safety cap (manual_stable must still fail closed
             # if retries exhaust). Documented in ADR 0005.
-            _max_retries = 3 if _manual_mode else max(1, int(self.config.get("max_json_retries") or 2))
+            _native_project = (
+                "[instance_native=true]" in str(user_message)
+                and "[native_kind=project]" in str(user_message)
+            )
+            _max_retries = (1 if _native_project else 3) if _manual_mode else max(
+                1, int(self.config.get("max_json_retries") or 2))
             while micro_plan is None and _retry_count < _max_retries:
                 _retry_count += 1
                 logger.info("[BATCH_PLANNER] retry %d/%d with stricter JSON instruction", _retry_count, _max_retries)
@@ -1376,6 +2534,22 @@ class BatchPlanner:
                 planner_calls += 1
                 if result.ok:
                     raw2 = str(result.value or "")
+                    # ── Bug #56 (ADR 0021): same adapter-error short-circuit
+                    # as the primary path. Feeding an HTTP 429 / 5xx body
+                    # through _json_from_llm masks the real upstream cause
+                    # behind a misleading "invalid JSON" report.
+                    if _is_adapter_error_text(raw2):
+                        logger.error(
+                            "[BATCH_PLANNER] retry %d: adapter error body detected, raw output (first 500): %s",
+                            _retry_count,
+                            raw2[:500],
+                        )
+                        task_instance.append_log('batch_planner_retry_error', {
+                            'raw_preview': str(raw2)[:500],
+                            'error': 'adapter_error_body_detected',
+                            'attempt': _retry_count,
+                        })
+                        break
                     if not _is_unavailable_sentinel(raw2):
                         try:
                             micro_plan = _normalize_micro_plan(_json_from_llm(raw2), max_steps=max_steps)
@@ -1591,7 +2765,15 @@ class BatchPlanner:
             _manual_mode_for_preflight = True
         if _manual_mode_for_preflight:
             preflight_error: ValueError | None = None
-            for semantic_attempt in range(3):
+            native_project_request = (
+                "[instance_native=true]" in str(user_message)
+                and "[native_kind=project]" in str(user_message)
+            )
+            # Native work is already surrounded by a failure→Episode→learning
+            # loop. One semantic repair is enough; repeated identical planning
+            # calls delay learning without adding evidence.
+            semantic_attempts = 2 if native_project_request else 3
+            for semantic_attempt in range(semantic_attempts):
                 try:
                     micro_plan = _manual_preflight_plan(
                         micro_plan,
@@ -1621,7 +2803,7 @@ class BatchPlanner:
                         ],
                         "rejected_expected_artifacts": list(micro_plan.expected_artifacts or []),
                     })
-                    if semantic_attempt >= 2:
+                    if semantic_attempt >= semantic_attempts - 1:
                         break
                     repair_prompt = (
                         "你是 Partner 手动任务规划器。上一个计划在执行前语义检查失败。\n"

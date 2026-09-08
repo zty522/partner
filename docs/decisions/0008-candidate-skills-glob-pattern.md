@@ -12,7 +12,7 @@
 ```python
 # partner/governance/candidate_skills.py:75 (Bug #39)
 def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
-    root = workspace_root(workspace) / "share/mind/governance/rl/candidate_skills"
+    root = workspace_root(workspace) / "share/mind/governance/experience_guided_policy/candidate_skills"
     rows: list[dict[str, Any]] = []
     for path in sorted(root.glob("candidate_*.json")):
         try:
@@ -33,7 +33,7 @@ def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
   `candidate_preflight_contract_v2`）都恰好以 `candidate_` 开头——**碰巧命中 glob**
 - 但任何用户调用 `register_candidate_skill(ws, {"candidate_id": "manual_stable_truth_audit_v2", ...})` 时
   （这是 Codex 8/26 真用过的 ID，参见 `docs/decisions/0004-manual-stable-production-baseline.md`
-  与 `docs/architecture/rl_evolution.md` 的"promoted"字段）——文件会写入 disk
+  与 `docs/architecture/experience_policy.md` 的"promoted"字段）——文件会写入 disk
   （`manual_stable_truth_audit_v2.json`），但 `load_candidate_skills` **不会找到它**
 - 结果：`control_policy.json` 的 `promoted["literature_github_learning:manual_final_artifact_truth"]` 值即使
   与磁盘文件名匹配，**`load_candidate_skills` 仍然返回不完整列表**，造成所有依赖它做 consistency check 的
@@ -45,7 +45,7 @@ def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
 
 ```python
 register_candidate_skill(ws, {"candidate_id": "my-custom-candidate-id", ...})
-# → 写入 /mnt/e/work/partner_workspace/share/mind/governance/rl/candidate_skills/my-custom-candidate-id.json
+# → 写入 /mnt/e/work/partner_workspace/share/mind/governance/experience_guided_policy/candidate_skills/my-custom-candidate-id.json
 # → 文件确实存在，size = 真实 candidate JSON
 
 load_candidate_skills(ws)
@@ -58,7 +58,7 @@ load_candidate_skills(ws)
 
 ```python
 def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
-    root = workspace_root(workspace) / "share/mind/governance/rl/candidate_skills"
+    root = workspace_root(workspace) / "share/mind/governance/experience_guided_policy/candidate_skills"
     rows: list[dict[str, Any]] = []
     # Hermes 2026-08-27 fix: glob all candidate-skill files, not just the
     # `candidate_*.json` pattern. The directory holds one file per

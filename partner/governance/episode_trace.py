@@ -23,6 +23,8 @@ REWARD_VECTOR_SPEC = {
     "dimensions": ["truth", "business_progress", "handoff", "observability", "efficiency", "safety"],
     "range": [0.0, 1.0],
     "hard_gates": ["truth", "safety"],
+    "hard_gate_scope": "truth_and_safety_only",
+    "outcome_gate": ["truth", "safety", "business_progress"],
     "rule": "truth or safety failure forces policy_eligible=false; other dimensions cannot compensate",
 }
 
@@ -78,7 +80,10 @@ def reward_vector(trajectory: dict[str, Any], reduced: dict[str, Any]) -> dict[s
     failures = reduced.get("failure_classes") or []
     truth_audit = outcome.get("truth_audit") or {}
     false_success = bool(outcome.get("false_success"))
-    truth = 0.0 if false_success else (1.0 if not truth_audit or truth_audit.get("passed") is True else 0.0)
+    completed = str(outcome.get("status") or reduced.get("status") or "") == "completed"
+    truth = 0.0 if (false_success or not completed) else (
+        1.0 if not truth_audit or truth_audit.get("passed") is True else 0.0
+    )
     safety = 0.0 if any(value == "safety.denied_or_violated" for value in failures) else 1.0
     progress = 1.0 if outcome.get("business_progress") is True else 0.0
     handoff = 1.0 if outcome.get("handoff_consumed") is True else 0.0
@@ -99,7 +104,10 @@ def reward_vector(trajectory: dict[str, Any], reduced: dict[str, Any]) -> dict[s
         0.35 * truth + 0.30 * progress + 0.10 * handoff
         + 0.10 * observability + 0.10 * efficiency + 0.05 * safety, 4
     )
-    return {"schema_version": 3, "values": values, "hard_gate_passed": truth == 1.0 and safety == 1.0,
+    return {"schema_version": 3, "values": values,
+            "hard_gate_passed": truth == 1.0 and safety == 1.0,
+            "hard_gate_scope": "truth_and_safety_only",
+            "outcome_gate_passed": eligible,
             "policy_eligible": eligible, "scalar": scalar}
 
 
@@ -150,16 +158,32 @@ def reduce_task_episode(workspace: str, *, instance_id: str, task_id: str,
             step_id = str(row.get("step_id") or "")
             start = starts.pop(step_id, {})
             ok = bool(row.get("ok")) and event.endswith("completed")
+            terminal_status = str(row.get("terminal_status") or "")
             tool_calls.append({
                 "tool_call_id": _id("tool", episode_id, step_id), "step_id": step_id,
                 "event_type": row.get("event_type") or start.get("event_type") or "",
                 "depends_on": start.get("depends_on") or [], "started_at": start.get("ts") or "",
-                "ended_at": row.get("ts") or "", "status": "completed" if ok else "failed",
+                "ended_at": row.get("ts") or "",
+                "status": "skipped" if terminal_status == "skipped" else ("completed" if ok else "failed"),
+                "terminal_reason": str(row.get("terminal_reason") or ""),
                 "elapsed_sec": row.get("elapsed_sec"), "raw_result_ref": str(task_dir / f"_step_{step_id}.result.json"),
             })
-            artifact_paths.update(str(value) for value in row.get("files") or [])
-            if not ok:
-                failures.append(f"tool.{row.get('event_type') or 'unknown'}.failed")
+            step_event_type = str(row.get("event_type") or start.get("event_type") or "")
+            if step_event_type not in {"atomic_inspect_file", "read_file", "list_directory"}:
+                artifact_paths.update(str(value) for value in row.get("files") or [])
+            if not ok and terminal_status != "skipped":
+                owner = str(row.get("failure_owner") or "")
+                mechanism = str(row.get("mechanism") or "")
+                failure_class = mechanism or f"tool.{row.get('event_type') or 'unknown'}.failed"
+                failures.append(failure_class)
+                failure_details.append({
+                    "class": failure_class,
+                    "step_id": step_id,
+                    "event_type": step_event_type,
+                    "failure_owner": owner,
+                    "mechanism": mechanism,
+                    "error": str(row.get("error") or row.get("summary") or "")[:1000],
+                })
         elif event == "robust_execute_start":
             model_starts.setdefault(str(row.get("event_name") or "model"), []).append(row)
         elif event in {"robust_execute_success", "robust_execute_failure"}:
@@ -183,12 +207,83 @@ def reduce_task_episode(workspace: str, *, instance_id: str, task_id: str,
                            "event_type": start.get("event_type") or "", "depends_on": start.get("depends_on") or [],
                            "started_at": start.get("ts") or "", "ended_at": "", "status": "interrupted"})
         failures.append("lifecycle.unclosed_tool")
+    for name, pending in model_starts.items():
+        for start in pending:
+            model_calls.append({
+                "model_call_id": _id("model", episode_id, name, str(len(model_calls) + 1)),
+                "purpose": name,
+                "model": (start.get("metadata") or {}).get("model") or "",
+                "attempt": (start.get("metadata") or {}).get("attempt") or 1,
+                "started_at": start.get("ts") or "",
+                "ended_at": "",
+                "status": "interrupted",
+            })
+            failures.append("lifecycle.unclosed_model_call")
+            failure_details.append({
+                "class": "lifecycle.unclosed_model_call",
+                "failure_owner": "environment",
+                "mechanism": "runtime_restart_interrupted_model_call",
+                "purpose": name,
+            })
 
     governance = next((row for row in reversed(rows) if row.get("event") == "manual_iteration_governance"), {})
     embedded = (((governance.get("trajectory") or {}).get("trajectory")) or {})
     trajectory = trajectory or embedded
     receipt = governance.get("receipt") or {}
     artifact_paths.update(str(value) for value in receipt.get("artifacts") or [])
+    artifact_paths.update(str(value) for value in (trajectory.get("outcome") or {}).get("artifacts") or [])
+    trajectory_mechanism = str((trajectory.get("outcome") or {}).get("failure_mechanism") or "")
+    if trajectory_mechanism:
+        failures.append(trajectory_mechanism)
+        failure_details.append({
+            "class": trajectory_mechanism,
+            "failure_owner": str((trajectory.get("outcome") or {}).get("failure_owner") or ""),
+            "mechanism": trajectory_mechanism,
+            "source": "governed_trajectory",
+        })
+    if bool((trajectory.get("outcome") or {}).get("duplicate_outcome")):
+        duplicate_class = "outcome.duplicate_semantic_result"
+        failures.append(duplicate_class)
+        failure_details.append({
+            "class": duplicate_class,
+            "failure_owner": "project_strategy",
+            "mechanism": duplicate_class,
+            "source": "governed_trajectory",
+        })
+    # Final acceptance failures can occur after every Event/tool call has
+    # succeeded (for example an old checker treating continuation.md as a new
+    # output, or applying a literature citation gate to a numeric benchmark).
+    # Preserve that mechanism in the Episode while the immutable task log is
+    # available; otherwise active learning sees a failed Episode with an empty
+    # class and can only perform a meaningless route match.
+    governance_status = str(governance.get("status") or "")
+    if governance_status and governance_status not in {
+        "recorded", "native_learning_observation_recorded",
+        "delivery_only_failure_accepted",
+    } and not trajectory_mechanism:
+        iteration_check = next(
+            (row for row in reversed(rows) if row.get("event") == "iteration_check"),
+            {},
+        )
+        missing = [str(value) for value in iteration_check.get("missing") or []]
+        inferred: list[str] = []
+        if any(value.startswith("named_artifact:") for value in missing):
+            inferred.append("verification.acceptance_contract/implicit_handoff_artifact")
+        if any(value.startswith("citations<") for value in missing):
+            inferred.append("verification.acceptance_contract/native_project_citation_gate")
+        if governance_status == "candidate_truth_gate_failed":
+            inferred.append("verification.claim_truth/native_project_scope_mismatch")
+        if not inferred:
+            inferred.append(f"outcome.{governance_status}")
+        for failure_class in inferred:
+            failures.append(failure_class)
+            failure_details.append({
+                "class": failure_class,
+                "failure_owner": "verification",
+                "mechanism": failure_class,
+                "missing": missing,
+                "source": "final_acceptance_governance",
+            })
     receipt_id = str(receipt.get("receipt_id") or (trajectory.get("state") or {}).get("receipt_id") or "")
     project_id = str(trajectory.get("project_id") or receipt.get("project_id") or "")
     invalidated = False
@@ -268,7 +363,7 @@ def reduce_task_episode(workspace: str, *, instance_id: str, task_id: str,
     trace_path = bundle / "trace.jsonl"
     trace_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in raw_events), encoding="utf-8")
     atomic_json(bundle / "state.json", reduced)
-    atomic_json(root / "share" / "mind" / "governance" / "rl" / "reward_vector_spec.json", REWARD_VECTOR_SPEC)
+    atomic_json(root / "share" / "mind" / "governance" / "experience_guided_policy" / "reward_vector_spec.json", REWARD_VECTOR_SPEC)
     return {"ok": True, "status": "reduced", "episode_id": episode_id, "bundle": str(bundle),
             "manifest": manifest, "state": reduced}
 
@@ -311,3 +406,45 @@ def try_reduce_manual_task(workspace: str, *, instance_id: str, task_id: str) ->
         return reduce_task_episode(workspace, instance_id=instance_id, task_id=task_id)
     except Exception as exc:  # diagnostic code is deliberately fail-open
         return {"ok": False, "status": "trace_best_effort_failed", "error": str(exc)[:1000]}
+
+
+def apply_episode_trajectory_correction(workspace: str, *, episode_id: str,
+                                        trajectory: dict[str, Any]) -> dict[str, Any]:
+    """Refresh the replaceable Episode projection from an append-only correction.
+
+    Raw task logs, trace.jsonl, and old trajectory rows are never modified.
+    """
+    root = workspace_root(workspace)
+    path = root / "share/mind/governance/episodes" / episode_id / "state.json"
+    state = _json(path)
+    if not state:
+        return {"ok": False, "status": "episode_not_found", "path": str(path)}
+    outcome = trajectory.get("outcome") or {}
+    mechanism = str(outcome.get("failure_mechanism") or "")
+    state["status"] = str(outcome.get("status") or state.get("status") or "failed")
+    if mechanism:
+        state["failure_classes"] = sorted(set([
+            *[str(value) for value in state.get("failure_classes") or []], mechanism,
+        ]))
+        details = list(state.get("failure_details") or [])
+        if not any(str(row.get("mechanism") or "") == mechanism
+                   for row in details if isinstance(row, dict)):
+            details.append({
+                "class": mechanism,
+                "failure_owner": str(outcome.get("failure_owner") or ""),
+                "mechanism": mechanism,
+                "source": "append_only_trajectory_correction",
+            })
+        state["failure_details"] = details
+    corrections = list(state.get("projection_corrections") or [])
+    corrections.append({
+        "trajectory_id": trajectory.get("trajectory_id"),
+        "trajectory_revision": trajectory.get("revision"),
+        "applied_at": now_iso(),
+        "raw_trace_mutated": False,
+    })
+    state["projection_corrections"] = corrections
+    state["reward_vector"] = reward_vector(trajectory, state)
+    atomic_json(path, state)
+    return {"ok": True, "status": "episode_projection_corrected",
+            "path": str(path), "state": state}

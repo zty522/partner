@@ -40,6 +40,18 @@ python scripts/partner_campaign.py resume
 python scripts/partner_campaign.py stop --reason "用户终止"
 ```
 
+Sprint 18 的主动课程必须使用专用 controller，而不是通用 Campaign runner：
+
+```bash
+systemctl --user link /mnt/e/work/partner/deploy/systemd/partner-sprint18@.service
+systemctl --user enable --now partner-sprint18@<campaign_id>.service
+systemctl --user status partner-sprint18@<campaign_id>.service --no-pager
+```
+
+该服务保持控制器存活，Task 终态到达即重新观测和投递；没有高信息新证据时保持
+`WAITING_EVIDENCE`，不会重复旧任务消耗模型额度。Campaign 自身的 deadline、WorkItem、失败数、模型调用和
+成本预算仍是硬停止条件；“持久服务”不等于无预算无限运行。
+
 ## 验真
 
 - service active 不是任务完成。

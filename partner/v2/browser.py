@@ -25,7 +25,23 @@ logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
 
 _WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_worker.py")
-_PYTHON = sys.executable or "python3"
+def _browser_python() -> str:
+    """Use the runtime that owns Playwright, independent of the caller CLI.
+
+    Developer probes may enter Partner through ``/usr/bin/python3`` while the
+    production runtime and Playwright live in the configured Conda runtime.
+    ``PARTNER_BROWSER_PYTHON`` remains the portable deployment override.
+    """
+    configured = str(os.environ.get("PARTNER_BROWSER_PYTHON") or "").strip()
+    if configured and os.path.isfile(configured):
+        return configured
+    production = "/home/os/miniconda3/bin/python"
+    if os.path.isfile(production):
+        return production
+    return sys.executable or "python3"
+
+
+_PYTHON = _browser_python()
 _REQUEST_LOCK = threading.RLock()
 
 

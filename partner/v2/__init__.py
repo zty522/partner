@@ -23,6 +23,7 @@ JsonDict = dict[str, Any]
 
 # ── Convenience re-exports ──
 from .push_events import atomic_push_files
+from .candidate_events import atomic_execute_candidate
 from .gap_events import atomic_ensure_tool
 from .vision_events import atomic_read_image
 from .perception import (
@@ -65,6 +66,11 @@ from .browser import (
     atomic_browser_execute,
     atomic_xhs_open_publish_editor,
     atomic_xhs_inspect_upload_requirements,
+)
+from .multimodal_browser_events import (
+    atomic_multimodal_browser_observe,
+    atomic_multimodal_community_read,
+    atomic_multimodal_login_resume,
 )
 from .media import (
     atomic_gen_chart,
@@ -131,6 +137,7 @@ from .governance_events import (
     atomic_record_issue,
     atomic_start_evolution_experiment,
     atomic_decide_evolution_experiment,
+    atomic_activate_promoted_candidate,
     atomic_observe_evolution_signals,
     atomic_review_manual_evolution_evidence,
     atomic_decide_manual_canary,
@@ -143,6 +150,43 @@ from .campaign_events import (
     atomic_cancel_campaign,
 )
 from .continuous_project_events import atomic_continuous_project_step
+from .external_learning_events import atomic_external_knowledge_scout
+from .sprint19_events import (
+    atomic_active_learning_effect_audit,
+    atomic_project_iteration_audit,
+    atomic_self_evolution_effect_audit,
+    atomic_sprint19_acceptance,
+)
+from .project_hypothesis_events import atomic_project_hypothesis_propose
+from .active_learning_events import (
+    atomic_agent_active_learning_observe_episode,
+    atomic_agent_active_learning_diagnostic_shadow,
+    atomic_agent_active_learning_refine_taxonomy,
+    atomic_agent_active_learning_skipped_terminal_repair_shadow,
+    atomic_agent_active_learning_skipped_terminal_fresh_canary,
+    atomic_agent_active_learning_handoff_intent_fresh_canary,
+    atomic_agent_active_learning_preflight_manifest_fresh_canary,
+    atomic_agent_active_learning_manual_failure_matched,
+    atomic_agent_active_learning_feedback,
+    atomic_agent_active_learning_select,
+    atomic_agent_active_learning_propose_episode_repair,
+    atomic_learning_observation_ingest,
+    atomic_learning_topic_select,
+    atomic_learning_candidate_propose,
+    atomic_learning_policy_update,
+    atomic_sprint18_learning_cycle,
+    atomic_targetdiff_active_learning,
+    atomic_targetdiff_active_robustness,
+    atomic_targetdiff_uncertainty_diagnostic,
+    atomic_targetdiff_uncertainty_candidate,
+)
+from .research_learning_events import (
+    atomic_research_active_learning_observe,
+    atomic_research_active_learning_select,
+    atomic_research_active_learning_investigate,
+    atomic_research_active_learning_matched,
+    atomic_research_adoption_context_shadow,
+)
 
 
 def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
@@ -249,6 +293,12 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_xhs_open_publish_editor, {"external_call": True, "produces_artifact": True}),
         ("xiaohongshu_inspect_upload_requirements", "读取小红书真实上传控件的accept/multiple及页面格式要求，输出JSON和MD；不会上传或发布。参数: 无", "local",
          atomic_xhs_inspect_upload_requirements, {"external_call": True, "produces_artifact": True}),
+        ("multimodal_browser_observe", "在白名单社区打开可见浏览器，采集 DOM、截图、Qwen VL 描述并由 MiniMax 跨模态核对；不点击或发布。参数: platform, url(可选)", "llm",
+         atomic_multimodal_browser_observe, {"external_call": True, "produces_artifact": True}),
+        ("multimodal_community_read", "观察白名单社区，由 LLM 仅从真实 DOM 链接编号中选择一条并阅读；登录墙会置前等待用户，不输入凭据。参数: platform, url(可选)", "llm",
+         atomic_multimodal_community_read, {"external_call": True, "produces_artifact": True}),
+        ("multimodal_login_resume", "打开白名单平台登录页到前台，并以 DOM、截图、视觉模型和推理模型复核登录状态；只在确定性登录信号存在时恢复，不读取或填写凭据。参数: platform, url(可选)", "llm",
+         atomic_multimodal_login_resume, {"external_call": True, "produces_artifact": True}),
 
         # ── Media (5 events) ──
         ("gen_chart", "生成数据图表（柱状图/折线图/散点图/饼图）。参数: data, chart_type, title, save_path, color_theme(可选)", "local",
@@ -293,6 +343,10 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_v2_web_search, {"external_call": True}),
         ("knowledge_learn", "从搜索结果中学习并记录知识。参数: topic, sources, key_insights(可选), save(可选)", "local",
          atomic_knowledge_learn, {"external_call": False}),
+        ("external_knowledge_scout", "外部知识主动学习：用 MiniMax 提出检索问题、选择新 GitHub/论文、拉取真实来源并形成原创可证伪想法。参数: topic(可选)", "local",
+         atomic_external_knowledge_scout, {"external_call": True, "produces_artifact": True}),
+        ("project_hypothesis_propose", "经验驱动策略学习：读取项目终态历史，由 LLM 在 Event 测量契约内提出可证伪的有界 Candidate；只形成候选，不执行任意代码。参数: project_id, project_steps", "llm",
+         atomic_project_hypothesis_propose, {"external_call": True, "produces_artifact": False}),
 
         # ── Loop / Planning (5 events) ──
         ("goal_parse", "解析用户目标为结构化的子目标列表。参数: goal, context(可选)", "local",
@@ -361,12 +415,66 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_start_evolution_experiment, {"external_call": False, "produces_artifact": True}),
         ("decide_evolution_experiment", "根据显式成功标准、回归和前后证据决定 promoted/rejected/inconclusive；未过晋升门不得 promoted。", "local",
          atomic_decide_evolution_experiment, {"external_call": False}),
+        ("activate_promoted_candidate", "仅在已有 policy/promoted Event 后，将可执行 Candidate 激活到 control_policy 并同步 production_effective 投影；学习型 Candidate 还必须提供通过三类生产硬门的 readiness_attestation_path。参数: candidate_id, decision_key, policy_event_id, readiness_attestation_path", "local",
+         atomic_activate_promoted_candidate, {"external_call": False, "produces_artifact": True}),
+        ("execute_candidate", "通过代码白名单执行已注册的 Event Candidate；参数: candidate_id, execution_id, instance_id, mode, event_params。", "local",
+         atomic_execute_candidate, {"external_call": False, "produces_artifact": True}),
         ("observe_evolution_signals", "从事件失败、当前任务无产物、交付缺回执和连续重复事件中提取高信号 Issue；不根据模糊文字猜测问题。", "local",
          atomic_observe_evolution_signals, {"external_call": False}),
         ("review_manual_evolution_evidence", "审查01-04真实手动任务轨迹的样本数、结果新颖性、Receipt和来源异构性；过门只建立candidate实验，绝不自动晋升。参数: project_id(可选)", "local",
          atomic_review_manual_evolution_evidence, {"external_call": False, "produces_artifact": True}),
         ("decide_manual_canary", "仅在baseline/candidate各至少3样本且已有真实回归证明时汇总指定实验并写显式PromotionDecision。参数: experiment_id", "local",
          atomic_decide_manual_canary, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_select", "读取真实 Episode 失败证据，用信息增益×任务价值×新颖性−成本−风险选择下一项诊断/repair/resample 实验；可用 focus_failure_class 续接既有诊断链；只提议，不执行或晋升。参数: instance_ids(默认03,05), focus_failure_class(可选)", "local",
+         atomic_agent_active_learning_select, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_observe_episode", "只读打开用户明确指定的 Episode 状态并返回失败类别与证据路径；不修改生产。参数: episode_id", "local",
+         atomic_agent_active_learning_observe_episode, {"external_call": False}),
+        ("agent_active_learning_feedback", "仅凭显式证据记录主动实验成败并更新选择记忆；不改生产策略。参数: context_key, option_id, success, evidence_refs", "local",
+         atomic_agent_active_learning_feedback, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_diagnostic_shadow", "读取选定 Episode 及原始 task log，诊断失败更像 systematic、transient 或 uncertain；只生成证据，不执行修复。", "local",
+         atomic_agent_active_learning_diagnostic_shadow, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_refine_taxonomy", "当一个失败标签含多个机制时，根据诊断证据生成版本化子类型；不改写历史 Episode 或生产策略。", "local",
+         atomic_agent_active_learning_refine_taxonomy, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_skipped_terminal_repair_shadow", "只读回放 systematic step 子类型诊断；仅在同一 trace 有 dependency-skipped 证据时评估补写终态的反事实效果，不改历史或生产。参数: diagnosis_path", "local",
+         atomic_agent_active_learning_skipped_terminal_repair_shadow, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_skipped_terminal_fresh_canary", "在隔离目录用真实 PlanExecutor 跑失败输入/跳过生成与交付/并行成功报告拓扑，验证每步唯一终态；不调用外部模型或生产实例。参数: canary_id", "local",
+         atomic_agent_active_learning_skipped_terminal_fresh_canary, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_handoff_intent_fresh_canary", "在隔离 workspace 验证独立任务可读取非前序输入、明确 continuation 漏交接时仍硬拒绝、正确交接可推进；不触碰生产实例。参数: canary_id", "local",
+         atomic_agent_active_learning_handoff_intent_fresh_canary, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_preflight_manifest_fresh_canary", "在隔离 workspace 验证 Candidate prompt 只注入已存在且白名单内的显式输入路径，baseline 不变、虚构路径仍拒绝。参数: canary_id", "local",
+         atomic_agent_active_learning_preflight_manifest_fresh_canary, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_manual_failure_matched", "在冻结失败 fixture 上匹配比较 literal baseline 与 claim-ledger/typed-output Candidate，记录决策和主动学习反馈；不修改生产。参数: experiment_id(可选)", "local",
+         atomic_agent_active_learning_manual_failure_matched, {"external_call": False, "produces_artifact": True}),
+        ("agent_active_learning_propose_episode_repair", "对用户明确指定的失败 Episode 生成受限 repair proposal 和只读审查 JSON；不改源码、control_policy 或 promotion。参数: episode_id", "local",
+         atomic_agent_active_learning_propose_episode_repair, {"external_call": False, "produces_artifact": True}),
+        ("learning_observation_ingest", "将真实轨迹投影为可审计 LearningObservation，分离 learning_eligible 与 promotion_eligible，保留负样本。", "local",
+         atomic_learning_observation_ingest, {"external_call": False, "produces_artifact": True}),
+        ("learning_topic_select", "用信息增益、不确定性、业务/迁移价值与成本/风险/重复惩罚主动选题，critic 拒绝无意义题目。", "local",
+         atomic_learning_topic_select, {"external_call": False, "produces_artifact": True}),
+        ("learning_candidate_propose", "从选题决策生成 R0-R4 受限 RepairRecipe Candidate；只建候选，不修改生产。参数: decision_path", "local",
+         atomic_learning_candidate_propose, {"external_call": False, "produces_artifact": True}),
+        ("learning_policy_update", "从正负 LearningObservation 更新 Beta 后验与最小探索概率；学习策略不自动投影生产。", "local",
+         atomic_learning_policy_update, {"external_call": False, "produces_artifact": True}),
+        ("sprint18_learning_cycle", "一次 Event-first 闭环：观测入库→主动选题→受限 Candidate→学习策略更新；不自动晋升生产。", "local",
+         atomic_sprint18_learning_cycle, {"external_call": False, "produces_artifact": True}),
+        ("targetdiff_active_learning", "在真实 TargetDiff pK 数据和官方 identity split 上，在相同标注预算下连续三轮比较 active/random/MaxVar 的下一样本选择；不是函数选择，不做药效因果主张。", "local",
+         atomic_targetdiff_active_learning, {"external_call": False, "produces_artifact": True}),
+        ("targetdiff_active_robustness", "汇总至少三个真实池随机种子的 equal-budget 主动学习结果；要求 Candidate 至少赢 2/3 且均值优于 random/MaxVar，否则正式 rejected。参数: run_ids, evaluation_id(可选)", "local",
+         atomic_targetdiff_active_robustness, {"external_call": False, "produces_artifact": True}),
+        ("targetdiff_uncertainty_diagnostic", "在真实 TargetDiff 官方 test 上，仅以后验评估方式检验 RF 方差与绝对误差的跨 seed 相关性、误差富集和 RMSD 分片可靠性；不选择样本、不测试 Candidate、不晋升。参数: seeds, labelled_budget, evaluation_id(可选)", "local",
+         atomic_targetdiff_uncertainty_diagnostic, {"external_call": False, "produces_artifact": True}),
+        ("targetdiff_uncertainty_candidate", "在冻结的真实 TargetDiff official test、三 seed 和相同标注预算下，matched 比较 raw RF variance 与仅由已标注样本训练的 cross-fitted residual uncertainty；test 标签只用于后验验收，不晋升。参数: seeds, labelled_budget, evaluation_id(可选)", "local",
+         atomic_targetdiff_uncertainty_candidate, {"external_call": False, "produces_artifact": True}),
+        ("research_active_learning_observe", "核验真实 GitHub 源码/论文来源并登记项目知识问题；只观察，不把阅读冒充改进。参数: project_id, goal, questions(列表), source_paths(至少2个真实路径)", "local",
+         atomic_research_active_learning_observe, {"external_call": False, "produces_artifact": True}),
+        ("research_active_learning_select", "根据预期信息增益、任务价值、新颖性与读取成本，选择下一条项目研究问题及真实来源；只选择不执行。参数: project_id", "local",
+         atomic_research_active_learning_select, {"external_call": False, "produces_artifact": True}),
+        ("research_active_learning_investigate", "读取主动选择的源码或论文，保存来源指纹、逐字证据与命中术语；不修改生产。参数: project_id", "local",
+         atomic_research_active_learning_investigate, {"external_call": False, "produces_artifact": True}),
+        ("research_active_learning_matched", "用相同真实问题和来源匹配比较 first-unread baseline 与信息价值 Candidate；最多接受进入 shadow，绝不自动 production。参数: project_id", "local",
+         atomic_research_active_learning_matched, {"external_call": False, "produces_artifact": True}),
+        ("research_adoption_context_shadow", "执行由多源源码/论文证据生成的最小上下文 Candidate：保留项目 Receipt、检索同项目轨迹并附来源证据；仅 shadow，不修改生产。参数: query, project_id, research_project_id, budget_chars(可选)", "local",
+         atomic_research_adoption_context_shadow, {"external_call": False, "produces_artifact": True}),
         ("campaign_status", "读取持久 Campaign、WorkItem 和 Lease 状态；service/heartbeat 不冒充任务进度。", "local",
          atomic_campaign_status, {"external_call": False}),
         ("create_campaign", "创建有期限、双槽、重试/失败/模型/成本预算的长期 Campaign；只持久化，需 runner 才会 dispatch。", "local",
@@ -377,8 +485,16 @@ def get_all_events() -> list[tuple[str, str, str, Any, dict]]:
          atomic_pause_campaign, {"external_call": False}),
         ("cancel_campaign", "取消 Campaign 并保留全部审计记录。参数: reason", "local",
          atomic_cancel_campaign, {"external_call": False}),
-        ("continuous_project_step", "执行由 Receipt 与 RL canary 选择的有界业务增量步骤。参数: strategy_id", "local",
+        ("continuous_project_step", "执行由 Receipt 与经验驱动策略 Candidate 选择的有界业务增量步骤。参数: strategy_id", "local",
          atomic_continuous_project_step, {"external_call": True, "produces_artifact": True}),
+        ("project_iteration_audit", "核验项目是否真正承接前序 Receipt、改变动作并产生新产物。参数: project_id", "local",
+         atomic_project_iteration_audit, {"external_call": False}),
+        ("active_learning_effect_audit", "核验知识缺口是否触发学习、完成学习并实际改变下一动作。参数: instance_id(可选)", "local",
+         atomic_active_learning_effect_audit, {"external_call": False}),
+        ("self_evolution_effect_audit", "核验 Candidate、匹配决策、行为代码面和 production_effective，不把反思当自进化。", "local",
+         atomic_self_evolution_effect_audit, {"external_call": False}),
+        ("sprint19_acceptance", "同时给出项目迭代、主动学习、自进化三条独立证据链及未过硬门。参数: project_id/instance_id(可选)", "local",
+         atomic_sprint19_acceptance, {"external_call": False, "produces_artifact": True}),
 
     ]
     return events

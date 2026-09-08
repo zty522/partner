@@ -9,9 +9,10 @@ Implements 4 changes for partner self-evolution + active-learning loops:
    so projects that auto-iterate (e.g. 02 molecular_generation) keep running.
 3. active_learning_to_production: bridge repair_proposal events to
    production_readiness/ so overnight canary can promote them.
-4. openid_locked_to_target: when an instance starts, ensure
-   instances/<id>/state/qq_user_context.json's openid is always
-   ECEFAFB566A538B6366AFFBC725091A3.
+4. instance_scoped_openid_recovery: recover the last user OpenID from the
+   *same instance's* inbound QQ history.  QQ Official OpenIDs are scoped to
+   the bot application, so an OpenID learned by one instance must never be
+   copied to another instance.
 
 Each patch is implemented as a small monkey-patchable function that the
 existing modules can opt into via a sentinel attribute
@@ -29,8 +30,6 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-TARGET_OPENID = "ECEFAFB566A538B6366AFFBC725091A3"
 
 # ---------------------------------------------------------------------------
 # Patch 1: governance_auto_claim
@@ -159,7 +158,7 @@ def promote_repair_to_production_readiness(workspace: str | Path,
     if not candidate_id or candidate_id == "repair_to_pr_":
         candidate_id = "repair_to_pr_" + hex(int(time.time()))[-8:]
 
-    pr_path = workspace / "share" / "mind" / "governance" / "rl" / "production_readiness" / f"{candidate_id}.json"
+    pr_path = workspace / "share" / "mind" / "governance" / "experience_guided_policy" / "production_readiness" / f"{candidate_id}.json"
     pr_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
@@ -193,45 +192,86 @@ def promote_repair_to_production_readiness(workspace: str | Path,
 
 
 # ---------------------------------------------------------------------------
-# Patch 4: openid_locked_to_target
+# Patch 4: instance-scoped OpenID recovery
 # ---------------------------------------------------------------------------
 
 
-def lock_openid_for_workspace(workspace: str | Path,
-                              target_openid: str = TARGET_OPENID) -> list[Path]:
-    """Ensure every ``instances/<iid>/state/qq_user_context.json`` and the
-    global ``state/qq_user_context.json`` has openid=target_openid.
+def _latest_private_openid(history_path: Path) -> tuple[str, dict[str, Any]]:
+    """Return the most recent inbound private-chat OpenID in one history.
 
-    Returns the list of files touched. Idempotent.
+    The history is instance-local and therefore carries the correct
+    bot-app/OpenID namespace.  Group messages are deliberately excluded:
+    proactive private delivery must not silently switch to a group target.
+    """
+    latest_openid = ""
+    latest_row: dict[str, Any] = {}
+    if not history_path.exists():
+        return latest_openid, latest_row
+    try:
+        with history_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("role") != "user" or str(row.get("source") or "").lower() != "qq":
+                    continue
+                channel = str(row.get("channel") or row.get("message_type") or "").lower()
+                if row.get("group_id") or channel in {"group", "group_at", "guild"}:
+                    continue
+                sender_id = str(row.get("sender_id") or row.get("openid") or "").strip()
+                if sender_id:
+                    latest_openid = sender_id
+                    latest_row = row
+    except OSError:
+        return "", {}
+    return latest_openid, latest_row
+
+
+def restore_instance_openid(workspace: str | Path) -> list[Path]:
+    """Repair one instance's proactive QQ target from its own inbound log.
+
+    ``workspace`` must be the instance workspace used by its bridge.  This
+    function never walks sibling instances and never accepts a caller-supplied
+    OpenID, which prevents cross-app identity contamination.
     """
     workspace = Path(workspace)
-    targets: list[Path] = []
-    global_path = workspace / "state" / "qq_user_context.json"
-    if global_path.exists():
-        targets.append(global_path)
-    inst_dir = workspace / "instances"
-    if inst_dir.is_dir():
-        for entry in sorted(inst_dir.iterdir()):
-            p = entry / "state" / "qq_user_context.json"
-            if p.exists():
-                targets.append(p)
-    touched: list[Path] = []
-    for p in targets:
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        if data.get("openid") == target_openid and data.get("last_openid") == target_openid:
-            continue
-        data["openid"] = target_openid
-        data["last_openid"] = target_openid
-        data["target_id"] = target_openid
-        data["updated_at"] = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        touched.append(p)
-    return touched
+    history_path = workspace / "state" / "qq_chat_history.jsonl"
+    target_openid, source_row = _latest_private_openid(history_path)
+    if not target_openid:
+        return []
+    context_path = workspace / "state" / "qq_user_context.json"
+    try:
+        data = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if data.get("openid") == target_openid:
+        return []
+    data.update({
+        "openid": target_openid,
+        "last_openid": target_openid,
+        "target_id": target_openid,
+        "name": str(source_row.get("sender_name") or data.get("name") or ""),
+        "recovered_from": str(history_path),
+        "updated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    })
+    context_path.parent.mkdir(parents=True, exist_ok=True)
+    context_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return [context_path]
+
+
+def lock_openid_for_workspace(workspace: str | Path,
+                              target_openid: str | None = None) -> list[Path]:
+    """Backward-compatible alias for the corrected instance-local repair.
+
+    ``target_openid`` is intentionally ignored.  It existed in the defective
+    cross-app implementation and is retained only so older callers fail safe.
+    """
+    return restore_instance_openid(workspace)
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +283,7 @@ def install_runtime_patch(workspace: str | Path) -> dict[str, Any]:
     """Run all four patches in sequence and return a summary."""
     workspace = Path(workspace)
     summary = {
-        "openid_locked": lock_openid_for_workspace(workspace),
+        "openid_recovered": restore_instance_openid(workspace),
         "ran_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
     }
 # self_evolve_annotation: candidate_id=repair_to_pr_277c0a88ba10fe92 failure_class=tool.create_file.failed intervention=mechanism_specific_bounded_repair

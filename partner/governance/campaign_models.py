@@ -119,8 +119,9 @@ class CampaignState:
             raise ValueError("active_instances exceeds max_active")
         if set(self.restore_instances) - {"01", "02", "03", "04", "05"} or len(self.restore_instances) > 2:
             raise ValueError("restore_instances must contain at most two known instances")
-        if int(self.report_interval_seconds) < 60:
-            raise ValueError("report_interval_seconds must be at least 60")
+        interval = int(self.report_interval_seconds)
+        if interval != 0 and interval < 60:
+            raise ValueError("report_interval_seconds must be 0 (disabled) or at least 60")
         self.budget.validate()
 
     def to_dict(self) -> dict[str, Any]:

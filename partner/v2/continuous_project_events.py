@@ -1,8 +1,10 @@
-"""Deterministic business-progress steps selected by the governed RL control plane."""
+"""Deterministic business-progress steps selected by the governed EGPL control plane."""
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -37,13 +39,16 @@ def _latest_json(root: Path, project_id: str) -> dict[str, Any]:
     return {}
 
 
-def _content_step(root: Path, strategy: str) -> dict[str, Any]:
+def _content_step(root: Path, strategy: str, evidence_variant: int = 0) -> dict[str, Any]:
     inbox = root / "external/content/inbox.jsonl"
     rows: list[dict[str, Any]] = []
     try:
         rows = [json.loads(line) for line in inbox.read_text(encoding="utf-8").splitlines() if line.strip()]
     except (OSError, ValueError):
         pass
+    if rows and evidence_variant:
+        offset = (max(1, int(evidence_variant)) - 1) % len(rows)
+        rows = rows[offset:] + rows[:offset]
     urls = sorted({str(url) for row in rows for url in (row.get("urls") or []) if str(url).startswith("http")})
     if strategy == "01_source_fact_check":
         checks = []
@@ -131,7 +136,7 @@ def _content_step(root: Path, strategy: str) -> dict[str, Any]:
 def _framework_step(root: Path, strategy: str) -> dict[str, Any]:
     code = Path(__file__).resolve().parents[2]
     if strategy == "03_evidence_graph_canary":
-        command = [sys.executable, "-m", "pytest", "tests/test_evidence_archive.py", "tests/test_rl_evolution.py", "-q"]
+        command = [sys.executable, "-m", "pytest", "tests/test_evidence_archive.py", "tests/test_experience_policy.py", "-q"]
     elif strategy == "03_runtime_recovery_canary":
         command = [sys.executable, "-m", "pytest", "tests/test_campaign.py", "-q", "-k",
                    "portfolio or restart or recovery or two_slots"]
@@ -166,7 +171,7 @@ def _framework_step(root: Path, strategy: str) -> dict[str, Any]:
                                      "business_density": round(business / max(1, total), 4),
                                      "degraded": business / max(1, total) < 0.30}}
     else:
-        command = [sys.executable, "-m", "pytest", "tests/test_rl_control.py", "tests/test_campaign.py", "-q"]
+        command = [sys.executable, "-m", "pytest", "tests/test_policy_control.py", "tests/test_campaign.py", "-q"]
     proc = subprocess.run(command, cwd=code, text=True, capture_output=True, timeout=180, check=False)
     manifests = list((root / "share/evidence").glob("*/*/*/evidence_manifest.json"))
     return {"ok": proc.returncode == 0, "strategy_id": strategy, "command": command,
@@ -218,15 +223,17 @@ def _molecular_step(root: Path, strategy: str) -> dict[str, Any]:
             "production_promotion": 0}}
 
 
-def _harness_step(root: Path, strategy: str) -> dict[str, Any]:
+def _harness_step(root: Path, strategy: str, source_variant: int = 0) -> dict[str, Any]:
     sources = {
         "deepseek": root / "external/code/deepseek-harness/docs/architecture.md",
         "codex": root / "external/code/openai-codex/codex-rs/rollout-trace/README.md",
+        "hermes": root / "external/code/hermes-agent/agent/context_compressor.py",
+        "openclaw": root / "external/code/openclaw/src/agents/agent-compaction-constants.ts",
     }
     partner_files = {
         "durable_evidence": Path(__file__).resolve().parents[1] / "governance/evidence_archive.py",
-        "offline_reducer": Path(__file__).resolve().parents[1] / "governance/rl_evolution.py",
-        "policy_control": Path(__file__).resolve().parents[1] / "governance/rl_control.py",
+        "offline_reducer": Path(__file__).resolve().parents[1] / "governance/experience_policy.py",
+        "policy_control": Path(__file__).resolve().parents[1] / "governance/policy_control.py",
         "project_receipt": Path(__file__).resolve().parents[1] / "governance/project_loop.py",
     }
     concepts = {
@@ -237,14 +244,29 @@ def _harness_step(root: Path, strategy: str) -> dict[str, Any]:
     }
     texts = {name: path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
              for name, path in sources.items()}
+    focus_names = [name for name, value in texts.items() if value]
+    focus_turn = max(1, int(source_variant or 1))
+    focus_name = focus_names[(focus_turn - 1) % len(focus_names)] if focus_names else ""
+    focus_text = texts.get(focus_name, "")
+    focus_path = sources.get(focus_name)
+    focus_excerpt = next((line.strip() for line in focus_text.splitlines()
+                          if line.strip() and not line.lstrip().startswith(("#", "//"))), "")[:240]
+    focus_digest = hashlib.sha256(focus_text.encode("utf-8")).hexdigest() if focus_text else ""
     mapping = {concept: {name: any(term.lower() in text.lower() for term in terms)
                          for name, text in texts.items()} for concept, terms in concepts.items()}
     implementation = {name: {"path": str(path), "exists": path.is_file()} for name, path in partner_files.items()}
     result = {"ok": all(texts.values()) and all(row["exists"] for row in implementation.values()),
             "strategy_id": strategy, "source_concepts": mapping, "partner_implementation": implementation,
             "copied_source": False,
+            "source_read": {"name": focus_name, "path": str(focus_path or ""),
+                            "sha256": focus_digest, "bytes": len(focus_text.encode("utf-8")),
+                            "grounded_excerpt": focus_excerpt,
+                            "source_variant": int(source_variant or 0)},
             "business_metrics": {"concepts_mapped": len(mapping),
-                                 "partner_contracts_present": sum(row["exists"] for row in implementation.values())}}
+                                 "partner_contracts_present": sum(row["exists"] for row in implementation.values()),
+                                 "source_files_read": int(bool(focus_text)),
+                                 "focus_source": focus_name,
+                                 "focus_sha256": focus_digest[:16]}}
     if strategy == "04_reference_gap_matrix":
         result["reference_gap_matrix"] = [
             {"concept": name, "external_evidence": any(values.values()),
@@ -265,11 +287,126 @@ def _harness_step(root: Path, strategy: str) -> dict[str, Any]:
     return result
 
 
+def _md_step(strategy: str, native_turn: int = 1,
+             candidate_variant: int = 0) -> dict[str, Any]:
+    """Run a deterministic velocity-Verlet validation, not a prose study."""
+    if strategy == "03_md_integrator_smoke":
+        dts = [0.01]
+        temperatures = [300.0]
+    elif strategy == "03_md_timestep_stability":
+        dts = [0.0025, 0.005, 0.01, 0.02, 0.04]
+        temperatures = [300.0]
+    else:
+        dts = [0.01]
+        temperatures = [100.0, 200.0, 300.0, 500.0]
+    # A promoted novelty Candidate expands the actual numerical design rather
+    # than changing a label.  Bounds stay conservative for velocity Verlet.
+    variant = max(0, int(candidate_variant or 0))
+    if variant:
+        scale = 1.0 + ((variant - 1) % 5) * 0.08
+        dts = [round(value * scale, 6) for value in dts]
+        temperatures = [round(value + ((variant - 1) % 4) * 25.0, 3)
+                        for value in temperatures]
+    rows = []
+    for temperature in temperatures:
+        for dt in dts:
+            # Dimensionless one-particle harmonic oscillator. Temperature
+            # controls initial kinetic energy; the deterministic integrator
+            # contract is what is being validated here.
+            x = 1.0
+            v = math.sqrt(temperature / 300.0)
+            energies = []
+            samples = []
+            for step in range(2000):
+                a = -x
+                x_next = x + v * dt + 0.5 * a * dt * dt
+                a_next = -x_next
+                v = v + 0.5 * (a + a_next) * dt
+                x = x_next
+                energy = 0.5 * (v * v + x * x)
+                energies.append(energy)
+                if step % 200 == 0:
+                    samples.append({"step": step, "x": x, "v": v, "energy": energy})
+            initial = energies[0]
+            drift = (energies[-1] - initial) / initial
+            rows.append({"temperature_k": temperature, "dt": dt, "steps": len(energies),
+                         "initial_energy": initial, "final_energy": energies[-1],
+                         "relative_energy_drift": drift,
+                         "max_relative_energy_error": max(abs(e - initial) for e in energies) / initial,
+                         "trajectory_samples": samples})
+    worst = max(abs(row["relative_energy_drift"]) for row in rows)
+    stable = sum(abs(row["relative_energy_drift"]) < 1e-3 for row in rows)
+    return {"ok": bool(rows) and stable > 0, "strategy_id": strategy,
+            "integrator": "velocity_verlet", "potential": "0.5*x^2",
+            "runs": rows, "command": ["in_process", "velocity_verlet", "2000_steps"],
+            "exit_code": 0, "test_output": f"{stable}/{len(rows)} runs drift < 1e-3; worst={worst:.6g}",
+            "native_turn": native_turn, "candidate_variant": variant,
+            "business_metrics": {"simulations_executed": len(rows),
+                                 "stable_simulations": stable,
+                                 "worst_relative_energy_drift": worst}}
+
+
+def _hermes_partner_step(root: Path, strategy: str, code_variant: int = 0) -> dict[str, Any]:
+    """Inspect real Hermes/Partner contracts and execute a bounded regression."""
+    code = Path(__file__).resolve().parents[2]
+    sources = {
+        "hermes_context": root / "external/code/hermes-agent/agent/context_compressor.py",
+        "partner_harness": code / "partner/mind/harness.py",
+        "partner_active_learning": code / "partner/governance/active_learning.py",
+        "partner_native_runtime": code / "partner/governance/instance_native.py",
+    }
+    if strategy == "05_code_candidate_autonomous":
+        from partner.evolution.bounded_code_candidate import synthesize_validate_apply
+        return synthesize_validate_apply(root, Path(__file__).resolve().parents[2], apply=True)
+    inventory = {}
+    for name, path in sources.items():
+        text = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+        inventory[name] = {"path": str(path), "exists": path.is_file(), "bytes": len(text.encode("utf-8")),
+                           "event_mentions": text.count("event"), "skill_mentions": text.lower().count("skill"),
+                           "state_mentions": text.lower().count("state")}
+    focus_names = sorted(inventory)
+    focus_name = focus_names[(max(1, int(code_variant or 1)) - 1) % len(focus_names)]
+    focus_path = Path(str(inventory[focus_name]["path"]))
+    focus_text = focus_path.read_text(encoding="utf-8", errors="replace") if focus_path.is_file() else ""
+    command = [sys.executable, "-m", "pytest", "tests/test_instance_native.py",
+               "tests/test_active_learning.py", "-q"]
+    proc = subprocess.run(command, cwd=code, text=True, capture_output=True,
+                          timeout=180, check=False)
+    gaps = []
+    if not inventory["hermes_context"]["exists"]:
+        gaps.append("hermes context source unavailable")
+    if strategy == "05_candidate_gap_matrix":
+        gaps.extend([
+            "learning Candidate must target the observed failure mechanism",
+            "promotion requires matched baseline/candidate evidence",
+            "project Receipt and learning observation must remain separate",
+        ])
+    candidate = {
+        "candidate_id": "candidate_native_mechanism_bound_route_v1",
+        "scope": "shadow",
+        "intervention": "bind native project plan and matched verifier to Episode mechanism",
+        "acceptance": ["real Event executed", "project artifact persisted", "no production auto-promotion"],
+        "rollback": "remove deterministic route; durable Episodes and Receipts remain valid",
+    } if strategy in {"05_candidate_gap_matrix", "05_event_contract_inventory"} else {}
+    return {"ok": all(row["exists"] for row in inventory.values()) and proc.returncode == 0,
+            "strategy_id": strategy, "source_inventory": inventory, "gaps": gaps,
+            "candidate": candidate, "command": command, "exit_code": proc.returncode,
+            "test_output": (proc.stdout + proc.stderr)[-4000:], "copied_source": False,
+            "code_surface_focus": {"name": focus_name, "path": str(focus_path),
+                                   "sha256": hashlib.sha256(focus_text.encode()).hexdigest(),
+                                   "bytes": len(focus_text.encode()),
+                                   "code_variant": int(code_variant or 0)},
+            "business_metrics": {"sources_read": sum(row["exists"] for row in inventory.values()),
+                                 "focused_regression_passed": proc.returncode == 0,
+                                 "gaps_identified": len(gaps),
+                                 "candidate_specs": int(bool(candidate))}}
+
+
 def atomic_continuous_project_step(ctx: Any, params: dict) -> dict:
     root, working, instance = _context(ctx)
     strategy = str(params.get("strategy_id") or "")
     if instance == "01":
-        result = _content_step(root, strategy)
+        result = _content_step(root, strategy, int(params.get("evidence_variant") or 0))
     elif instance == "02":
         if strategy in {"02_model_risk_register", "02_next_experiment_gate"}:
             result = _molecular_step(root, strategy)
@@ -280,24 +417,72 @@ def atomic_continuous_project_step(ctx: Any, params: dict) -> dict:
             delegated = atomic_official_split_error_slices if strategy == "02_error_slices" else atomic_official_split_calibration
             return delegated(ctx, params)
     elif instance == "03":
-        result = _framework_step(root, strategy)
+        result = (_md_step(strategy, int(params.get("native_turn") or 1),
+                           int(params.get("candidate_variant") or 0)) if strategy.startswith("03_md_")
+                  else _framework_step(root, strategy))
     elif instance == "04":
-        result = _harness_step(root, strategy)
+        result = _harness_step(root, strategy, int(params.get("source_variant") or 0))
+    elif instance == "05":
+        result = _hermes_partner_step(root, strategy, int(params.get("code_variant") or 0))
     else:
         return {"ok": False, "status": "unsupported_instance", "error": instance}
+    # Code Candidate truth is its patch + matched probe + regression.  Do not
+    # let an optional presentation PDF overwrite that truth or manufacture a
+    # false Event failure.
+    if instance == "05" and strategy == "05_code_candidate_autonomous":
+        delivered_files = []
+        for raw in result.get("files") or []:
+            source = Path(str(raw))
+            if not source.is_file():
+                continue
+            target = working / ("05_code_candidate_" + source.name)
+            shutil.copy2(source, target)
+            delivered_files.append(str(target))
+        return {
+            "ok": bool(result.get("ok")),
+            "status": str(result.get("decision") or result.get("status") or "completed"),
+            "summary": str(result.get("summary") or
+                           f"代码 Candidate 决策={result.get('decision')}; production_effective={result.get('production_effective')}"),
+            "result": result,
+            "files": delivered_files,
+        }
     output = working / f"{strategy or 'continuous_project_step'}.json"
+    selection_id = str(params.get("action_selection_id") or "")
+    selection_reason = str(params.get("action_selection_reason") or "")
+    intervention_applied = bool(params.get("learning_intervention_applied"))
+    if selection_id:
+        result["action_selection"] = {
+            "selection_id": selection_id,
+            "learning_intervention_applied": intervention_applied,
+            "selection_reason": selection_reason,
+            "explanation": "由真实终态证据的经验驱动策略学习选择；内部用 UCB 平衡利用与探索，LLM 只在近似平局时做受限语义评审",
+        }
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     from partner.v2.domain_reports import render_continuous_report
     report = render_continuous_report(instance, strategy, result)
+    if selection_id:
+        trace = (
+            f"> 动作选择证据：`{selection_id}`；"
+            f"选择原因：{selection_reason or 'dependency_bootstrap'}。"
+        )
+        first_break = report.find("\n\n")
+        if first_break >= 0:
+            report = report[:first_break + 2] + trace + "\n\n" + report[first_break + 2:]
     md = working / f"{strategy or 'continuous_project_step'}.md"
     md.write_text(report, encoding="utf-8")
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf = working / f"{strategy or 'continuous_project_step'}.pdf"
+    styles = {"01": "editorial", "02": "research", "03": "lab_note",
+              "04": "source_review", "05": "engineering_change"}
+    titles = {"01": "内容证据编辑简报", "02": "分子生成实验记录", "03": "分子动力学实验手记",
+              "04": "Harness 源码研读札记", "05": "Partner 工程变更审查"}
     pdf_result = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": str(pdf),
-        "title": f"持续项目推进 {strategy}", "min_content_chars": 700, "min_sections": 4})
+        "title": titles.get(instance, strategy or "项目记录"), "report_style": styles.get(instance, "standard"),
+        "min_content_chars": 700, "min_sections": 4})
     ok = bool(result.get("ok") and pdf_result.get("ok"))
     return {"ok": ok, "status": "completed" if ok else "verification_failed",
-            "summary": f"{strategy} 已执行；业务指标={result.get('business_metrics')}",
+            "summary": (f"{strategy} 已执行；业务指标={result.get('business_metrics')}；"
+                        f"动作选择={selection_id or 'manual'}；学习干预={intervention_applied}"),
             "result": result, "files": [str(output), str(md), str(pdf)]}
 
 

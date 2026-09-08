@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-08-26"
+updated_at: "2026-09-08"
 authority_order: [canonical, current, reference, historical]
 tiers:
   L0: always-load routing metadata only
@@ -8,6 +8,69 @@ tiers:
   L3: current project state, latest receipt, and task evidence
   L4: raw logs and historical archives; never load by default
 documents:
+  - id: one_way_egpl_multimodal_browser_decision
+    path: docs/decisions/0075-one-way-egpl-and-multimodal-browser.md
+    tier: L1
+    authority: current
+    tags: [decision, egpl, migration, llm, multimodal, browser, vision, event-first]
+    instances: [all]
+    max_chars: 9000
+  - id: sprint21_multimodal_computer_community_reading
+    path: docs/sprint21_多模态计算机操作与社区阅读.md
+    tier: L2
+    authority: current
+    tags: [sprint21, multimodal, browser, vision, qwen, xiaohongshu, wechat, tencent, alibaba, event-first]
+    instances: ["01", "04", all]
+    max_chars: 12000
+  - id: experience_guided_policy_event_candidates_decision
+    path: docs/decisions/0074-experience-guided-policy-and-falsifiable-event-candidates.md
+    tier: L1
+    authority: current
+    tags: [decision, egpl, contextual-bandit, event-candidate, llm, falsification, measurement-contract, event-first]
+    instances: [all]
+    max_chars: 9000
+  - id: sprint20_experience_guided_policy_hypothesis_engine
+    path: docs/sprint20_经验驱动策略学习与项目假设引擎.md
+    tier: L2
+    authority: current
+    tags: [sprint20, egpl, llm, hypothesis, candidate, active-learning, self-evolution, event-first]
+    instances: [all]
+    max_chars: 10000
+  - id: semantic_reward_native_bandit_decision
+    path: docs/decisions/0073-semantic-reward-and-native-bandit.md
+    tier: L1
+    authority: current
+    tags: [decision, reward, rl, contextual-bandit, self-evolution, llm, event-first]
+    instances: [all]
+    max_chars: 7000
+  - id: llm_guided_external_learning_self_evolution
+    path: docs/decisions/0072-llm-guided-external-learning-and-self-evolution.md
+    tier: L1
+    authority: current
+    tags: [decision, active-learning, self-evolution, llm, candidate, reward, github, paper, pdf, event-first]
+    instances: [all]
+    max_chars: 8000
+  - id: three_observable_loops_domain_pdf_decision
+    path: docs/decisions/0071-three-observable-loops-and-domain-pdf.md
+    tier: L1
+    authority: current
+    tags: [decision, sprint19, iteration, active-learning, self-evolution, candidate, pdf, event-first]
+    instances: [all]
+    max_chars: 7000
+  - id: sprint19_resource_adaptive_behavioral_evolution
+    path: docs/sprint19_资源自适应与行为型代码自进化.md
+    tier: L1
+    authority: canonical
+    tags: [sprint19, resource-adaptive, candidate, rl, active-learning, production]
+    instances: [all]
+    max_chars: 6000
+  - id: resource_adaptive_behavioral_candidate_decision
+    path: docs/decisions/0070-resource-adaptive-runtime-and-behavioral-code-candidate.md
+    tier: L1
+    authority: current
+    tags: [decision, scheduler, candidate, event-first, promotion, rollback]
+    instances: [all]
+    max_chars: 7000
   - id: current_status
     path: docs/current_status.md
     tier: L1
@@ -57,12 +120,61 @@ documents:
     tags: [project, iteration, receipt, next-action, resume]
     instances: [all]
     max_chars: 7000
+  - id: instance_native_runtime
+    path: docs/architecture/instance_native_runtime.md
+    tier: L1
+    authority: canonical
+    tags: [runtime, instance-native, event-driven, continuation, active-learning, two-slot, restart]
+    instances: [all]
+    max_chars: 8000
+  - id: instance_native_production_decision
+    path: docs/decisions/0060-instance-native-production-runtime.md
+    tier: L2
+    authority: current
+    tags: [decision, production, instance-native, campaign-replacement, event-first]
+    instances: [all]
+    max_chars: 6000
+  - id: native_novelty_mechanism_truth_decision
+    path: docs/decisions/0069-native-novelty-and-mechanism-truth.md
+    tier: L2
+    authority: current
+    tags: [decision, instance-native, reward, novelty, active-learning, mechanism-match, two-slot]
+    instances: [all]
+    max_chars: 7000
+  - id: project_pipeline_cleanup_decision
+    path: docs/decisions/0065-project-pipeline-cleanup-and-contract-pinning.md
+    tier: L2
+    authority: current
+    tags: [decision, project-loop, scaffold, storage-contract, dashboard, oneshot]
+    instances: [all]
+    max_chars: 7000
+  - id: qq_app_scoped_user_identity_decision
+    path: docs/decisions/0067-qq-app-scoped-user-identity.md
+    tier: L1
+    authority: current
+    tags: [decision, qq, delivery, instance-isolation, openid, anti-regression]
+    instances: [all]
+    max_chars: 7000
+  - id: native_project_event_routing_decision
+    path: docs/decisions/0068-native-project-event-routing-and-learning-application.md
+    tier: L1
+    authority: current
+    tags: [decision, instance-native, event-first, project-iteration, active-learning, two-slot]
+    instances: [all]
+    max_chars: 7000
   - id: user_observability_reports
     path: docs/architecture/user_observability_and_reports.md
     tier: L2
     authority: canonical
     tags: [campaign, progress, qq, report, pdf, user-experience]
     instances: [all]
+    max_chars: 7000
+  - id: context_selection_candidate_gate_c
+    path: docs/architecture/context_selection_candidate_gate_c.md
+    tier: L2
+    authority: current
+    tags: [cognition, context, candidate, experiment, isolation, gate-c]
+    instances: ["04", "05", all]
     max_chars: 7000
   - id: preserve_user_visible_behavior_decision
     path: docs/decisions/0003-preserve-user-visible-behavior.md
@@ -78,8 +190,99 @@ documents:
     tags: [evolution, issue, hypothesis, experiment, rollback]
     instances: ["03", "05", all]
     max_chars: 8000
-  - id: rl_evolution
-    path: docs/architecture/rl_evolution.md
+  - id: event_first_self_evolution
+    path: docs/architecture/event_first_self_evolution.md
+    tier: L1
+    authority: canonical
+    tags: [event-first, candidate, execution, experiment, promotion, bdk, rl]
+    instances: [all]
+    max_chars: 9000
+  - id: world_model_bdk
+    path: docs/architecture/world_model_bdk.md
+    tier: L2
+    authority: canonical
+    tags: [bdk, world-model, transformer, hypothesis, memory, active-learning, evolution]
+    instances: ["03", "04", "05", all]
+    max_chars: 9000
+  - id: two_level_active_learning
+    path: docs/architecture/two_level_active_learning.md
+    tier: L1
+    authority: canonical
+    tags: [active-learning, self-evolution, bdk, episode, diagnosis, information-gain]
+    instances: ["03", "05", all]
+    max_chars: 8500
+  - id: event_first_candidate_restoration_decision
+    path: docs/decisions/0032-event-first-candidate-restoration.md
+    tier: L2
+    authority: current
+    tags: [decision, event-first, candidate, synthetic-evidence, bdk, rl]
+    instances: [all]
+    max_chars: 7000
+  - id: first_event_first_bdk_experiment_decision
+    path: docs/decisions/0033-first-event-first-bdk-experiment.md
+    tier: L2
+    authority: current
+    tags: [decision, event-first, bdk, targetdiff, experiment, baseline, candidate]
+    instances: ["02", all]
+    max_chars: 6500
+  - id: world_model_bdk_long_horizon_decision
+    path: docs/decisions/0034-world-model-bdk-and-long-horizon-loop.md
+    tier: L2
+    authority: current
+    tags: [decision, bdk, world-model, long-horizon, campaign, event-first]
+    instances: ["03", "04", "05", all]
+    max_chars: 5500
+  - id: incubator_convergence_transformer_decision
+    path: docs/decisions/0035-incubator-convergence-transformer-hypothesis-candidate.md
+    tier: L2
+    authority: current
+    tags: [decision, migration, transformer, hypothesis-provider, candidate, benchmark]
+    instances: ["03", "04", "05", all]
+    max_chars: 6500
+  - id: world_model_pressure_episode_shadow_decision
+    path: docs/decisions/0036-world-model-pressure-and-real-episode-shadow.md
+    tier: L2
+    authority: current
+    tags: [decision, world-model, transformer, stress, robust, episode, candidate]
+    instances: ["03", "04", "05", all]
+    max_chars: 7000
+  - id: two_level_active_learning_decision
+    path: docs/decisions/0037-two-level-active-learning-agent-diagnosis.md
+    tier: L2
+    authority: current
+    tags: [decision, active-learning, taxonomy, diagnosis, event-first, episode]
+    instances: ["03", "05", all]
+    max_chars: 6000
+  - id: skipped_terminal_bounded_repair_decision
+    path: docs/decisions/0038-skipped-terminal-bounded-repair.md
+    tier: L2
+    authority: current
+    tags: [decision, active-learning, bounded-repair, skipped, episode, observability]
+    instances: ["03", "05", all]
+    max_chars: 6000
+  - id: causal_replay_fresh_terminal_canary_decision
+    path: docs/decisions/0039-causal-replay-and-fresh-terminal-canary.md
+    tier: L2
+    authority: current
+    tags: [decision, causal-replay, active-learning, canary, plan-executor, terminal]
+    instances: ["03", "05", all]
+    max_chars: 6500
+  - id: explicit_continuation_intent_handoff_decision
+    path: docs/decisions/0040-explicit-continuation-intent-handoff.md
+    tier: L2
+    authority: current
+    tags: [decision, active-learning, bounded-repair, handoff, receipt, event-first]
+    instances: ["03", "05", all]
+    max_chars: 6000
+  - id: adopted_incubator_external_learning
+    path: docs/knowledge/incubated_external_learning/notes/adopted_harness_world_model.md
+    tier: L2
+    authority: current
+    tags: [external-learning, harness, world-model, provenance, adoption]
+    instances: ["04", "05", all]
+    max_chars: 5000
+  - id: experience_policy
+    path: docs/architecture/experience_policy.md
     tier: L2
     authority: canonical
     tags: [evolution, rl, trajectory, reward, policy, experiment]
@@ -106,6 +309,13 @@ documents:
     tags: [external, harness, deepseek, codex, openclaw, hermes, event-log, episode, trace, provenance]
     instances: ["03", "04", "05", all]
     max_chars: 7000
+  - id: cognition_shadow_integration
+    path: docs/architecture/cognition_shadow_integration.md
+    tier: L2
+    authority: current
+    tags: [cognition, event-ledger, replay, shadow, bdk, episode, integration]
+    instances: ["03", "04", "05", all]
+    max_chars: 6000
   - id: unified_harness_episode_learning_decision
     path: docs/decisions/0006-unified-harness-episode-learning.md
     tier: L2
@@ -246,6 +456,175 @@ documents:
     tags: [decision, framework-fix, push-files, materialise-from-upstream, content-injection, bug-55, dependency-chain]
     instances: ["03", "04", "05", all]
     max_chars: 4000
+  - id: cognition_shadow_sidecar_decision_0021
+    path: docs/decisions/0021-cognition-shadow-sidecar-gate-b.md
+    tier: L2
+    authority: canonical
+    tags: [decision, cognition, episode, sidecar, shadow, gate-b, fail-open]
+    instances: ["03", "04", "05", all]
+    max_chars: 4000
+  - id: cognition_context_gate_c_decision_0022
+    path: docs/decisions/0022-cognition-context-gate-c-shadow.md
+    tier: L2
+    authority: canonical
+    tags: [decision, cognition, context, selector, shadow, gate-c, experiment]
+    instances: ["04", "05", all]
+    max_chars: 5000
+  - id: semantic_preflight_business_rl_decision_0041
+    path: docs/decisions/0041-semantic-preflight-business-rl-promotion.md
+    tier: L2
+    authority: canonical
+    tags: [decision, active-learning, semantic-preflight, matched-experiment, rl, event-first, promotion]
+    instances: ["04", "05", all]
+    max_chars: 8000
+  - id: campaign_terminal_wave_negative_rl_decision_0042
+    path: docs/decisions/0042-campaign-terminal-wave-and-negative-rl.md
+    tier: L1
+    authority: canonical
+    tags: [decision, campaign, terminal, five-instance, two-slot, rl, negative-sample, learning-barrier]
+    instances: [all]
+    max_chars: 8000
+  - id: manual_04_production_negative_episode_decision_0043
+    path: docs/decisions/0043-manual-04-production-negative-episode.md
+    tier: L1
+    authority: canonical
+    tags: [decision, manual, instance-04, active-learning, self-evolution, rl, semantic-truth, pdf, negative-sample]
+    instances: ["04", "05", all]
+    max_chars: 10000
+  - id: persistent_user_message_audit_04_canary_decision_0044
+    path: docs/decisions/0044-persistent-user-message-audit-and-04-canary.md
+    tier: L1
+    authority: canonical
+    tags: [decision, manual, instance-04, message, delivery, audit, dedup, reconnect, canary]
+    instances: ["04", all]
+    max_chars: 7000
+  - id: claim_truth_reward_active_learning_closure_decision_0045
+    path: docs/decisions/0045-claim-truth-reward-and-active-learning-closure.md
+    tier: L1
+    authority: canonical
+    tags: [decision, manual, instance-04, claim-ledger, semantic-truth, reward, active-learning, matched-experiment]
+    instances: ["04", "05", all]
+    max_chars: 9000
+  - id: manual_negative_probe_readonly_active_learning_closure_decision_0046
+    path: docs/decisions/0046-manual-negative-probe-and-readonly-active-learning-closure.md
+    tier: L1
+    authority: canonical
+    tags: [decision, manual, instance-04, claim-ledger, pre-delivery, expected-missing, active-learning, event-first]
+    instances: ["04", all]
+    max_chars: 9000
+  - id: research_active_learning_reward_decision_0047
+    path: docs/decisions/0047-research-active-learning-and-learning-reward.md
+    tier: L1
+    authority: canonical
+    tags: [decision, instance-04, research, active-learning, github, literature, reward, belief, event-first]
+    instances: ["04", "05", all]
+    max_chars: 9000
+  - id: multisource_code_candidate_real_project_matched_decision_0048
+    path: docs/decisions/0048-multisource-evidence-code-candidate-real-project-matched.md
+    tier: L1
+    authority: canonical
+    tags: [decision, research, adoption, candidate, event-first, context, trajectory, receipt, matched-experiment]
+    instances: ["01", "02", "03", "04", "05", all]
+    max_chars: 9000
+  - id: research_adoption_downstream_agent_matched_decision_0049
+    path: docs/decisions/0049-research-adoption-downstream-agent-matched.md
+    tier: L1
+    authority: canonical
+    tags: [decision, research, adoption, candidate, event-first, downstream-agent, truth, matched-experiment]
+    instances: ["04", "05", all]
+    max_chars: 9000
+  - id: learned_candidate_production_readiness_decision_0050
+    path: docs/decisions/0050-learned-candidate-production-readiness-gate.md
+    tier: L1
+    authority: canonical
+    tags: [decision, production, candidate, llm, business-progress, rl, readiness, activation]
+    instances: ["03", "04", "05", all]
+    max_chars: 9000
+  - id: minimax_business_candidate_honest_rl_boundary_decision_0051
+    path: docs/decisions/0051-minimax-business-candidate-and-honest-rl-boundary.md
+    tier: L1
+    authority: canonical
+    tags: [decision, minimax, candidate, event-first, claim-ledger, matched-experiment, business-progress, rl, readiness]
+    instances: ["04", "05", all]
+    max_chars: 10000
+  - id: bounded_production_canary_longitudinal_policy_learning_sampling_decision_0052
+    path: docs/decisions/0052-bounded-production-canary-and-longitudinal-rl-sampling.md
+    tier: L1
+    authority: canonical
+    tags: [decision, production-canary, rollback, longitudinal-rl, minimax, event-first, matched-experiment]
+    instances: ["04", "05", all]
+    max_chars: 10000
+  - id: immediate_serial_execution_cross_project_repair_decision_0053
+    path: docs/decisions/0053-immediate-serial-execution-and-cross-project-repair.md
+    tier: L1
+    authority: canonical
+    tags: [decision, serial-queue, immediate-execution, instance-isolation, active-learning, matched-experiment, rl]
+    instances: ["04", "05", all]
+    max_chars: 10000
+  - id: completion_signal_continuous_learning_decision_0054
+    path: docs/decisions/0054-completion-signal-driven-continuous-learning.md
+    tier: L1
+    authority: canonical
+    tags: [decision, campaign, completion-signal, minimax, matched-experiment, active-learning, longitudinal-rl]
+    instances: ["04", "05", all]
+    max_chars: 10000
+  - id: sprint18_active_curriculum_real_project_loop_decision_0055
+    path: docs/decisions/0055-sprint18-active-curriculum-real-project-loop.md
+    tier: L1
+    authority: canonical
+    tags: [decision, sprint18, active-learning, self-evolution, targetdiff, campaign, event-first]
+    instances: ["02", "04", "05", all]
+    max_chars: 10000
+  - id: sprint18_uncertainty_candidate_ledger_separation_decision_0056
+    path: docs/decisions/0056-sprint18-uncertainty-candidate-and-ledger-separation.md
+    tier: L1
+    authority: canonical
+    tags: [decision, sprint18, active-learning, uncertainty, candidate, ledger-separation, campaign, event-first]
+    instances: ["02", "04", "05", all]
+    max_chars: 10000
+  - id: sprint18_persistent_controller_monitor_projection_decision_0057
+    path: docs/decisions/0057-sprint18-persistent-controller-and-monitor-projection.md
+    tier: L1
+    authority: canonical
+    tags: [decision, sprint18, systemd, campaign, monitor, reward, observation, event-first]
+    instances: ["02", "04", "05", all]
+    max_chars: 9000
+  - id: sprint18_real_date_append_only_readiness_decision_0058
+    path: docs/decisions/0058-real-date-window-and-append-only-readiness-projection.md
+    tier: L1
+    authority: canonical
+    tags: [decision, sprint18, longitudinal-rl, real-date, matched-experiment, trajectory, readiness, event-first]
+    instances: ["04", "05", all]
+    max_chars: 9000
+  - id: campaign_not_instance_mind_decision_0059
+    path: docs/decisions/0059-campaign-is-not-the-instance-mind.md
+    tier: L1
+    authority: canonical
+    tags: [decision, campaign, instance-autonomy, event-driven, active-learning, self-evolution, user-experience]
+    instances: [all]
+    max_chars: 9000
+  - id: sprint17_completion_signal_continuous_learning
+    path: docs/sprint17_完成信号驱动持续学习.md
+    tier: L2
+    authority: current
+    tags: [sprint, campaign, completion-signal, minimax, active-learning, rl, progress]
+    instances: ["04", "05", all]
+    max_chars: 9000
+  - id: sprint18_active_curriculum_auto_repair_promotion
+    path: docs/sprint18_主动课程自动修复与受限晋升.md
+    tier: L2
+    authority: current
+    tags: [sprint, active-learning, curriculum, auto-repair, temporal-learning, canary, promotion, rl]
+    instances: ["04", "05", all]
+    max_chars: 18000
+  - id: hermes_04_manual_failure_repair_prompt
+    path: docs/handoff/hermes_04_manual_failure_repair_prompt.md
+    tier: L3
+    authority: current
+    tags: [handoff, hermes, repair, manual, instance-04, active-learning, self-evolution]
+    instances: ["04", "05"]
+    max_chars: 12000
+    default_load: false
   - id: architecture_review
     path: docs/architecture_review.md
     tier: L2

@@ -36,7 +36,7 @@ def _states(root: Path, project_id: str) -> list[dict[str, Any]]:
 
 
 def _trajectory_actions(root: Path) -> dict[str, dict[str, Any]]:
-    path = root / "share/mind/governance/rl/trajectories.jsonl"
+    path = root / "share/mind/governance/experience_guided_policy/trajectories.jsonl"
     rows: dict[str, dict[str, Any]] = {}
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -142,7 +142,7 @@ def evaluate_preflight_shadow(workspace: str, *, project_id: str,
             if canaries else "execute a bounded canary; projected shadow metrics are not promotion evidence"
         ),
     }
-    directory = root / "share/mind/governance/rl/shadow_evaluations"
+    directory = root / "share/mind/governance/experience_guided_policy/shadow_evaluations"
     path = directory / f"{experiment_id}_preflight.json"
     atomic_json(path, result)
     skill = register_candidate_skill(workspace, {
@@ -262,6 +262,12 @@ def evaluate_isolated_preflight_canary(
         "baseline_mean_reward": mean(baseline, "reward"),
         "candidate_mean_reward": mean(candidate, "reward"),
     }
+    pair_reward_gains = [
+        round(float(pair["candidate"]["reward"]) - float(pair["baseline"]["reward"]), 4)
+        for pair in pairs
+    ]
+    improved_pairs = sum(gain > 0.0 for gain in pair_reward_gains)
+    non_regressed_pairs = sum(gain >= 0.0 for gain in pair_reward_gains)
     sample_gate = pair_count >= max(1, int(minimum_pairs))
     quality_gate = bool(
         sample_gate
@@ -270,6 +276,14 @@ def evaluate_isolated_preflight_canary(
         and metrics["candidate_observability_passes"] >= metrics["baseline_observability_passes"]
         and metrics["candidate_semantic_repair_calls"] <= metrics["baseline_semantic_repair_calls"]
         and metrics["candidate_mean_reward"] >= metrics["baseline_mean_reward"]
+    )
+    # "Sustained" is deliberately stronger than a positive aggregate mean:
+    # every independently matched business target must be non-regressive and
+    # at least two targets must improve.  One lucky report cannot satisfy it.
+    sustained_gate = bool(
+        quality_gate and pair_count >= 3
+        and non_regressed_pairs == pair_count
+        and improved_pairs >= 2
     )
     result = {
         "schema_version": 1,
@@ -286,14 +300,23 @@ def evaluate_isolated_preflight_canary(
         "minimum_pairs": minimum_pairs,
         "sample_gate_passed": sample_gate,
         "quality_gate_passed": quality_gate,
+        "sustained_business_improvement_passed": sustained_gate,
+        "business_improvement_proven": sustained_gate,
         "promotion": False,
-        "decision": "ready_for_explicit_decision" if quality_gate else "inconclusive",
+        "decision": "ready_for_explicit_decision" if sustained_gate else "inconclusive",
         "metrics": metrics,
+        "longitudinal_metrics": {
+            "pair_reward_gains": pair_reward_gains,
+            "improved_pairs": improved_pairs,
+            "non_regressed_pairs": non_regressed_pairs,
+            "required_improved_pairs": 2,
+            "required_non_regressed_pairs": pair_count,
+        },
         "pairs_detail": pairs,
         "rejected_executions": rejected,
         "created_at": now_iso(),
     }
-    directory = root / "share/mind/governance/rl/shadow_evaluations"
+    directory = root / "share/mind/governance/experience_guided_policy/shadow_evaluations"
     path = directory / f"{experiment_id}_isolated_preflight.json"
     atomic_json(path, result)
     return {"ok": True, **result, "path": str(path)}

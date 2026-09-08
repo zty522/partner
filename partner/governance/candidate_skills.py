@@ -32,7 +32,7 @@ def register_candidate_skill(workspace: str, payload: dict[str, Any]) -> dict[st
     source_episodes = _required_list(payload.get("source_episode_ids"), "source_episode_ids")
     success_criteria = _required_list(payload.get("success_criteria"), "success_criteria")
     applicability = _required_list(payload.get("applicability"), "applicability")
-    directory = root / "share/mind/governance/rl/candidate_skills"
+    directory = root / "share/mind/governance/experience_guided_policy/candidate_skills"
     current_path = directory / f"{safe_id(candidate_id)}.json"
     try:
         previous = json.loads(current_path.read_text(encoding="utf-8"))
@@ -110,7 +110,7 @@ def register_candidate_skill(workspace: str, payload: dict[str, Any]) -> dict[st
 
 
 def load_candidate_skills(workspace: str) -> list[dict[str, Any]]:
-    root = workspace_root(workspace) / "share/mind/governance/rl/candidate_skills"
+    root = workspace_root(workspace) / "share/mind/governance/experience_guided_policy/candidate_skills"
     rows: list[dict[str, Any]] = []
     # Hermes 2026-08-27 fix: glob all candidate-skill files, not just the
     # `candidate_*.json` pattern. The directory holds one file per
@@ -170,7 +170,7 @@ def activate_promoted_candidate(
         return {"ok": False, "status": "promotion_candidate_mismatch"}
     readiness_contract = dict(candidate.get("production_readiness_contract") or {})
     learned_artifact = str(candidate.get("artifact_type") or "") in {
-        "event_context_policy", "learned_policy", "offline_rl_policy",
+        "event_context_policy", "learned_policy", "offline_policy_learning_policy",
     }
     if readiness_contract.get("required") is True or learned_artifact:
         from .production_readiness import verify_readiness_attestation
@@ -181,7 +181,7 @@ def activate_promoted_candidate(
                     "readiness": attestation}
 
     root = workspace_root(workspace)
-    control_path = root / "share/mind/governance/rl/control_policy.json"
+    control_path = root / "share/mind/governance/experience_guided_policy/control_policy.json"
     try:
         control = json.loads(control_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -190,7 +190,7 @@ def activate_promoted_candidate(
     control["updated_at"] = now_iso()
     atomic_json(control_path, control)
 
-    path = root / "share/mind/governance/rl/candidate_skills" / f"{safe_id(candidate_id)}.json"
+    path = root / "share/mind/governance/experience_guided_policy/candidate_skills" / f"{safe_id(candidate_id)}.json"
     candidate["version"] = int(candidate.get("version") or 0) + 1
     candidate["status"] = "promoted"
     candidate["promotion_decision_id"] = str(policy_event_id)
@@ -223,7 +223,7 @@ def project_candidate_decision(
     policy_event_id: str,
 ) -> dict[str, Any] | None:
     """Refresh the Candidate JSON projection from an authoritative Policy Event."""
-    root = workspace_root(workspace) / "share/mind/governance/rl/candidate_skills"
+    root = workspace_root(workspace) / "share/mind/governance/experience_guided_policy/candidate_skills"
     path = root / f"{safe_id(candidate_id)}.json"
     try:
         record = json.loads(path.read_text(encoding="utf-8"))

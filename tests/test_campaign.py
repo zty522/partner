@@ -6,20 +6,23 @@ from pathlib import Path
 import pytest
 
 from partner.governance.campaign import (
-    _artifact_semantic_problems, _progress_signature, _requested_named_artifacts, build_campaign_report, campaign_instruction, campaign_snapshot, complete_campaign_work,
+    _artifact_semantic_problems, _isolated_learning_work, _matched_experiment_work, _progress_signature, _requested_named_artifacts, _task_runtime_evidence, build_campaign_report, campaign_instruction, campaign_snapshot, complete_campaign_work,
     cancel_campaign, create_campaign, enqueue_work_item, materialize_evolution_work,
     materialize_portfolio_work, materialize_project_actions, materialize_targetdiff_continuous_work,
-    seed_default_work, seed_execution_work, seed_targetdiff_continuous_work,
+    correct_shared_learning_artifact_projection, correct_campaign_report_budget_projection,
+    correct_isolated_learning_business_projection,
+    reconcile_campaign_tasks, seed_default_work, seed_execution_work, seed_targetdiff_continuous_work,
     seed_portfolio_work, seed_targetdiff_project_work, tick_campaign,
 )
 from partner.governance.evolution_loop import record_issue
 from partner.governance.campaign_models import CampaignBudget, CampaignState, WorkItem
-from partner.governance.campaign_runtime import dispatch_to_instance, runtime_instance_ready
+from partner.governance.campaign_runtime import dispatch_to_instance, runtime_instance_ready, switch_runtime_slots
 from partner.governance.campaign_storage import (
     list_leases, list_work_items, load_campaign, load_work_item, save_campaign,
     save_lease, save_work_item, set_active_campaign,
 )
 from partner.governance.project_loop import enqueue_next_action, record_iteration, request_next_action
+from partner.governance.candidate_skills import register_candidate_skill
 from partner.governance.storage import latest_receipt, load_project_state
 
 
@@ -39,6 +42,19 @@ def _campaign(root, instances=None, duration=3600, max_items=20):
         report_interval_seconds=3600,
         budget=CampaignBudget(max_work_items=max_items, max_runtime_seconds=duration),
     )
+
+
+def test_switch_runtime_slots_reasserts_selected_service_after_host_restart(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    from partner.governance import campaign_runtime as runtime_module
+
+    runtime_module.set_active_slots(root, ["04"], reason="pre-reboot durable assignment")
+    calls = []
+    monkeypatch.setattr(runtime_module.subprocess, "run", lambda args, check: calls.append((args, check)))
+
+    switch_runtime_slots(root, ["04"])
+
+    assert calls == [(["systemctl", "--user", "start", "partner-04.service"], True)]
 
 
 def test_campaign_contract_rejects_more_than_two_active(tmp_path):
@@ -107,6 +123,145 @@ def test_paused_campaign_does_not_dispatch(tmp_path):
     save_campaign(root, state)
     result = tick_campaign(root, state.campaign_id, dispatch=lambda *_: "must-not-run")
     assert result["status"] == "paused" and result["dispatched"] == []
+
+
+def test_blocked_campaign_resumes_when_new_evidence_work_is_enqueued(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["04"])
+    state.status = "blocked"
+    state.stop_reason = "no runnable work; waiting for resume event or new evidence"
+    save_campaign(root, state)
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "04", "project_id": "literature_github_learning",
+        "kind": "project_iteration", "title": "new evidence",
+        "instruction": "consume one unseen evidence digest", "requires_delivery": False,
+    })
+    result = tick_campaign(
+        root, state.campaign_id,
+        dispatch=lambda queued, _instruction: f"task-{queued.work_item_id}",
+    )
+    assert result["status"] == "running"
+    assert result["dispatched"] == [{
+        "work_item_id": item.work_item_id,
+        "instance_id": "04",
+        "task_id": f"task-{item.work_item_id}",
+    }]
+
+
+def test_runtime_evidence_collects_shared_learning_artifacts_only(tmp_path):
+    root = Path(_root(tmp_path))
+    task = root / "instances/04/state/tasks/task-learning"
+    task.mkdir(parents=True)
+    evidence = root / "share/mind/governance/research_learning/p/evidence/e.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('{"evidence_found": true}', encoding="utf-8")
+    source = root / "external/code/source.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    marker = "campaign_id=c1 work_item_id=w1"
+    (task / "task_instance.json").write_text(json.dumps({
+        "task_id": "task-learning", "user_message": f"[{marker}]",
+        "metadata": {"step_results": {"learn": {
+            "event_type": "research_active_learning_investigate",
+            "path": str(evidence), "source_path": str(source),
+        }}},
+    }), encoding="utf-8")
+    (task / "task_log.jsonl").write_text(
+        json.dumps({"event": "plan_executor_step_completed",
+                    "event_type": "research_active_learning_investigate"}) + "\n" +
+        json.dumps({"event": "completion_status_updated", "status": "done",
+                    "source": "manual_stop_project_finalization"}) + "\n",
+        encoding="utf-8",
+    )
+    runtime = _task_runtime_evidence(str(root), marker, "04")
+    assert str(evidence) in runtime["artifacts"]
+    assert str(source) not in runtime["artifacts"]
+
+
+def test_sprint18_learning_event_is_not_project_business_progress():
+    assert _isolated_learning_work(
+        "[sprint18=true] isolated",
+        ["atomic_inspect_file", "targetdiff_uncertainty_candidate"],
+    ) is True
+    assert _isolated_learning_work(
+        "[sprint18=true] isolated", ["continuous_project_step"],
+    ) is False
+    assert _isolated_learning_work(
+        "manual production", ["targetdiff_uncertainty_candidate"],
+    ) is False
+
+
+def test_matched_campaign_work_freezes_project_state_across_arms():
+    matched = (
+        "[experiment_id=e1] [match_key=2026-09-02:p:t1] "
+        "[policy_arm=candidate] [strategy_id=c1] compare"
+    )
+    assert _matched_experiment_work(matched) is True
+    assert _matched_experiment_work("[policy_arm=candidate] ordinary production") is False
+
+
+def test_shared_learning_projection_correction_is_strict_and_append_only(tmp_path):
+    root = Path(_root(tmp_path))
+    state = _campaign(str(root), ["04"])
+    item = enqueue_work_item(str(root), state.campaign_id, {
+        "instance_id": "04", "project_id": "literature_github_learning",
+        "kind": "project_iteration", "title": "learning",
+        "instruction": "[sprint18=true] event-first learning", "requires_delivery": False,
+    })
+    item.status = "blocked"
+    item.task_id = "task-report-monitor"
+    item.task_id = "task-learning"
+    item.blocked_reason = "required artifact missing"
+    item.event_types = ["research_active_learning_investigate"]
+    save_work_item(str(root), item)
+    state = load_campaign(str(root), state.campaign_id)
+    state.usage.failures = 1
+    save_campaign(str(root), state)
+    evidence = root / "share/mind/governance/research_learning/p/evidence/e.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('{"verified": true}', encoding="utf-8")
+    task = root / "instances/04/state/tasks/task-learning"
+    task.mkdir(parents=True)
+    marker = f"campaign_id={state.campaign_id} work_item_id={item.work_item_id}"
+    (task / "task_instance.json").write_text(json.dumps({
+        "task_id": "task-learning", "user_message": f"[{marker}]",
+        "metadata": {"step_results": {"learn": {
+            "event_type": "research_active_learning_investigate", "path": str(evidence),
+        }}},
+    }), encoding="utf-8")
+    (task / "task_log.jsonl").write_text(
+        json.dumps({"event": "plan_executor_step_completed",
+                    "event_type": "research_active_learning_investigate"}) + "\n" +
+        json.dumps({"event": "completion_status_updated", "status": "done",
+                    "source": "manual_stop_project_finalization"}) + "\n",
+        encoding="utf-8",
+    )
+
+    corrected = correct_shared_learning_artifact_projection(
+        str(root), state.campaign_id, item.work_item_id,
+    )
+    assert corrected["ok"] is True
+    stored = load_work_item(str(root), state.campaign_id, item.work_item_id)
+    assert stored.status == "completed" and stored.blocked_reason == ""
+    assert stored.artifacts and all(Path(path).is_file() for path in stored.artifacts)
+    usage = load_campaign(str(root), state.campaign_id).usage
+    assert usage.failures == 0 and usage.work_items_completed == 1
+    events = (root / "state/campaigns" / state.campaign_id / "events.jsonl").read_text()
+    assert "work_item_projection_corrected" in events
+    assert correct_shared_learning_artifact_projection(
+        str(root), state.campaign_id, item.work_item_id,
+    )["status"] == "projection_not_eligible"
+
+    stored.evidence.extend(["business_progress=true", "learning_progress=false"])
+    save_work_item(str(root), stored)
+    label_fix = correct_isolated_learning_business_projection(
+        str(root), state.campaign_id, item.work_item_id,
+    )
+    assert label_fix["ok"] is True
+    fixed = load_work_item(str(root), state.campaign_id, item.work_item_id)
+    assert "business_progress=true" not in fixed.evidence
+    assert "business_progress=false" in fixed.evidence
+    assert "learning_progress=true" in fixed.evidence
 
 
 def test_delivery_work_waits_for_runtime_channel_readiness(tmp_path):
@@ -184,6 +339,22 @@ def test_blocked_campaign_still_schedules_checkpoint_report(tmp_path):
     assert result["status"] == "blocked"
     assert len(reports) == 1
     assert reports[0].title == "Campaign 定时进度摘要"
+
+
+def test_zero_report_interval_keeps_campaign_control_plane_silent(tmp_path):
+    root = _root(tmp_path)
+    state = create_campaign(
+        root, goal="silent bounded experiment", allowed_instances=["01"],
+        duration_seconds=3600, report_interval_seconds=0,
+        budget=CampaignBudget(max_runtime_seconds=3600),
+    )
+    state.status = "blocked"
+    save_campaign(root, state)
+    result = tick_campaign(root, state.campaign_id, dispatch=lambda *_: "unused")
+    reports = [item for item in list_work_items(root, state.campaign_id)
+               if item.kind == "report"]
+    assert result["status"] == "blocked"
+    assert reports == []
 
 
 def test_final_report_separates_primary_blocks_from_report_chain_issues(tmp_path):
@@ -304,6 +475,37 @@ def _write_delivery_task(root, item, delivered=True):
     )
 
 
+def test_reconcile_accepts_manual_finalization_as_authoritative_terminal(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["04"])
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "04", "project_id": "literature_github_learning",
+        "kind": "project_iteration", "title": "local observation",
+        "instruction": "bounded research", "requires_artifact": False,
+        "requires_delivery": False,
+    })
+    item.status = "running"
+    item.attempt = 1
+    item.task_id = "campaign-dispatch-manual-final"
+    save_work_item(root, item)
+    task = Path(root) / "instances/04/state/tasks/manual-final"
+    task.mkdir(parents=True)
+    (task / "task_instance.json").write_text(json.dumps({
+        "task_id": "manual-final", "user_message": campaign_instruction(item),
+        "metadata": {},
+    }), encoding="utf-8")
+    (task / "task_log.jsonl").write_text("\n".join([
+        json.dumps({"event": "completion_status_updated", "status": "done",
+                    "source": "batch_plan"}),
+        json.dumps({"event": "manual_iteration_governance", "ok": True,
+                    "status": "experiment_observation_recorded"}),
+        json.dumps({"event": "completion_status_updated", "status": "done",
+                    "source": "manual_stop_project_finalization"}),
+    ]) + "\n", encoding="utf-8")
+    assert reconcile_campaign_tasks(root, state.campaign_id) == [item.work_item_id]
+    assert load_work_item(root, state.campaign_id, item.work_item_id).status == "completed"
+
+
 def test_bounded_campaign_event_requires_three_user_progress_callbacks(tmp_path):
     root = _root(tmp_path)
     state = _campaign(root, ["03"])
@@ -347,6 +549,117 @@ def test_completion_requires_artifact_and_real_delivery(tmp_path):
     failed = complete_campaign_work(root, campaign_instruction(item), files=[], event_types=["write"])
     assert failed["handled"] is True and failed["ok"] is False
     assert load_work_item(root, state.campaign_id, item.work_item_id).status == "failed"
+
+
+def test_report_delivery_problem_does_not_consume_business_failure_budget(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["02"])
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "02", "project_id": "molecular_generation",
+        "kind": "report", "title": "Campaign 定时进度摘要",
+        "instruction": "send report", "requires_artifact": False,
+        "requires_delivery": True, "max_attempts": 1,
+    })
+    item.status = "queued"
+    item.task_id = "task-report-no-ack"
+    item.attempt = 1
+    save_work_item(root, item)
+    result = complete_campaign_work(
+        root, campaign_instruction(item), files=[],
+        event_types=["campaign_report_delivery"], success=True,
+    )
+    stored = load_work_item(root, state.campaign_id, item.work_item_id)
+    assert result["ok"] is True and stored.status == "blocked"
+    assert "real delivery callback not found" in stored.blocked_reason
+    assert "monitor_only=true" in stored.evidence
+    assert "report_delivery_issue=true" in stored.evidence
+    assert load_campaign(root, state.campaign_id).usage.failures == 0
+
+
+def test_report_ignores_generic_failed_terminal_when_real_delivery_exists(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["02"])
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "02", "project_id": "molecular_generation",
+        "kind": "report", "title": "Campaign 定时进度摘要",
+        "instruction": "send report", "requires_artifact": False,
+        "requires_delivery": True, "max_attempts": 1,
+    })
+    item.status = "queued"; item.task_id = "task-report-delivered"; item.attempt = 1
+    save_work_item(root, item)
+    task = Path(root) / "instances/02/state/tasks/task-report-delivered"
+    task.mkdir(parents=True)
+    (task / "task_instance.json").write_text(json.dumps({
+        "task_id": "task-report-delivered", "user_message": campaign_instruction(item),
+        "metadata": {"step_results": {"report": {"delivered": True}}},
+    }), encoding="utf-8")
+    (task / "task_log.jsonl").write_text(
+        json.dumps({"event": "completion_status_updated", "status": "failed"}) + "\n",
+        encoding="utf-8",
+    )
+    result = complete_campaign_work(
+        root, campaign_instruction(item), files=[],
+        event_types=["campaign_report_delivery"], success=False,
+    )
+    stored = load_work_item(root, state.campaign_id, item.work_item_id)
+    assert result["ok"] is True and stored.status == "completed"
+    assert load_campaign(root, state.campaign_id).usage.failures == 0
+
+
+def test_historical_report_failure_budget_projection_is_corrected_append_only(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["02"])
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "02", "project_id": "molecular_generation",
+        "kind": "report", "title": "Campaign 定时进度摘要",
+        "instruction": "send report", "requires_delivery": True,
+    })
+    item.status = "blocked"
+    item.blocked_reason = "task completion reported failure; real delivery callback not found"
+    item.evidence = ["monitor_only=false", "task completion reported failure",
+                     "real delivery callback not found"]
+    save_work_item(root, item)
+    state = load_campaign(root, state.campaign_id)
+    state.usage.failures = 1
+    save_campaign(root, state)
+
+    result = correct_campaign_report_budget_projection(
+        root, state.campaign_id, item.work_item_id,
+    )
+    assert result["ok"] is True
+    stored = load_work_item(root, state.campaign_id, item.work_item_id)
+    assert stored.status == "blocked"
+    assert stored.blocked_reason == "real delivery callback not found"
+    assert "monitor_only=true" in stored.evidence
+    assert load_campaign(root, state.campaign_id).usage.failures == 0
+    events = (Path(root) / "state/campaigns" / state.campaign_id / "events.jsonl").read_text()
+    assert "work_item_projection_corrected" in events
+    assert correct_campaign_report_budget_projection(
+        root, state.campaign_id, item.work_item_id,
+    )["status"] == "projection_not_eligible"
+
+
+def test_report_already_marked_monitor_does_not_decrement_unrelated_failures(tmp_path):
+    root = _root(tmp_path)
+    state = _campaign(root, ["02"])
+    item = enqueue_work_item(root, state.campaign_id, {
+        "instance_id": "02", "project_id": "molecular_generation",
+        "kind": "report", "title": "Campaign 定时进度摘要",
+        "instruction": "send report", "requires_delivery": False,
+    })
+    item.status = "blocked"
+    item.task_id = "task-report-monitor"
+    item.blocked_reason = "task completion reported failure"
+    item.evidence = ["monitor_only=true", "task completion reported failure",
+                     "report_delivery_issue=true"]
+    save_work_item(root, item)
+    state = load_campaign(root, state.campaign_id)
+    state.usage.failures = 4
+    save_campaign(root, state)
+    result = correct_campaign_report_budget_projection(root, state.campaign_id, item.work_item_id)
+    assert result["ok"] is True
+    assert load_work_item(root, state.campaign_id, item.work_item_id).status == "completed"
+    assert load_campaign(root, state.campaign_id).usage.failures == 4
 
 
 def test_reconcile_detects_persisted_task_failure_without_waiting_for_lease(tmp_path):
@@ -838,12 +1151,12 @@ def test_molecular_continuous_replenishes_after_receipt_and_rl_milestones(tmp_pa
     save_work_item(root, stage10)
     checkpoint = materialize_targetdiff_continuous_work(root, state.campaign_id)[0]
     assert checkpoint.instance_id == "05"
-    assert "rl_after_targetdiff_stage=10" in checkpoint.instruction
+    assert "policy_after_targetdiff_stage=10" in checkpoint.instruction
     # The next business experiment must wait for the milestone audit.
     assert materialize_targetdiff_continuous_work(root, state.campaign_id) == []
 
     checkpoint.status = "completed"; checkpoint.task_id = "task-rl10"
-    checkpoint.event_types = ["offline_rl_self_evolution"]
+    checkpoint.event_types = ["offline_policy_learning_self_evolution"]
     save_work_item(root, checkpoint)
     stage11 = materialize_targetdiff_continuous_work(root, state.campaign_id)[0]
     assert "targetdiff_stage=11" in stage11.instruction
@@ -889,11 +1202,11 @@ def test_portfolio_continuous_rotates_changed_inputs_with_two_slots_and_rl_gate(
             save_work_item(root, item)
     rl = materialize_portfolio_work(root, state.campaign_id)
     assert len(rl) == 1 and rl[0].instance_id == "05"
-    assert "offline_rl_self_evolution" in rl[0].instruction
+    assert "offline_policy_learning_self_evolution" in rl[0].instruction
 
     rl[0].status = "completed"
     rl[0].task_id = "done-rl"
-    rl[0].event_types = ["offline_rl_self_evolution"]
+    rl[0].event_types = ["offline_policy_learning_self_evolution"]
     save_work_item(root, rl[0])
     exploration = materialize_portfolio_work(root, state.campaign_id)
     assert {item.instance_id for item in exploration} == {"01", "03", "04"}
@@ -901,6 +1214,101 @@ def test_portfolio_continuous_rotates_changed_inputs_with_two_slots_and_rl_gate(
     snapshot = campaign_snapshot(root, state.campaign_id)
     assert snapshot["portfolio"]["lanes"]["02"]["status"] == "waiting_input"
     assert snapshot["portfolio"]["lanes"]["05"]["status"] == "waiting_wave"
+
+
+def test_portfolio_learning_wave_cannot_be_starved_by_self_updated_input(tmp_path):
+    root = _root(tmp_path)
+    workspace = Path(root)
+    content = workspace / "external/content/inbox.jsonl"
+    content.parent.mkdir(parents=True)
+    content.write_text('{"title":"wave one"}\n', encoding="utf-8")
+    state = create_campaign(
+        root, goal="[portfolio_continuous=true] learning barrier",
+        allowed_instances=["01", "03", "05"], duration_seconds=3600,
+        max_active=2, budget=CampaignBudget(max_work_items=20, max_runtime_seconds=3600),
+    )
+    seed_portfolio_work(root, state.campaign_id)
+    first_wave = materialize_portfolio_work(root, state.campaign_id)
+    assert {item.instance_id for item in first_wave} == {"01", "03"}
+
+    # Observe a changed source twice while the first wave is still active.
+    # It is therefore stable and immediately admissible when the wave ends.
+    content.write_text('{"title":"wave two"}\n', encoding="utf-8")
+    materialize_portfolio_work(root, state.campaign_id)
+    materialize_portfolio_work(root, state.campaign_id)
+    for item in first_wave:
+        item.status = "completed"
+        item.task_id = f"done-{item.work_item_id}"
+        item.event_types = ["bounded_project_event"]
+        item.artifacts = [f"/{item.instance_id}.json"]
+        save_work_item(root, item)
+
+    admitted = materialize_portfolio_work(root, state.campaign_id)
+    assert len(admitted) == 1
+    assert admitted[0].instance_id == "05"
+    assert "offline_policy_learning_self_evolution" in admitted[0].instruction
+    snapshot = campaign_snapshot(root, state.campaign_id)
+    assert snapshot["portfolio"]["lanes"]["01"]["status"] == "waiting_learning_barrier"
+
+
+def test_portfolio_long_horizon_schedules_one_event_first_candidate_experiment(tmp_path):
+    root = _root(tmp_path)
+    state = create_campaign(
+        root, goal="[portfolio_continuous=true] candidate evaluation",
+        allowed_instances=["03", "05"], duration_seconds=3600,
+        max_active=2, budget=CampaignBudget(max_work_items=12, max_runtime_seconds=3600),
+    )
+    seed_portfolio_work(root, state.campaign_id)
+    business = materialize_portfolio_work(root, state.campaign_id)[0]
+    business.status = "completed"; business.task_id = "done-business"
+    business.event_types = ["framework_campaign_contract_audit"]
+    business.evidence = ["business_progress=true"]
+    save_work_item(root, business)
+
+    learning = materialize_portfolio_work(root, state.campaign_id)[0]
+    assert learning.instance_id == "05"
+    learning.status = "completed"; learning.task_id = "done-learning"
+    learning.event_types = ["offline_policy_learning_self_evolution"]
+    save_work_item(root, learning)
+
+    registered = register_candidate_skill(root, {
+        "candidate_id": "event_first_world_model_shadow",
+        "title": "world model shadow observation",
+        "status": "candidate",
+        "artifact_type": "event_candidate",
+        "project_id": "partner_framework_frontend",
+        "source_campaign_id": state.campaign_id,
+        "source_episode_ids": ["episode_business_1"],
+        "success_criteria": ["matched baseline/candidate metrics are recorded"],
+        "applicability": ["shadow-only framework observation"],
+        "execution_contract": {
+            "ready": True, "kind": "event", "event_type": "continuous_project_step",
+            "allowed_instances": ["03"], "default_params": {"strategy_id": "shadow_world_model"},
+        },
+        "evaluation_contract": {
+            "ready": True, "kind": "event", "event_type": "continuous_project_step",
+            "allowed_instances": ["03"], "default_params": {"strategy_id": "shadow_world_model"},
+        },
+    })
+    assert registered["candidate"]["evaluation_ready"] is True
+
+    created = materialize_portfolio_work(root, state.campaign_id)
+    assert len(created) == 1
+    experiment = created[0]
+    assert experiment.kind == "evolution_experiment"
+    assert experiment.instance_id == "03"
+    assert "long_horizon_candidate=event_first_world_model_shadow" in experiment.instruction
+    assert "continuous_project_step" in experiment.instruction
+    assert materialize_portfolio_work(root, state.campaign_id) == []
+
+    experiment.status = "completed"; experiment.task_id = "done-candidate"
+    experiment.event_types = ["continuous_project_step"]
+    save_work_item(root, experiment)
+    follow_up = materialize_portfolio_work(root, state.campaign_id)
+    assert len(follow_up) == 1 and follow_up[0].instance_id == "03"
+    assert "portfolio_exploration_round=1" in follow_up[0].instruction
+    snapshot = campaign_snapshot(root, state.campaign_id)
+    assert snapshot["portfolio"]["long_horizon"]["phase"] == "WAIT_EVIDENCE"
 
 
 def test_portfolio_requires_two_stable_input_observations_before_redispatch(tmp_path):
@@ -1068,8 +1476,8 @@ def test_tick_materializes_receipt_continuation_before_rl_checkpoint(tmp_path):
     initial.evidence = ["business_progress=true"]
     save_work_item(root, initial)
     recorded = record_iteration(root, {
-        "project_id": "partner_framework_frontend", "owner_instance": "03",
-        "goal": "continue framework", "inputs": [], "actions_executed": ["audit"],
+        "project_id": "molecular_dynamics_study", "owner_instance": "03",
+        "goal": "continue molecular dynamics", "inputs": [], "actions_executed": ["audit"],
         "artifacts": ["/framework.json"], "delivery_confirmed": True,
         "next_actions": [{"title": "next framework canary", "event_type": "continuous_project_step",
                           "params": {"user_request": "[strategy_id=03_user_observability_canary] "
@@ -1152,6 +1560,42 @@ def test_inherited_completed_curriculum_can_start_scout_without_current_outcome(
     assert not any(item.instance_id == "05" for item in scouts)
 
 
+def test_superseded_after_fix_campaign_readmits_unconsumed_fingerprints(tmp_path):
+    from partner.governance.campaign import PORTFOLIO_EXPLORATION
+
+    root = _root(tmp_path)
+    first = create_campaign(
+        root, goal="[portfolio_continuous=true] broken predecessor",
+        allowed_instances=["03", "04"], duration_seconds=3600,
+        max_active=2, budget=CampaignBudget(max_work_items=10, max_runtime_seconds=3600),
+    )
+    seed_portfolio_work(root, first.campaign_id)
+    materialize_portfolio_work(root, first.campaign_id)
+    portfolio_path = Path(root) / "state/campaigns" / first.campaign_id / "portfolio_state.json"
+    portfolio = json.loads(portfolio_path.read_text())
+    for instance in ("03", "04"):
+        portfolio["lanes"][instance]["exploration_round"] = len(PORTFOLIO_EXPLORATION[instance])
+    portfolio["next_scout_at"] = "2999-01-01T00:00:00+00:00"
+    portfolio_path.write_text(json.dumps(portfolio))
+    cancel_campaign(
+        root, first.campaign_id,
+        "superseded_after_fix: deterministic campaign event routing repaired",
+    )
+    second = create_campaign(
+        root, goal="[portfolio_continuous=true] clean successor",
+        allowed_instances=["03", "04"], duration_seconds=3600,
+        max_active=2, budget=CampaignBudget(max_work_items=10, max_runtime_seconds=3600),
+    )
+    assert seed_portfolio_work(root, second.campaign_id) == []
+    admitted = materialize_portfolio_work(root, second.campaign_id)
+    assert {item.instance_id for item in admitted} == {"03"}
+    portfolio = json.loads(
+        (Path(root) / "state/campaigns" / second.campaign_id / "portfolio_state.json").read_text()
+    )
+    assert portfolio["recovery_from_superseded_campaign"] == first.campaign_id
+    assert "last_dispatched_fingerprint" not in portfolio["lanes"]["04"]
+
+
 def test_deadline_final_sync_captures_late_rl_audit_outcome(tmp_path):
     root = _root(tmp_path)
     state = _campaign(root, ["05"], duration=60, max_items=4)
@@ -1162,18 +1606,18 @@ def test_deadline_final_sync_captures_late_rl_audit_outcome(tmp_path):
     audit.task_id = "rl-task"
     audit.attempt = 1
     audit.artifacts = [str(artifact)]
-    audit.event_types = ["offline_rl_self_evolution"]
+    audit.event_types = ["offline_policy_learning_self_evolution"]
     audit.evidence = ["delivery_confirmed=True"]
     save_work_item(root, audit)
 
     future = datetime.now(timezone.utc).astimezone() + timedelta(seconds=120)
     tick_campaign(root, state.campaign_id, dispatch=lambda *_: "final-task", now=future)
-    trajectories = Path(root) / "share/mind/governance/rl/trajectories.jsonl"
+    trajectories = Path(root) / "share/mind/governance/experience_guided_policy/trajectories.jsonl"
     rows = [json.loads(line) for line in trajectories.read_text(encoding="utf-8").splitlines()]
     assert [row["work_item_id"] for row in rows] == [audit.work_item_id]
-    assert rows[0]["action"]["action_key"] == "05:project_iteration:offline_rl_self_evolution"
+    assert rows[0]["action"]["action_key"] == "05:project_iteration:offline_policy_learning_self_evolution"
     events = Path(root) / "state/campaigns" / state.campaign_id / "events.jsonl"
-    assert "offline_rl_final_sync" in events.read_text(encoding="utf-8")
+    assert "offline_policy_learning_final_sync" in events.read_text(encoding="utf-8")
 
 
 def test_dashboard_exposes_campaign_without_full_work_payload(tmp_path, monkeypatch):

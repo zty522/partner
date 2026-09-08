@@ -1702,18 +1702,21 @@ class SelfEvolveEngine:
 
                 # Use push callbacks for real delivery (bridges send via QQ API)
                 try:
-                    from partner.mind.executor import _push_callback, _file_push_callback
+                    from partner.mind.executor import push_text_now, _file_push_callback
                 except Exception:
-                    _push_callback = None
+                    push_text_now = None
                     _file_push_callback = None
 
                 # 1. Push text report
-                if _push_callback:
+                if push_text_now:
                     try:
-                        _push_callback(delivery_text)
-                        logger.info("[5STEP] Text delivered via push callback")
+                        _text_delivery = push_text_now(delivery_text, source="self_review:five_step")
+                        if _text_delivery.get("delivered"):
+                            logger.info("[5STEP] Text delivered via audited channel")
+                        else:
+                            logger.warning("[5STEP] Text delivery not acknowledged: %s", _text_delivery)
                     except Exception as _pc:
-                        logger.warning("[5STEP] Push callback failed: %s", _pc)
+                        logger.warning("[5STEP] Audited text delivery failed: %s", _pc)
                 else:
                     # Fallback: write to qq_chat_history directly
                     qq_path = _os.path.join(workspace, "state", "qq_chat_history.jsonl")

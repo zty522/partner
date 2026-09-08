@@ -1,3 +1,4 @@
+# partner03_framework_continue: instance 03 self-drive @ 2026-09-06T06:12:18
 """Runtime adapters for campaign dispatch and two-slot service switching."""
 from __future__ import annotations
 
@@ -57,11 +58,17 @@ def dispatch_to_instance(workspace: str, item: WorkItem, instruction: str) -> st
 
 
 def switch_runtime_slots(workspace: str, instance_ids: list[str]) -> None:
-    """Persist slots, then stop removed units and start selected units."""
+    """Converge runtime services to the persisted slot assignment.
+
+    Starting only newly-added slots is insufficient after a host/WSL reboot:
+    the durable scheduler can still say ``04`` is selected while the actual
+    ``partner-04.service`` is dead.  ``systemctl start`` is idempotent, so all
+    selected units are asserted on every reconciliation.
+    """
     root = str(workspace_root(workspace))
     previous = set(load_scheduler(root).get("active_slots") or [])
     selected = list(dict.fromkeys(str(value) for value in instance_ids))
-    set_active_slots(root, selected, reason="campaign scheduler")
+    set_active_slots(root, selected, reason="instance-native slot arbiter")
     removed = sorted(previous - set(selected))
     if removed:
         subprocess.run(

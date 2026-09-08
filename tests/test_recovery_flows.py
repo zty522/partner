@@ -118,6 +118,7 @@ def test_generate_text_forwards_prompt_and_resolved_data_and_strips_reasoning(tm
     }))
     assert "include exact quotes" in captured["task"]
     assert "actual quote" in captured["task"]
+    assert captured["agent_params"]["purpose"] == "report"
     assert "<think>" not in result["content"]
     assert result["content"].startswith("# Grounded report")
 

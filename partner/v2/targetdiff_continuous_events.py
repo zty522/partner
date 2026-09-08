@@ -157,7 +157,7 @@ Controller 只在本阶段收据、产物和真实交付全部终态后生成下
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf = working / f"targetdiff_stage_{stage}_report.pdf"
     pdf_result = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": str(pdf),
-        "title": f"TargetDiff Stage {stage}：{title}", "min_content_chars": 1200, "min_sections": 8})
+        "title": f"TargetDiff Stage {stage}：{title}", "report_style": "research", "min_content_chars": 1200, "min_sections": 8})
     if not pdf_result.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf_result.get("error"),
                 "files": [str(source), str(output), str(md)]}

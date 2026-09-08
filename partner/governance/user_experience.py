@@ -12,7 +12,7 @@ PROJECT_NAMES = {
     "02": "分子生成方法研究",
     "03": "Partner 框架与前端",
     "04": "文献与 GitHub 学习",
-    "05": "Partner 自进化与 RL",
+    "05": "Partner 自进化与经验策略学习",
 }
 
 
@@ -125,12 +125,12 @@ def execution_receipt_message(*, instance_id: str, event_type: str, result: dict
         action = str(command or "")
     if not action:
         action_names = {
-            "framework_campaign_contract_audit": "运行 Campaign/RL 合同测试并核对恢复路径",
+            "framework_campaign_contract_audit": "运行 Campaign/EGPL 合同测试并核对恢复路径",
             "continuous_project_step": "执行本项目当前策略并核对机器指标",
             "evidence_execution_slice": "读取内容证据，运行去重与来源检查脚本",
             "targetdiff_provenance_audit": "核验 TargetDiff 来源、镜像校验和及 split/affinity 结构",
             "external_learning_index_slice": "核验外部来源版本及已索引/已集成边界",
-            "offline_rl_self_evolution": "摄取本轮新轨迹，重算奖励与候选策略",
+            "offline_policy_learning_self_evolution": "摄取本轮新轨迹，重算奖励与候选策略",
         }
         action = action_names.get(event_type, f"执行本轮 {event_type} 任务")
     return (

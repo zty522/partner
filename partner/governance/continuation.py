@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from .models import NextAction
-from .rl_control import choose_action
+from .policy_control import choose_action
 
 
 PRIMARY_CHOICES: dict[str, tuple[str, list[dict[str, Any]]]] = {
@@ -55,7 +55,7 @@ FOLLOWUPS: dict[str, dict[str, Any]] = {
     "02_calibration_analysis": {"strategy_id": "02_error_slices", "event_type": "continuous_project_step",
                                 "title": "02 官方测试集误差切片"},
     "03_evidence_graph_canary": {"strategy_id": "03_policy_integration", "event_type": "continuous_project_step",
-                                 "title": "03 RL 策略接入合同 canary"},
+                                 "title": "03 EGPL 策略接入合同 canary"},
     "04_harness_mapping": {"strategy_id": "04_adapter_contract", "event_type": "continuous_project_step",
                             "title": "04 Harness 独立适配合同验证"},
 }

@@ -57,10 +57,14 @@ def render_continuous_report(instance_id: str, strategy: str, result: dict[str, 
 ## 风险与判断
 
 - 来源可达不等于主张真实；原文、时间和上下文仍需逐条核对。
-- 相同 URL 的多条记录可能是重复采集，不能被包装成多个独立证据。
+- 相同 UEGPL 的多条记录可能是重复采集，不能被包装成多个独立证据。
 - 未获得明确内容与发布授权前，Partner 只能准备候选和证据，不能执行公开发布。
 
 证据哈希只能证明本轮读取内容是否变化，不能证明页面陈述本身正确。下一轮若要形成候选稿，应逐条标注可引用原句、事实核验来源、时效性和潜在误导风险；无法核验的数字或因果主张必须删除或明确标记为待确认。
+
+## 验收与恢复条件
+
+本轮只有在机器 JSON 与本报告中的记录数、来源数和授权数一致时才算完成证据整理；报告生成或消息送达本身不代表内容已经可发布。若结果处于安全等待，恢复必须由新的可核验来源、完成的主张级事实核验，或用户对具体内容的明确授权触发。任何恢复都要重新检查来源时效和原文上下文，不能沿用旧轮“可写”判断，更不能把 Campaign 自动续跑解释为发布许可。
 
 ## 下一步
 
@@ -125,13 +129,53 @@ def render_continuous_report(instance_id: str, strategy: str, result: dict[str, 
     if instance_id == "03":
         command = " ".join(str(value) for value in result.get("command") or [])
         output = str(result.get("test_output") or "")[-1800:]
+        if strategy.startswith("03_md_"):
+            return f"""# 03 分子动力学数值实验记录
+
+> 本轮策略：`{strategy}`。本轮实际运行 velocity-Verlet 数值积分，不把阅读资料或生成报告算作模拟完成。
+
+## 实验问题
+
+用确定性谐振子体系检查积分器的能量守恒、时间步敏感性或初始温度敏感性。它是分子动力学执行链的最小可复现实验，不代表真实分子力场已经验证。
+
+## 实际执行
+
+- 积分器：`{result.get('integrator', 'unknown')}`
+- 势函数：`{result.get('potential', 'unknown')}`
+- 执行入口：`{command}`
+- 退出码：`{result.get('exit_code', 'n/a')}`
+
+## 数值结果
+
+```text
+{output}
+```
+
+| 指标 | 结果 |
+|---|---|
+{_metric_rows(metrics)}
+
+## 方法与可复现合同
+
+每个组合从相同位置坐标开始，速度按给定温度作确定性缩放；每一轮先根据当前位置计算加速度，更新位置，再用更新前后的加速度平均值更新速度。总步数固定为 2000，每 200 步保存一次轨迹抽样。稳定门预先定义为末态相对能量漂移绝对值小于 `1e-3`，同时保存全程最大相对误差，避免末态偶然回到初始能量附近造成假通过。时间步扫描只改变 `dt`，温度扫描只改变初始动能，因此不同轮次仍可比较。
+
+机器 JSON 中的每个 run 都包含温度、时间步、步数、初末能量、漂移、最大误差和轨迹抽样。后续接入真实引擎时，应保留同样的输入合同、版本、随机种子、能量单位、环境与退出码；如果力场或体系发生改变，必须建立新的比较组，不能和本轮无量纲谐振子结果混算。
+
+## 证据与边界
+
+每个时间步/温度组合的初末能量、相对漂移和抽样轨迹保存在同目录机器 JSON。`ok=True` 只证明至少一个预注册数值稳定性门通过；不能据此声称 Amber、GROMACS、真实溶剂或生物分子体系已经跑通。
+
+## 下一步
+
+下一轮改变时间步或温度样本空间并比较漂移；完成最小积分器合同后，再把同一验证思想迁移到可用的真实 MD 引擎和具体体系。
+"""
         return f"""# 03 Partner 框架验证与变更决策
 
 > 本轮策略：`{strategy}`。本报告区分“测试通过”“实机可用”和“允许晋升”，三者不能互相替代。
 
 ## 要验证的问题
 
-本轮验证持久证据、双槽调度、Campaign 恢复或 RL 控制合同是否仍成立。影响范围限定在 Partner 框架，不以生成 PDF 或发送消息作为框架进步。
+本轮验证持久证据、双槽调度、Campaign 恢复或 EGPL 控制合同是否仍成立。影响范围限定在 Partner 框架，不以生成 PDF 或发送消息作为框架进步。
 
 ## 合同覆盖范围
 
@@ -140,7 +184,7 @@ def render_continuous_report(instance_id: str, strategy: str, result: dict[str, 
 | 持久证据 | Task 产物可归档并被下一轮读取 | 业务结论一定正确 |
 | 双槽调度 | 同时活动实例不超过两个 | 长时间资源没有累积 |
 | 恢复语义 | runner 重启不重复注入任务 | 外部 QQ/浏览器永不失败 |
-| RL 控制 | candidate 不越过晋升门 | 当前策略已经优于所有替代 |
+| EGPL 控制 | candidate 不越过晋升门 | 当前策略已经优于所有替代 |
 
 ## 实际执行
 
@@ -214,6 +258,49 @@ def render_continuous_report(instance_id: str, strategy: str, result: dict[str, 
 ## 机器证据
 
 完整映射和路径位于同目录 JSON，PDF 只保留来源、采用判断和边界。
+"""
+    if instance_id == "05":
+        inventory = result.get("source_inventory") or {}
+        rows = "\n".join(
+            f"| `{name}` | `{item.get('path')}` | {'存在' if item.get('exists') else '缺失'} | {item.get('bytes', 0)} |"
+            for name, item in inventory.items()
+        ) or "| — | — | 缺失 | 0 |"
+        return f"""# 05 Hermes × Partner 自进化机制实验
+
+> 本轮策略：`{strategy}`。本轮读取真实源码并运行聚焦回归；Skill 只是被研究对象之一，Partner 的执行根基仍是 Event-first。
+
+## 真实源码输入
+
+| 来源 | 路径 | 状态 | 字节数 |
+|---|---|---|---|
+{rows}
+
+## 实际验证
+
+- 命令：`{' '.join(str(value) for value in result.get('command') or [])}`
+- 退出码：`{result.get('exit_code', 'n/a')}`
+
+```text
+{str(result.get('test_output') or '')[-1800:]}
+```
+
+## 指标
+
+| 指标 | 结果 |
+|---|---|
+{_metric_rows(metrics)}
+
+## Candidate 与边界
+
+```json
+{_json(result.get('candidate') or {})}
+```
+
+Candidate 只能进入 shadow/matched 验证，不修改 `control_policy.json`，不自批准 production。项目推进 Receipt 与学习观察分账；只有真实项目 Event 的产物可获得业务进步奖励。
+
+## 下一步
+
+若回归通过，下一轮针对最新 Episode 的具体 mechanism 做匹配实验；若失败，保存失败测试与 stderr 并触发一次有界主动学习，而不是重复生成相同报告。
 """
     return f"""# 持续项目结果：{strategy}
 

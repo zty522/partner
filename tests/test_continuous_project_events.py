@@ -88,3 +88,34 @@ def test_molecular_risk_register_consumes_persisted_machine_evidence(tmp_path):
     assert result["ok"] is True
     assert result["result"]["business_metrics"]["evidence_files_reviewed"] == 1
     assert result["result"]["business_metrics"]["production_promotion"] == 0
+
+
+def test_native_md_step_runs_numerical_integrator(tmp_path):
+    workspace = tmp_path / "workspace/instances/03"
+    working = workspace / "state/tasks/md"
+    ctx = SimpleNamespace(workspace=str(workspace), working_dir=str(working),
+                          task_instance=SimpleNamespace(working_dir=str(working), workspace=str(workspace),
+                                                        user_message="native"))
+    result = atomic_continuous_project_step(ctx, {"strategy_id": "03_md_timestep_stability"})
+    assert result["ok"] is True
+    assert result["result"]["business_metrics"]["simulations_executed"] == 5
+    assert result["result"]["integrator"] == "velocity_verlet"
+    assert all(Path(path).is_file() for path in result["files"])
+
+
+def test_native_05_reads_real_sources_and_runs_focused_regression(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    workspace = root / "instances/05"
+    hermes = root / "external/code/hermes-agent/agent/context_compressor.py"
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("# event state skill\n", encoding="utf-8")
+    working = workspace / "state/tasks/learn"
+    ctx = SimpleNamespace(workspace=str(workspace), working_dir=str(working),
+                          task_instance=SimpleNamespace(working_dir=str(working), workspace=str(workspace),
+                                                        user_message="native"))
+    monkeypatch.setattr("partner.v2.continuous_project_events.subprocess.run",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout="2 passed", stderr=""))
+    result = atomic_continuous_project_step(ctx, {"strategy_id": "05_candidate_gap_matrix"})
+    assert result["ok"] is True
+    assert result["result"]["candidate"]["scope"] == "shadow"
+    assert result["result"]["business_metrics"]["focused_regression_passed"] is True

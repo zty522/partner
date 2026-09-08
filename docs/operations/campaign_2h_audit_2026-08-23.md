@@ -37,7 +37,7 @@
 2. 停止边界没有 latch。现在失败/截止时间/模型/成本边界持久，并取消未开始业务项。
 3. Executor 只读 `task_id`而 Interaction 传 `task_instance_id`。现在两者均可复用，不再重复建任务。
 4. 03/04/05 的泛化 planner 无有限协议。默认改为 `framework_campaign_contract_audit`、
-   `external_learning_index_slice` 和 `offline_rl_self_evolution`。
+   `external_learning_index_slice` 和 `offline_policy_learning_self_evolution`。
 5. evolution 失败可递归派生。现在每次只物化一个根 Issue，实验失败不再生成新 evolution 源。
 6. 旧运行的 10 个业务终态已写为离线 RL 轨迹，并生成首个正式 candidate Experiment。
 

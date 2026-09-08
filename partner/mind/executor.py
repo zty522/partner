@@ -3013,6 +3013,20 @@ def _push_one_shot_output_files(project_dir: str, parsed: dict | None,
         allow_workspace_fallback=allow_workspace_fallback,
         extra_scan_roots=extra_scan_roots,
     )
+    # Machine sidecars remain in Task/Receipt evidence, but when a readable
+    # PDF is available the user channel should not also receive MD/JSON/CSV
+    # copies unless the original request explicitly requires such a format.
+    non_pdf_required = set(required_exts or set()) - {".pdf", ".md"}
+    pdf_files = [path for path in files if path.lower().endswith(".pdf")]
+    if pdf_files and not non_pdf_required:
+        files = pdf_files
+    elif files and not non_pdf_required and all(
+            os.path.splitext(path)[1].lower() in {".md", ".json", ".jsonl", ".txt", ".csv"}
+            for path in files):
+        # Machine-readable sidecars stay in the Task/Receipt and governance
+        # ledgers.  If an Event has no readable PDF, report it in QQ text
+        # rather than pushing raw JSON/Markdown as a user-facing attachment.
+        files = []
     logger.info(
         "[REPORT] one-shot output file candidates: %s callback=%s required_exts=%s allow_workspace_fallback=%s",
         [os.path.basename(p) for p in files],
@@ -3463,13 +3477,6 @@ def push_text_now(text: str, *, source: str = "runtime", parent_id: str = "",
         if not acknowledged:
             error = "active channel did not acknowledge delivery"
             finish_text_delivery(_workspace, attempt, acknowledged=False, status="failed", error=error)
-            # Sprint18 §6 relay: append to relay_outbox so a 03-bot daemon
-            # can resend via the still-active partner03 channel.
-            try:
-                from ..evolution.sprint18_relay import append_relay_outbox
-                append_relay_outbox(_workspace, content=content, kind="text", source=source, parent_id=parent_id)
-            except Exception as exc:
-                logger.debug("[SPRINT18_RELAY] text outbox append skipped: %s", exc)
             return {"ok": False, "delivered": False, "status": "failed", "error": error,
                     "attempt_id": attempt["attempt_id"]}
         finish_text_delivery(_workspace, attempt, acknowledged=True, status="sent")
@@ -3499,12 +3506,6 @@ def push_file_now(path: str, caption: str = "") -> dict:
             return {"ok": False, "delivered": False, "status": "invalid", "error": "file is empty"}
         acknowledged = bool(_file_push_callback(data, os.path.basename(path), caption or os.path.basename(path)))
         if not acknowledged:
-            # Sprint18 §6 relay: append to relay_outbox
-            try:
-                from ..evolution.sprint18_relay import append_relay_outbox
-                append_relay_outbox(_workspace, content=caption or os.path.basename(path), kind="file", source=path, parent_id="")
-            except Exception as exc:
-                logger.debug("[SPRINT18_RELAY] file outbox append skipped: %s", exc)
             return {"ok": False, "delivered": False, "status": "failed", "error": "active channel did not acknowledge delivery"}
         _mark_file_delivered(path)
         return {"ok": True, "delivered": True, "status": "sent", "size": len(data), "path": path}
@@ -3612,7 +3613,7 @@ def _must_preserve_as_serial_task(text: str, source: str = "") -> bool:
     """
     raw = str(text or "")
     origin = str(source or "").strip().lower()
-    if origin in {"longitudinal_rl_sampler", "serial_experiment_queue"}:
+    if origin in {"longitudinal_policy_sampler", "serial_experiment_queue"}:
         return True
     if "[execution_mode=serial_queue]" in raw:
         return True
@@ -5502,6 +5503,7 @@ async def _enqueue_minimal_research_event_after_planning_failure(
         priority=max(2, min(8, int(payload.get("priority") or 4) + 1)),
         payload={
             "title": title,
+            "project_id": str(payload.get("project_id") or "")[:160],
             "step": int(payload.get("step") or 0) + 1,
             "delivery_mode": "research_project",
             "user_request": (
@@ -5551,6 +5553,7 @@ async def _enqueue_stop_project_event(event: MindEvent, title: str, reason: str,
         priority=max(2, min(8, int(payload.get("priority") or 4) + 1)),
         payload={
             "title": title,
+            "project_id": str(payload.get("project_id") or "")[:160],
             "step": int(payload.get("step") or 0) + 1,
             "event_kind": "selector_stop_project",
             "reason": reason or "selector chose to stop",
@@ -6431,6 +6434,13 @@ async def _handle_batch_plan_event(event: MindEvent):
     payload = event.payload or {}
     root_request = _root_user_request(payload) or str(payload.get("user_request") or "")
     title = str(payload.get("title") or payload.get("project") or payload.get("event_kind") or event.type.value).strip()
+    native_project = re.search(r"\[project_id=([A-Za-z0-9_.-]+)\]", root_request)
+    if "[instance_native=true]" in root_request and native_project:
+        # The native state machine owns project identity.  Do not create a
+        # new share/projects directory from a generated next-action sentence.
+        title = native_project.group(1)
+        payload["title"] = title
+        payload["project_id"] = title
     if _is_generic_project_title(title) and root_request:
         title = _compact_title_from_request(root_request, fallback=title)
         payload["title"] = title
@@ -6453,11 +6463,22 @@ async def _handle_batch_plan_event(event: MindEvent):
     started_at = _time.time()
     spec = _action_event_spec(event.type)
     artifact_path = os.path.join(project_dir, str(spec.get("artifact") or "batch_plan_result.md"))
+    native_project_request = (
+        "[instance_native=true]" in root_request
+        and "[native_kind=project]" in root_request
+    )
     required_exts = _required_output_exts(root_request, event.type.value, str(payload.get("event_kind") or ""))
     # For literature_review and similar research events, always require delivery
     if event.type in {EventType.LITERATURE_REVIEW} and not required_exts:
         required_exts.add(".md")
-    if required_exts:
+    if native_project_request:
+        # The native Event declares and returns its own concrete artifacts.
+        # Paths named in the durable handoff are inputs, not user-requested
+        # output filenames (for example an old continuation.md Receipt).
+        required_exts = set()
+        payload["expected_artifacts"] = []
+        payload["delivery_required"] = True
+    elif required_exts:
         payload["expected_artifacts"] = _align_expected_artifacts_with_required_exts(
             payload.get("expected_artifacts"),
             required_exts,
@@ -7127,9 +7148,22 @@ async def _handle_batch_plan_event(event: MindEvent):
         if manual_mode:
             from ..planner.batch_planner import _MANUAL_BLOCKED_EVENTS
             blocked_events = _MANUAL_BLOCKED_EVENTS
+            native_project_request = (
+                "[instance_native=true]" in str(root_request or "")
+                and "[native_kind=project]" in str(root_request or "")
+            )
+            native_project_events = {
+                "continuous_project_step", "molecular_generation_benchmark",
+                "molecular_diversity_benchmark", "molecular_synth_baseline_benchmark",
+                "molecular_goal_optimization_benchmark",
+            }
             blocked_ids = {
                 str(step.id) for step in micro_plan.plan
                 if str(getattr(step, "event_type", "")) in blocked_events
+                and not (
+                    native_project_request
+                    and str(getattr(step, "event_type", "")) in native_project_events
+                )
             }
             changed = True
             while changed:
@@ -8037,9 +8071,13 @@ async def _handle_batch_plan_event(event: MindEvent):
                     for path in raw_candidate_files
                     if str(path).strip()
                 ]
+                pdf_candidate_files = [name for name in candidate_files
+                                       if name.lower().endswith(".pdf")]
+                if pdf_candidate_files:
+                    candidate_files = pdf_candidate_files
                 text_only_contract = not required_exts and not (
                     payload.get("expected_artifacts") or payload.get("root_expected_artifacts")
-                )
+                ) and not raw_candidate_files
                 if text_only_contract:
                     candidate_files = []
                 artifact_line = (
@@ -10109,6 +10147,7 @@ async def _handle_stop_project(event: MindEvent):
                     payload.get("inbox_message_id") or payload.get("trigger_source") == "inbox"
                 )
                 governance_result = record_manual_task_outcome(_workspace, {
+                    "project_id": payload.get("project_id") or "",
                     "task_id": payload.get("task_id"),
                     "goal": payload.get("root_user_request") or title,
                     "inputs": payload.get("completion_inputs") or [],
@@ -10143,12 +10182,6 @@ async def _handle_stop_project(event: MindEvent):
                                 or governance_result.get("local_observation_confirmed")
                             )
                         )
-                        # Sprint18 §6 follow-up: when manual_runtime recorded
-                        # ``delivery_only_failure_accepted`` (channel ack failed
-                        # but artifacts exist on disk and were written by an
-                        # external-system event_type), the work is done.
-                        if not accepted and governance_result.get("status") == "delivery_only_failure_accepted":
-                            accepted = True
                         task_record.mark(
                             "done" if accepted else "failed",
                             {
@@ -10230,6 +10263,20 @@ async def _handle_stop_project(event: MindEvent):
                                 )
                         except Exception as trace_exc:
                             logger.warning("[EPISODE_TRACE] best-effort reduction failed: %s", trace_exc)
+                        # The authoritative governance terminal drives the
+                        # project-native state machine immediately.  Ordinary
+                        # user tasks are filtered inside handle_terminal.
+                        try:
+                            from ..governance.instance_native import handle_terminal
+                            native_transition = handle_terminal(
+                                _workspace, instance_id=_governance_instance_id(_workspace),
+                                task_id=str(payload.get("task_id")),
+                            )
+                            task_record.append_log("instance_native_terminal_consumed", native_transition)
+                        except Exception as native_exc:
+                            task_record.append_log("instance_native_terminal_failed", {
+                                "error": str(native_exc)[:1000],
+                            })
                 except Exception:
                     pass
                 if not governance_result.get("ok"):
@@ -10306,6 +10353,18 @@ async def _handle_stop_project(event: MindEvent):
                 # experiences after it has accepted the task.
                 learning_data["failure_factors"] = []
                 learning_data["difficulties"] = []
+            else:
+                failure_label = str(
+                    (governance_result or {}).get("status") or reason or "governed task rejected"
+                )
+                failures = list(learning_data.get("failure_factors") or [])
+                if failure_label not in failures:
+                    failures.append(failure_label)
+                learning_data["failure_factors"] = failures
+                learning_data["difficulties"] = list(dict.fromkeys([
+                    *list(learning_data.get("difficulties") or []), failure_label,
+                ]))
+                learning_data["milestone"] = "任务失败并进入主动学习"
 
             lm.record_project_completion(
                 project_name=title,
@@ -11229,6 +11288,10 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
     # original USER_MESSAGE.  The durable TaskInstance message is the typed
     # input/output contract and must participate in disambiguation.
     original_request = str(getattr(task, "user_message", "") or "")
+    native_project = bool(
+        "[instance_native=true]" in original_request
+        and "[native_kind=project]" in original_request
+    )
     request_contract = str(root_goal or "") + "\n" + original_request
     named_sources = [request_contract]
     named_sources.extend(str(item.get("description") or "") for item in expected if isinstance(item, dict))
@@ -11270,6 +11333,12 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
         name for name in requested_names
         if not any(base == name or base.endswith(" " + name) for base in input_basenames)
     }
+    # Instance-native project Events own a typed output contract which has
+    # already been installed on TaskInstance and validated above.  Project
+    # handoff prose may mention prior artifacts such as continuation.md; those
+    # are context inputs, never implicit outputs for this bounded Event turn.
+    if native_project:
+        requested_names = set()
     actual_names = {os.path.basename(str(row.get("relative_path") or "")).lower() for row in valid_files}
     for name in sorted(requested_names - actual_names):
         missing.append(f"named_artifact:{name}")
@@ -11307,7 +11376,7 @@ def _run_batch_check_rule(task, root_goal: str, config: dict) -> dict:
         "[instance_native=true]" in original_request
         and "[native_kind=learning]" in original_request
     )
-    if (not native_learning and min_citations
+    if (not native_learning and not native_project and min_citations
             and any(term in str(root_goal or "").lower() for term in citation_terms)
             and citation_count < min_citations):
         missing.append(f"citations<{min_citations}")

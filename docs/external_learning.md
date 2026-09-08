@@ -1,7 +1,56 @@
 # Partner 外部资料学习与采用状态
 
+> **2026-08-30 收敛规则**：`partner_test/hermes_external_learning` 是历史孵化来源，不再被 Partner runtime
+> 读取。已接受结论迁入 `docs/knowledge/incubated_external_learning/`，之后只在 Partner 中维护；未接受列表
+> 留在孵化档案作 provenance，不继续形成第二套知识库。
+
 **基线日期**: 2026-08-23
 **权威性**: 当前（L2）
+
+## 2026-09-08 持续 GitHub/论文主动学习 Event
+
+04 的实例原生轮转新增 `external_knowledge_scout`，不依赖旧 Campaign 周期。每次项目动作完成后立即沿 Receipt
+续接；轮到外部知识动作时，由 MiniMax 形成可证伪知识缺口、在真实搜索结果中选择互补 repo/paper，再依据
+实际读取的 README/机制源码和论文 PDF 前八页（无 PDF 时明确为摘要）形成札记与最小实验。仓库、论文、成功索引、
+失败索引与 insight 分别写入 `workspace/external/code/discovered`、`literature/discovered` 和 `insights`。
+
+这条链的状态是 `acquired/read/synthesised`，不是 `integrated`。只有后续生成 Partner-owned Candidate，并在真实项目
+baseline/candidate 中改善 Reward，才可改成 adopted/production。QQ 仅接收最终 PDF；JSON/MD 机器证据留在本地。
+
+## 2026-08-31 Codex/Hermes/JitRL 进入可执行研究主动学习链
+
+- Codex `codex-rs/core/src/compact.rs`、Hermes `agent/context_compressor.py` 和 JitRL PDF 已从
+  “present/indexed”进入 04 的真实 `observe/select/investigate/matched` 读取实验；每个来源记录 SHA256，
+  代码记录固定 Git revision。
+- Hermes 源码直接支持“压缩后用 handoff summary 和已有 state 继续、持久记忆仍权威”的机制证据；JitRL
+  原文直接支持“不更新参数、保存 state/action/reward 轨迹并按当前状态检索学习”。
+- 这只把来源选择与证据获取机制集成为 Partner-owned Event；没有复制外部执行器，也没有把外部实现整体
+  集成进 Partner。来源本身仍不是 Partner 生产能力。
+- 首次 JitRL 判断的假阴性被保留；`semantic_alias_v2` 新证据纠正为质量 `0.991`、支持后验 `0.917`。
+  该案例成为“语义验真必须允许可审计同义概念、同时保留纠错历史”的反例。
+- 来源选择 Candidate 的匹配覆盖率为 `0.372 → 0.889`，仅 `accept_for_shadow`；lexical/semantic evidence
+  coverage 不是业务效果或代码 adoption 证明。详见 ADR 0047。
+
+## 2026-08-31 从来源证据到最小 Partner-owned Candidate
+
+- ADR 0048 没有整体复制外部 Harness，只采用“预算化 handoff”和“按当前状态检索奖励轨迹”两个机制；
+  最终代码归 Partner 所有，并受现有 Receipt/Event/Candidate 合同约束。
+- adoption 编译器要求至少两个独立来源且同时含 code、paper；外部 Evidence Quote、source SHA256 与三个
+  Partner 本地实现 SHA256 都进入候选 provenance。
+- 五项目 shadow 对照证明 context/evidence preparation 改善；`integrated` 仍限定为 shadow Candidate，
+  不能将此外推成生产能力或长期业务 RL。
+
+## 2026-08-29 BDK 与“无需 RL”纠正
+
+- `partner_test/bdk_transformer` 的 FunctionPool 解决低维数值函数组合/门控问题，适合作为某个 Event 的
+  可替换模型 provider；它不具备 Agent 所需的状态机、工具协议、环境反馈、记忆、权限和任务承接能力，
+  因而不作为 Partner 底层架构。
+- `hermes_external_learning` 的 BO/MaxVar 实验说明：在连续可采样的科学实验空间里，可以用 GP acquisition
+  选择下一个点，不必训练 RL policy。这一结论不能外推为“Partner 自进化不需要 RL”。
+- Partner 按问题类型选算法：数值实验选点用 BO/active learning；重复策略路由可用保守 contextual
+  bandit/offline RL；代码、Event 和协议的改进用 Event-first 的可证伪实验与人工/硬门晋升。
+- 外部学习笔记首先是 `knowledge_draft`。只有被转写为具名 Event 执行合同、拥有匹配测试和真实证据时，
+  才能成为 executable Candidate；文字校验或主题分类不能替代效果验证。
 
 ## 1. 三种状态不得混淆
 
@@ -53,8 +102,8 @@ Partner 新增的离线 RL 层不微调 LLM 权重，而是将持久化 Campaign
 - 晋升：样本数、均奖励和成功率达标只允许 canary；生产仍必须通过
   `EvolutionExperiment -> PromotionDecision`。
 
-实现见 `partner/governance/rl_evolution.py`，设计见
-`docs/architecture/rl_evolution.md`。
+实现见 `partner/governance/experience_policy.py`，设计见
+`docs/architecture/experience_policy.md`。
 
 ## 4. 两小时运行的实际学习结果
 
@@ -86,3 +135,10 @@ Polar/SESA 类训练流程需要明确环境隔离、大量 rollout、GPU/分布
   却声称本回合没有 shell/file-write；Receipt `receipt_680db01279ab` 已追加 invalidate。
 - 生成时与最终治理时现在都会拒绝和真实写文件事件矛盾的能力声明。首个自进化尝试只在 shadow
   创建 Candidate Experiment，`promotion=false`，不修改 production。
+
+## 8. 2026-08-31 外部资料采用已进入下游验证
+
+Hermes/Codex 的预算化上下文思想与 JitRL 的 state/action/reward 运行时记忆没有整套复制，而是被编译为
+Partner 自己的 Event Candidate。ADR 0049 已用三个机制任务证明本地消费者能使用该证据，并通过失败实验
+修正完整对象预算、跨语言召回和来源去重。外部 LLM 验证因缺少项目数据外发授权未执行；这项缺口必须原样
+保留，不能用本地 deterministic benchmark 替代。

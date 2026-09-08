@@ -122,7 +122,7 @@ def _run(ctx: Any, mode: str) -> dict:
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf = working / f"{stem}.pdf"
     pdf_result = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": str(pdf),
-        "title": f"TargetDiff 官方拆分 {mode} 实验", "min_content_chars": 800, "min_sections": 5})
+        "title": f"TargetDiff 官方拆分 {mode} 实验", "report_style": "research", "min_content_chars": 800, "min_sections": 5})
     ok = bool(pdf_result.get("ok") and result.get("train_test_group_overlap") == 0)
     return {"ok": ok, "status": "completed" if ok else "verification_failed",
             "summary": f"官方 split {mode} 完成：train={result['train_rows']} test={result['test_rows']}，HGB-linear RMSE差={result['delta_hgb_minus_linear_rmse']:.4f}",

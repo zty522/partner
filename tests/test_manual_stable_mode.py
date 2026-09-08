@@ -24,6 +24,8 @@ from partner.mind.harness import (
     _local_create_file,
     _local_read_file,
     _maybe_trigger_self_reflect_after_write,
+    _preserve_candidate_verified_sources,
+    _step_retry_budget,
     _step_result_summary,
 )
 from partner.harness_core import TaskInstance
@@ -35,14 +37,60 @@ from partner.mind.executor import (
     _resolve_one_shot_output_files,
     _sanitize_user_report_text,
     _select_direct_governance_event,
+    _direct_campaign_terminal_payload,
     _run_batch_check_rule,
+    _text_only_result_from_steps,
+    push_text_now,
+    set_push_callback,
 )
+
+
+def test_file_delivery_prefers_pdf_when_no_non_pdf_format_is_required(tmp_path, monkeypatch):
+    pdf = tmp_path / "report.pdf"
+    md = tmp_path / "report.md"
+    machine = tmp_path / "result.json"
+    pdf.write_bytes(b"%PDF-1.4\n" + b"x" * 1200)
+    md.write_text("# report", encoding="utf-8")
+    machine.write_text("{}", encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(executor_module, "_workspace", str(tmp_path))
+    monkeypatch.setattr(executor_module, "_file_push_callback",
+                        lambda data, name, label: sent.append(name) or True)
+    monkeypatch.setattr(executor_module, "_file_was_recently_delivered", lambda path: False)
+    monkeypatch.setattr(executor_module, "_mark_file_delivered", lambda path: None)
+    ok, files = executor_module._push_one_shot_output_files(
+        str(tmp_path), {"files": [str(machine), str(md), str(pdf)]},
+        allow_workspace_fallback=False,
+    )
+    assert ok is True
+    assert files == [str(pdf)]
+    assert sent == ["report.pdf"]
+
+
+def test_file_delivery_keeps_machine_sidecars_local_when_no_pdf_exists(tmp_path, monkeypatch):
+    md = tmp_path / "review.md"
+    machine = tmp_path / "review.json"
+    md.write_text("# internal review", encoding="utf-8")
+    machine.write_text("{}", encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(executor_module, "_workspace", str(tmp_path))
+    monkeypatch.setattr(executor_module, "_file_push_callback",
+                        lambda data, name, label: sent.append(name) or True)
+    ok, files = executor_module._push_one_shot_output_files(
+        str(tmp_path), {"files": [str(machine), str(md)]},
+        allow_workspace_fallback=False,
+    )
+    assert ok is False
+    assert files == []
+    assert sent == []
 from partner.planner.batch_planner import (
     BatchPlanner,
     _ensure_write_artifact,
     _manual_environment_contract,
     _manual_experiment_intervention,
+    _manual_effective_intervention,
     _manual_preflight_plan,
+    _manual_research_active_learning_request,
 )
 from partner.state.config import manual_stable_mode, runtime_capability_enabled, runtime_mode
 from partner.v2.campaign_events import atomic_create_campaign, atomic_enqueue_campaign_work
@@ -64,6 +112,7 @@ def _workspace(tmp_path):
             "automatic_self_heal": False,
             "autonomous_cron": False,
             "step_messages": True,
+            "cognition_shadow_mirror": False,
         },
     }), encoding="utf-8")
     return root, instance
@@ -73,12 +122,26 @@ def test_manual_stable_is_fail_closed_and_experimental_capabilities_are_off(tmp_
     root, instance = _workspace(tmp_path)
     assert runtime_mode(str(instance)) == "manual_stable"
     assert manual_stable_mode(str(instance)) is True
-    for capability in ("automatic_campaigns", "automatic_iteration", "automatic_self_heal", "autonomous_cron"):
+    for capability in ("automatic_campaigns", "automatic_iteration", "automatic_self_heal", "autonomous_cron",
+                       "cognition_shadow_mirror"):
         assert runtime_capability_enabled(str(instance), capability) is False
     assert runtime_capability_enabled(str(instance), "step_messages") is True
 
 
-def test_manual_stable_never_selects_legacy_campaign_shortcut():
+def test_instance_native_step_retry_budget_hands_failures_to_learning_early():
+    ordinary = SimpleNamespace(user_message="ordinary manual task")
+    project = SimpleNamespace(
+        user_message="work [instance_native=true] [native_kind=project]",
+    )
+    learning = SimpleNamespace(
+        user_message="learn [instance_native=true] [native_kind=learning]",
+    )
+    assert _step_retry_budget(ordinary) == 3
+    assert _step_retry_budget(project) == 1
+    assert _step_retry_budget(learning) == 0
+
+
+def test_manual_stable_allows_only_explicit_durable_campaign_shortcut():
     handlers = {"continuous_project_step": object(), "review_manual_evolution_evidence": object()}
     assert _select_direct_governance_event(
         "请执行 continuous_project_step", handlers, manual_mode=True,
@@ -89,6 +152,31 @@ def test_manual_stable_never_selects_legacy_campaign_shortcut():
     assert _select_direct_governance_event(
         "执行 continuous_project_step", handlers, manual_mode=False,
     ) == "continuous_project_step"
+    assert _select_direct_governance_event(
+        "[PARTNER_CAMPAIGN campaign_id=campaign_x work_item_id=work_x] "
+        "直接执行确定性事件 continuous_project_step。",
+        handlers, manual_mode=True,
+    ) == "continuous_project_step"
+    assert _select_direct_governance_event(
+        "[PARTNER_CAMPAIGN campaign_id=campaign_x] 文档中提到 continuous_project_step",
+        handlers, manual_mode=True,
+    ) == ""
+
+
+def test_direct_campaign_terminal_payload_preserves_verified_outcome():
+    payload = {"task_id": "task-1", "user_request": "campaign work"}
+    terminal = _direct_campaign_terminal_payload(
+        payload,
+        event_type="framework_campaign_contract_audit",
+        direct_result={"ok": True, "summary": "58 tests passed"},
+        files=["/tmp/report.pdf"],
+        accepted=True,
+    )
+    assert terminal["completion_ok"] is True
+    assert terminal["delivery_confirmed"] is True
+    assert terminal["completed_event_types"] == ["framework_campaign_contract_audit"]
+    assert terminal["completed_files"] == ["/tmp/report.pdf"]
+    assert terminal["completion_findings"] == ["58 tests passed"]
 
 
 def test_manual_batch_dedup_uses_full_request_not_compact_title():
@@ -137,8 +225,22 @@ def test_ensure_write_recognizes_manual_evolution_review_as_artifact_producer(tm
     assert checked.plan[0].event_type == "review_manual_evolution_evidence"
 
 
+def test_ensure_write_does_not_turn_input_markdown_into_output_for_text_only_task(tmp_path):
+    plan = MicroPlan(
+        plan=[HarnessStep("read", "atomic_inspect_file", {"path": "/tmp/README.md"}, [])],
+        expected_artifacts=[],
+    )
+    checked = _ensure_write_artifact(
+        plan,
+        str(tmp_path),
+        "真实读取 /tmp/README.md 的第一行，只回复实际文本；不生成文件、不修改任何文件。",
+    )
+    assert checked.expected_artifacts == []
+    assert [step.event_type for step in checked.plan] == ["atomic_inspect_file"]
+
+
 def test_rule_check_treats_existing_absolute_paths_as_inputs_and_grounded_citations(tmp_path, monkeypatch):
-    _, instance = _workspace(tmp_path)
+    root, instance = _workspace(tmp_path)
     monkeypatch.setattr(executor_module, "_workspace", str(instance))
     source_paths = []
     for index in range(3):
@@ -161,6 +263,131 @@ def test_rule_check_treats_existing_absolute_paths_as_inputs_and_grounded_citati
     assert result["satisfied"] is True
     assert result["citation_count"] >= 3
     assert not any(item.startswith("named_artifact:source_") for item in result["missing"])
+
+
+def test_rule_check_does_not_apply_business_citation_gate_to_native_learning_artifact(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    task = TaskInstance.create(
+        str(instance),
+        "对真实 Episode 做主动学习诊断\n"
+        "[instance_native=true] [native_kind=learning] [source_episode=episode_real]",
+    )
+    report = os.path.join(task.working_dir, "active_learning_review_episode_real.json")
+    with open(report, "w", encoding="utf-8") as handle:
+        json.dump({
+            "episode_id": "episode_real",
+            "failure_class": "runtime.timeout",
+            "mechanism": "planner_timeout",
+            "production_effective": False,
+            "repair_proposal": "缩小读取范围后做 matched validation",
+        }, handle, ensure_ascii=False)
+    task.update_expected_artifacts([{"type": "file", "pattern": "*.json", "required": True}])
+
+    result = _run_batch_check_rule(task, "主动学习诊断研究失败机制", {
+        "check": {"min_file_size": 1, "min_file_count": 1, "min_citations": 3},
+    })
+
+    assert result["satisfied"] is True, result
+    assert "citations<3" not in result["missing"]
+
+
+def test_rule_check_does_not_apply_research_citation_gate_to_native_project_event(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    task = TaskInstance.create(
+        str(instance),
+        "分子生成方法创新与实践\n"
+        "[instance_native=true] [native_kind=project] [project_id=molecular_generation]",
+    )
+    report = os.path.join(task.working_dir, "molecular_diversity_report.md")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("# Diversity\n" + "机器计算的相似度与多样性指标。" * 20)
+    task.update_expected_artifacts([{"type": "file", "pattern": "*.md", "required": True}])
+
+    result = _run_batch_check_rule(task, "承接上一轮 continuation.md，推进分子生成方法与效果对比", {
+        "check": {"min_file_size": 1, "min_file_count": 1, "min_citations": 3},
+    })
+
+    assert result["satisfied"] is True, result
+    assert "citations<3" not in result["missing"]
+    assert "named_artifact:continuation.md" not in result["missing"]
+
+
+def test_rule_check_keeps_citation_gate_for_ordinary_research_task(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    task = TaskInstance.create(str(instance), "研究方法并形成报告")
+    report = os.path.join(task.working_dir, "research_report.md")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("# Report\n" + "没有来源的分析。" * 30)
+    task.update_expected_artifacts([{"type": "file", "pattern": "*.md", "required": True}])
+
+    result = _run_batch_check_rule(task, "研究方法并形成报告", {
+        "check": {"min_file_size": 1, "min_file_count": 1, "min_citations": 3},
+    })
+
+    assert result["satisfied"] is False
+    assert "citations<3" in result["missing"]
+
+
+def test_ensure_write_artifact_accepts_filename_contract_from_planner(tmp_path):
+    plan = MicroPlan(
+        plan=[HarnessStep(
+            "generate", "generate_text", {"task": "形成真实下一步报告"}, [],
+        )],
+        expected_artifacts=[{"filename": "next_step_report.md", "purpose": "下一步报告"}],
+    )
+
+    checked = _ensure_write_artifact(plan, str(tmp_path), "生成下一步报告")
+
+    assert checked.expected_artifacts[0]["pattern"] == "next_step_report.md"
+    writer = checked.plan[-1]
+    assert writer.event_type == "atomic_write_artifact"
+    assert writer.parameters["path"] == "next_step_report.md"
+    assert writer.depends_on == ["generate"]
+
+
+def test_rule_check_typed_source_path_with_spaces_is_not_an_output(tmp_path, monkeypatch):
+    root, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    source = tmp_path / "Without Gradient Updates.pdf"
+    source.write_bytes(b"%PDF-1.4\nsource evidence\n%%EOF")
+    task = TaskInstance.create(str(instance), "matched report")
+    report = os.path.join(task.working_dir, "research_adoption_report.md")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("# Report\n" + "verified analysis " * 20)
+    task.update_expected_artifacts([{"type": "file", "pattern": "*.md", "required": True}])
+
+    result = _run_batch_check_rule(
+        task,
+        f"source_paths=[{source}] 生成 research_adoption_report.md",
+        {"check": {"min_file_size": 10, "min_file_count": 1}},
+    )
+
+    assert "named_artifact:updates.pdf" not in result["missing"], result
+
+
+def test_rule_check_uses_durable_user_message_when_root_goal_was_reduced(tmp_path, monkeypatch):
+    root, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    source = tmp_path / "Without Gradient Updates.pdf"
+    source.write_bytes(b"%PDF-1.4\nsource evidence\n%%EOF")
+    task = TaskInstance.create(
+        str(instance),
+        f"source_paths=[{source}] 生成 research_adoption_report.md",
+    )
+    report = os.path.join(task.working_dir, "research_adoption_report.md")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("# Report\n" + "verified analysis " * 20)
+    task.update_expected_artifacts([{"type": "file", "pattern": "*.md", "required": True}])
+
+    result = _run_batch_check_rule(
+        task,
+        "active project summary mentions Updates.pdf but omitted typed inputs",
+        {"check": {"min_file_size": 10, "min_file_count": 1}},
+    )
+    assert "named_artifact:updates.pdf" not in result["missing"], result
 
 
 def test_manual_stable_blocks_campaign_creation_and_enqueue(tmp_path):
@@ -246,6 +473,61 @@ def test_source_path_extension_is_not_treated_as_output_requirement():
     assert ".py" in _required_output_exts("请修改 trajectory.py 并保存")
 
 
+def test_pdf_input_manifest_is_not_treated_as_pdf_output_requirement():
+    required = _required_output_exts(
+        "请做只读研究，source_paths=[/mnt/e/external/paper one.pdf]；"
+        "保留 source_path 和 evidence_quote，不生成文件。"
+    )
+    assert ".pdf" not in required
+
+
+def test_pdf_evidence_sentence_after_markdown_request_is_not_pdf_output():
+    required = _required_output_exts(
+        "生成不少于1200字的 Markdown 报告。PDF 当前直接证据描述 WebRL，不得冒充 JitRL。"
+    )
+    assert ".md" in required
+    assert ".pdf" not in required
+
+
+def test_explicit_research_active_learning_chain_is_event_first(tmp_path):
+    root, _ = _workspace(tmp_path)
+    instance = root / "instances/04"
+    instance.mkdir(exist_ok=True)
+    task_dir = instance / "state/tasks/research-chain"
+    task_dir.mkdir(parents=True)
+    source_a = root / "external/code/a.py"
+    source_b = root / "external/literature/b.pdf"
+    source_a.parent.mkdir(parents=True)
+    source_b.parent.mkdir(parents=True)
+    source_a.write_text("context compaction", encoding="utf-8")
+    source_b.write_bytes(b"%PDF-1.4\n")
+    message = (
+        "research_active_learning_observe(project_id=research_1,goal=learn continuity,"
+        "questions=[context compaction,runtime feedback],"
+        f"source_paths=[{source_a},{source_b}]);"
+        "research_active_learning_select(project_id同上);"
+        "research_active_learning_investigate(project_id同上);"
+        "research_active_learning_matched(project_id同上)"
+    )
+    assert _manual_research_active_learning_request(message)["project_id"] == "research_1"
+    registry = _manual_registry()
+    noop = lambda ctx, params: {"ok": True}
+    for name in (
+        "research_active_learning_observe", "research_active_learning_select",
+        "research_active_learning_investigate", "research_active_learning_matched",
+    ):
+        registry.register(HarnessEventSpec(name, "atomic", name, noop, execution_method="local"))
+    checked = _manual_preflight_plan(
+        MicroPlan(plan=[], expected_artifacts=[]), registry=registry,
+        workspace=str(instance), working_dir=str(task_dir), user_message=message,
+    )
+    assert [step.event_type for step in checked.plan] == [
+        "research_active_learning_observe", "research_active_learning_select",
+        "research_active_learning_investigate", "research_active_learning_matched",
+    ]
+    assert checked.expected_artifacts == []
+
+
 def test_explicit_markdown_report_filename_need_not_contain_report_word():
     assert _final_report_delivery_satisfied(
         "生成 harness_episode_learning_closed_loop.md 中文报告",
@@ -269,6 +551,65 @@ def test_reasoning_trace_is_removed_from_user_facing_summary():
     text = _sanitize_user_report_text("<think>private reasoning</think>\n实际结论：manual_stable")
     assert "private reasoning" not in text
     assert text == "实际结论：manual_stable"
+
+
+def test_user_text_delivery_is_audited_and_deduplicated_across_runtime_memory(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    sent = []
+    set_push_callback(lambda text: sent.append(text) or True)
+    verbose = (
+        "「真实读取并比较下面四个文件_ 1」这一轮后台执行超过单步时间限制，已停止等待当前子步骤。\n\n"
+        "本轮不会编造结果；接下来会把目标拆成更小的可验证动作继续推进。"
+    )
+
+    first = push_text_now(verbose, source="project:backend_timeout_notice", dedup_ttl_sec=21600)
+    executor_module._acknowledged_text_deliveries.clear()  # simulate a fresh process
+    second = push_text_now(verbose, source="project:backend_timeout_notice", dedup_ttl_sec=21600)
+
+    assert first["status"] == "sent"
+    assert second["status"] == "already_sent"
+    assert second["deduplicated"] is True
+    assert sent == ["⏳ 任务「真实读取并比较下面四个文件_ 1」执行超时，正在重试"]
+    rows = [json.loads(line) for line in
+            (instance / "state" / "user_message_delivery.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["status"] for row in rows] == ["attempting", "sent", "deduplicated"]
+    assert rows[1]["acknowledged"] is True
+
+
+def test_failed_user_text_delivery_is_audited_but_not_deduplicated(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    set_push_callback(lambda _text: False)
+
+    first = push_text_now("可重试的真实消息", source="test")
+    second = push_text_now("可重试的真实消息", source="test")
+
+    assert first["status"] == second["status"] == "failed"
+    rows = [json.loads(line) for line in
+            (instance / "state" / "user_message_delivery.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["status"] for row in rows] == ["attempting", "failed", "attempting", "failed"]
+
+
+def test_same_step_receipt_is_not_deduplicated_across_distinct_manual_events(tmp_path, monkeypatch):
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    sent = []
+    set_push_callback(lambda text: sent.append(text) or True)
+
+    first = push_text_now("⏳ 1/1 读取文件", source="batch_plan:step_start", parent_id="event-a")
+    second = push_text_now("⏳ 1/1 读取文件", source="batch_plan:step_start", parent_id="event-b")
+
+    assert first["status"] == second["status"] == "sent"
+    assert sent == ["⏳ 1/1 读取文件", "⏳ 1/1 读取文件"]
+
+
+def test_text_only_first_line_is_grounded_in_event_result_not_input_filename():
+    result = _text_only_result_from_steps(
+        "读取 README.md 第一行，只回复文字",
+        {"step1": {"ok": True, "result": {"path": "/tmp/README.md", "content": "# 标题\n正文"}}},
+    )
+    assert result == "# 标题"
 
 
 def test_manual_report_write_does_not_inject_strict_reflect(tmp_path):
@@ -347,6 +688,250 @@ def test_manual_candidate_prompt_contract_is_feature_isolated(tmp_path):
     assert "候选实验专属" not in _manual_environment_contract(str(instance), str(task_dir), baseline)
     assert "候选实验专属" in _manual_environment_contract(str(instance), str(task_dir), candidate)
     assert _manual_experiment_intervention("ordinary production task")["route"] == "production_current"
+
+
+def test_research_adoption_candidate_is_forced_through_execute_candidate_event(tmp_path):
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/research-candidate"
+    task_dir.mkdir(parents=True)
+    registry = _manual_registry()
+    noop = lambda ctx, params: {"ok": True}
+    registry.register(HarnessEventSpec(
+        "execute_candidate", "atomic", "candidate", noop,
+        execution_method="local",
+    ))
+    registry.register(HarnessEventSpec(
+        "generate_text", "atomic", "generate", noop,
+        execution_method="llm",
+    ))
+    registry.register(HarnessEventSpec(
+        "push_files", "atomic", "push", noop,
+        external_call=True, execution_method="local",
+    ))
+    registry.register(HarnessEventSpec(
+        "create_file", "atomic", "write", noop,
+        produces_artifact=True, execution_method="local",
+    ))
+    plan = MicroPlan(plan=[
+        HarnessStep("candidate", "call_agent_skill", {
+            "candidate_id": "candidate_research_test",
+            "event_params": {"project_id": "literature_github_learning",
+                             "research_project_id": "research", "query": "compare"},
+        }, []),
+        HarnessStep("candidate_placeholder", "atomic_inspect_file", {
+            "path": "${candidate.result.artifact_path}",
+        }, ["candidate"]),
+        HarnessStep("report", "generate_text", {
+            "data": "$candidate.result.content", "prompt": "grounded report",
+        }, ["candidate_placeholder"]),
+        HarnessStep("write", "create_file", {
+            "path": "report.md", "content": "$report.result.content",
+        }, ["report"]),
+    ], expected_artifacts=[])
+    message = ("[strategy_id=candidate_evidence_trajectory_context_v1] [policy_arm=candidate] "
+               "[experiment_id=experiment_business] [match_key=pair_1] 发送文件 push_files")
+    checked = _manual_preflight_plan(
+        plan, registry=registry, workspace=str(instance), working_dir=str(task_dir),
+        user_message=message)
+    assert _manual_experiment_intervention(message)["route"] == "research_adoption_event_candidate_v1"
+    assert checked.plan[0].event_type == "execute_candidate"
+    assert checked.plan[0].parameters["mode"] == "shadow"
+    assert all(step.id != "candidate_placeholder" for step in checked.plan)
+    assert checked.plan[1].parameters["data"] == "$candidate.result.context"
+    assert checked.plan[1].depends_on == ["candidate"]
+    assert "Research-Adoption Candidate 真值合同" in checked.plan[1].parameters["prompt"]
+    assert all(step.event_type != "push_files" for step in checked.plan)
+
+
+def test_research_adoption_explicit_request_compiles_without_llm_planner(tmp_path):
+    from partner.planner.batch_planner import _deterministic_research_candidate_plan
+
+    message = (
+        "[strategy_id=candidate_evidence_trajectory_context_v1][policy_arm=candidate]"
+        "[experiment_id=experiment_business][match_key=pair_1] "
+        "Candidate ID=candidate_research_test；event_params={query:compare WebRL and Hermes, "
+        "project_id:literature_github_learning, research_project_id:research_v1, "
+        "instance_id:04, budget_chars:8000} source_paths=[/tmp/a.py,/tmp/Jit RL.pdf]"
+    )
+    plan = _deterministic_research_candidate_plan(message, str(tmp_path))
+    assert plan is not None
+    assert [step.event_type for step in plan.plan] == [
+        "execute_candidate", "generate_text", "create_file", "push_files",
+    ]
+    assert plan.plan[0].parameters["event_params"]["query"] == "compare WebRL and Hermes"
+    assert plan.plan[0].parameters["event_params"]["budget_chars"] == 8000
+    assert plan.plan[0].parameters["event_params"]["source_paths"] == [
+        "/tmp/a.py", "/tmp/Jit RL.pdf",
+    ]
+    assert plan.plan[1].parameters["data"] == "$candidate_context.result"
+    assert "JitRL" in plan.plan[1].parameters["prompt"]
+    assert "不得标 event_recording" in plan.plan[1].parameters["prompt"]
+    assert "不得标 task_lifecycle" in plan.plan[1].parameters["prompt"]
+
+
+def test_research_adoption_baseline_compiles_same_bounded_business_shape(tmp_path):
+    from partner.planner.batch_planner import _deterministic_research_baseline_plan
+
+    message = (
+        "[strategy_id=baseline_governed_context_v1][policy_arm=baseline]"
+        "[experiment_id=experiment_business][match_key=pair_1] "
+        "event_params={query:compare WebRL and Hermes, "
+        "project_id:literature_github_learning, instance_id:04, budget_chars:8000} "
+        "source_paths=[/tmp/hermes.py,/tmp/Jit RL paper.pdf]"
+    )
+    plan = _deterministic_research_baseline_plan(message, str(tmp_path))
+    assert plan is not None
+    assert [step.event_type for step in plan.plan] == [
+        "select_context", "generate_text", "create_file",
+    ]
+    assert plan.plan[0].parameters["query"] == "compare WebRL and Hermes"
+    assert plan.plan[0].parameters["budget_chars"] == 8000
+    assert plan.plan[0].parameters["use_llm"] is False
+    assert plan.plan[0].parameters["source_paths"] == [
+        "/tmp/hermes.py", "/tmp/Jit RL paper.pdf",
+    ]
+    assert plan.plan[1].parameters["data"] == "$baseline_context.result"
+
+
+def test_promoted_preflight_policy_activates_only_unmarked_04_production(tmp_path):
+    root, instance03 = _workspace(tmp_path)
+    instance04 = root / "instances/04"
+    instance04.mkdir(parents=True)
+    control = root / "share/mind/governance/experience_guided_policy/control_policy.json"
+    control.parent.mkdir(parents=True)
+    control.write_text(json.dumps({"promoted": {
+        "literature_github_learning:planning.semantic_preflight":
+            "candidate_preflight_contract_v2"
+    }}), encoding="utf-8")
+    production = _manual_effective_intervention(str(instance04), "ordinary source report")
+    assert production["active"] is True
+    assert production["policy_arm"] == "production"
+    assert production["route"] == "production_candidate_prompt_contract_v2"
+    assert _manual_effective_intervention(str(instance03), "ordinary source report")["active"] is False
+
+
+def test_sprint18_campaign_is_isolated_from_existing_production_canary(tmp_path):
+    root, _ = _workspace(tmp_path)
+    instance04 = root / "instances/04"
+    instance04.mkdir(parents=True)
+    result = _manual_effective_intervention(
+        str(instance04),
+        "[PARTNER_CAMPAIGN campaign_id=campaign_test work_item_id=work_test] "
+        "[sprint18=true] investigate harness evidence",
+    )
+    assert result["active"] is False
+    assert result["route"] == "sprint18_isolated_candidate"
+
+
+def test_promoted_preflight_policy_preserves_verified_sources_in_production(tmp_path):
+    root, _ = _workspace(tmp_path)
+    instance04 = root / "instances/04"
+    instance04.mkdir(parents=True)
+    control = root / "share/mind/governance/experience_guided_policy/control_policy.json"
+    control.parent.mkdir(parents=True)
+    control.write_text(json.dumps({"promoted": {
+        "literature_github_learning:planning.semantic_preflight":
+            "candidate_preflight_contract_v2"
+    }}), encoding="utf-8")
+    data = {"verified_sources": json.dumps({
+        "README": {"source_path": "/evidence/README.md",
+                   "evidence_quote": "This is a production quote longer than twenty characters."}
+    })}
+    content = _preserve_candidate_verified_sources(
+        "ordinary production task", data, "# Report\n\nAnalysis", str(instance04))
+    assert "source_path: /evidence/README.md" in content
+
+
+def test_candidate_prompt_includes_only_verified_explicit_input_manifest(tmp_path):
+    root, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/isolated-manifest"
+    source = root / "instances/04/state/tasks/source/evidence.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("grounded", encoding="utf-8")
+    missing = source.parent / "missing.md"
+    baseline = (
+        f"[strategy_id=baseline_current_preflight_v1] [policy_arm=baseline] "
+        f"[experiment_id=e] [match_key=p] compare {source} and {missing}"
+    )
+    candidate = baseline.replace(
+        "baseline_current_preflight_v1", "candidate_preflight_contract_v2"
+    ).replace("policy_arm=baseline", "policy_arm=candidate")
+    baseline_contract = _manual_environment_contract(str(instance), str(task_dir), baseline)
+    candidate_contract = _manual_environment_contract(str(instance), str(task_dir), candidate)
+    assert "verified_input_manifest" not in baseline_contract
+    assert "verified_input_manifest" in candidate_contract
+    assert str(source.resolve()) in candidate_contract
+    assert str(missing.resolve()) not in candidate_contract
+
+
+def test_manual_preflight_injects_extensionless_explicit_evidence(tmp_path):
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/extensionless"
+    task_dir.mkdir(parents=True)
+    license_path = task_dir / "LICENSE"
+    license_path.write_text("permission is hereby granted", encoding="utf-8")
+    plan = MicroPlan(plan=[], expected_artifacts=[])
+    checked = _manual_preflight_plan(
+        plan, registry=_manual_registry(), workspace=str(instance), working_dir=str(task_dir),
+        user_message=f"读取 {license_path}",
+    )
+    assert checked.plan[0].event_type == "atomic_inspect_file"
+    assert checked.plan[0].parameters["path"] == str(license_path.resolve())
+
+
+def test_rule_quality_gate_counts_real_extensionless_source_as_citation(tmp_path, monkeypatch):
+    from partner.mind import executor as executor_module
+
+    _, instance = _workspace(tmp_path)
+    monkeypatch.setattr(executor_module, "_workspace", str(instance))
+    task_dir = instance / "state/tasks/extensionless-quality"
+    task_dir.mkdir(parents=True)
+    license_path = task_dir / "LICENSE"
+    license_path.write_text("permission is hereby granted", encoding="utf-8")
+    report = task_dir / "report.md"
+    report.write_text(f"source_path: {license_path}\n", encoding="utf-8")
+    task = TaskInstance(
+        task_id="extensionless-quality", user_message="方法报告", created_at="2026-01-01T00:00:00",
+        working_dir=str(task_dir),
+        expected_artifacts=[],
+    )
+    result = executor_module._run_batch_check_rule(task, "方法报告", {
+        "check": {"min_file_size": 1, "min_file_count": 1, "min_citations": 1}
+    })
+    assert result["satisfied"] is True
+    assert str(license_path.resolve()) in result["grounded_path_citations"]
+
+
+def test_manual_business_plan_cannot_invoke_active_learning_control_plane(tmp_path):
+    _, instance = _workspace(tmp_path)
+    task_dir = instance / "state/tasks/control-plane"
+    task_dir.mkdir(parents=True)
+    registry = _manual_registry()
+    event_type = "agent_active_learning_preflight_manifest_fresh_canary"
+    registry.register(HarnessEventSpec(
+        event_type, "atomic", "control", lambda ctx, params: {"ok": True}))
+    plan = MicroPlan(plan=[HarnessStep("control", event_type, {}, [])], expected_artifacts=[])
+    with pytest.raises(ValueError, match="autonomous event"):
+        _manual_preflight_plan(
+            plan, registry=registry, workspace=str(instance), working_dir=str(task_dir),
+            user_message="[policy_arm=candidate] ordinary business observation",
+        )
+
+
+def test_verified_source_preservation_is_candidate_only_and_deterministic():
+    data = {"verified_sources": json.dumps({
+        "README": {"source_path": "/evidence/README.md",
+                   "evidence_quote": "This is an exact source quotation longer than twenty characters."}
+    })}
+    baseline = _preserve_candidate_verified_sources(
+        "[strategy_id=baseline_current_preflight_v1] [policy_arm=baseline] "
+        "[experiment_id=e] [match_key=m]", data, "# Report\n\nAnalysis body")
+    candidate = _preserve_candidate_verified_sources(
+        "[strategy_id=candidate_preflight_contract_v2] [policy_arm=candidate] "
+        "[experiment_id=e] [match_key=m]", data, "# Report\n\nAnalysis body")
+    assert "source_path:" not in baseline
+    assert "source_path: /evidence/README.md" in candidate
+    assert "evidence_quote: This is an exact source quotation" in candidate
 
 
 def test_candidate_preflight_binds_literal_named_source_paths_but_baseline_does_not(tmp_path):
@@ -720,7 +1305,7 @@ def test_promoted_truth_policy_interposes_deterministic_extract_before_report(tm
     root, _ = _workspace(tmp_path)
     instance = root / "instances" / "04"
     instance.mkdir(parents=True)
-    control = root / "share" / "mind" / "governance" / "rl" / "control_policy.json"
+    control = root / "share" / "mind" / "governance" / "experience_guided_policy" / "control_policy.json"
     control.parent.mkdir(parents=True)
     control.write_text(json.dumps({"promoted": {
         "literature_github_learning:manual_final_artifact_truth": "manual_stable_truth_audit_v2",
@@ -748,7 +1333,7 @@ def test_promoted_truth_policy_keeps_exact_extract_on_lossy_synthesis_path(tmp_p
     root, _ = _workspace(tmp_path)
     instance = root / "instances" / "04"
     instance.mkdir(parents=True)
-    control = root / "share" / "mind" / "governance" / "rl" / "control_policy.json"
+    control = root / "share" / "mind" / "governance" / "experience_guided_policy" / "control_policy.json"
     control.parent.mkdir(parents=True)
     control.write_text(json.dumps({"promoted": {
         "literature_github_learning:manual_final_artifact_truth": "manual_stable_truth_audit_v2",
@@ -1363,6 +1948,44 @@ def test_retried_llm_event_counts_every_real_invocation(tmp_path, monkeypatch):
     ))
     assert calls == 2
     assert model_calls == 2
+
+
+def test_dependency_skipped_step_persists_authoritative_terminal_event(tmp_path):
+    async def fail(ctx, params):
+        return {"ok": False, "error": "source unavailable", "retryable": False}
+
+    async def must_not_run(ctx, params):
+        raise AssertionError("dependency-skipped handler must not run")
+
+    registry = EventRegistry()
+    registry.register(HarnessEventSpec("read", "atomic", "read", fail))
+    registry.register(HarnessEventSpec(
+        "generate_text", "atomic", "generate", must_not_run, execution_method="llm",
+    ))
+    workspace = tmp_path / "workspace/instances/03"
+    workspace.mkdir(parents=True)
+    task = TaskInstance.create(str(workspace), "terminalize skipped dependency")
+    ctx = SimpleNamespace(
+        title="terminal observability", task_instance=task, progress_callback=None,
+        workspace=str(workspace), project_dir=str(tmp_path),
+        event=SimpleNamespace(type=SimpleNamespace(value="manual"), payload={}),
+    )
+    results, model_calls, _, failures = asyncio.run(
+        PlanExecutor(registry, StateStore(str(tmp_path))).execute(ctx, [
+            HarnessStep("source", "read", {}, []),
+            HarnessStep("compose", "generate_text", {"data": "$source.result.content"}, ["source"]),
+        ])
+    )
+    rows = [json.loads(line) for line in open(task.log_path, encoding="utf-8")]
+    terminal = [row for row in rows
+                if row.get("event") == "plan_executor_step_completed"
+                and row.get("step_id") == "compose"]
+    assert results["compose"]["terminal_status"] == "skipped"
+    assert model_calls == 0
+    assert failures["compose"].startswith("skipped:")
+    assert len(terminal) == 1
+    assert terminal[0]["terminal_status"] == "skipped"
+    assert terminal[0]["terminal_reason"] == "required_dependencies_failed"
 
 
 def test_llm_handler_uses_concrete_harness_event_and_strips_thinking(tmp_path):

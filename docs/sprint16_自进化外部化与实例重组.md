@@ -147,7 +147,7 @@ active_slots 当前 = `["03", "02"]`（不是默认 `01/02`）。
   实例已经做过"消化外部代码库 → 写报告"的事，但没有真正变成 candidate skill。
 - `share/mind/external/` 已经有 5 个子目录（external / governance / system /
   user / skill_cards.jsonl）—— 已有外部治理结构。
-- `share/mind/governance/rl/` 12 类轨迹/策略/评估目录。
+- `share/mind/governance/experience_guided_policy/` 12 类轨迹/策略/评估目录。
 - `share/mind/governance/experiments/` 15 个 experiment JSON。
 - `share/mind/governance/episodes/` 已归约多个 episode。
 - `share/mind/governance/experiment_observations/experiment_7736f187bcad/` 16
@@ -606,7 +606,7 @@ created_by: instance_id
 
 | 位置 | 描述 | 优 | 缺 |
 |---|---|---|---|
-| candidate_skills/ | `share/mind/governance/rl/candidate_skills/`（现状） | 已有 evaluator/registry/版本控制；Bug #39 修后 glob 行为正确 | 与 existing RL 评估器耦合；外部 ingest 的 candidate 是否走同一 canary 流程待定 |
+| candidate_skills/ | `share/mind/governance/experience_guided_policy/candidate_skills/`（现状） | 已有 evaluator/registry/版本控制；Bug #39 修后 glob 行为正确 | 与 existing RL 评估器耦合；外部 ingest 的 candidate 是否走同一 canary 流程待定 |
 | skill_cards_external/ | `share/mind/external/skill_cards_external/`（新增） | 与现有 external 治理结构对齐；schema 可不同 | 需要新建 evaluator；与 RL 闭环不通 |
 | external/skill_drafts/ | `share/mind/external/external/skill_drafts/`（在 share/mind/external/external/ 下） | 紧贴 external/ 原始资料；metadata 完整 | 与 partner/governance 评估器脱节 |
 

@@ -77,7 +77,7 @@ def run_shadow_evolution(workspace: str, *, project_id: str = "") -> dict[str, A
             "candidate reduces target failure rate without lower business progress or observability",
             "full regression passes and a user-authorized PromotionDecision exists",
         ],
-        "tests": ["tests/test_episode_trace.py", "tests/test_rl_control.py"],
+        "tests": ["tests/test_episode_trace.py", "tests/test_policy_control.py"],
         "project_id": project_id or "partner_self_evolution",
     }).get("experiment") or {})
     result = {
@@ -88,7 +88,7 @@ def run_shadow_evolution(workspace: str, *, project_id: str = "") -> dict[str, A
         "experiment_id": experiment.get("experiment_id") or "", "created_at": now_iso(),
         "next_gate": "collect matched baseline/candidate shadow episodes; minimum 10 per arm",
     }
-    out_dir = root / "share/mind/governance/rl/shadow_experiments"
+    out_dir = root / "share/mind/governance/experience_guided_policy/shadow_experiments"
     atomic_json(out_dir / f"{result['experiment_id'] or candidate_id}.json", result)
-    append_jsonl(root / "share/mind/governance/rl/shadow_runs.jsonl", result)
+    append_jsonl(root / "share/mind/governance/experience_guided_policy/shadow_runs.jsonl", result)
     return {"ok": True, **result}

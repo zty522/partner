@@ -171,6 +171,16 @@ class Partner:
         )
         if cancelled:
             logger.warning("[TASK_QUEUE] reconciled %d orphaned pending task(s) at startup", cancelled)
+        try:
+            from ..harness_core.task_instance import reconcile_orphaned_task_instances
+
+            finalized = reconcile_orphaned_task_instances(self.workspace, startup_at)
+            if finalized:
+                logger.warning(
+                    "[TASK_INSTANCE] finalized %d restart-orphaned execution(s)", finalized,
+                )
+        except Exception as exc:
+            logger.warning("[TASK_INSTANCE] restart reconciliation failed: %s", exc)
 
         self.state.heartbeat(status="")
         # The config file is shared by all instances.  `__main__` resolves an

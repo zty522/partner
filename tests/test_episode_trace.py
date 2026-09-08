@@ -64,6 +64,63 @@ def test_episode_trace_reduces_raw_log_into_correlated_graph(tmp_path):
     assert Path(result["bundle"], "trace.jsonl").is_file()
 
 
+def test_episode_trace_treats_dependency_skip_as_terminal_not_unclosed_failure(tmp_path):
+    root, task_id = _task(tmp_path, failed_preflight=False, task_id="task-skipped")
+    task_dir = Path(root) / "instances/04/state/tasks" / task_id
+    rows = [json.loads(line) for line in (task_dir / "task_log.jsonl").read_text().splitlines()]
+    rows.extend([
+        {"ts": "2026-01-01T00:00:07Z", "event": "plan_executor_step_started",
+         "step_id": "compose", "event_type": "generate_text", "depends_on": ["source"]},
+        {"ts": "2026-01-01T00:00:08Z", "event": "plan_executor_step_completed",
+         "step_id": "compose", "event_type": "generate_text", "ok": False,
+         "terminal_status": "skipped", "terminal_reason": "required_dependencies_failed",
+         "failed_dependencies": ["source"], "files": [], "elapsed_sec": 0},
+    ])
+    (task_dir / "task_log.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    state = reduce_task_episode(root, instance_id="04", task_id=task_id)["state"]
+    compose = next(row for row in state["tool_calls"] if row["step_id"] == "compose")
+    assert compose["status"] == "skipped"
+    assert compose["terminal_reason"] == "required_dependencies_failed"
+    assert "lifecycle.unclosed_tool" not in state["failure_classes"]
+    assert "tool.generate_text.failed" not in state["failure_classes"]
+
+
+def test_episode_trace_classifies_final_acceptance_failure_without_failed_tool(tmp_path):
+    root, task_id = _task(tmp_path, failed_preflight=False, task_id="task-acceptance-failed")
+    task_dir = Path(root) / "instances/04/state/tasks" / task_id
+    rows = [json.loads(line) for line in (task_dir / "task_log.jsonl").read_text().splitlines()]
+    rows.insert(-1, {"ts": "2026-01-01T00:00:05.5Z", "event": "iteration_check",
+                     "satisfied": False, "missing": ["named_artifact:continuation.md"]})
+    rows[-1] = {"ts": "2026-01-01T00:00:06Z", "event": "manual_iteration_governance",
+                "status": "manual_outcome_rejected", "ok": False,
+                "trajectory": {"trajectory": {
+                    "project_id": "literature_github_learning",
+                    "outcome": {"status": "failed", "failure_mechanism": ""},
+                }}}
+    (task_dir / "task_log.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    state = reduce_task_episode(root, instance_id="04", task_id=task_id)["state"]
+    expected = "verification.acceptance_contract/implicit_handoff_artifact"
+    assert expected in state["failure_classes"]
+    assert any(row.get("source") == "final_acceptance_governance"
+               and row.get("mechanism") == expected
+               for row in state["failure_details"])
+
+
+def test_episode_trace_marks_completed_duplicate_as_learning_signal(tmp_path):
+    root, task_id = _task(tmp_path, failed_preflight=False, task_id="task-duplicate")
+    trajectory = {
+        "project_id": "literature_github_learning",
+        "outcome": {"status": "completed", "duplicate_outcome": True,
+                    "failure_mechanism": ""},
+    }
+    state = reduce_task_episode(root, instance_id="04", task_id=task_id,
+                                trajectory=trajectory)["state"]
+    assert "outcome.duplicate_semantic_result" in state["failure_classes"]
+
+
 def test_reward_vector_truth_failure_cannot_be_compensated():
     value = reward_vector({
         "state": {"delivery_confirmed": True},
@@ -90,6 +147,38 @@ def test_candidate_verified_source_footer_is_exact_and_candidate_only():
     assert _preserve_candidate_verified_sources("ordinary production", data, bad) == bad
 
 
+def test_continuous_candidate_preserves_list_shaped_verified_evidence():
+    source = "/tmp/continuous-source.py"
+    quote = "A machine-verified continuous campaign quote longer than twenty characters."
+    data = {"verified_source_evidence": [{
+        "source_path": source,
+        "evidence_quote": quote,
+        "question": "How should context be retained?",
+    }]}
+    marker = ("[strategy_id=candidate_evidence_trajectory_context_v1] "
+              "[policy_arm=candidate] [experiment_id=continuous] [match_key=p]")
+    repaired = _preserve_candidate_verified_sources(
+        marker,
+        data,
+        "# Report\nBody\n\n# 七、Claim Ledger — C1\nclaim_id: C1\nclaim_text: incomplete",
+    )
+    assert f"source_path: {source}" in repaired
+    assert f"evidence_quote: {quote}" in repaired
+    assert "support_type: direct" in repaired
+    assert "claim_id: C1" not in repaired
+
+
+def test_continuous_baseline_does_not_receive_candidate_evidence_footer():
+    data = {"verified_source_evidence": [{
+        "source_path": "/tmp/source.py",
+        "evidence_quote": "A baseline must not receive this candidate-only verified quote.",
+    }]}
+    marker = ("[strategy_id=baseline_governed_context_v1] "
+              "[policy_arm=baseline] [experiment_id=continuous] [match_key=p]")
+    original = "# Baseline\nNo named evidence."
+    assert _preserve_candidate_verified_sources(marker, data, original) == original
+
+
 def test_shadow_evolution_creates_candidate_without_production_mutation(tmp_path):
     root, task_id = _task(tmp_path)
     trajectory = {"project_id": "literature_github_learning", "state": {"delivery_confirmed": True},
@@ -100,7 +189,7 @@ def test_shadow_evolution_creates_candidate_without_production_mutation(tmp_path
     assert result["promotion"] is False
     assert result["production_mutation"] is False
     assert result["target_failure_class"] == "planning.semantic_preflight"
-    assert not Path(root, "share/mind/governance/rl/control_policy.json").exists()
+    assert not Path(root, "share/mind/governance/experience_guided_policy/control_policy.json").exists()
     repeated = run_shadow_evolution(root, project_id="literature_github_learning")
     assert repeated["experiment_id"] == result["experiment_id"]
     experiments = Path(root, "share/mind/governance/experiments.jsonl").read_text(encoding="utf-8").splitlines()
@@ -159,7 +248,7 @@ def test_shadow_replay_separates_executed_canary_from_projected_baseline(tmp_pat
                     "truth_audit": {"passed": True}},
     }
     reduce_task_episode(root, instance_id="04", task_id=task_id, trajectory=trajectory)
-    trajectory_path = Path(root, "share/mind/governance/rl/trajectories.jsonl")
+    trajectory_path = Path(root, "share/mind/governance/experience_guided_policy/trajectories.jsonl")
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     trajectory_path.write_text(json.dumps(trajectory) + "\n", encoding="utf-8")
     result = evaluate_preflight_shadow(
@@ -203,7 +292,7 @@ def test_isolated_canary_requires_matched_distinct_routes(tmp_path):
         }
         trajectory_rows.append(trajectory)
         reduce_task_episode(root, instance_id="04", task_id=task_id, trajectory=trajectory)
-    trajectory_path = Path(root, "share/mind/governance/rl/trajectories.jsonl")
+    trajectory_path = Path(root, "share/mind/governance/experience_guided_policy/trajectories.jsonl")
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     trajectory_path.write_text(
         "".join(json.dumps(row) + "\n" for row in trajectory_rows), encoding="utf-8"
@@ -216,14 +305,15 @@ def test_isolated_canary_requires_matched_distinct_routes(tmp_path):
     assert result["intervention_isolated"] is True
     assert result["independent_task_ids"] is True
     assert result["quality_gate_passed"] is True
-    assert result["decision"] == "ready_for_explicit_decision"
+    assert result["sustained_business_improvement_passed"] is False
+    assert result["decision"] == "inconclusive"
     assert result["promotion"] is False
 
 
 def test_isolated_canary_uses_latest_executed_retry_for_same_arm_and_match(tmp_path):
     root, old_task = _task(tmp_path, failed_preflight=False, task_id="candidate-old")
     root, new_task = _task(tmp_path, failed_preflight=False, task_id="candidate-new")
-    trajectory_path = Path(root, "share/mind/governance/rl/trajectories.jsonl")
+    trajectory_path = Path(root, "share/mind/governance/experience_guided_policy/trajectories.jsonl")
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for task_id, created_at in ((old_task, "2026-01-01T00:00:00Z"),

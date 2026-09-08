@@ -544,10 +544,10 @@ def build_prompt(
     if failure_block:
         context_blocks.append(failure_block)
         _debug_ctx.append("failures")
-    # RL Experience context (from learning.db)
+    # Experience context (from learning.db)
     try:
-        from ..evolution.rl_engine import get_rl_loop
-        rl = get_rl_loop(workspace_root) if workspace_root else None
+        from ..evolution.experience_engine import get_experience_loop
+        rl = get_experience_loop(workspace_root) if workspace_root else None
         if rl:
             rl_ctx = rl.format_context()
             if rl_ctx and rl_ctx.strip():

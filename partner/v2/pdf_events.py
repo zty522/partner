@@ -134,6 +134,16 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
                 _s.fontName = _cn_font
             except Exception:
                 pass
+        report_style = str(params.get("report_style") or "standard").strip().lower()
+        themes = {
+            "editorial": ("#7A284B", "#B24C74", "编辑证据简报", "EDITORIAL BRIEF"),
+            "research": ("#174A7E", "#2B78B8", "研究实验记录", "RESEARCH NOTE"),
+            "lab_note": ("#285943", "#4B8B6B", "计算实验手记", "LAB NOTE"),
+            "source_review": ("#5B3F82", "#8064A2", "源码研读札记", "SOURCE REVIEW"),
+            "engineering_change": ("#37474F", "#D06B32", "工程变更审查", "ENGINEERING REVIEW"),
+            "standard": ("#173F5F", "#3CAEA3", "证据驱动执行报告", "EVIDENCE REPORT"),
+        }
+        primary, accent, subtitle, footer = themes.get(report_style, themes["standard"])
         body_style = ParagraphStyle(
             "Body",
             parent=styles["Normal"],
@@ -147,11 +157,11 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
         styles["Title"].fontName = _cn_font
         styles["Title"].fontSize = 22
         styles["Title"].leading = 29
-        styles["Title"].textColor = colors.HexColor("#173F5F")
-        styles["Title"].alignment = TA_CENTER
+        styles["Title"].textColor = colors.HexColor(primary)
+        styles["Title"].alignment = TA_LEFT
         for _name, _color, _size in (
-            ("Heading1", "#173F5F", 17), ("Heading2", "#20639B", 14),
-            ("Heading3", "#3CAEA3", 11), ("Heading4", "#555555", 10),
+            ("Heading1", primary, 17), ("Heading2", accent, 14),
+            ("Heading3", primary, 11), ("Heading4", "#555555", 10),
         ):
             styles[_name].fontName = _cn_font
             styles[_name].textColor = colors.HexColor(_color)
@@ -166,18 +176,18 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
         )
         subtitle_style = ParagraphStyle(
             "ReportSubtitle", parent=body_style, fontName=_cn_font, fontSize=9,
-            leading=12, alignment=TA_CENTER, textColor=colors.HexColor("#607D8B"),
+            leading=12, alignment=TA_LEFT, textColor=colors.HexColor("#607D8B"),
         )
         story = [
             Spacer(1, 0.5 * cm),
             Paragraph(_escape(title), styles["Title"]),
             Spacer(1, 0.18 * cm),
-            Paragraph("Partner · 证据驱动执行报告", subtitle_style),
+            Paragraph(_escape(f"Partner · {subtitle}"), subtitle_style),
             Spacer(1, 0.25 * cm),
         ]
         from reportlab.platypus import HRFlowable
-        story.append(HRFlowable(width="72%", thickness=2, color=colors.HexColor("#3CAEA3"),
-                                spaceBefore=3, spaceAfter=14, hAlign="CENTER"))
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor(accent),
+                                spaceBefore=3, spaceAfter=14, hAlign="LEFT"))
         # 嵌入图片
         from reportlab.platypus import Image as RLImage
         from reportlab.lib.utils import ImageReader
@@ -277,7 +287,7 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
                         table_body = [[Paragraph(_escape(cell), body_style) for cell in row] for row in table_rows]
                         tbl = Table(table_body, colWidths=None, repeatRows=1)
                         tbl.setStyle(TableStyle([
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(primary)),
                             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                             ("FONTNAME", (0, 0), (-1, -1), _cn_font),
                             ("FONTSIZE", (0, 0), (-1, -1), 9),
@@ -355,7 +365,7 @@ def atomic_generate_pdf(ctx, params: dict) -> dict:
             canvas.line(2 * cm, A4[1] - 1.25 * cm, A4[0] - 2 * cm, A4[1] - 1.25 * cm)
             canvas.setFont("Helvetica", 8)
             canvas.setFillColor(colors.HexColor("#78909C"))
-            canvas.drawString(2 * cm, A4[1] - 1.05 * cm, "PARTNER · EVIDENCE REPORT")
+            canvas.drawString(2 * cm, A4[1] - 1.05 * cm, f"PARTNER · {footer}")
             canvas.drawRightString(A4[0] - 2 * cm, 1.05 * cm, f"{document.page}")
             canvas.restoreState()
 

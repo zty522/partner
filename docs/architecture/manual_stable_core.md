@@ -36,6 +36,10 @@ QQ 用户消息
 用户明确点名的同实例历史 Task 产物可以只读，并会被确定性注入计划、连接到证据提取步骤；这用于
 “承接上一轮”，不开放任意跨实例可变目录。输出文件不能反过来计入本轮输入。
 
+输入文件与项目承接是两种关系：独立任务读取源码/数据不代表它要承接同角色的上一 Receipt。只有显式
+`continue_from_project` 或 `previous_receipt_id` 才触发前序 artifact 硬门；明确承接但漏交接仍拒绝。
+终态事件必须保留该 provenance。详见 ADR 0040。
+
 04 已晋升 `manual_stable_truth_audit_v2`，但作用域仅为
 `literature_github_learning:manual_final_artifact_truth`：普通 04 任务读取文件并生成 Markdown/TXT 时，
 Planner 必须为每个输入保留连续的 `source_path/evidence_quote`，治理层再打开源文件逐项核验。
@@ -100,6 +104,12 @@ Planner 必须为每个输入保留连续的 `source_path/evidence_quote`，治�
 6. 最终消息概括实际结果和边界；结束后不会自行生成下一轮。
 7. “我将执行”、thinking-only、未闭合 JSON、空/短模板、虚假能力声明与伪造运行指标均不能通过。
 8. 失败后如曾生成错误 Receipt，必须用 append-only correction 作废；不得篡改历史。
+9. 所有用户可见文本先写 `user_message_delivery.jsonl` attempt，再调用活动通道；只有 channel ACK 才写
+   `sent` 并进入持久去重集合。失败发送不得被误记为已发送。
+10. 普通步骤消息的去重作用域必须包含本次父 Event；两个独立手动任务即使文案相同也都要显示。只有同一
+    超时/阻塞通知允许跨 Event、重启和 QQ reconnect 做长 TTL 内容级抑制。
+11. 纯文本读取任务必须发送真实 Event result；输入文件不得被写成“新生成产物”，显式“不生成文件”不得
+    被输入路径中的 `.md/.pdf` 关键词覆盖。
 
 01 浏览器任务还需对协议关键截图分别调用视觉模型，并分别发送截图和中文说明。普通逐步文字消息
 不能替代该要求。

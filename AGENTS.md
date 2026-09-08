@@ -16,10 +16,12 @@ non-deprecated document with the highest authority and newest `updated_at` in `d
 
 ## Non-negotiable completion rules
 
-- The production default is `runtime.mode=manual_stable`: a user message is the sole task trigger.
+- The production compatibility mode is `runtime.mode=manual_stable`: an ordinary user message remains a sole bounded task trigger.
   It must produce an immediate receipt, one bounded plan, visible start/finish for every real step,
-  and a truthful final result. Campaign, Research Loop, automatic iteration, self-heal and autonomous
-  cron are experimental and must remain off unless the user explicitly starts a separately accepted experiment.
+  and a truthful final result. Separately, `runtime.instance_native_autonomy=true` may authorize each
+  instance to continue its own project from authoritative task terminals. It must use the state machine
+  in `docs/architecture/instance_native_runtime.md`; Campaign, Research Loop, automatic iteration,
+  self-heal and autonomous cron remain off.
 - Never route a normal user message through a Campaign-specific fast path or replace its established
   message sequence with a report-only/fixed-template protocol. Shared infrastructure may be reused;
   the manual user experience is the compatibility boundary.
@@ -48,12 +50,15 @@ non-deprecated document with the highest authority and newest `updated_at` in `d
 - A production behavior change requires focused tests, proportional regression tests, and a documentation update.
 - Self-generated production changes begin as candidates. Promote only after validation; regressions must be rejected or rolled back.
 - Never expose API keys, access tokens, private QQ identifiers, cookies, or credentials in logs, tests, or documents.
-- Do not start more than two Partner instances. Do not start paused instances outside the slot scheduler.
-- Do not start instances 03–05 unless the user or an approved scheduling decision places them in an available slot.
-- Experimental long-running work, when explicitly re-enabled, must use a persisted Campaign and bounded
-  WorkItems. It is not a production default. Process uptime, heartbeat, `Bot ready`, a written next step,
-  or one passing task is not a continuous-run result.
-- Campaign tasks have one continuation owner. When a Campaign marker is present, do not also start
+- Do not bypass the resource-adaptive slot scheduler. Its live CPU/load/memory
+  decision (bounded by the configured ceiling and five enabled instances) is
+  authoritative; do not hard-code a two-instance limit elsewhere.
+- Do not start instances 03–05 unless the user or the instance-native slot arbiter places them in an available slot.
+- Production long-running project work is instance-native and completion-signal driven. Campaign is retained only
+  for bounded benchmark/matched experiment/audit workloads; it must not act as an instance's mind or emit periodic
+  project progress. Process uptime, heartbeat, `Bot ready`, a written next step, or one passing task is not a
+  continuous-run result.
+- Every task has one continuation owner. When a Campaign marker is present, do not also start
   the process-local Research Loop.
 - Respect Campaign deadline, work-item, retry, failure, model-call, cost and human-approval budgets.
 - At campaign boundaries, create a final report and require real channel delivery; record delivery failure honestly.
@@ -65,7 +70,8 @@ non-deprecated document with the highest authority and newest `updated_at` in `d
 - Evolution attempts produce an `EvolutionExperiment` and `PromotionDecision`.
 - Context selection records document IDs, reasons, versions, and token/character budget usage.
 - Important architecture decisions are recorded under `docs/decisions/`.
-- Explicit experimental long runs additionally produce CampaignState, WorkItem, InstanceLease, event history
+- Instance-native runs produce per-instance durable state and append-only native transition events. Explicit
+  benchmark Campaigns additionally produce CampaignState, WorkItem, InstanceLease, event history
   and CampaignReport records. Manual tasks do not need these Campaign records.
 
 See `docs/handoff/change_protocol.md` and `docs/handoff/verification_rules.md` for the full workflow.

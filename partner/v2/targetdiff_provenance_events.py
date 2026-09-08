@@ -123,7 +123,7 @@ README 将无监督分析中筛出的记录描述为实验测得 binding affinit
     from partner.v2.pdf_events import atomic_generate_detailed_pdf
     pdf = working / "targetdiff_provenance_audit.pdf"
     pdf_result = atomic_generate_detailed_pdf(ctx, {"content": report, "output_path": str(pdf),
-        "title": "TargetDiff 官方拆分来源与结构对照审计", "min_content_chars": 1200, "min_sections": 7})
+        "title": "TargetDiff 官方拆分来源与结构对照审计", "report_style": "research", "min_content_chars": 1200, "min_sections": 7})
     if not pdf_result.get("ok"):
         return {"ok": False, "status": "pdf_failed", "error": pdf_result.get("error"),
                 "files": [str(source), str(output), str(md)]}

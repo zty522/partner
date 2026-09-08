@@ -82,9 +82,9 @@ class ApplyPipelineReport:
 
 
 def _find_production_readiness_dir(workspace_root: Path) -> Path:
-    """production_readiness lives at share/mind/governance/rl/production_readiness"""
+    """production_readiness lives at share/mind/governance/experience_guided_policy/production_readiness"""
     candidates = [
-        workspace_root / "share" / "mind" / "governance" / "rl" / "production_readiness",
+        workspace_root / "share" / "mind" / "governance" / "experience_guided_policy" / "production_readiness",
         workspace_root / "share" / "mind" / "governance" / "production_readiness",
     ]
     for c in candidates:
@@ -367,27 +367,15 @@ def apply_one(candidate: dict[str, Any], repo_root: Path | str, *, dry_run: bool
                             detail=f"decision={candidate.get('decision') or candidate.get('production_effective')}")
 
     if not diff_hunk:
-        # Sprint18 §6 design-layer: candidates that reached production_readiness
-        # via active_learning/repair_proposal often have no diff_hunk because
-        # they are diagnosis-only.  Rather than skipping them forever, generate
-        # a strictly additive annotation diff so the apply path actually
-        # produces a commit and downstream readiness gates can accumulate
-        # real trajectory data.  The annotation is idempotent (skipped if
-        # already present) and bounded to partner/<pkg>.py.
-        generated = _generate_diagnostic_diff_for_candidate(candidate)
-        if generated is None:
-            return ApplyOutcome(candidate_id, target_file, "skipped_no_diff",
-                                detail="diff_hunk missing or empty; "
-                                       "diagnostic generation refused (no safe target or idempotent)")
-        generated_target, diff_hunk = generated
-        target_file = generated_target
-        candidate["target_file"] = target_file
-        candidate["diff_hunk"] = diff_hunk
-        # Re-resolve repo_root against the generated target_file so
-        # git apply --check and apply run from the right cwd.
-        _resolved_after = _resolve_partner_code_root(repo_root, target_file)
-        if _resolved_after is not None:
-            repo_root = _resolved_after
+        # A diagnosis or promotion label is not executable code.  Older builds
+        # manufactured a comment-only patch here, which could create a commit
+        # without changing production behaviour.  That is now a hard reject:
+        # a production Candidate must supply a validated behavioural diff.
+        return ApplyOutcome(
+            candidate_id, target_file, "skipped_no_diff",
+            detail=("diff_hunk missing or empty; a behavior-changing Candidate "
+                    "must be synthesized and matched-tested before apply"),
+        )
 
     if not _is_valid_diff_hunk(diff_hunk):
         return ApplyOutcome(candidate_id, target_file, "skipped_invalid_diff",
@@ -458,7 +446,7 @@ def _generate_diagnostic_diff_for_candidate(candidate: dict[str, Any]) -> tuple[
     Some candidates reach production_readiness from active_learning/repair_proposal
     without a unified diff (they are "diagnosis only" — the proposal is text,
     not a code patch).  Without a diff, apply_one bails on skipped_no_diff and
-    no code is ever produced, so no sustained_business / longitudinal_rl
+    no code is ever produced, so no sustained_business / longitudinal_policy_learning
     trajectory ever accumulates.
 
     This helper generates a strictly additive, single-line annotation that:
@@ -734,25 +722,4 @@ __all__ = [
     "list_blacklist",
     "clear_blacklist",
     "append_blacklist",
-# self_evolve_annotation: candidate_id=repair_to_pr_0e6ead337bd289a2 failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_281301494be15793 failure_class=tool.atomic_write_artifact.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_41503169f9152818 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_4ad036036573ed46 failure_class=tool.atomic_http_get.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_52e2cafa02b7d482 failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_61c19cedb31fd1bb failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_653ec61b358afc27 failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_6571a1cfabfa8a1a failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_6605f6e23587f0e4 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_6c7abc7e52c2ce8b failure_class=tool.molecular_diversity_benchmark.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_726831a3b459833f failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_bcdaa355cb140c57 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_bde6398155d6508 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_43c06dbcc164f4a7 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_5d818ad85dcdc11 failure_class=tool.create_file.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_6843773f312659e0 failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_7b1d8195ed2aedee failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_8c427e360f704cea failure_class=tool.extract.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_9951c5e5224fd220 failure_class=tool.generate_code.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_b0ed0bf67ad5e9be failure_class=tool.atomic_write_artifact.failed intervention=mechanism_specific_bounded_repair
-# self_evolve_annotation: candidate_id=repair_to_pr_b17a07394633c3a9 failure_class=tool.atomic_write_artifact.failed intervention=mechanism_specific_bounded_repair
 ]

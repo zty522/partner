@@ -10,6 +10,7 @@ import logging
 import os
 import urllib.error
 import urllib.request
+import time
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ def read_image_with_qwen(image_path: str, prompt: str = "", workspace: str = "")
     cfg = _load_qwen_vision_cfg(workspace)
     if not cfg.get("api_key") or not cfg.get("model"):
         return {"ok": False, "error": "api.json 未配置 qwen api_key/vision_model"}
+    started = time.time()
     try:
         # 统一缩放到 1200 内（dashscope 限制，实测 1200 宽稳定）
         im = Image.open(image_path)
@@ -94,9 +96,34 @@ def read_image_with_qwen(image_path: str, prompt: str = "", workspace: str = "")
         with opener.open(req, timeout=120) as resp:
             data = json.loads(resp.read().decode())
         desc = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        usage = data.get("usage") or {}
+        try:
+            from partner.api_log import append_api_call
+            append_api_call(
+                "qwen", model=cfg["model"], base_url=cfg["base_url"], purpose="vision",
+                status="ok", elapsed_ms=int((time.time() - started) * 1000),
+                prompt_chars=len(text), response_chars=len(str(desc)),
+                prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                completion_tokens=int(usage.get("completion_tokens") or 0),
+                total_tokens=int(usage.get("total_tokens") or 0),
+                workspace_root=_find_workspace_root(workspace),
+                instance=os.path.basename(str(workspace).rstrip("/")),
+            )
+        except Exception:
+            pass
         return {"ok": True, "description": str(desc).strip(), "model": cfg["model"],
-                "image": os.path.basename(image_path)}
+                "image": os.path.basename(image_path), "usage": usage}
     except Exception as exc:
+        try:
+            from partner.api_log import append_api_call
+            append_api_call(
+                "qwen", model=str(cfg.get("model") or ""), base_url=str(cfg.get("base_url") or ""),
+                purpose="vision", status="failed", elapsed_ms=int((time.time() - started) * 1000),
+                error=type(exc).__name__, workspace_root=_find_workspace_root(workspace),
+                instance=os.path.basename(str(workspace).rstrip("/")),
+            )
+        except Exception:
+            pass
         return {"ok": False, "error": f"qwen 读图失败: {exc}"}
 
 

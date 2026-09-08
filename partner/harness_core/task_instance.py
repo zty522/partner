@@ -158,3 +158,78 @@ class TaskInstance:
         self.completion_status = status
         self.save()
         self.append_log("completion_status_updated", {"status": status, **dict(data or {})})
+        terminal_data = dict(data or {})
+        # Artifact validation inside the batch harness happens before the
+        # outer executor runs claim truth, delivery and Receipt governance.
+        # Its ``done`` checkpoint is therefore not an authoritative terminal
+        # and must not wake a Campaign before the final verdict exists.
+        preliminary_batch_done = (
+            status == "done" and terminal_data.get("source") == "batch_plan"
+        )
+        if status in {"done", "failed"} and not preliminary_batch_done:
+            # A durable ledger plus a best-effort named-pipe wakeup lets an
+            # explicitly authorised Campaign dispatch the next bounded item
+            # immediately.  Manual tasks merely append the audit row; absence
+            # of a controller is expected and never changes their result.
+            try:
+                from ..governance.completion_signal import emit_task_terminal
+
+                emit_task_terminal(
+                    self.working_dir,
+                    task_id=self.task_id,
+                    status=status,
+                    data=terminal_data,
+                )
+            except Exception:
+                # Observability must never become task-completion authority.
+                pass
+
+
+def reconcile_orphaned_task_instances(workspace: str, cutoff: datetime) -> int:
+    """Finalize in-memory executions that cannot survive a runtime restart.
+
+    ``TaskQueue`` already cancels its mirrors at startup, but the authoritative
+    ``TaskInstance`` used by native project continuation previously stayed
+    ``pending`` forever. That made the controller suppress redispatch after a
+    host restart. Failed finalization is honest: the interrupted execution is
+    not resumed or reported as successful, and its terminal can trigger the
+    bounded Event-first learning path.
+    """
+    tasks_root = os.path.join(str(workspace), "state", "tasks")
+    if not os.path.isdir(tasks_root):
+        return 0
+    changed = 0
+    for name in os.listdir(tasks_root):
+        path = os.path.join(tasks_root, name, "task_instance.json")
+        if not os.path.isfile(path):
+            continue
+        try:
+            task = TaskInstance.load(str(workspace), name)
+            if str(task.completion_status or "").lower() not in {
+                "pending", "running", "planning", "executing",
+            }:
+                continue
+            created = datetime.fromisoformat(str(task.created_at))
+            compare_cutoff = cutoff
+            if created.tzinfo is not None and compare_cutoff.tzinfo is None:
+                created = created.replace(tzinfo=None)
+            elif created.tzinfo is None and compare_cutoff.tzinfo is not None:
+                created = created.replace(tzinfo=compare_cutoff.tzinfo)
+            if created >= compare_cutoff:
+                continue
+            governance = dict((task.metadata or {}).get("manual_iteration_governance") or {})
+            governance.update({
+                "ok": False,
+                "status": "runtime_restart_orphaned",
+                "error": "execution process ended before an authoritative terminal result",
+            })
+            task.metadata["manual_iteration_governance"] = governance
+            task.save()
+            task.mark("failed", {
+                "source": "manual_stop_project_finalization",
+                "governance_status": "runtime_restart_orphaned",
+            })
+            changed += 1
+        except (OSError, TypeError, ValueError):
+            continue
+    return changed

@@ -1,5 +1,50 @@
 # Partner 代码结构与文件夹说明
 
+## 2026-09-01 完成信号与持续 RL Campaign 新增核心
+
+- `partner/governance/completion_signal.py`：Task 权威终态的 durable JSONL 与 workspace 隔离 named FIFO。
+- `partner/governance/continuous_rl_campaign.py`：04/05 多主题 matched WorkItem、严格 arm 顺序、真实日期补窗，
+  以及 QQ 故障时不计 delivery 的 local-observation 降级。
+- `partner/governance/readiness_activation.py`：统一 production readiness 复审；只有全门通过才按 Event-first
+  promotion/activation，任一门阻断则不改 control policy。
+- `scripts/run_event_driven_policy_campaign.py`：7 天双槽实验入口；终态即 reconcile/dispatch，30 秒仅作 watchdog。
+- `scripts/partner_campaign.py`：通用 Campaign runner 同样接入终态信号。
+- `partner/harness_core/task_instance.py`：最终 done/failed 发信号；batch-plan 中间 done 不提前唤醒。
+- `partner/mind/harness.py`：有界 `execute_candidate` 与无 LLM 的 baseline `select_context` 内联，避免 worker
+  pool 饥饿；外部生成 Event 仍走受控 Agent 适配器。
+- `scripts/run_research_adoption_downstream_experiment.py`：MiniMax 结果写入稳定治理目录，失败重试带诊断约束。
+
+生产 `manual_stable` 没有改成默认 Campaign；当前 Campaign 只来自用户显式授权。
+
+## 2026-08-30 世界模型与长时域控制新增核心
+
+- `partner/governance/long_horizon_loop.py`：从持久 WorkItem 归约项目、学习、Candidate 验证和 WAIT 相位。
+- `partner/governance/campaign.py`：只调度同 Campaign、双 Event 合同 ready 的 Candidate bounded experiment。
+- `partner/cognition/world_model/`：正式假设库、联想记忆、概率证据、主动选点、Event 账本和可替换 provider。
+- `partner/cognition/world_model/providers.py`：Library 与小型 trainable Transformer HypothesisProvider。
+- `partner/cognition/world_model/benchmark.py`：周期/衰减/阈值三个冻结 shadow 领域。
+- `partner/v2/world_model_events.py`：baseline、Candidate 和 matched evaluation 原子 Event。
+- `partner/governance/research_learning.py`：真实源码/论文指纹、VOI 选择、证据摘录、belief posterior 与
+  shadow-only matched experiment。
+- `partner/governance/research_adoption.py`：多源证据采用硬门、受保护 Receipt、同项目奖励轨迹检索与
+  预算化 shadow context Candidate。
+- `partner/v2/research_learning_events.py`：四个 research-active-learning 的 Event-first 原子包装。
+- `scripts/run_research_adoption_real_project_experiment.py`：01–05 真实项目冻结快照的 baseline/candidate
+  隔离执行、硬门评价与 inconclusive Policy 记录。
+- `partner/learn/bdk_function_pool.py`、`bdk_constraints.py`：孵化后迁入的 Partner-owned 数值兼容器官。
+
+Partner runtime 不再从 `/mnt/e/work/partner_test` import；孵化区仅保留历史证据。
+
+## 2026-08-29 Event-first 新增核心
+
+- `partner/governance/evolution_events.py`：Issue/Candidate/执行/Experiment/Policy 的 hash-linked 事件账本。
+- `partner/governance/candidate_execution.py`：Candidate 执行合同、实例/生产硬门和执行幂等边界。
+- `partner/v2/candidate_events.py`：`execute_candidate` 原子 Event；只转发到代码内白名单 handler。
+- `partner/v2/targetdiff_bdk_events.py`：BDK FunctionPool 的可选数值模型 Event，不是 Agent 全局底层。
+- `scripts/run_bdk_event_first_experiment.py`：真实数据上的 sklearn Event 与 BDK Candidate 匹配实验编排器。
+
+这些模块不创建“Skill 旁路”。Event 仍是唯一运行入口，Candidate 只是 Event 策略的版本化待验证制品。
+
 ## 代码仓库 (`/mnt/e/work/partner/`)
 
 ```
@@ -15,13 +60,14 @@ partner/
 │   │
 │   ├── core/                        ← 核心引擎
 │   │   ├── delivery_queue.py        ← 历史交付记录辅助（不代表真实发送确认）
+│   │   ├── user_message_audit.py    ← 用户文本 attempt/ACK/failure 与跨重启限域去重账本
 │   │   └── interaction_orchestrator.py ← 交互编排
 │   │
 │   ├── planner/                     ← 计划生成
 │   │   └── prompt_builder.py        ← batch_plan prompt 构建: 上下文注入、习惯、规则、经验
 │   │
 │   ├── adapters/                    ← LLM 适配器
-│   │   └── direct_api.py            ← DeepSeek DirectAPI: 模型切换、fallback、超时管理
+│   │   └── direct_api.py            ← MiniMax-M3 默认 DirectAPI；显式 provider、模型/超时与脱敏审计，无隐式 DeepSeek fallback
 │   │
 │   ├── evolution/                   ← 自进化模块
 │   │   ├── self_heal.py             ← 自愈引擎 v2 (365行): Skill Bank + SESA 风格提取
@@ -42,24 +88,34 @@ partner/
 │   │   ├── context_selector.py      ← L0-L4、预算、来源与确定性 fallback
 │   │   ├── project_loop.py          ← Receipt、NextAction 与真实 queue ack
 │   │   ├── evolution_loop.py        ← Issue、Experiment、promotion/rollback gate
+│   │   ├── evolution_events.py      ← Event-first hash-linked 自进化事实账本
+│   │   ├── candidate_execution.py   ← Candidate→白名单 Event 的执行合同与幂等门
 │   │   ├── signal_detector.py       ← 运行结果中的高置信问题信号
 │   │   ├── scheduler.py             ← 五角色、最多两个活动实例的硬门
 │   │   ├── protocols.py             ← 声明式项目协议运行桥
 │   │   ├── campaign_models.py       ← Campaign/WorkItem/Lease/Report 契约
 │   │   ├── campaign_storage.py      ← Campaign 持久状态与 runner lock
-│   │   ├── campaign.py              ← 长期控制器、恢复、预算、watchdog、报告
+│   │   ├── campaign.py              ← 长期控制器、恢复、预算、最终治理回收、watchdog、报告
+│   │   ├── completion_signal.py     ← Task 最终终态账本与 named-FIFO 即时唤醒
+│   │   ├── continuous_rl_campaign.py ← 04/05 多主题 matched 工作负载与真实日期窗口
+│   │   ├── readiness_activation.py  ← 全 readiness 门与 Event-first 条件激活
 │   │   ├── campaign_runtime.py      ← inbox dispatch、systemd 双槽与 QQ delivery readiness 门
 │   │   ├── external_catalog.py      ← 外部资料路径、哈希与采用边界目录
 │   │   ├── evidence_archive.py      ← WorkItem 持久证据包、SHA256 与语义结果指纹
 │   │   ├── episode_trace.py         ← raw task evidence → Episode Trace v3 + Reward Vector
-│   │   ├── candidate_skills.py      ← 版本化 Candidate Skill 与 append-only revisions
+│   │   ├── cognition_adapter.py     ← 外部/本地认知 bundle 校验、shadow 归档与草案边界
+│   │   ├── cognition_mirror.py      ← Episode reducer 后默认关闭、fail-open 的认知旁路镜像
+│   │   ├── cognition_context.py     ← Gate C 只读 soft-boost selector 与匹配预检（未接生产）
+│   │   ├── candidate_skills.py      ← 版本化 Candidate 制品与 append-only revisions（旧文件名兼容）
+│   │   ├── candidate_events.py      ← execute_candidate 原子 Event（无任意代码执行）
+│   │   ├── targetdiff_bdk_events.py ← sklearn 匹配基线与 BDK FunctionPool 数值 Event
 │   │   ├── strategy_space.py        ← 六类 baseline/candidate 决策目录
 │   │   ├── shadow_replay.py         ← baseline 投影与真实 canary 分离评估
 │   │   ├── shadow_evolution.py      ← 失败聚类与 shadow Experiment（不改生产）
 │   │   ├── manual_runtime.py        ← Receipt、truth audit、trajectory 终态治理
 │   │   ├── continuation.py          ← 业务结果到可执行 Receipt NextAction
-│   │   ├── rl_control.py            ← baseline/candidate 选择、评价与控制策略
-│   │   └── rl_evolution.py          ← v2 业务奖励轨迹与离线候选策略
+│   │   ├── policy_control.py            ← baseline/candidate 选择、评价与控制策略
+│   │   └── experience_policy.py          ← v2 业务奖励轨迹与离线候选策略
 │   ├── protocols/                   ← 01/02 阶段转换 JSON（代码包内资源）
 │   │
 │   ├── agents/                      ← Agent 框架
@@ -143,7 +199,7 @@ partner/
 │   └── skill.md                     ← Agent 功能总览
 │
 ├── scripts/partner_campaign.py      ← Campaign CLI/后台 runner
-├── scripts/partner_rl_update.py     ← 指定 Campaign 的离线轨迹/候选策略重算
+├── scripts/partner_policy_update.py     ← 指定 Campaign 的离线轨迹/候选策略重算
 ├── scripts/partner_episode_reduce.py ← task raw evidence → Episode Trace v3 离线归约
 ├── scripts/partner_shadow_evolution.py ← 只读 Episode 聚类并建立 shadow candidate
 ├── scripts/simulate_campaign_soak.py ← 隔离 fake-clock 长跑模拟
@@ -228,7 +284,17 @@ partner_workspace/
 Campaign 目录在 portfolio profile 下新增 `portfolio_state.json`，记录五项目输入指纹、等待原因与最后派发版本；详细合同见 `docs/architecture/project_portfolio.md`。
 
 `partner/governance/episode_trace.py` 保存 raw 引用、构建 model/tool/artifact/delivery 图并计算六维奖励；
+`partner/governance/cognition_mirror.py` 将完成后的权威 Episode 确定性映射为两事件哈希链；它由
+`runtime.cognition_shadow_mirror` 显式开启，默认不运行，失败不影响任务且不注册 Candidate；
+`partner/governance/cognition_adapter.py` 验证来源身份与否定权限位，只归档 shadow bundle；
+`partner/governance/cognition_context.py` 仅供 Gate C 离线/显式 shadow 实验，复用 `context_selector.py`，
+不被 planner/executor 导入；
 `partner/governance/shadow_evolution.py` 只建立候选实验，不能写生产控制策略；
 `partner/governance/shadow_replay.py` 通过 trajectory marker 区分历史 baseline 与真实 candidate canary。
 
-*最后更新: 2026-08-26（Episode Trace v3、Candidate Registry 与受控 Canary）*
+`partner/governance/research_adoption.py` 将经核验的 code/paper/local evidence 编译成受预算约束的上下文
+Candidate；`partner/governance/research_downstream.py` 提供三类冻结下游任务、独立评价、外发脱敏和本地
+typed-evidence consumer；`scripts/run_research_adoption_downstream_experiment.py` 只运行 shadow 配对并验证
+项目/Receipt 不变，不写生产策略。
+
+*最后更新: 2026-08-31（多源证据 Candidate 与下游 Agent shadow 对照）*

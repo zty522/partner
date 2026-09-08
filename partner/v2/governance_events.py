@@ -12,8 +12,9 @@ from partner.governance.evolution_loop import decide_experiment, record_issue, s
 from partner.governance.project_loop import record_iteration, request_next_action
 from partner.governance.signal_detector import detect_and_record
 from partner.governance.storage import governance_log, instance_id, workspace_root
-from partner.governance.rl_evolution import evaluate_manual_evolution_evidence
-from partner.governance.rl_control import evaluate_canaries
+from partner.governance.experience_policy import evaluate_manual_evolution_evidence
+from partner.governance.policy_control import evaluate_canaries
+from partner.governance.candidate_skills import activate_promoted_candidate
 
 
 JsonDict = dict[str, Any]
@@ -85,6 +86,15 @@ def atomic_start_evolution_experiment(ctx: Any, params: JsonDict) -> JsonDict:
 
 def atomic_decide_evolution_experiment(ctx: Any, params: JsonDict) -> JsonDict:
     return decide_experiment(_workspace(ctx), params)
+
+
+def atomic_activate_promoted_candidate(ctx: Any, params: JsonDict) -> JsonDict:
+    return activate_promoted_candidate(
+        _workspace(ctx), candidate_id=str(params.get("candidate_id") or ""),
+        decision_key=str(params.get("decision_key") or ""),
+        policy_event_id=str(params.get("policy_event_id") or ""),
+        readiness_attestation_path=str(params.get("readiness_attestation_path") or ""),
+    )
 
 
 def atomic_observe_evolution_signals(ctx: Any, params: JsonDict) -> JsonDict:
@@ -165,7 +175,7 @@ def atomic_decide_manual_canary(ctx: Any, params: JsonDict) -> JsonDict:
                 "evaluation": evaluated}
     sample_artifacts: list[str] = []
     try:
-        trajectory_path = root / "share" / "mind" / "governance" / "rl" / "trajectories.jsonl"
+        trajectory_path = root / "share" / "mind" / "governance" / "experience_guided_policy" / "trajectories.jsonl"
         for line in trajectory_path.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             if str((row.get("action") or {}).get("experiment_id") or "") != experiment_id:

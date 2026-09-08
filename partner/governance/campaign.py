@@ -27,6 +27,7 @@ from .evolution_loop import record_issue
 from .evidence_archive import archive_work_item_evidence, semantic_outcome_fingerprint
 from .continuation import propose_continuation
 from .models import NextAction, now_iso
+from .long_horizon_loop import assess_long_horizon
 from .project_loop import record_action_state, record_iteration, request_next_action
 from .scheduler import ROLES, load_scheduler
 from .storage import atomic_json, governance_log, latest_receipt, load_project_state, workspace_root
@@ -40,7 +41,7 @@ BUSY_WORK = {"leased", "queued", "running"}
 BOUNDED_CAMPAIGN_EVENTS = {
     "framework_campaign_contract_audit",
     "external_learning_index_slice",
-    "offline_rl_self_evolution",
+    "offline_policy_learning_self_evolution",
     "evidence_execution_slice",
     "targetdiff_project_slice",
     "targetdiff_data_contract",
@@ -62,6 +63,31 @@ BOUNDED_CAMPAIGN_EVENTS = {
     "targetdiff_official_split_error_slices",
     "continuous_project_step",
 }
+
+
+def _isolated_learning_work(instruction: str, event_types: list[str]) -> bool:
+    """Separate Sprint18 learning evidence from project-business progress."""
+    if "[sprint18=true]" not in str(instruction or "") or not event_types:
+        return False
+    return all(
+        str(value).startswith(("research_active_learning_", "agent_active_learning_", "learning_"))
+        or str(value) in {
+            "atomic_inspect_file", "research_adoption_context_shadow",
+            "sprint18_learning_cycle", "targetdiff_active_learning",
+            "targetdiff_active_robustness", "targetdiff_uncertainty_diagnostic",
+            "targetdiff_uncertainty_candidate",
+        }
+        for value in event_types
+    )
+
+
+def _matched_experiment_work(instruction: str) -> bool:
+    """Identify an arm whose ProjectState must remain frozen across the pair."""
+    return bool(
+        _instruction_marker(instruction, "experiment_id")
+        and _instruction_marker(instruction, "match_key")
+        and _instruction_marker(instruction, "policy_arm") in {"baseline", "candidate"}
+    )
 NAMED_ARTIFACT_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.(?:jsonl|py|md|pdf|csv|json|png|jpe?g|webp|xlsx)(?![A-Za-z0-9])", re.I,
 )
@@ -81,9 +107,9 @@ def _event(workspace: str, campaign_id: str, event: str, **details: Any) -> None
 
 
 def _dependencies_satisfied(item: WorkItem, items: list[WorkItem]) -> bool:
-    """Keep the RL audit behind the business/framework evidence it evaluates."""
+    """Keep the EGPL audit behind the business/framework evidence it evaluates."""
     waits_for_campaign_evidence = (
-        "offline_rl_self_evolution" in item.instruction
+        "offline_policy_learning_self_evolution" in item.instruction
         or (item.instance_id == "05" and "evidence_execution_slice" in item.instruction)
     )
     if not waits_for_campaign_evidence:
@@ -97,19 +123,19 @@ def _dependencies_satisfied(item: WorkItem, items: list[WorkItem]) -> bool:
     )
 
 
-def _sync_offline_rl_at_stop(workspace: str, campaign_id: str) -> None:
+def _sync_offline_policy_learning_at_stop(workspace: str, campaign_id: str) -> None:
     """Capture late outcomes, including the 05 audit itself, before final reporting."""
     # Local import avoids coupling the Campaign model/storage import graph to
     # the optional offline learner during module initialization.
-    from .rl_evolution import run_offline_rl_update
+    from .experience_policy import run_offline_policy_learning_update
 
-    result = run_offline_rl_update(workspace, campaign_id)
+    result = run_offline_policy_learning_update(workspace, campaign_id)
     created = int(result.get("new_trajectories") or 0) if result.get("ok") else 0
     if created:
         _event(
             workspace,
             campaign_id,
-            "offline_rl_final_sync",
+            "offline_policy_learning_final_sync",
             new_trajectories=created,
             policy_path=str(result.get("policy_path") or ""),
         )
@@ -219,17 +245,17 @@ DEFAULT_SEEDS = {
     ),
     "03": (
         "Partner 框架最小改进候选",
-        "执行确定性事件 framework_campaign_contract_audit。在当前代码上运行 Campaign/RL "
+        "执行确定性事件 framework_campaign_contract_audit。在当前代码上运行 Campaign/EGPL "
         "针对性合同测试，产出机器可读结果和详细 PDF；不得用“设计了修复”代替真实测试。",
     ),
     "04": (
         "文献与 GitHub 真实学习切片",
         "执行确定性事件 external_learning_index_slice。核验 external 中 Polar、RLVR-World、SESA 和 "
-        "JIT-RL 的真实文件、哈希和可用设计，生成目录、学习报告和详细 PDF。索引不等于已集成。",
+        "JIT-EGPL 的真实文件、哈希和可用设计，生成目录、学习报告和详细 PDF。索引不等于已集成。",
     ),
     "05": (
         "自进化机制证据审计",
-        "执行确定性事件 offline_rl_self_evolution。把当前 Campaign 真实 WorkItem 转换为可审计轨迹，"
+        "执行确定性事件 offline_policy_learning_self_evolution。把当前 Campaign 真实 WorkItem 转换为可审计轨迹，"
         "用产物、QQ 送达、验收、重试和 watchdog 更新离线候选策略，建立一个正式 candidate "
         "Experiment。未达样本和回归门槛不得 promoted。",
     ),
@@ -297,7 +323,7 @@ def seed_execution_work(workspace: str, campaign_id: str, waves: int = 2) -> lis
             "title": "执行型自进化回放与决策",
             "instruction": (
                 f"Campaign 总目标：{state.goal}\n\n[execution_wave=1] 直接执行确定性事件 "
-                "evidence_execution_slice。等待 01–04 全部执行波次终态后，补齐离线 RL 轨迹，"
+                "evidence_execution_slice。等待 01–04 全部执行波次终态后，补齐离线经验策略学习 轨迹，"
                 "编写并运行候选动作评估器，对正式 Experiment 写出明确的 inconclusive/rejected/promoted 决策；"
                 "样本不足不得 promoted。必须发送源码、结果和详细 PDF。"
             ),
@@ -307,7 +333,7 @@ def seed_execution_work(workspace: str, campaign_id: str, waves: int = 2) -> lis
 
 
 def seed_targetdiff_project_work(workspace: str, campaign_id: str, stages: int = 5) -> list[WorkItem]:
-    """Seed the evidence-linked TargetDiff project arc, followed by one RL audit."""
+    """Seed the evidence-linked TargetDiff project arc, followed by one EGPL audit."""
     state = load_campaign(workspace, campaign_id)
     if not state:
         raise ValueError("campaign not found")
@@ -341,7 +367,7 @@ def seed_targetdiff_project_work(workspace: str, campaign_id: str, stages: int =
             "instance_id": "05", "project_id": ROLES["05"], "kind": "project_iteration",
             "title": "TargetDiff 项目里程碑自进化审计",
             "instruction": (
-                f"Campaign 总目标：{state.goal}\n\n直接执行确定性事件 offline_rl_self_evolution。"
+                f"Campaign 总目标：{state.goal}\n\n直接执行确定性事件 offline_policy_learning_self_evolution。"
                 "等待 02 所有阶段终态后，把真实产物、验收、QQ 交付、失败与重试转成离线轨迹；"
                 "只提出有证据且可证伪的下一项方法改进。样本或回归门不足必须保持 inconclusive，"
                 "不得用自评替代晋升证据。生成并发送详细报告。"
@@ -427,10 +453,29 @@ def _load_portfolio_state(workspace: str, campaign_id: str) -> dict[str, Any]:
         inherited = json.loads(json.dumps(previous))
         inherited.update({"campaign_id": campaign_id, "inherited_from": previous.get("campaign_id") or path.parent.name})
         inherited.pop("updated_at", None)
+        try:
+            predecessor_state = json.loads((path.parent / "campaign_state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            predecessor_state = {}
+        recovery_replay = str(predecessor_state.get("stop_reason") or "").startswith(
+            "superseded_after_fix:"
+        )
         for lane in inherited["lanes"].values():
             if isinstance(lane, dict):
                 lane.pop("work_item_id", None)
-                lane["status"] = "inherited"
+                if recovery_replay:
+                    # An explicitly superseded controller never successfully
+                    # consumed these inputs.  Re-admit them after the normal
+                    # two-tick stability gate; preserve the old Campaign as
+                    # failure evidence instead of editing its WorkItems.
+                    lane.pop("last_dispatched_fingerprint", None)
+                    lane.pop("last_dispatched_at", None)
+                    lane["stable_observations"] = 0
+                    lane["status"] = "recovery_pending"
+                else:
+                    lane["status"] = "inherited"
+        if recovery_replay:
+            inherited["recovery_from_superseded_campaign"] = path.parent.name
         return inherited
     return {"version": 1, "campaign_id": campaign_id, "lanes": {}, "updated_at": ""}
 
@@ -483,7 +528,7 @@ def _portfolio_inputs(workspace: str) -> dict[str, dict[str, Any]]:
 
     framework_paths = [
         code_root / "partner" / "governance" / "campaign.py",
-        code_root / "partner" / "governance" / "rl_evolution.py",
+        code_root / "partner" / "governance" / "experience_policy.py",
         code_root / "partner" / "mind" / "executor.py",
         code_root / "scripts" / "partner_campaign.py",
         code_root / "tests" / "test_campaign.py",
@@ -517,6 +562,18 @@ def _portfolio_inputs(workspace: str) -> dict[str, dict[str, Any]]:
         external / "code" / "openai-codex" / "docs" / "sandbox.md",
     ])
     learning_fingerprint = _bounded_files_fingerprint(root, learning_paths)
+    # Compute the promoted-policy component separately.  The source list is
+    # intentionally capped; appending these paths to a large list could sort
+    # beyond that cap and silently miss a real policy change.
+    policy_fingerprint = _bounded_files_fingerprint(root, [
+        root / "share" / "mind" / "governance" / "experience_guided_policy" / "control_policy.json",
+        root / "share" / "mind" / "governance" / "experience_guided_policy" / "candidate_skills"
+        / "candidate_preflight_contract_v2.json",
+    ])
+    if learning_fingerprint or policy_fingerprint:
+        learning_fingerprint = hashlib.sha256(
+            f"sources={learning_fingerprint}|policy={policy_fingerprint}".encode("ascii")
+        ).hexdigest()
 
     return {
         "01": {
@@ -553,7 +610,7 @@ PORTFOLIO_WORK = {
     ),
     "03": (
         "Partner 框架：代码变化合同审计",
-        "直接执行确定性事件 framework_campaign_contract_audit。针对当前代码指纹实际运行 Campaign/RL 合同测试，"
+        "直接执行确定性事件 framework_campaign_contract_audit。针对当前代码指纹实际运行 Campaign/EGPL 合同测试，"
         "保存机器结果、Markdown/PDF 并真实发送；失败必须给出具体测试和下一修复入口。",
         82,
     ),
@@ -591,7 +648,7 @@ PORTFOLIO_EXPLORATION = {
         ("evidence_execution_slice", 2, "计算干净 Campaign 比率并定位新出现的运行质量回归。"),
         ("evidence_execution_slice", 3, "把历史故障转成可执行 runtime gate 候选，不自动合并。"),
         ("continuous_project_step", 1, "[strategy_id=03_runtime_recovery_canary] 隔离验证双槽、重启恢复、"
-         "Scout 批次和 RL 波次门，不修改生产状态。"),
+         "Scout 批次和 EGPL 波次门，不修改生产状态。"),
         ("continuous_project_step", 1, "[strategy_id=03_user_observability_canary] 运行用户三阶段回执、"
          "领域报告和文件投递归一化合同测试。"),
         ("continuous_project_step", 1, "[strategy_id=03_soak_density_analysis] 分析最近 Campaign 的业务推进"
@@ -626,7 +683,7 @@ def _portfolio_item_lane(item: WorkItem) -> str:
 def _portfolio_business_outcome_fingerprint(items: list[WorkItem]) -> str:
     # A rotating scout is monitoring, not a new business wave.  Including it
     # here used to wake 05 after every no-change audit and produced repetitive
-    # RL reports while the real project lanes were idle.
+    # EGPL reports while the real project lanes were idle.
     completed = [
         item for item in items
         if _portfolio_item_lane(item) in PORTFOLIO_BUSINESS_INSTANCES
@@ -649,7 +706,7 @@ def _portfolio_business_outcome_fingerprint(items: list[WorkItem]) -> str:
 
 
 def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkItem]:
-    """Admit changed project evidence and one RL audit after each settled wave."""
+    """Admit changed project evidence and one EGPL audit after each settled wave."""
     state = load_campaign(workspace, campaign_id)
     if not _is_portfolio_continuous(state):
         return []
@@ -658,6 +715,32 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
     items = list_work_items(workspace, campaign_id)
     inputs = _portfolio_inputs(workspace)
     created: list[WorkItem] = []
+    policy_lane = lanes.setdefault("05", {"project_id": ROLES["05"]})
+    prior_outcome_fingerprint = _portfolio_business_outcome_fingerprint(items)
+    prior_nonterminal_business = any(
+        _portfolio_item_lane(item) in PORTFOLIO_BUSINESS_INSTANCES
+        and item.status not in TERMINAL_WORK
+        for item in items
+    )
+    completed_business_wave = sum(
+        1 for item in items
+        if _portfolio_item_lane(item) in PORTFOLIO_BUSINESS_INSTANCES
+        and item.kind == "project_iteration"
+        and "[portfolio_scout=true]" not in item.instruction
+        and item.status in TERMINAL_WORK
+    )
+    # A project completion commonly changes its own ProjectState fingerprint.
+    # Without a wave barrier the next business item is admitted on the same
+    # tick, so lane 05 can wait forever for an empty business queue.  Once a
+    # bounded wave has settled, reserve the next admission for learning.  This
+    # does not stop already-running business and is released as soon as 05 is
+    # queued for this exact outcome fingerprint.
+    learning_barrier_due = bool(
+        prior_outcome_fingerprint
+        and completed_business_wave >= 2
+        and not prior_nonterminal_business
+        and policy_lane.get("last_dispatched_fingerprint") != prior_outcome_fingerprint
+    )
 
     for instance in PORTFOLIO_BUSINESS_INSTANCES:
         lane = lanes.setdefault(instance, {})
@@ -693,6 +776,12 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
         if lane.get("last_dispatched_fingerprint") == evidence["fingerprint"]:
             lane["status"] = "waiting_change"
             continue
+        if learning_barrier_due:
+            lane.update({
+                "status": "waiting_learning_barrier",
+                "reason": "settled business wave must be admitted to lane 05 before new business work",
+            })
+            continue
         title, body, priority = PORTFOLIO_WORK[instance]
         try:
             item = enqueue_work_item(workspace, campaign_id, {
@@ -722,43 +811,120 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
         request_next_action(workspace, {"project_id": ROLES[instance]}).get("ok")
         for instance in PORTFOLIO_BUSINESS_INSTANCES if instance in state.allowed_instances
     )
-    rl_lane = lanes.setdefault("05", {"project_id": ROLES["05"]})
+    executable_candidates = []
+    try:
+        from .candidate_skills import load_candidate_skills
+        executable_candidates = [
+            row for row in load_candidate_skills(workspace)
+            if row.get("execution_ready") is True
+            and row.get("evaluation_ready") is True
+            and str(row.get("source_campaign_id") or "") == campaign_id
+            and row.get("production_effective") is not True
+            and str(row.get("status") or "") in {"candidate", "shadow", "canary"}
+        ]
+    except (OSError, ValueError, TypeError):
+        executable_candidates = []
+    attempted_candidates = set(str(value) for value in portfolio.get("attempted_candidate_ids") or [])
+    unattempted_candidates = [
+        row for row in executable_candidates
+        if str(row.get("candidate_id") or "") not in attempted_candidates
+    ]
+    long_horizon = assess_long_horizon(
+        items,
+        has_project_continuation=proposed_continuations,
+        has_executable_candidate=bool(unattempted_candidates),
+        minimum_business_per_learning=min(
+            2,
+            max(1, sum(
+                1 for instance in PORTFOLIO_BUSINESS_INSTANCES
+                if instance in state.allowed_instances and inputs[instance]["ready"]
+            )),
+        ),
+    )
+    portfolio["long_horizon"] = long_horizon.to_dict()
+    if (long_horizon.phase == "VALIDATE_CANDIDATE" and not proposed_continuations
+            and not any(item.status not in TERMINAL_WORK for item in items)):
+        candidate = unattempted_candidates[0] if unattempted_candidates else None
+        if candidate is not None:
+            evaluation = dict(candidate.get("evaluation_contract") or {})
+            allowed = [str(value) for value in evaluation.get("allowed_instances") or []
+                       if str(value) in state.allowed_instances]
+            if allowed:
+                instance = allowed[0]
+                candidate_id = str(candidate["candidate_id"])
+                event_type = str(evaluation["event_type"])
+                params_json = json.dumps(dict(evaluation.get("default_params") or {}),
+                                         ensure_ascii=False, sort_keys=True)
+                try:
+                    item = enqueue_work_item(workspace, campaign_id, {
+                        "instance_id": instance,
+                        "project_id": str(candidate.get("project_id") or ROLES[instance]),
+                        "kind": "evolution_experiment",
+                        "title": f"长期循环验证 Candidate {candidate_id}",
+                        "instruction": (
+                            f"{PORTFOLIO_MARKER} [portfolio_lane={instance}] "
+                            f"[long_horizon_candidate={candidate_id}] "
+                            f"直接执行确定性事件 {event_type}，参数={params_json}。"
+                            "必须执行 evaluation contract 中冻结的 baseline/candidate 对照，"
+                            "写出真实指标与明确 decision；不得自动晋升。"
+                        ),
+                        "priority": 78,
+                        "requires_artifact": True,
+                        "requires_delivery": True,
+                    })
+                    created.append(item)
+                    items.append(item)
+                    attempted_candidates.add(candidate_id)
+                    portfolio["attempted_candidate_ids"] = sorted(attempted_candidates)
+                    portfolio["long_horizon"]["scheduled_candidate_id"] = candidate_id
+                    portfolio["long_horizon"]["scheduled_event_type"] = event_type
+                except ValueError as exc:
+                    if "budget exhausted" not in str(exc):
+                        raise
     nonterminal_business = [item for item in items if _portfolio_item_lane(item) in PORTFOLIO_BUSINESS_INSTANCES
                             and item.status not in TERMINAL_WORK]
     outcome_fingerprint = _portfolio_business_outcome_fingerprint(items)
-    rl_lane["observed_fingerprint"] = outcome_fingerprint
+    policy_lane["observed_fingerprint"] = outcome_fingerprint
     if "05" not in state.allowed_instances:
-        rl_lane.update({"status": "outside_campaign_scope", "reason": "instance 05 not allowed"})
+        policy_lane.update({"status": "outside_campaign_scope", "reason": "instance 05 not allowed"})
     elif nonterminal_business:
-        rl_lane.update({"status": "waiting_wave", "reason": "waiting for all admitted business work to settle"})
-    elif proposed_continuations:
-        rl_lane.update({"status": "waiting_wave", "reason": "waiting for declared project continuations to settle"})
+        policy_lane.update({"status": "waiting_wave", "reason": "waiting for all admitted business work to settle"})
+    elif proposed_continuations and not learning_barrier_due:
+        policy_lane.update({"status": "waiting_wave", "reason": "waiting for declared project continuations to settle"})
     elif not outcome_fingerprint:
-        rl_lane.update({"status": "waiting_evidence", "reason": "waiting for a completed business outcome"})
-    elif rl_lane.get("last_dispatched_fingerprint") == outcome_fingerprint:
-        rl_lane.update({"status": "waiting_change", "reason": "current business outcomes already learned"})
+        policy_lane.update({"status": "waiting_evidence", "reason": "waiting for a completed business outcome"})
+    elif not long_horizon.learning_allowed:
+        policy_lane.update({
+            "status": "waiting_business_quota",
+            "reason": (
+                f"need the bounded business quota before the next learning pass; "
+                f"have {long_horizon.business_since_learning}"
+            ),
+        })
+    elif policy_lane.get("last_dispatched_fingerprint") == outcome_fingerprint:
+        policy_lane.update({"status": "waiting_change", "reason": "current business outcomes already learned"})
     elif not any(_portfolio_item_lane(item) == "05" and item.status not in TERMINAL_WORK for item in items):
         try:
             item = enqueue_work_item(workspace, campaign_id, {
                 "instance_id": "05", "project_id": ROLES["05"], "kind": "project_iteration",
-                "title": "五项目组合：本轮结果离线 RL 审计",
+                "title": "五项目组合：本轮结果离线经验策略学习 审计",
                 "instruction": (
                     f"{PORTFOLIO_MARKER} [portfolio_lane=05] [source_fingerprint={outcome_fingerprint}] "
-                    "直接执行确定性事件 offline_rl_self_evolution。只摄取本轮新终态 WorkItem 的真实产物、"
+                    "直接执行确定性事件 offline_policy_learning_self_evolution。只摄取本轮新终态 WorkItem 的真实产物、"
                     "验收、QQ 回执、失败与重试，奖励新证据和跨轮承接；形成 candidate Experiment。"
                     "样本或回归门不足不得 promoted，自进化不得替代 01–04 项目推进。"
                 ),
                 "priority": 79, "requires_artifact": True, "requires_delivery": True,
             })
             created.append(item)
-            rl_lane.update({
+            policy_lane.update({
                 "status": "queued", "work_item_id": item.work_item_id,
                 "last_dispatched_fingerprint": outcome_fingerprint, "last_dispatched_at": now_iso(),
                 "reason": "new settled business wave admitted for offline learning",
             })
         except ValueError as exc:
             if "budget exhausted" in str(exc):
-                rl_lane.update({"status": "budget_exhausted", "reason": str(exc)})
+                policy_lane.update({"status": "budget_exhausted", "reason": str(exc)})
             else:
                 raise
 
@@ -766,7 +932,7 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
     # declared exploration curriculum. These tasks differ by executable
     # objective; exhausting the curriculum is safer than replaying one report.
     outcomes_learned = bool(outcome_fingerprint and
-                            rl_lane.get("last_dispatched_fingerprint") == outcome_fingerprint)
+                            policy_lane.get("last_dispatched_fingerprint") == outcome_fingerprint)
     inherited_fresh_start = bool(portfolio.get("inherited_from") and
                                  not any(_portfolio_item_lane(item) for item in items))
     if ((outcomes_learned or inherited_fresh_start) and not proposed_continuations
@@ -806,7 +972,7 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
             created.append(item)
             lane.update({"exploration_round": round_index + 1, "exploration_status": "queued",
                          "work_item_id": item.work_item_id})
-            rl_lane.update({"status": "waiting_wave", "reason": "waiting for proactive exploration wave to settle"})
+            policy_lane.update({"status": "waiting_wave", "reason": "waiting for proactive exploration wave to settle"})
 
     # After every declared curriculum is exhausted, keep the controller alive
     # with a rotating, low-frequency evidence scout batch. This is monitoring and
@@ -844,7 +1010,7 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
                 for instance in PORTFOLIO_BUSINESS_INSTANCES:
                     if instance in state.allowed_instances:
                         lanes[instance]["scout_status"] = "suppressed_low_business_density"
-                rl_lane.update({"status": "waiting_change",
+                policy_lane.update({"status": "waiting_change",
                                 "reason": "Scout suppressed: recent business progress density below 0.25"})
                 _save_portfolio_state(workspace, campaign_id, portfolio)
                 return created
@@ -854,7 +1020,7 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
             checked = 0
             # Admit up to max_active distinct lanes so a quiet long run does
             # not leave the second slot unused. Ineligible lanes are skipped,
-            # and no-change scouts remain excluded from the RL wave digest.
+            # and no-change scouts remain excluded from the EGPL wave digest.
             while admitted < state.max_active and checked < len(eligible):
                 instance = eligible[(cursor + checked) % len(eligible)]
                 checked += 1
@@ -885,7 +1051,7 @@ def materialize_portfolio_work(workspace: str, campaign_id: str) -> list[WorkIte
             if admitted:
                 portfolio["scout_cursor"] = cursor + checked
                 portfolio["next_scout_at"] = (_now() + timedelta(minutes=15)).isoformat(timespec="seconds")
-                rl_lane.update({"status": "waiting_wave", "reason": "waiting for rotating evidence scout batch"})
+                policy_lane.update({"status": "waiting_wave", "reason": "waiting for rotating evidence scout batch"})
     _save_portfolio_state(workspace, campaign_id, portfolio)
     return created
 
@@ -898,7 +1064,7 @@ def seed_portfolio_work(workspace: str, campaign_id: str) -> list[WorkItem]:
 
 
 def materialize_targetdiff_continuous_work(workspace: str, campaign_id: str) -> list[WorkItem]:
-    """Replenish one declared experiment at a time and insert RL only at milestones."""
+    """Replenish one declared experiment at a time and insert EGPL only at milestones."""
     state = load_campaign(workspace, campaign_id)
     if not state:
         return []
@@ -914,14 +1080,14 @@ def materialize_targetdiff_continuous_work(workspace: str, campaign_id: str) -> 
     if current == 0:
         return []
     if current in {10, 13} and "05" in state.allowed_instances:
-        marker = f"rl_after_targetdiff_stage={current}"
+        marker = f"policy_after_targetdiff_stage={current}"
         checkpoint = next((item for item in items if marker in item.instruction), None)
         if checkpoint is None:
             return [enqueue_work_item(workspace, campaign_id, {
                 "instance_id": "05", "project_id": ROLES["05"], "kind": "project_iteration",
-                "title": f"TargetDiff Stage {current} 里程碑 RL 审计",
+                "title": f"TargetDiff Stage {current} 里程碑 EGPL 审计",
                 "instruction": (
-                    f"[molecular_continuous=true] [{marker}] 直接执行确定性事件 offline_rl_self_evolution。"
+                    f"[molecular_continuous=true] [{marker}] 直接执行确定性事件 offline_policy_learning_self_evolution。"
                     f"只摄取截至 Stage {current} 的真实完成、失败、重试、产物 lineage 和 QQ 回执；"
                     "计算新证据与结果承接奖励，形成 candidate Experiment。样本或回归门不足不得 promoted。"
                 ),
@@ -970,7 +1136,7 @@ def materialize_evolution_work(workspace: str, campaign_id: str) -> list[WorkIte
         return []
     campaign_items = list_work_items(workspace, campaign_id)
     if _is_targetdiff_continuous(campaign_items):
-        # This profile owns its two declared RL checkpoints. Historical Issues
+        # This profile owns its two declared EGPL checkpoints. Historical Issues
         # must not pre-empt the business experiment chain.
         return []
     # The seeded 05 policy audit owns the first evolution slot.  Do not let
@@ -999,7 +1165,7 @@ def materialize_evolution_work(workspace: str, campaign_id: str) -> list[WorkIte
             "kind": "evolution_experiment",
             "title": f"验证 Issue {issue['issue_id']}",
             "instruction": (
-                f"执行确定性事件 offline_rl_self_evolution。基于 Issue {issue['issue_id']} "
+                f"执行确定性事件 offline_policy_learning_self_evolution。基于 Issue {issue['issue_id']} "
                 f"的真实证据进行诊断：{issue.get('summary','')}。"
                 "建立带 baseline、可证伪假设、成功标准和回滚策略的 candidate Experiment；"
                 "执行聚焦测试。只有全部标准和回归通过才可 promoted，否则 rejected/inconclusive。"
@@ -1217,6 +1383,11 @@ def build_campaign_report(
 
 
 def _schedule_report_if_due(workspace: str, state: CampaignState, now: datetime) -> None:
+    # A zero/negative interval is an explicit silent-control-plane contract.
+    # Campaigns used as bounded experiments may keep internal ledgers without
+    # impersonating project progress through periodic user messages.
+    if int(state.report_interval_seconds) <= 0:
+        return
     if state.last_report_at:
         due = _parse_time(state.last_report_at) + timedelta(seconds=state.report_interval_seconds)
         if now < due:
@@ -1320,7 +1491,7 @@ def tick_campaign(
     creation_stop_reason = _budget_stop_reason(pre_state, now) if pre_state else ""
     if pre_state and not creation_stop_reason:
         # Materialize a Receipt-owned continuation before Portfolio considers
-        # an RL checkpoint.  The previous order allowed 05 to run after every
+        # an EGPL checkpoint.  The previous order allowed 05 to run after every
         # small step instead of once after the whole business chain settled.
         materialize_project_actions(workspace, campaign_id)
         materialize_portfolio_work(workspace, campaign_id)
@@ -1330,7 +1501,7 @@ def tick_campaign(
         pre_items = list_work_items(workspace, campaign_id) if pre_state else []
         pre_stop_reason = _effective_stop_reason(pre_state, now, pre_items) if pre_state else ""
     if pre_state and pre_stop_reason:
-        _sync_offline_rl_at_stop(workspace, campaign_id)
+        _sync_offline_policy_learning_at_stop(workspace, campaign_id)
         _ensure_final_report_work(workspace, pre_state, pre_stop_reason)
     with campaign_lock(workspace, campaign_id):
         state = load_campaign(workspace, campaign_id)
@@ -1486,8 +1657,8 @@ def tick_campaign(
                        error=str(exc))
 
     state = load_campaign(workspace, campaign_id)
-    # A Campaign waiting on an external resume event still owes the operator
-    # periodic visibility.  `blocked` pauses business work, not reporting.
+    # Periodic visibility is opt-in.  Project-native/autonomy runtimes use a
+    # zero interval and report only meaningful task transitions.
     if state and state.status in {"running", "blocked"} and not pre_stop_reason:
         _schedule_report_if_due(workspace, state, now)
     return {"ok": True, "status": state.status if state else "unknown", "active_instances": selected,
@@ -1538,6 +1709,14 @@ def _task_runtime_evidence(workspace: str, marker: str, instance_id: str = "") -
                 row = json.loads(line)
                 if row.get("event") == "completion_status_updated" and row.get("status") == "done":
                     execution_done = True
+                    # Sprint18 §6: batch_plan normal-path "done" is the same
+                    # authoritative completion signal as
+                    # manual_stop_project_finalization. Without this, every
+                    # self-driven batch_plan run was deemed "complete=False"
+                    # and then blocked on "final LLM acceptance not found".
+                    src = str(row.get("source") or "")
+                    if src in {"manual_stop_project_finalization", "batch_plan"}:
+                        complete = True
                 if row.get("event") == "completion_status_updated" and row.get("status") == "failed":
                     execution_done = True
                     failed = True
@@ -1575,6 +1754,56 @@ def _task_runtime_evidence(workspace: str, marker: str, instance_id: str = "") -
         artifacts = [str(value) for value in task_dir.iterdir()
                      if value.is_file() and not value.name.startswith("_")
                      and value.name not in {"task_instance.json", "task_log.jsonl", "active_plan.json"}]
+        # Learning Events persist their authoritative artifacts in the shared
+        # governance store, not in volatile task directories.  Preserve that
+        # distinction while still satisfying a Campaign WorkItem's evidence
+        # contract.  Only output-like keys from known learning Events and
+        # allowlisted governance roots are eligible; arbitrary input paths in
+        # a nested result can never be promoted to artifacts.
+        governance = (workspace_root(workspace) / "share/mind/governance").resolve()
+        learning_roots = (
+            (governance / "research_learning").resolve(),
+            (governance / "active_learning").resolve(),
+        )
+        for step in dict(data.get("metadata", {}).get("step_results") or {}).values():
+            if not isinstance(step, dict):
+                continue
+            event_type = str(step.get("event_type") or "")
+            if not (
+                event_type.startswith("research_active_learning_")
+                or event_type.startswith("agent_active_learning_")
+                or event_type.startswith("learning_")
+                or event_type in {"sprint18_learning_cycle", "targetdiff_active_learning",
+                                  "targetdiff_active_robustness",
+                                  "targetdiff_uncertainty_diagnostic",
+                                  "targetdiff_uncertainty_candidate"}
+            ):
+                continue
+            candidates: list[str] = []
+
+            def visit(candidate: Any, *, key: str = "") -> None:
+                if isinstance(candidate, dict):
+                    for child_key, child in candidate.items():
+                        visit(child, key=str(child_key))
+                elif isinstance(candidate, (list, tuple)):
+                    for child in candidate:
+                        visit(child, key=key)
+                elif isinstance(candidate, str) and key in {
+                    "path", "files", "evidence_refs", "experiment_path",
+                    "decision_path", "policy_path", "manifest_path",
+                }:
+                    candidates.append(candidate)
+
+            visit(step)
+            for candidate in candidates:
+                try:
+                    evidence_path = Path(candidate).resolve()
+                    if (evidence_path.is_file()
+                            and any(root in evidence_path.parents for root in learning_roots)):
+                        artifacts.append(str(evidence_path))
+                except (OSError, ValueError):
+                    continue
+        artifacts = list(dict.fromkeys(artifacts))
         model_calls = max(reported_total_model_calls, planner_model_calls + step_model_calls)
         return {"found": True, "complete": complete, "execution_done": execution_done,
                 "failed": failed, "blocked_reason": blocked_reason, "resume_event": resume_event,
@@ -1585,8 +1814,216 @@ def _task_runtime_evidence(workspace: str, marker: str, instance_id: str = "") -
     return {"found": False, "complete": False, "execution_done": False, "failed": False,
             "blocked_reason": "", "resume_event": "",
             "delivered": False, "model_calls": 0,
-            "progress_phases": [],
-            "event_types": [], "artifacts": [], "task_id": ""}
+            "progress_phases": [], "event_types": [], "artifacts": [], "task_id": ""}
+
+
+
+def _scan_task_dir_artifacts(task_dir):
+    """Scan a task working dir for any non-metadata file and return absolute paths."""
+    from pathlib import Path as _P
+    out = []
+    td = _P(task_dir)
+    if not td.is_dir():
+        return out
+    for value in sorted(td.iterdir()):
+        if not value.is_file():
+            continue
+        if value.name.startswith("_"):
+            continue
+        if value.name in {"task_instance.json", "task_log.jsonl", "active_plan.json"}:
+            continue
+        out.append(str(value))
+    return out
+
+
+def _scan_recent_task_artifacts_fallback(workspace, instance_id=""):
+    """Walk the most recent task dirs of an instance and collect every artifact."""
+    from pathlib import Path as _P
+    if not workspace:
+        return []
+    base = _P(workspace)
+    candidates = []
+    if instance_id:
+        candidates.append(base / "instances" / instance_id / "state" / "tasks")
+    candidates.append(base / "state" / "tasks")
+    candidates.append(base / "share" / "tasks")
+    found = []
+    for tasks_root in candidates:
+        if not tasks_root.is_dir():
+            continue
+        task_dirs = sorted(
+            (p for p in tasks_root.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )[:5]
+        for td in task_dirs:
+            found.extend(_scan_task_dir_artifacts(td))
+    return found
+
+
+def correct_shared_learning_artifact_projection(
+    workspace: str, campaign_id: str, work_item_id: str,
+) -> dict[str, Any]:
+    """Correct a historical Campaign artifact false-negative append-only.
+
+    The correction is deliberately narrow: the old sole rejection must be
+    ``required artifact missing`` and the persisted task must now prove a
+    completed, non-failed Event-first learning run with durable evidence under
+    the governance learning namespaces.  Raw task logs/events are unchanged.
+    """
+    marker = f"campaign_id={campaign_id} work_item_id={work_item_id}"
+    with campaign_lock(workspace, campaign_id):
+        item = load_work_item(workspace, campaign_id, work_item_id)
+        state = load_campaign(workspace, campaign_id)
+        if not item or not state:
+            return {"ok": False, "status": "missing_campaign_work"}
+        if item.status != "blocked" or item.blocked_reason != "required artifact missing":
+            return {"ok": False, "status": "projection_not_eligible",
+                    "blocked_reason": item.blocked_reason}
+        runtime = _task_runtime_evidence(workspace, marker, item.instance_id)
+        allowed_events = bool(runtime.get("event_types")) and all(
+            str(value).startswith(("research_active_learning_", "agent_active_learning_", "learning_"))
+            or str(value) in {
+                "atomic_inspect_file", "sprint18_learning_cycle",
+                "targetdiff_active_learning", "targetdiff_active_robustness",
+                "targetdiff_uncertainty_diagnostic",
+                "targetdiff_uncertainty_candidate",
+            }
+            for value in runtime.get("event_types") or []
+        )
+        artifacts = [str(value) for value in runtime.get("artifacts") or []
+                     if Path(str(value)).is_file()]
+        if (not runtime.get("found") or not runtime.get("complete")
+                or runtime.get("failed") or not allowed_events or not artifacts
+                or (item.requires_delivery and not runtime.get("delivered"))):
+            return {"ok": False, "status": "projection_evidence_gate_failed",
+                    "runtime": runtime}
+        archive = archive_work_item_evidence(
+            workspace, campaign_id=campaign_id, work_item_id=item.work_item_id,
+            project_id=item.project_id, instance_id=item.instance_id,
+            artifacts=artifacts,
+            event_types=list(runtime.get("event_types") or item.event_types),
+        )
+        if not archive.get("ok") or not archive.get("artifacts"):
+            return {"ok": False, "status": "projection_archive_failed", "archive": archive}
+        prior = {"status": item.status, "blocked_reason": item.blocked_reason,
+                 "artifacts": list(item.artifacts)}
+        item.status = "completed"
+        item.blocked_reason = ""
+        item.artifacts = list(archive["artifacts"])
+        item.event_types = list(dict.fromkeys(runtime.get("event_types") or item.event_types))
+        signature = str(archive.get("semantic_outcome_fingerprint")
+                        or _progress_signature(item.event_types, item.artifacts))
+        item.evidence.extend([
+            "projection_correction=shared_learning_artifact_v1",
+            f"evidence_manifest={archive['manifest_path']}",
+            f"progress_signature={signature}",
+        ])
+        item.updated_at = now_iso()
+        save_work_item(workspace, item)
+        state.usage.failures = max(0, state.usage.failures - 1)
+        state.usage.work_items_completed += 1
+        state.updated_at = now_iso()
+        save_campaign(workspace, state)
+        _event(
+            workspace, campaign_id, "work_item_projection_corrected",
+            work_item_id=item.work_item_id, prior=prior, status="completed",
+            artifacts=item.artifacts, evidence_manifest=archive["manifest_path"],
+            raw_task_mutated=False,
+        )
+        return {"ok": True, "status": "projection_corrected",
+                "work_item": item.to_dict(), "prior": prior,
+                "evidence_manifest": archive["manifest_path"]}
+
+
+def correct_isolated_learning_business_projection(
+    workspace: str, campaign_id: str, work_item_id: str,
+) -> dict[str, Any]:
+    """Remove a false business-progress label from a completed learning item."""
+    marker = f"campaign_id={campaign_id} work_item_id={work_item_id}"
+    with campaign_lock(workspace, campaign_id):
+        item = load_work_item(workspace, campaign_id, work_item_id)
+        if not item:
+            return {"ok": False, "status": "missing_campaign_work"}
+        if (item.status != "completed"
+                or not _isolated_learning_work(item.instruction, item.event_types)
+                or "business_progress=true" not in item.evidence):
+            return {"ok": False, "status": "projection_not_eligible"}
+        runtime = _task_runtime_evidence(workspace, marker, item.instance_id)
+        if not runtime.get("complete") or runtime.get("failed"):
+            return {"ok": False, "status": "projection_evidence_gate_failed",
+                    "runtime": runtime}
+        prior = list(item.evidence)
+        item.evidence = [value for value in item.evidence
+                         if value not in {"business_progress=true", "learning_progress=false"}]
+        item.evidence.extend([
+            "business_progress=false", "learning_progress=true",
+            "projection_correction=isolated_learning_not_business_v1",
+        ])
+        item.updated_at = now_iso()
+        save_work_item(workspace, item)
+        _event(
+            workspace, campaign_id, "work_item_projection_corrected",
+            work_item_id=item.work_item_id,
+            prior={"business_progress": True, "evidence": prior},
+            status="completed", business_progress=False, learning_progress=True,
+            raw_task_mutated=False,
+        )
+        return {"ok": True, "status": "learning_projection_corrected",
+                "work_item": item.to_dict()}
+
+
+def correct_campaign_report_budget_projection(
+    workspace: str, campaign_id: str, work_item_id: str,
+) -> dict[str, Any]:
+    """Remove a control-plane report from the business failure budget.
+
+    The report may remain blocked when its real channel acknowledgement is
+    missing.  This correction changes only its derived attribution and budget
+    projection; the original Task and delivery failure remain immutable.
+    """
+    with campaign_lock(workspace, campaign_id):
+        item = load_work_item(workspace, campaign_id, work_item_id)
+        state = load_campaign(workspace, campaign_id)
+        if not item or not state:
+            return {"ok": False, "status": "missing_campaign_work"}
+        if (item.kind != "report" or item.status != "blocked"
+                or "projection_correction=campaign_report_control_plane_v1" in item.evidence):
+            return {"ok": False, "status": "projection_not_eligible"}
+        allowed = {"task completion reported failure", "real delivery callback not found"}
+        problems = {value.strip() for value in item.blocked_reason.split(";") if value.strip()}
+        if not problems or not problems.issubset(allowed):
+            return {"ok": False, "status": "projection_evidence_gate_failed",
+                    "problems": sorted(problems)}
+        prior = {"blocked_reason": item.blocked_reason, "evidence": list(item.evidence),
+                 "failures": state.usage.failures}
+        consumed_business_failure_budget = "monitor_only=false" in item.evidence
+        delivery_missing = "real delivery callback not found" in problems
+        item.blocked_reason = "real delivery callback not found" if delivery_missing else ""
+        item.status = "blocked" if delivery_missing else "completed"
+        item.evidence = [value for value in item.evidence
+                         if value not in {"monitor_only=false", "task completion reported failure"}]
+        item.evidence.extend([
+            "monitor_only=true", "business_progress=false", "learning_progress=false",
+            "report_delivery_issue=true" if delivery_missing else "report_delivery_issue=false",
+            "projection_correction=campaign_report_control_plane_v1",
+        ])
+        item.updated_at = now_iso()
+        save_work_item(workspace, item)
+        if consumed_business_failure_budget:
+            state.usage.failures = max(0, state.usage.failures - 1)
+        if item.status == "completed":
+            state.usage.work_items_completed += 1
+        state.updated_at = now_iso()
+        save_campaign(workspace, state)
+        _event(
+            workspace, campaign_id, "work_item_projection_corrected",
+            work_item_id=item.work_item_id, prior=prior, status=item.status,
+            monitor_only=True, business_progress=False,
+            business_failure_budget_corrected=consumed_business_failure_budget,
+            raw_task_mutated=False,
+        )
+        return {"ok": True, "status": "campaign_report_projection_corrected",
+                "work_item": item.to_dict(), "prior": prior}
 
 
 def _delivery_ack_from_latest_task(workspace: str, marker: str, instance_id: str = "") -> bool:
@@ -1744,7 +2181,11 @@ def complete_campaign_work(
         state.usage.model_calls += int(runtime.get("model_calls") or 0)
         state.usage.cost_units += float(runtime.get("model_calls") or 0)
         problems = []
-        if not success:
+        # Report handlers can emit a successful channel/file result before the
+        # generic manual finalizer labels the control-plane task failed.  The
+        # report ledger owns this verdict; only its actual delivery/artifact
+        # contract may block it, not the generic business terminal bit.
+        if not success and item.kind != "report":
             problems.append("task completion reported failure")
         if item.kind != "report" and runtime.get("found") and not runtime.get("complete"):
             problems.append("final LLM acceptance not found")
@@ -1787,10 +2228,12 @@ def complete_campaign_work(
             value.split("=", 1)[1] for value in reversed(previous_receipt.findings)
             if value.startswith("outcome_fingerprint=")
         ), "") if previous_receipt else ""
-        monitor_only = item.kind == "audit" or "[portfolio_scout=true]" in item.instruction
+        isolated_learning = _isolated_learning_work(item.instruction, item.event_types)
+        report_monitor = item.kind == "report"
+        monitor_only = report_monitor or item.kind == "audit" or "[portfolio_scout=true]" in item.instruction
         business_progress = bool(
             item.kind == "project_iteration" and item.instance_id in PORTFOLIO_BUSINESS_INSTANCES
-            and not monitor_only
+            and not monitor_only and not isolated_learning
             and not problems and not runtime_blocked_reason
             and signature and signature != previous_outcome
         )
@@ -1798,6 +2241,7 @@ def complete_campaign_work(
             f"outcome_fingerprint={signature}",
             f"monitor_only={str(monitor_only).lower()}",
             f"business_progress={str(business_progress).lower()}",
+            f"learning_progress={str(isolated_learning and not problems and not runtime_blocked_reason).lower()}",
         ])
         if monitor_only:
             item.evidence.append("no_change=true")
@@ -1825,10 +2269,14 @@ def complete_campaign_work(
                     workspace, item.project_id, item.source_action_id, "blocked",
                     task_id=item.task_id, blocked_reason=item.blocked_reason,
                 )
-            state.usage.failures += 1
-            if item.status == "failed":
+            # Report delivery belongs to the control plane.  Preserve its
+            # blocked status and report_issues count, but do not consume the
+            # business failure/retry budget or create a business Issue.
+            if not report_monitor:
+                state.usage.failures += 1
+            if item.status == "failed" and not report_monitor:
                 state.usage.retries += 1
-            if item.kind != "evolution_experiment":
+            if item.kind not in {"evolution_experiment", "report"}:
                 record_issue(workspace, {
                     "summary": f"Campaign WorkItem 验收失败: {item.title}",
                     "category": "delivery" if not delivered and item.requires_delivery else "verification",
@@ -1839,6 +2287,8 @@ def complete_campaign_work(
                     "source_work_kind": item.kind,
                     "source_work_item_id": item.work_item_id,
                 })
+            elif report_monitor:
+                item.evidence.append("report_delivery_issue=true")
         elif runtime_blocked_reason:
             item.status = "blocked"
             item.blocked_reason = runtime_blocked_reason
@@ -1872,7 +2322,8 @@ def complete_campaign_work(
                delivery_confirmed=delivered, problems=problems)
 
     receipt_result: dict[str, Any] = {}
-    if item.status in {"completed", "blocked"} and item.kind == "project_iteration":
+    if (item.status in {"completed", "blocked"} and item.kind == "project_iteration"
+            and not isolated_learning and not _matched_experiment_work(item.instruction)):
         previous = latest_receipt(workspace, item.project_id)
         bounded_stage = bool(set(item.event_types) & BOUNDED_CAMPAIGN_EVENTS)
         continuation = propose_continuation(
@@ -1964,3 +2415,5 @@ def campaign_snapshot(workspace: str, campaign_id: str = "") -> dict[str, Any]:
     if _is_portfolio_continuous(state):
         result["portfolio"] = _load_portfolio_state(workspace, campaign_id)
     return result
+
+# 03_instance_native_step touched at 2026-09-06T12:26:47+08:00

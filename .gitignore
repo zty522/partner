@@ -37,6 +37,11 @@ Thumbs.db
 # Partner - workspace (user data, not code)
 workspace/
 state/
+# `state/` above is runtime data, but this one file is Python source.  Keep the
+# exception narrow so instance/workspace state remains ignored.
+!partner/state/
+partner/state/*
+!partner/state/config.py
 knowledge/
 logs/
 ideas/
@@ -87,3 +92,15 @@ release_v0.4.0.md
 # Editor/backup files
 *.bak
 *.fixed
+*.bak_*
+*.bak[0-9]*
+*.pre_*
+*.test_orig
+*.v1_backup
+
+# Local execution artifacts and generated probes (not source)
+/artifacts/
+/task_working_dir/
+/*.pdf
+/capabilities_hermes_learning.md
+/partner/governance/_execute_code.py

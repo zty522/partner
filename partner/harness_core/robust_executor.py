@@ -26,7 +26,10 @@ DEFAULT_CONFIG: JsonDict = {
         "per_event": {
             "atomic_http_get": {"timeout": 20, "retries": 1},
             "micro_planner": {"timeout": 45, "retries": 0},
-            "batch_planner": {"timeout": 180, "retries": 1},
+            # A timeout is already a complete negative observation. Repeating
+            # the same large prompt/model call doubles latency without adding
+            # information; native autonomy should hand it to learning instead.
+            "batch_planner": {"timeout": 180, "retries": 0},
             # Semantic repair has its own bounded outer loop.  It uses the
             # same model and prompt size as batch planning, so a 60s global
             # default spuriously times out healthy 60-90s responses and leaves

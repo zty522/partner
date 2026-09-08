@@ -1,4 +1,4 @@
-"""DirectAPIAdapter - calls DeepSeek API directly, bypassing hermes subprocess.
+"""Direct API adapter with an explicit provider boundary.
 
 Avoids the subprocess.PIPE deadlock on WSL (Python 3.13 parent, Python 3.11 child)
 by using simple HTTP requests.
@@ -25,10 +25,10 @@ API_BASE = "https://api.deepseek.com"
 MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
 
-def _resolve_api_json() -> dict:
+def _resolve_api_json(provider: str = "") -> dict:
     """从 workspace config/api.json 读取 provider 配置（统一管理入口）。
 
-    默认 deepseek；minimax 为 fallback。
+    默认 MiniMax。DeepSeek 只能由调用方显式指定，绝不作为 fallback。
 
     解析顺序：~/.partner_workspace 指针 → workspace_root/config/api.json。
     任何失败都返回空 dict，调用方回退到环境变量 / 模块默认值。
@@ -50,10 +50,12 @@ def _resolve_api_json() -> dict:
             return {}
         with open(api_path, encoding="utf-8") as f:
             data = json.load(f)
-        # 默认 provider: minimax（用户最新要求切回 MiniMax-M3）；deepseek 作 fallback（中午便宜时用过，保留）
-        primary = (data.get("apis", {}).get("minimax") or {})
+        apis = data.get("apis", {}) or {}
+        requested = str(provider or "").strip().lower()
+        selected_name = requested if requested else "minimax"
+        primary = apis.get(selected_name, {}) or {}
         if not (str(primary.get("api_key") or "").strip() and str(primary.get("base_url") or "").strip()):
-            primary = data.get("apis", {}).get("deepseek", {}) or {}
+            return {}
         out = {}
         for k in ("api_key", "model", "base_url"):
             v = str(primary.get(k) or "").strip()
@@ -64,10 +66,7 @@ def _resolve_api_json() -> dict:
         b = out.get("base_url", "")
         if b.endswith("/v1"):
             out["base_url"] = b[:-3]
-        if primary is data.get("apis", {}).get("minimax"):
-            out["_provider"] = "minimax"
-        else:
-            out["_provider"] = "deepseek"
+        out["_provider"] = selected_name
         return out
     except Exception:
         return {}
@@ -94,12 +93,12 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
 
 
 def _log_api_call(**kw):
-    """记录 API 调用日志；失败不影响主流程。provider 字段从 cfg._provider 取，缺省 "deepseek" 兼容。"""
+    """记录 API 调用日志；失败不影响主流程。provider 缺省为 MiniMax。"""
     try:
         from ..api_log import append_api_call
-        provider = "deepseek"
+        provider = "minimax"
         try:
-            provider = _resolve_api_json().get("_provider", "deepseek")
+            provider = _resolve_api_json().get("_provider", "minimax")
         except Exception:
             pass
         append_api_call(provider, **kw)
@@ -113,7 +112,7 @@ _LONG_GEN_PURPOSES = ("batch_plan", "action", "report", "focus_extract")
 def select_model_and_tokens(cfg: dict, purpose: str = "", max_tokens=None) -> tuple[str, int]:
     """模型与 max_tokens 选择（purpose 分流）。
 
-    默认 provider：minimax（MiniMax-M3，用户最新要求）；deepseek 为 fallback（中午便宜时用过，保留）。
+    默认 provider：minimax（MiniMax-M3）。DeepSeek 不做隐式 fallback。
     长内容生成类 purpose（batch_plan/action/report/focus_extract）用 minimax 长生成模型；
     max_tokens ≥16000 防输出截断。
     普通对话（chat/classify/direct_reply 等）保持 api.json 配置模型。
@@ -122,7 +121,10 @@ def select_model_and_tokens(cfg: dict, purpose: str = "", max_tokens=None) -> tu
     model = cfg.get("model") or os.environ.get("MINIMAX_MODEL") or "MiniMax-M3"
     mt = max_tokens
     if purpose in _LONG_GEN_PURPOSES:
-        provider = str(cfg.get("_provider") or "deepseek").lower()
+        configured_model = str(cfg.get("model") or "").lower()
+        provider = str(cfg.get("_provider") or (
+            "deepseek" if configured_model.startswith("deepseek") else "minimax"
+        )).lower()
         provider_default = (
             cfg.get("model") or os.environ.get("MINIMAX_LONG_GEN_MODEL") or "MiniMax-M3"
             if provider == "minimax"
@@ -137,17 +139,18 @@ def select_model_and_tokens(cfg: dict, purpose: str = "", max_tokens=None) -> tu
 
 
 def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
-         purpose: str = "chat", timeout: int = 60) -> str:
-    """Send a chat request directly to DeepSeek API.
+         purpose: str = "chat", timeout: int = 60, provider: str = "") -> str:
+    """Send a chat request to the explicitly selected provider (MiniMax by default).
     
     Returns the model's response text, or empty string on failure.
     """
-    cfg = _resolve_api_json()
-    api_key = cfg.get("api_key") or API_KEY
+    cfg = _resolve_api_json(provider)
+    selected_provider = str(cfg.get("_provider") or provider or "minimax").lower()
+    api_key = cfg.get("api_key") or (API_KEY if selected_provider == "deepseek" else "")
     model, max_tokens = select_model_and_tokens(cfg, purpose, max_tokens)
-    api_base = (cfg.get("base_url") or API_BASE).rstrip("/")
+    api_base = (cfg.get("base_url") or (API_BASE if selected_provider == "deepseek" else "")).rstrip("/")
     if not api_key:
-        logger.error("[DirectAPI] No DeepSeek API key found")
+        logger.error("[DirectAPI] No API key found for provider=%s", selected_provider)
         _log_api_call(purpose=purpose, status="failed", error="no api key", model=model)
         return ""
 
@@ -194,12 +197,17 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
         if r.status_code == 200:
             data = r.json()
             resp_content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage") or {}
             logger.info(f"[DirectAPI] {purpose} OK in {elapsed:.1f}s, prompt={len(prompt)}chars response={len(resp_content)}chars")
             _log_api_call(model=model, base_url=api_base, purpose=purpose, status="ok",
                           elapsed_ms=int(elapsed * 1000), prompt_chars=len(prompt),
-                          response_chars=len(resp_content))
+                          response_chars=len(resp_content),
+                          prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                          completion_tokens=int(usage.get("completion_tokens") or 0),
+                          total_tokens=int(usage.get("total_tokens") or 0))
             # Fallback: if v4-flash returns empty on batch_plan, retry with v4-pro
-            if purpose == "batch_plan" and len(resp_content) < 10 and payload.get("model") == "deepseek-v4-flash":
+            if (selected_provider == "deepseek" and purpose == "batch_plan"
+                    and len(resp_content) < 10 and payload.get("model") == "deepseek-v4-flash"):
                 logger.warning(f"[DirectAPI] v4-flash returned empty, falling back to v4-pro...")
                 fallback_payload = dict(payload)
                 fallback_payload["model"] = "deepseek-v4-pro"
@@ -221,10 +229,14 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                     if fr.status_code == 200:
                         fb_data = fr.json()
                         fb_content = fb_data["choices"][0]["message"]["content"]
+                        fb_usage = fb_data.get("usage") or {}
                         logger.info(f"[DirectAPI] v4-pro fallback OK in {time.time()-start:.1f}s, {len(fb_content)} chars")
                         _log_api_call(model="deepseek-v4-pro", base_url=api_base, purpose=purpose,
                                       status="ok", elapsed_ms=int((time.time() - start) * 1000),
                                       prompt_chars=len(prompt), response_chars=len(fb_content),
+                                      prompt_tokens=int(fb_usage.get("prompt_tokens") or 0),
+                                      completion_tokens=int(fb_usage.get("completion_tokens") or 0),
+                                      total_tokens=int(fb_usage.get("total_tokens") or 0),
                                       error="fallback_from_v4_flash_empty")
                         return fb_content
                     else:

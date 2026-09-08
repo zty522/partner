@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from partner.governance.evolution_loop import decide_experiment
-from partner.governance.rl_evolution import run_offline_rl_update
+from partner.governance.experience_policy import run_offline_policy_learning_update
 from partner.governance.storage import governance_log, workspace_root
 
 
@@ -283,9 +283,9 @@ def atomic_evidence_execution_slice(ctx: Any, params: dict) -> dict:
         result["git"] = extra["git"]
     elif instance == "05":
         campaign_id = str(params.get("campaign_id") or "")
-        update = run_offline_rl_update(str(root), campaign_id)
-        source = str(root / "share" / "mind" / "governance" / "rl" / "trajectories.jsonl")
-        action = "离线 RL 候选实验回放与显式决策"
+        update = run_offline_policy_learning_update(str(root), campaign_id)
+        source = str(root / "share" / "mind" / "governance" / "experience_guided_policy" / "trajectories.jsonl")
+        action = "离线经验策略学习 候选实验回放与显式决策"
         script, result = _run_script(working, wave, RL_EVALUATOR, ["--input", source])
         experiments = []
         try:

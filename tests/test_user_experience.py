@@ -93,3 +93,12 @@ def test_domain_reports_have_different_information_architectures():
     assert "目标与承接" not in content + framework
     assert _content_quality(content, [])["plain_chars"] >= 700
     assert _content_quality(framework, [])["plain_chars"] >= 600
+
+
+def test_pdf_report_styles_are_domain_specific_contracts():
+    # Rendering is integration-tested elsewhere; this protects the caller-facing
+    # style vocabulary so reports do not silently collapse to one visual template.
+    from partner.v2.continuous_project_events import atomic_continuous_project_step
+    source = __import__("inspect").getsource(atomic_continuous_project_step)
+    for style in ("editorial", "research", "lab_note", "source_review", "engineering_change"):
+        assert style in source
