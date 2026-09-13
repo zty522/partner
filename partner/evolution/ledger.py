@@ -22,11 +22,16 @@ from pathlib import Path
 from typing import Any
 
 LEDGER_RELATIVE = "share/mind/governance/evolution_events.jsonl"
+DECISION_LEDGER_RELATIVE = "share/mind/governance/decision_loop_events.jsonl"
 SCHEMA_VERSION = 2
 
 
 def ledger_path(workspace_root: Path | str) -> Path:
-    return Path(workspace_root) / LEDGER_RELATIVE
+    root = Path(workspace_root)
+    epoch = root / "share/mind/governance/evolution_ledger_epoch.json"
+    # Once the governance epoch is split, this retired schema-v2 loop gets a
+    # separate evidence log and can no longer corrupt the promotion ledger.
+    return root / (DECISION_LEDGER_RELATIVE if epoch.is_file() else LEDGER_RELATIVE)
 
 
 def _read_last_hash(p: Path) -> str:

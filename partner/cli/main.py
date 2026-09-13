@@ -154,6 +154,18 @@ def cmd_showcase(args):
     _print_commands()
 
 
+def cmd_desktop(args):
+    """Launch the supported PySide6 desktop interface."""
+    workspace = args.workspace or _resolve_runtime_workspace(None)
+    try:
+        from shells.frontend.desktop_gui.launcher import launch_gui
+    except ImportError as exc:
+        print(f"{C_RED}❌ 桌面 GUI 组件不可用: {exc}{C_RESET}")
+        print("   安装方式: pip install 'partner-research[desktop]'")
+        return
+    launch_gui(workspace_path=workspace)
+
+
 def cmd_bot(args):
     workspace = _resolve_runtime_workspace(args.workspace)
     if not workspace:
@@ -706,6 +718,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bot.add_argument('--workspace', '-w', help='工作区路径')
     p_bot.set_defaults(func=cmd_bot)
 
+    # desktop GUI
+    p_desktop = sub.add_parser('desktop', help='打开桌面 GUI')
+    p_desktop.add_argument('--workspace', '-w', help='工作区路径')
+    p_desktop.set_defaults(func=cmd_desktop)
+
     # update
     p_update = sub.add_parser('update', help='Update Partner to the latest version')
     p_update.set_defaults(func=cmd_update)
@@ -823,11 +840,8 @@ def build_parser() -> argparse.ArgumentParser:
     from .world_model_cli import register_subparser as register_world_model
     register_world_model(sub)
 
-    # tui — moved to shells/frontend/tui/
-    _shells_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'shells')
-    if _shells_dir not in sys.path:
-        sys.path.insert(0, _shells_dir)
-    from frontend.tui import register_subparser as register_tui
+    # TUI ships as part of the installable ``shells`` package.
+    from shells.frontend.tui import register_subparser as register_tui
     register_tui(sub)
 
     # agent management

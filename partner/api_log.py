@@ -41,15 +41,29 @@ def append_api_call(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    finish_reason: str = "",
     error: str = "",
     workspace_root: str = "",
     instance: str = "",
+    project_id: str = "",
+    task_id: str = "",
+    episode_id: str = "",
+    event_type: str = "",
 ) -> str:
     """追加一条 API 调用记录。返回日志文件路径；失败返回空串（不抛异常）。"""
     try:
         root = workspace_root or workspace_root_from_pointer()
         if not root:
             return ""
+        # Per-instance callers still write into one authoritative usage ledger.
+        # Instance identity is carried as a field, not encoded by splitting the
+        # log across five directories.
+        norm = os.path.normpath(root)
+        parts = norm.split(os.sep)
+        if "instances" in parts:
+            index = parts.index("instances")
+            if index + 1 < len(parts):
+                root = os.sep.join(parts[:index]) or os.sep
         log_dir = os.path.join(root, "state", "logs")
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "api_calls.jsonl")
@@ -67,7 +81,12 @@ def append_api_call(
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "error": error or "",
+            "finish_reason": finish_reason,
             "instance": instance,
+            "project_id": project_id,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "event_type": event_type,
         }
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")

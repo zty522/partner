@@ -546,3 +546,6 @@ class LayeredMemoryStore:
 # Re-export MemoryManager for backward compatibility
 # ---------------------------------------------------------------------------
 from .memory_manager import MemoryManager  # noqa: E402, F401
+from .event_memory import EventMemory, MemoryProjector
+
+__all__ = ["EventMemory", "MemoryProjector"]

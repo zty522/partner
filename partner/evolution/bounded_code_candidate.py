@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,9 @@ TARGET = "partner/evolution/generated_candidate_policy.py"
 MECHANISM = "outcome.duplicate_semantic_result"
 RECIPE = "turn_parameter_sweep_v1"
 SPECS = (
+    {"project_id": "molecular_generation", "short": "molecular_method",
+     "recipe": "duplicate_forces_verified_maxmin_v2",
+     "hypothesis": "after repeated molecular outcomes, the multi-seed supported MaxMin arm increases fingerprint diversity within its preregistered QED-loss bound"},
     {"project_id": "molecular_dynamics_study", "short": "md",
      "recipe": "turn_parameter_sweep_v1",
      "hypothesis": "varying a bounded MD parameter plan by native turn reduces duplicate outcomes"},
@@ -42,59 +46,64 @@ SPECS = (
 )
 
 
-def _llm_json(prompt: str, *, max_tokens: int = 3000) -> dict[str, Any]:
+def _llm_json(prompt: str, *, root: Path, max_tokens: int = 3000) -> dict[str, Any]:
     """Use an LLM as a bounded diagnosis/critic, never as the hard gate."""
     try:
         from partner.adapters.direct_api import chat
-        raw = chat(prompt, purpose="classify", max_tokens=max_tokens,
-                   temperature=0.1, timeout=120)
+        raw = chat(prompt, purpose="self_evolution_code_candidate", max_tokens=max_tokens,
+                   temperature=0.1, timeout=120, workspace=str(root),
+                   instance_id="05", project_id="agent_self_evolution",
+                   event_type="bounded_code_candidate")
     except Exception:
         return {}
     cleaned = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.S | re.I)
-    start = cleaned.find("{")
-    if start < 0:
-        return {}
-    depth = 0
-    for index in range(start, len(cleaned)):
-        if cleaned[index] == "{":
-            depth += 1
-        elif cleaned[index] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    value = json.loads(cleaned[start:index + 1])
-                    return value if isinstance(value, dict) else {}
-                except (TypeError, ValueError):
-                    return {}
-    return {}
+    decoder = json.JSONDecoder()
+    values: list[tuple[int, dict[str, Any]]] = []
+    for match in re.finditer(r"\{", cleaned):
+        try:
+            value, end = decoder.raw_decode(cleaned[match.start():])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            values.append((end, value))
+    return max(values, key=lambda row: row[0])[1] if values else {}
 
 
 def _llm_diagnose_candidate(available: list[tuple[dict[str, str], dict[str, Any] | None]],
-                            original: str) -> dict[str, Any]:
+                            original: str, *, root: Path | None = None) -> dict[str, Any]:
+    root = Path(root or Path.cwd())
     options = [{"project_id": spec["project_id"], "recipe": spec["recipe"],
                 "hypothesis": spec["hypothesis"], "has_real_evidence": bool(evidence),
+                "matched_business_canary_available": spec["project_id"] in {
+                    "molecular_generation", "molecular_dynamics_study"
+                },
                 "already_installed": f'"{spec["project_id"]}": "{spec["recipe"]}"' in original,
                 "trajectory_id": str((evidence or {}).get("trajectory_id") or "")}
                for spec, evidence in available]
     return _llm_json("""你是 Partner 自进化诊断员。主动学习面向外部知识；本任务只判断 Partner 自身行为机制。
-下面每个选项都由代码预先限定，不能发明任意目标文件。请选择有真实 Episode 且尚未安装的一项；若全部饱和，
+下面每个选项都由代码预先限定，不能发明任意目标文件。只能选择有真实 Episode、尚未安装、且
+matched_business_canary_available=true 的一项；业务 canary 不可用的想法只能保留为 shadow 研究，不能尝试晋升。
+若全部饱和，
 明确 no_new_candidate。输出严格 JSON：
 {"project_id":"...","recipe":"...","failure_mechanism":"...","causal_hypothesis":"...",
 "risk":"...","required_counterexample":"...","decision":"propose|no_new_candidate"}
-选项：""" + json.dumps(options, ensure_ascii=False), max_tokens=3200)
+选项：""" + json.dumps(options, ensure_ascii=False), root=root, max_tokens=3200)
 
 
-def _llm_critic(result: dict[str, Any]) -> dict[str, Any]:
+def _llm_critic(result: dict[str, Any], *, root: Path | None = None) -> dict[str, Any]:
+    root = Path(root or Path.cwd())
     compact = {key: result.get(key) for key in (
         "candidate_id", "project_id", "mechanism", "recipe", "baseline_probe",
-        "candidate_probe", "regression", "production_effective")}
+        "candidate_probe", "business_canary", "regression", "production_effective")}
     if isinstance(compact.get("regression"), dict):
         compact["regression"] = {"exit_code": compact["regression"].get("exit_code"),
                                   "command": compact["regression"].get("command")}
     return _llm_json("""你是独立 Candidate critic。只能根据机器结果找反例和遗漏，不能自行批准生产。
+注意：production_effective=false 是晋升前的安全状态，不是候选无效的证据；baseline/candidate probe
+只证明受控策略是否改变下一动作，不等于证明业务产物改善。你必须区分机制隔离、代码回归和后续业务 canary。
 输出严格 JSON：{"causal_isolation":"pass|uncertain|fail","missing_tests":["..."],
 "possible_reward_hacking":"...","rollback_trigger":"...","recommendation":"promote|reject|more_evidence"}。
-机器结果：""" + json.dumps(compact, ensure_ascii=False), max_tokens=3000)
+机器结果：""" + json.dumps(compact, ensure_ascii=False), root=root, max_tokens=3000)
 
 
 def _record_applied_lifecycle(workspace: Path, candidate_id: str,
@@ -200,6 +209,72 @@ def latest_duplicate_evidence(workspace: str | Path,
     return None
 
 
+def _molecular_business_canary(root: Path) -> dict[str, Any]:
+    """Require fresh, multi-seed business evidence before molecular promotion."""
+    rows: list[dict[str, Any]] = []
+    for path in (root / "instances/02/state/tasks").glob(
+            "*/molecular_method_candidate_metrics.json"):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        delta = dict(value.get("candidate_minus_baseline") or {})
+        if "fingerprint_diversity" not in delta:
+            continue
+        supported_by_strict_contract = bool(
+            (float(delta.get("scaffold_count") or 0) > 0
+             or float(delta.get("fingerprint_diversity") or 0) >= 0.05)
+            and float(delta.get("mean_qed") or 0) >= -0.03
+            and float(delta.get("mean_sa") or 0) <= 0.15
+        )
+        rows.append({"path": str(path), "method_id": value.get("method_id"),
+                     "replicate_seed": value.get("replicate_seed"),
+                     "candidate_improved": supported_by_strict_contract,
+                     "deltas": delta})
+    rows.sort(key=lambda row: Path(row["path"]).stat().st_mtime)
+    supported = [row for row in rows if row["method_id"] == "maxmin_fingerprint"
+                 and row["candidate_improved"]]
+    counterexample = [row for row in rows if row["method_id"] == "scaffold_round_robin"
+                      and not row["candidate_improved"]]
+    seeds = {int(row.get("replicate_seed") or 0) for row in supported}
+    return {"passed": len(seeds) >= 2 and bool(counterexample),
+            "supported_maxmin": supported[-3:],
+            "falsified_round_robin": counterexample[-2:],
+            "required": "two distinct supported MaxMin seeds and one falsified alternative"}
+
+
+def _preproduction_business_canary(root: Path, project_id: str,
+                                   recipe: str) -> dict[str, Any]:
+    """Require a domain measurement, not merely a changed parameter dict.
+
+    Only domains with a deterministic, same-budget comparator are eligible.
+    Other candidates remain shadow until their real project Event supplies a
+    matched canary; they must never be activated from a novelty probe alone.
+    """
+    if project_id == "molecular_generation":
+        return _molecular_business_canary(root)
+    if project_id == "molecular_dynamics_study" and recipe == "turn_parameter_sweep_v1":
+        from partner.v2.continuous_project_events import _md_step
+        baseline = _md_step("03_md_timestep_stability", native_turn=7, candidate_variant=0)
+        candidate = _md_step("03_md_timestep_stability", native_turn=7, candidate_variant=7)
+        baseline_drift = float(baseline["business_metrics"]["worst_relative_energy_drift"])
+        candidate_drift = float(candidate["business_metrics"]["worst_relative_energy_drift"])
+        return {
+            "passed": candidate_drift < baseline_drift,
+            "metric": "worst_relative_energy_drift",
+            "baseline": baseline_drift,
+            "candidate": candidate_drift,
+            "direction": "lower_is_better",
+            "same_budget": (len(baseline["runs"]) == len(candidate["runs"])),
+        }
+    return {
+        "passed": False,
+        "reason": "real_project_matched_canary_not_implemented_for_recipe",
+        "project_id": project_id,
+        "recipe": recipe,
+    }
+
+
 def _candidate_source(original: str, project_id: str = "molecular_dynamics_study",
                       recipe: str = RECIPE) -> str:
     entry = f'    "{project_id}": "{recipe}",\n'
@@ -230,17 +305,20 @@ def _load_enricher(path: Path):
 
 def _probe(path: Path, project_id: str = "molecular_dynamics_study") -> dict[str, Any]:
     enrich = _load_enricher(path)
-    strategy = ("03_md_timestep_stability" if project_id == "molecular_dynamics_study"
+    strategy = ("molecular_scaffold_cap" if project_id == "molecular_generation"
+                else "03_md_timestep_stability" if project_id == "molecular_dynamics_study"
                 else ("04_reference_gap_matrix" if project_id == "literature_github_learning"
                       else "05_event_contract_inventory"))
-    field = ("candidate_variant" if project_id == "molecular_dynamics_study"
+    field = ("candidate_variant" if project_id in {"molecular_generation", "molecular_dynamics_study"}
              else ("source_variant" if project_id == "literature_github_learning"
                    else "code_variant"))
     first = enrich(project_id, strategy, 7, {})
     second = enrich(project_id, strategy, 8, {})
-    changed = (first.get(field) == 7
-               and second.get(field) == 8
-               and first != second)
+    expected_first = 3 if project_id == "molecular_generation" else 7
+    expected_second = 3 if project_id == "molecular_generation" else 8
+    changed = (first.get(field) == expected_first
+               and second.get(field) == expected_second
+               and (project_id == "molecular_generation" or first != second))
     return {"passed": changed, "turn_7": first, "turn_8": second}
 
 
@@ -251,9 +329,11 @@ def synthesize_validate_apply(workspace: str | Path, repo_root: str | Path,
     target = repo / TARGET
     original = target.read_text(encoding="utf-8")
     available = [(spec, latest_duplicate_evidence(root, spec["project_id"])) for spec in SPECS]
-    llm_diagnosis = _llm_diagnose_candidate(available, original) if use_llm else {}
+    llm_diagnosis = _llm_diagnose_candidate(available, original, root=root) if use_llm else {}
     eligible = [(spec, evidence) for spec, evidence in available
-                if evidence and f'"{spec["project_id"]}": "{spec["recipe"]}"' not in original]
+                if evidence
+                and spec["project_id"] in {"molecular_generation", "molecular_dynamics_study"}
+                and f'"{spec["project_id"]}": "{spec["recipe"]}"' not in original]
     selected = next(((spec, evidence) for spec, evidence in eligible
                      if spec["project_id"] == llm_diagnosis.get("project_id")
                      and spec["recipe"] == llm_diagnosis.get("recipe")), None)
@@ -277,9 +357,46 @@ def synthesize_validate_apply(workspace: str | Path, repo_root: str | Path,
     }
     if evidence is None:
         result.update({"ok": False, "decision": "rejected",
-                       "reason": "no real duplicate MD trajectory evidence"})
+                       "reason": "no real duplicate trajectory evidence for an allow-listed recipe"})
         atomic_json(out_dir / "result.json", result)
         return {**result, "files": [str(out_dir / "result.json")]}
+    result["business_canary"] = _preproduction_business_canary(root, project_id, recipe)
+    if not result["business_canary"]["passed"]:
+        result.update({"ok": False, "decision": "rejected",
+                       "reason": "matched_real_project_business_canary_failed"})
+        atomic_json(out_dir / "result.json", result)
+        return {**result, "files": [str(out_dir / "result.json")]}
+    current_evidence_signature = hashlib.sha256(json.dumps({
+        "business_canary": result["business_canary"],
+    }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    for prior_path in sorted(
+            (root / "share/mind/governance/code_candidates").glob("*/result.json"),
+            key=lambda path: path.stat().st_mtime, reverse=True):
+        if prior_path == out_dir / "result.json":
+            continue
+        try:
+            prior = json.loads(prior_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        if (prior.get("project_id") != project_id or prior.get("recipe") != recipe
+                or prior.get("decision") not in {"rejected", "rolled_back"}):
+            continue
+        prior_signature = hashlib.sha256(json.dumps({
+            "business_canary": prior.get("business_canary") or {},
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        if prior_signature == current_evidence_signature:
+            result.update({
+                "ok": True, "decision": "no_new_candidate",
+                "reason": "unchanged_evidence_after_prior_negative_candidate",
+                "production_effective": False,
+                "prior_negative_candidate_id": prior.get("candidate_id", ""),
+                "prior_llm_critique": prior.get("llm_critique") or {},
+                "business_metrics": {"new_code_candidate_applied": 0,
+                                     "negative_candidate_reused": 1},
+            })
+            atomic_json(out_dir / "result.json", result)
+            return {**result, "files": [str(out_dir / "result.json")]}
+        break
     candidate_source = _candidate_source(original, project_id, recipe)
     if candidate_source == original:
         prior = {}
@@ -343,31 +460,70 @@ def synthesize_validate_apply(workspace: str | Path, repo_root: str | Path,
 
     backup = out_dir / "preimage.py"
     backup.write_text(original, encoding="utf-8")
-    tmp = target.with_suffix(target.suffix + ".candidate.tmp")
-    tmp.write_text(candidate_source, encoding="utf-8")
-    os.replace(tmp, target)
+    # Run the Candidate as an integrated package in a temporary repository.
+    # Production stays byte-for-byte unchanged until business canary,
+    # behavioral probe, regression and independent critic all pass.
+    validation_root = Path(tempfile.mkdtemp(prefix="partner_candidate_repo_"))
+    source_repo = Path(__file__).resolve().parents[2]
+    package_source = (repo / "partner" if (repo / "partner/governance").is_dir()
+                      else source_repo / "partner")
+    shutil.copytree(package_source, validation_root / "partner")
+    shell_source = repo / "shells" if (repo / "shells").is_dir() else source_repo / "shells"
+    if shell_source.is_dir():
+        shutil.copytree(shell_source, validation_root / "shells")
+    (validation_root / TARGET).write_text(candidate_source, encoding="utf-8")
+    shutil.copytree(source_repo / "tests", validation_root / "tests")
     command = [sys.executable, "-m", "pytest", "tests/test_native_project_event_route.py",
-               "tests/test_continuous_project_events.py", "-q"]
-    proc = subprocess.run(command, cwd=repo, text=True, capture_output=True,
+               "tests/test_continuous_project_events.py"]
+    if project_id == "molecular_generation":
+        command.append("tests/test_molecular_method_candidate.py")
+    command.append("-q")
+    proc = subprocess.run(command, cwd=validation_root, text=True, capture_output=True,
                           timeout=240, check=False)
     regression = {"command": command, "exit_code": proc.returncode,
                   "output": (proc.stdout + proc.stderr)[-4000:]}
     result["regression"] = regression
-    llm_critique = _llm_critic(result) if use_llm else {}
+    llm_critique = _llm_critic(result, root=root) if use_llm else {}
     result["llm_critique"] = llm_critique
     result["llm_trace"]["critic_calls"] = int(bool(use_llm))
-    if proc.returncode != 0 or not _probe(target, project_id)["passed"]:
-        target.write_text(original, encoding="utf-8")
+    critic_allows = (not use_llm or (
+        str(llm_critique.get("causal_isolation") or "") == "pass"
+        and str(llm_critique.get("recommendation") or "") == "promote"
+    ))
+    probe_passed = bool(_probe(validation_root / TARGET, project_id)["passed"])
+    shutil.rmtree(validation_root, ignore_errors=True)
+    if proc.returncode != 0 or not probe_passed or not critic_allows:
         result.update({"ok": False, "decision": "rolled_back",
-                       "reason": "post-apply regression failed", "rolled_back": True})
+                       "reason": ("independent_llm_critic_withheld_promotion"
+                                  if proc.returncode == 0 and probe_passed
+                                  else "post-apply regression failed"),
+                       "rolled_back": True, "production_effective": False})
     else:
-        result.update({"ok": True, "decision": "applied",
-                       "production_effective": True, "rolled_back": False,
-                       "business_metrics": {"code_candidates_applied": 1,
-                                            "baseline_failed": 1,
-                                            "candidate_passed": 1,
-                                            "focused_regression_passed": 1},
-                       "postimage_sha256": hashlib.sha256(candidate_source.encode()).hexdigest()})
+        if target.read_text(encoding="utf-8") != original:
+            result.update({"ok": False, "decision": "rolled_back",
+                           "reason": "production_preimage_changed_during_validation",
+                           "rolled_back": True, "production_effective": False})
+        else:
+            tmp = target.with_suffix(target.suffix + ".candidate.tmp")
+            tmp.write_text(candidate_source, encoding="utf-8")
+            os.replace(tmp, target)
+            post_probe = _probe(target, project_id)
+            if not post_probe.get("passed"):
+                rollback = target.with_suffix(target.suffix + ".rollback.tmp")
+                rollback.write_text(original, encoding="utf-8")
+                os.replace(rollback, target)
+                result.update({"ok": False, "decision": "rolled_back",
+                               "reason": "post_install_probe_failed", "rolled_back": True,
+                               "production_effective": False, "post_install_probe": post_probe})
+            else:
+                result.update({"ok": True, "decision": "applied",
+                               "production_effective": True, "rolled_back": False,
+                               "post_install_probe": post_probe,
+                               "business_metrics": {"code_candidates_applied": 1,
+                                                    "baseline_failed": 1,
+                                                    "candidate_passed": 1,
+                                                    "focused_regression_passed": 1},
+                               "postimage_sha256": hashlib.sha256(candidate_source.encode()).hexdigest()})
     atomic_json(out_dir / "result.json", result)
     if result.get("decision") == "applied":
         result["governance"] = _record_applied_lifecycle(root, candidate_id, out_dir,

@@ -60,7 +60,7 @@ def capture_qt_offscreen(
     """Render the REAL Partner GUI offscreen and capture to PNG.
 
     Uses QT_QPA_PLATFORM=offscreen to instantiate the actual
-    ModernMainWindow, renders it, and saves as PNG.
+    PartnerWorkspaceWindow, renders it, and saves as PNG.
 
     Returns the path to the screenshot PNG on success, or empty string
     on failure. Does NOT fall back to synthetic rendering.
@@ -68,7 +68,7 @@ def capture_qt_offscreen(
     Retries up to _MAX_SS_RETRIES times with _SS_RETRY_DELAY_S delay
     between attempts. Logs detailed error information on each failure.
 
-    The subprocess tries to import shells.frontend.desktop_gui.modern.main_window.
+    The subprocess imports the supported Partner Workspace window.
     If the import fails (e.g., after auto-evolution damaged the file), the
     error message will contain the specific ImportError/SyntaxError.
     """
@@ -83,8 +83,8 @@ def capture_qt_offscreen(
         'from PySide6.QtWidgets import QApplication',
         'app = QApplication(sys.argv)',
         'try:',
-        '    from shells.frontend.desktop_gui.modern.main_window import ModernMainWindow',
-        '    win = ModernMainWindow()',
+        '    from shells.frontend.desktop_gui.workspace import PartnerWorkspaceWindow',
+        '    win = PartnerWorkspaceWindow(os.environ.get("PARTNER_WORKSPACE", "/mnt/e/work/partner_workspace"))',
         '    win.resize(' + str(width) + ', ' + str(height) + ')',
         '    win.show()',
         '    from PySide6.QtCore import QTimer, QEventLoop',

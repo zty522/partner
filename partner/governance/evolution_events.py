@@ -16,6 +16,7 @@ from typing import Any
 
 from .models import now_iso
 from .storage import append_jsonl, governance_log
+from .storage import atomic_json, workspace_root
 
 
 EVENT_TYPES = {
@@ -35,6 +36,7 @@ EVENT_TYPES = {
     "active_learning/query_proposed",
     "active_learning/diagnosis_completed",
     "active_learning/feedback_recorded",
+    "active_learning/duplicate_feedback_ignored",
     "active_learning/strategy_revised",
     "active_learning/repair_evaluated",
     "active_learning/repair_canary_completed",
@@ -48,6 +50,7 @@ EVENT_TYPES = {
     "active_learning/policy_updated",
     "project/action_selected",
     "active_learning/project_action_selected",
+    "evidence/experimental_synthesis_registered",
 }
 
 
@@ -55,6 +58,55 @@ def _canonical(value: dict[str, Any]) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def _epoch_manifest_path(workspace: str) -> Path:
+    return (workspace_root(workspace) / "share/mind/governance"
+            / "evolution_ledger_epoch.json")
+
+
+def _active_ledger_path(workspace: str) -> Path:
+    """Resolve the authoritative ledger without rewriting historical bytes."""
+    manifest = _epoch_manifest_path(workspace)
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return governance_log(workspace, "evolution_events")
+    name = str(value.get("active_ledger") or "").strip()
+    return manifest.parent / name if name else governance_log(workspace, "evolution_events")
+
+
+def initialize_evolution_ledger_epoch(workspace: str, *, reason: str,
+                                      audit: dict[str, Any]) -> dict[str, Any]:
+    """Start a clean authority epoch while preserving the immutable old log.
+
+    This is intentionally explicit and idempotent.  It is used when old,
+    incompatible writers made the historical chain unverifiable; it never
+    edits, truncates, or blesses that history.
+    """
+    manifest_path = _epoch_manifest_path(workspace)
+    if manifest_path.is_file():
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return {"ok": True, "status": "already_initialized", **value,
+                "manifest_path": str(manifest_path)}
+    old_path = governance_log(workspace, "evolution_events")
+    old_bytes = old_path.read_bytes() if old_path.is_file() else b""
+    manifest = {
+        "schema_version": 1,
+        "epoch": 2,
+        "active_ledger": "evolution_events_epoch2.jsonl",
+        "historical_ledger": old_path.name,
+        "historical_sha256": hashlib.sha256(old_bytes).hexdigest(),
+        "historical_bytes": len(old_bytes),
+        "historical_audit": audit,
+        "reason": str(reason),
+        "created_at": now_iso(),
+        "authority_rule": ("only active_ledger is authoritative for integrity and future "
+                           "promotion; historical_ledger remains read-only evidence"),
+    }
+    atomic_json(manifest_path, manifest)
+    return {"ok": True, "status": "initialized", **manifest,
+            "manifest_path": str(manifest_path)}
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
@@ -114,7 +166,7 @@ def append_evolution_event(
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
 
-    path = governance_log(workspace, "evolution_events")
+    path = _active_ledger_path(workspace)
     with _exclusive_ledger_lock(path):
         rows = _rows(path)
         prior = next(
@@ -150,11 +202,14 @@ def append_evolution_event(
 
 
 def load_evolution_events(workspace: str) -> list[dict[str, Any]]:
-    return _rows(governance_log(workspace, "evolution_events"))
+    historical = governance_log(workspace, "evolution_events")
+    active = _active_ledger_path(workspace)
+    return (_rows(historical) + _rows(active)) if active != historical else _rows(active)
 
 
 def verify_evolution_ledger(workspace: str) -> dict[str, Any]:
-    rows = load_evolution_events(workspace)
+    active = _active_ledger_path(workspace)
+    rows = _rows(active)
     previous = "GENESIS"
     seen_keys: set[str] = set()
     legacy_records: list[dict[str, Any]] = []
@@ -210,10 +265,16 @@ def verify_evolution_ledger(workspace: str) -> dict[str, Any]:
             seen_keys.add(key)
         previous = actual
         previous_seq = max(previous_seq, row_seq)
-    return {"ok": True, "event_count": len(rows), "head_hash": previous,
+    result = {"ok": True, "event_count": len(rows), "head_hash": previous,
             "legacy_non_idempotent_count": len(legacy_records),
             "legacy_non_idempotent_records": legacy_records,
             "legacy_fork_count": len(legacy_forks),
             "legacy_forks": legacy_forks,
             "legacy_sequence_collision_count": len(legacy_sequence_collisions),
-            "legacy_sequence_collisions": legacy_sequence_collisions}
+            "legacy_sequence_collisions": legacy_sequence_collisions,
+            "active_ledger": str(active)}
+    manifest = _epoch_manifest_path(workspace)
+    if manifest.is_file():
+        result["epoch_manifest"] = str(manifest)
+        result["historical_ledger_authoritative"] = False
+    return result

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "context_id": "context_35e01d6d316fbe7d",
+  "created_at": "2026-09-11T16:32:22+08:00",
+  "project_id": "molecular_generation",
+  "instance_id": "02",
+  "task_id": "",
+  "purpose": "project_action_deliberation",
+  "privacy_mode": "derived_only",
+  "sections": [
+    {
+      "kind": "project_truth",
+      "source_id": "project:molecular_generation:current",
+      "chars": 103,
+      "sha256": "2c4572c31a35a20db2319694a23e2f226f286d7e5caa8280a9e02e1cff7d9500",
+      "local_path_hash": ""
+    },
+    {
+      "kind": "verified_trajectories",
+      "source_id": "project:molecular_generation:trajectories:last8",
+      "chars": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "local_path_hash": ""
+    },
+    {
+      "kind": "acceptance_contract",
+      "source_id": "repo:docs/sprint33_三条认知黄金链与深上下文验收.md",
+      "chars": 465,
+      "sha256": "a6efd890409dcf72a5a1e386e3ad0c2acf265b6f19f8c3ff28ae2ba34297f7d5",
+      "local_path_hash": "feb46674dac313ec"
+    },
+    {
+      "kind": "acceptance_contract",
+      "source_id": "repo:docs/architecture/project_centered_application.md",
+      "chars": 267,
+      "sha256": "4165b00a734d8740c7dc0180b666265fa252a754ff3f11b72d65d715f459bd61",
+      "local_path_hash": "4c5057096b2c690a"
+    },
+    {
+      "kind": "relevant_source",
+      "source_id": "repo:partner/v2/molecular_iteration_events.py",
+      "chars": 1840,
+      "sha256": "d41625eb4bc3705cbc74ea41035433705067a735ddd5a38b5482558d8ebac33c",
+      "local_path_hash": "839eeee1de2da733"
+    },
+    {
+      "kind": "relevant_source",
+      "source_id": "repo:partner/governance/project_action_selector.py",
+      "chars": 1697,
+      "sha256": "544c35b518c6c9162916fc56d878cfa31ba55f3fcfd0d891cffc7a33d8e712e8",
+      "local_path_hash": "d9a98a4e7ca8b2c3"
+    }
+  ],
+  "omissions": [],
+  "context_chars": 4374,
+  "estimated_prompt_tokens": 1094,
+  "coverage": {
+    "project_truth": true,
+    "trajectory": true,
+    "belief_history": false,
+    "acceptance_contract": true,
+    "episode_evidence": false,
+    "relevant_source": true
+  }
+}

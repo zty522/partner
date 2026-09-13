@@ -63,6 +63,8 @@ class NativeInstanceState:
     learning_interruptions: int = 0
     consecutive_failures: int = 0
     suspended_project_request: str = ""
+    active_application_job_id: str = ""
+    application_bounded: bool = False
     reason: str = ""
     updated_at: str = ""
 
@@ -92,7 +94,17 @@ def load_native_runtime_config(workspace: str | Path) -> dict[str, Any]:
     enabled = [str(value) for value in runtime.get("instance_native_enabled_instances") or []]
     return {
         "enabled": bool(runtime.get("instance_native_autonomy", False)),
+        "continuation_owner": str(
+            runtime.get("continuation_owner") or "work_item_runtime_v1"
+        ),
+        "legacy_continuation_events_enabled": bool(
+            runtime.get("legacy_continuation_events_enabled", False)
+        ),
         "enabled_instances": [value for value in enabled if value in PROJECTS],
+        # Listener availability is independent from autonomous project
+        # continuation.  Manual acceptance windows keep every QQ Bot online
+        # while only explicit user/Application work enters execution.
+        "auto_continue": bool(runtime.get("instance_native_auto_continue", True)),
         # ADR 0062: defer to scheduler.effective_max_active which itself reads
         # partner_config.json OR falls back to /proc-based host estimation.
         # The legacy `or 2` hard floor is removed.
@@ -103,6 +115,17 @@ def load_native_runtime_config(workspace: str | Path) -> dict[str, Any]:
         "slot_quantum_project_steps": max(
             1, int(runtime.get("instance_native_slot_quantum_project_steps") or 2)),
     }
+
+
+def _project_cognition_llm_enabled(workspace: str | Path) -> bool:
+    """Keep terminal reflection aligned with the explicit LLM policy gate."""
+    path = workspace_root(str(workspace)) / "config/partner_config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return False
+    policy = data.get("experience_guided_policy") or {}
+    return str(policy.get("llm_deliberation") or "").lower() == "every_project_action"
 
 
 def load_state(workspace: str | Path, instance_id: str) -> NativeInstanceState:
@@ -220,6 +243,36 @@ def _native_marker(value: dict[str, Any]) -> bool:
     return "[instance_native=true]" in text
 
 
+def _application_markers(value: dict[str, Any]) -> tuple[str, bool]:
+    text = str(value.get("user_message") or value.get("root_user_request") or "")
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+    match = re.search(r"\[partner_job_id=([^\]\s]+)\]", text)
+    job_id = str(metadata.get("application_job_id") or (match.group(1) if match else ""))
+    bounded = "[application_bounded=true]" in text or bool(metadata.get("application_bounded"))
+    return job_id, bounded
+
+
+def _active_application_job_id(workspace: str | Path, instance_id: str) -> str:
+    """Return a newer explicit application owner, if one exists.
+
+    Restart reconciliation can finish an old orphaned native Task while a new
+    user Job is already running.  Its terminal is still valid history, but it
+    must not enqueue autonomous continuation ahead of the explicit Job.
+    """
+    directory = workspace_root(str(workspace)) / "state/application/jobs"
+    candidates: list[tuple[str, str]] = []
+    for path in directory.glob("*.json") if directory.exists() else []:
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        if (str(row.get("assigned_instance") or "") == instance_id
+                and str(row.get("status") or "") in {"dispatched", "running"}):
+            candidates.append((str(row.get("updated_at") or row.get("created_at") or ""),
+                               str(row.get("job_id") or "")))
+    return max(candidates, default=("", ""))[1]
+
+
 def _terminal_task(workspace: str | Path, instance_id: str,
                    task_id: str) -> tuple[Path | None, dict[str, Any]]:
     root = workspace_root(str(workspace))
@@ -242,6 +295,24 @@ def _failure_evidence(value: dict[str, Any]) -> tuple[bool, str]:
     accepted = bool(status == "done" and governance.get("ok", True))
     reason = str(governance.get("error") or governance.get("status") or status)
     return (not accepted), reason
+
+
+def _learning_branch(*, failure: bool, knowledge_gap: bool,
+                     governance: dict[str, Any]) -> str:
+    """Route epistemic gaps outward and Partner mechanism faults inward."""
+    trajectory = dict((governance.get("trajectory") or {}).get("trajectory") or {})
+    outcome = dict(trajectory.get("outcome") or {})
+    owner = str(outcome.get("failure_owner") or "").strip().lower()
+    if knowledge_gap and not failure:
+        return "external_learning"
+    if not failure:
+        return "project"
+    if owner in {"user_input", "environment", "delivery"}:
+        return "blocked_external"
+    # Unknown legacy failures stay conservative but auditable. They may be
+    # diagnosed as Partner faults; the diagnostic Candidate still has no
+    # automatic production authority.
+    return "learning"
 
 
 def _should_continue_project(workspace: str | Path, state: NativeInstanceState) -> bool:
@@ -450,6 +521,21 @@ def _learning_request(state: NativeInstanceState, task_id: str, task_path: Path 
     )
 
 
+def _external_learning_request(state: NativeInstanceState, task_id: str,
+                               task_path: Path | None, reason: str) -> str:
+    evidence = str(task_path.parent if task_path else task_id)
+    return (
+        f"【{state.instance_id}实例外部知识主动学习】[learning_for_task={task_id}] "
+        f"项目出现可验证的知识缺口：{reason[:500]}。原项目证据：{evidence}。"
+        "这是面向外部知识的 active learning，不是 Partner 自进化。"
+        "以 Event-first 方式执行一次有界的问题定义→外部来源获取→原始内容深读/解析→"
+        "claim-level 交叉验真→采用或拒绝。软件机制问题至少保留一个可定位源码证据和一个论文正文证据；"
+        "数据缺口至少保留官方 API/字段来源与一项独立方法或出版物证据；"
+        "只有有依据的结论才可进入原项目的下一候选，本轮不自动修改生产。"
+        "完成后必须返回原项目，并说明新证据使哪个参数、假设或 Event 候选发生了什么变化。"
+    )
+
+
 def _ensure_episode(workspace: str | Path, instance_id: str, task_id: str) -> dict[str, Any]:
     """Materialize the real failed task as learning input before dispatch."""
     try:
@@ -465,6 +551,41 @@ def _ensure_episode(workspace: str | Path, instance_id: str, task_id: str) -> di
 def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
              request: str) -> dict[str, Any]:
     root = workspace_root(str(workspace))
+    # Every actual native continuation crosses a Selector Event.  The selector
+    # may later be LLM-ranked, but the executable boundary remains typed and
+    # deterministic: one project concurrency key, explicit prerequisite and
+    # an append-only selection receipt before the inbox mutation.
+    try:
+        from partner.event_fabric import EventLedger, NextEventSelector
+        ledger = EventLedger(root)
+        candidate_type = ({
+            "learning": "self_evolution.diagnose_and_repair",
+            "external_learning": "active_learning.acquire_external_evidence",
+        }.get(kind, "project.continue_from_receipt"))
+        prior_summary = next((row for row in ledger.recent_summaries(limit=200)
+                              if str(row.get("correlation_id") or "") == state.last_task_id), {})
+        source_event_id = str(prior_summary.get("event_id") or "")
+        selection = NextEventSelector(ledger).select([{
+            "event_id": source_event_id or state.last_task_id or f"seed:{state.instance_id}",
+            "correlation_id": state.last_task_id,
+            "next_event_candidates": [{
+                "event_type": candidate_type,
+                "series": ("self_evolution" if kind == "learning" else
+                           "active_learning" if kind == "external_learning" else "project"),
+                "project_id": state.project_id,
+                "concurrency_key": f"project:{state.project_id}",
+                "prerequisites": ([f"summary:{source_event_id}"] if source_event_id else []),
+            }],
+        }])
+        if not selection.selected:
+            return {"ok": False, "status": "selector_deferred",
+                    "instance_id": state.instance_id,
+                    "selection_id": selection.selection_id}
+    except Exception as exc:
+        # Selection evidence is an execution precondition.  Fail closed rather
+        # than silently returning to the legacy implicit continuation path.
+        return {"ok": False, "status": "selector_failed",
+                "instance_id": state.instance_id, "error": str(exc)}
     digest = hashlib.sha256(
         # updated_at is changed whenever a consumed/orphaned dispatch is
         # recovered. Without a dispatch generation, re-enqueue produced the
@@ -475,6 +596,10 @@ def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
     marker = (
         f"\n\n[instance_native=true] [native_kind={kind}] [project_id={state.project_id}]"
     )
+    if state.active_application_job_id:
+        marker += f" [partner_job_id={state.active_application_job_id}]"
+    if state.application_bounded:
+        marker += " [application_bounded=true]"
     project_label = PROJECTS.get(state.instance_id, (state.project_id, state.project_id))[1]
     headed_request = (
         f"【{state.instance_id}实例项目：{project_label}】\n"
@@ -490,6 +615,7 @@ def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
         "sender_id": f"partner_{state.instance_id}_self",
         "sender_name": f"Partner{state.instance_id}项目内部续跑",
         "created_at": now_iso(),
+        "selector_selection_id": selection.selection_id,
     }
     inbox = root / "instances" / state.instance_id / "state/desktop_inbox.jsonl"
     inbox.parent.mkdir(parents=True, exist_ok=True)
@@ -501,7 +627,9 @@ def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     state.pending_message_id = message_id
     state.pending_kind = kind
-    state.phase = "LEARNING_DISPATCHED" if kind == "learning" else "PROJECT_DISPATCHED"
+    state.phase = ({"learning": "LEARNING_DISPATCHED",
+                    "external_learning": "EXTERNAL_LEARNING_DISPATCHED"}
+                   .get(kind, "PROJECT_DISPATCHED"))
     state.reason = "meaningful terminal-triggered transition"
     save_state(workspace, state)
     _append_event(workspace, "native_task_dispatched", state,
@@ -517,6 +645,37 @@ def recover_or_start(workspace: str | Path, instance_id: str) -> dict[str, Any]:
     save_state(workspace, state)
     if not state.enabled:
         return {"ok": False, "status": "native_disabled", "instance_id": instance_id}
+    application_owner = _active_application_job_id(workspace, instance_id)
+    if application_owner:
+        # Application Jobs are explicit user-owned work.  Startup recovery and
+        # readmission sweeps must wait for their durable terminal projection;
+        # otherwise a generic native continuation can be queued between the
+        # Job's inbox consumption and its final receipt.
+        state.active_application_job_id = application_owner
+        state.application_bounded = True
+        state.reason = "explicit application job precedes autonomous seed"
+        save_state(workspace, state)
+        return {
+            "ok": True,
+            "status": "application_job_precedes_auto_seed",
+            "instance_id": instance_id,
+            "application_job_id": application_owner,
+        }
+    if state.application_bounded and state.active_application_job_id:
+        # A completed bounded Job must remain stopped after its durable
+        # terminal.  The job leaves the active application index before every
+        # consumer has necessarily observed that terminal, so consulting only
+        # _active_application_job_id() creates a small window in which startup
+        # recovery can seed an unrelated autonomous turn.
+        state.phase = "BLOCKED"
+        state.reason = "bounded application job completed; waiting for next explicit user request"
+        save_state(workspace, state)
+        return {
+            "ok": True,
+            "status": "bounded_application_wait",
+            "instance_id": instance_id,
+            "application_job_id": state.active_application_job_id,
+        }
     if state.phase == "BLOCKED":
         return {"ok": False, "status": "blocked_requires_evidence_change",
                 "instance_id": instance_id, "reason": state.reason}
@@ -565,33 +724,124 @@ def handle_terminal(workspace: str | Path, *, instance_id: str,
     # Ordinary user tasks retain manual_stable stop semantics.  Only explicit
     # project next_actions or native tasks may enter autonomous continuation.
     governance = dict((value.get("metadata") or {}).get("manual_iteration_governance") or {})
+    application_job_id, application_bounded = _application_markers(value)
+    explicit_owner = _active_application_job_id(workspace, instance_id)
+    if explicit_owner and application_job_id != explicit_owner:
+        _append_event(workspace, "native_terminal_superseded_by_application_job", state,
+                      task_id=task_id, application_job_id=explicit_owner)
+        return {"ok": True, "status": "terminal_superseded_by_application_job",
+                "task_id": task_id, "application_job_id": explicit_owner}
+    if application_job_id:
+        state.active_application_job_id = application_job_id
+    if application_bounded:
+        state.application_bounded = True
     receipt = dict(governance.get("receipt") or {})
     has_next = bool(receipt.get("next_actions"))
     if not _native_marker(value) and not has_next:
         return {"ok": True, "status": "manual_task_not_auto_continued", "task_id": task_id}
     failure, reason = _failure_evidence(value)
+    step_results = ((value.get("metadata") or {}).get("step_results") or {})
+    typed_external_gaps = [
+        result for result in step_results.values()
+        if isinstance(result, dict)
+        and bool(result.get("blocked"))
+        and (
+            str(result.get("learning_route") or "") == "external_active_learning"
+            or bool(result.get("resume_event"))
+        )
+    ] if isinstance(step_results, dict) else []
     unresolved = [str(item).strip() for item in receipt.get("unresolved_questions") or []
                   if str(item).strip()]
     governed_trajectory = ((governance.get("trajectory") or {}).get("trajectory") or {})
     governed_outcome = governed_trajectory.get("outcome") or {}
     duplicate_outcome = bool(governed_outcome.get("duplicate_outcome"))
     knowledge_gap = bool(not failure and (
-        (unresolved and not has_next) or duplicate_outcome
+        typed_external_gaps or (unresolved and not has_next) or duplicate_outcome
     ))
     if knowledge_gap:
-        reason = (
+        reason = (str(typed_external_gaps[0].get("blocked_reason") or "")
+                  if typed_external_gaps else "") or (
             "outcome.duplicate_semantic_result: current Event produced no new business evidence"
             if duplicate_outcome
             else "unresolved project knowledge gap: " + "; ".join(unresolved[:3])
         )
     completed_kind = state.pending_kind or (
-        "learning" if "[native_kind=learning]" in str(value.get("user_message") or "") else "project"
+        "external_learning" if "[native_kind=external_learning]" in str(value.get("user_message") or "")
+        else "learning" if "[native_kind=learning]" in str(value.get("user_message") or "")
+        else "project"
     )
+    cognition_reflection: dict[str, Any] = {}
+    if completed_kind == "project" and governed_trajectory:
+        try:
+            from .project_cognition import reflect_on_project_outcome
+            cognition_reflection = reflect_on_project_outcome(
+                workspace, project_id=state.project_id,
+                instance_id=instance_id, task_id=task_id,
+                trajectory=governed_trajectory, receipt=receipt,
+                use_llm=_project_cognition_llm_enabled(workspace),
+            )
+            # Project cognition is useful to the user only when it is visible
+            # as a distinct, non-business-delta narrative.  Projectors consume
+            # this Event; it does not mutate the Receipt or earn Reward.
+            try:
+                from partner.event_fabric import EventLedger, EventSummary
+                fabric = EventLedger(workspace_root(str(workspace)))
+                cognition_event_id = "evt_" + hashlib.sha256(
+                    f"project-cognition|{state.project_id}|{task_id}".encode()
+                ).hexdigest()[:16]
+                if not fabric.has_summary(cognition_event_id):
+                    cognition_event = fabric.create(
+                        "project.belief_revised", "project",
+                        event_id=cognition_event_id,
+                        project_id=state.project_id, instance_id=instance_id,
+                        correlation_id=task_id, channel="local",
+                        continuation_owner="none",
+                        payload={"cognition_event_id": cognition_reflection.get("event_id"),
+                                 "task_id": task_id},
+                    )
+                    narrative = str(cognition_reflection.get("user_narrative") or "").strip()
+                    next_question = str(cognition_reflection.get("next_project_question") or "").strip()
+                    fabric.complete(cognition_event, EventSummary(
+                        event_id=cognition_event.event_id, status="completed",
+                        headline="项目认识已更新",
+                        outcome=narrative or "终态证据已归约，未形成可发布的新叙事。",
+                        human_message=narrative,
+                        evidence_refs=list(cognition_reflection.get("evidence_refs") or []),
+                        business_delta=False, learning_delta=False, evolution_delta=False,
+                        production_effective=False, notification_kind="routine",
+                        next_event_candidates=([{
+                            "event_type": "project.answer_next_question", "series": "project",
+                            "project_id": state.project_id,
+                            "concurrency_key": f"project:{state.project_id}",
+                            "question": next_question,
+                        }] if next_question else []),
+                    ))
+            except Exception as exc:
+                _append_event(
+                    workspace, "native_project_cognition_projection_failed", state,
+                    task_id=task_id, error=type(exc).__name__,
+                )
+            _append_event(
+                workspace, "native_project_outcome_reflected", state,
+                task_id=task_id,
+                cognition_event_id=str(cognition_reflection.get("event_id") or ""),
+                llm_completed=bool(
+                    (cognition_reflection.get("llm_participation") or {}).get("completed")
+                ),
+                recommended_next_arm_id=str(
+                    cognition_reflection.get("recommended_next_arm_id") or ""
+                ),
+            )
+        except Exception as exc:
+            _append_event(
+                workspace, "native_project_outcome_reflection_failed", state,
+                task_id=task_id, error=type(exc).__name__,
+            )
     state.last_task_id = task_id
     state.last_terminal_status = str(value.get("completion_status") or "")
     state.pending_message_id = ""
     state.pending_kind = ""
-    if completed_kind == "learning":
+    if completed_kind in {"learning", "external_learning"}:
         state.learning_interruptions += 1
         if failure:
             state.consecutive_failures += 1
@@ -599,19 +849,48 @@ def handle_terminal(workspace: str | Path, *, instance_id: str,
             save_state(workspace, state)
             _append_event(workspace, "native_learning_blocked", state,
                           task_id=task_id, reason=reason,
-                          semantic_kind="partner_self_evolution")
+                          semantic_kind=("external_active_learning" if completed_kind == "external_learning"
+                                         else "partner_self_evolution"))
             return {"ok": False, "status": "learning_blocked", "task_id": task_id,
                     "reason": reason}
         state.consecutive_failures = 0
         state.phase = "RESUME_PROJECT"
         save_state(workspace, state)
+        semantic_kind = ("external_active_learning" if completed_kind == "external_learning"
+                         else "partner_self_evolution")
         _append_event(workspace, "native_learning_completed", state, task_id=task_id,
-                      semantic_kind="partner_self_evolution")
+                      semantic_kind=semantic_kind)
+        learned_evidence = str(path.parent if path else task_id)
+        resume_request = state.suspended_project_request or _next_project_request(workspace, state)
+        resume_request += (
+            f"\n\n【{'外部学习' if completed_kind == 'external_learning' else 'Partner 自进化'}回到原项目】"
+            f"上一个学习/修复 Task={task_id}，证据目录={learned_evidence}。"
+            "本轮必须先读取该证据，明确采用或拒绝了什么，再运行一个与原基线可比的动作。"
+            "如果参数、假设或 Event 都没有变化，必须记为未采用，不得声称学习起效。"
+        )
         return _enqueue(workspace, state, kind="project",
-                        request=state.suspended_project_request
-                        or _next_project_request(workspace, state))
+                        request=resume_request)
     state.project_steps += 1
     state.project_steps_since_yield += 1
+    # A Candidate no-change is a valid, neutral learning observation: the
+    # machine proved that no new evidence justified another production
+    # mutation. Its compact observation receipt intentionally does not claim
+    # project actions/artifacts, so routing it through the ADR 0061 business
+    # progress contract incorrectly turns honesty into a permanent BLOCKED
+    # lane. Record the neutral terminal and choose a different project action;
+    # this is not counted as business progress.
+    if str(governance.get("status") or "") == "candidate_no_change_observation_recorded":
+        state.consecutive_failures = min(state.consecutive_failures + 1, 1)
+        state.phase = "ADVANCE_PROJECT"
+        state.reason = "Candidate no-change recorded; select a different evidence-bound action"
+        save_state(workspace, state)
+        _append_event(
+            workspace, "native_candidate_no_change_observed", state,
+            task_id=task_id, reward=0.0, business_progress=False,
+            production_effective=False,
+        )
+        return _enqueue(workspace, state, kind="project",
+                        request=_next_project_request(workspace, state))
     # One duplicate is a negative reward for the project-action bandit, not an
     # immediate excuse to run a five-step internal diagnosis.  Give the newly
     # informed selector one counterfactual action first; only a repeated
@@ -628,6 +907,18 @@ def handle_terminal(workspace: str | Path, *, instance_id: str,
                         request=_next_project_request(workspace, state))
     if failure or knowledge_gap:
         state.consecutive_failures += 1
+        learning_branch = _learning_branch(
+            failure=failure, knowledge_gap=knowledge_gap, governance=governance,
+        )
+        if learning_branch == "blocked_external":
+            state.phase = "BLOCKED"
+            state.reason = "failure belongs to user/environment/delivery; internal evolution not authorized"
+            save_state(workspace, state)
+            _append_event(workspace, "native_project_blocked", state,
+                          task_id=task_id, reason=reason,
+                          trigger="external_failure_owner")
+            return {"ok": False, "status": "external_failure_blocked",
+                    "task_id": task_id, "reason": reason}
         # A learning interruption is useful only when the immediately resumed
         # project gets one chance to apply it.  If that project still fails,
         # do not let one unhealthy instance monopolise a scarce runtime slot
@@ -684,8 +975,10 @@ def handle_terminal(workspace: str | Path, *, instance_id: str,
         except Exception as exc:  # noqa: BLE001 — loop never blocks learning enqueue
             _append_event(workspace, "curiosity/budget_run_failed", state,
                           payload={"where": "handle_terminal.failure", "error": str(exc)[:200]})
-        return _enqueue(workspace, state, kind="learning",
-                        request=_learning_request(state, task_id, path, reason))
+        request = (_external_learning_request(state, task_id, path, reason)
+                   if learning_branch == "external_learning"
+                   else _learning_request(state, task_id, path, reason))
+        return _enqueue(workspace, state, kind=learning_branch, request=request)
     state.consecutive_failures = 0
     state.learning_interruptions = 0
     state.suspended_project_request = ""
@@ -718,6 +1011,15 @@ def handle_terminal(workspace: str | Path, *, instance_id: str,
         return {"ok": True, "status": "yield_slot", "instance_id": instance_id,
                 "task_id": task_id}
     state.phase = "ADVANCE_PROJECT"
+    if state.application_bounded and state.active_application_job_id:
+        state.phase = "BLOCKED"
+        state.reason = "bounded application job completed; waiting for next explicit user request"
+        save_state(workspace, state)
+        _append_event(workspace, "native_application_job_completed", state,
+                      task_id=task_id, application_job_id=state.active_application_job_id)
+        return {"ok": True, "status": "application_job_completed",
+                "instance_id": instance_id, "task_id": task_id,
+                "application_job_id": state.active_application_job_id}
     save_state(workspace, state)
     _append_event(workspace, "native_project_completed", state, task_id=task_id)
     return _enqueue(workspace, state, kind="project",

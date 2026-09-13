@@ -76,8 +76,8 @@ sys.path.insert(0, {project_root!r})
 from PySide6.QtWidgets import QApplication
 app = QApplication(sys.argv)
 try:
-    from shells.frontend.desktop_gui.modern.main_window import ModernMainWindow
-    win = ModernMainWindow()
+    from shells.frontend.desktop_gui.workspace import PartnerWorkspaceWindow
+    win = PartnerWorkspaceWindow(os.environ.get("PARTNER_WORKSPACE", "/mnt/e/work/partner_workspace"))
     win.resize({width}, {height})
     win.show()
     from PySide6.QtCore import QTimer, QEventLoop
@@ -142,7 +142,7 @@ class GUIManager:
 
         Launches a Qt Offscreen subprocess that:
         1. Creates QApplication
-        2. Instantiates ModernMainWindow
+        2. Instantiates the supported PartnerWorkspaceWindow
         3. Renders offscreen
         4. Captures via win.grab()
         5. Saves PNG

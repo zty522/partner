@@ -116,8 +116,8 @@ sys.path.insert(0, "/mnt/e/work/partner")
 from PySide6.QtWidgets import QApplication
 app = QApplication(sys.argv)
 try:
-    from shells.frontend.desktop_gui.modern.main_window import ModernMainWindow
-    win = ModernMainWindow()
+    from shells.frontend.desktop_gui.workspace import PartnerWorkspaceWindow
+    win = PartnerWorkspaceWindow(os.environ.get("PARTNER_WORKSPACE", "/mnt/e/work/partner_workspace"))
     win.resize(1280, 900)
     win.show()
     from PySide6.QtCore import QTimer, QEventLoop

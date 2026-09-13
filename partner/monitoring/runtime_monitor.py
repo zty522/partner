@@ -34,25 +34,67 @@ def _read_json(path: str) -> dict[str, Any]:
         return {}
 
 
+def _workspace_identity(workspace: str) -> tuple[str, str]:
+    """Return the shared workspace root and optional instance id."""
+    norm = os.path.normpath(os.path.abspath(workspace))
+    parts = norm.split(os.sep)
+    if "instances" in parts:
+        index = parts.index("instances")
+        if index + 1 < len(parts):
+            return os.sep.join(parts[:index]) or os.sep, parts[index + 1]
+    return norm, ""
+
+
+def summarize_api_calls(workspace: str, limit: int = 2000) -> dict[str, Any]:
+    """Summarise provider-reported usage from the shared Direct API ledger."""
+    root, instance_id = _workspace_identity(workspace)
+    rows = _read_jsonl(os.path.join(root, "state", "logs", "api_calls.jsonl"), limit=limit)
+    if instance_id:
+        rows = [row for row in rows if str(row.get("instance") or "") == instance_id]
+    purpose_counts: dict[str, int] = {}
+    model_counts: dict[str, int] = {}
+    for row in rows:
+        purpose = str(row.get("purpose") or "unknown")
+        model = str(row.get("model") or "unknown")
+        purpose_counts[purpose] = purpose_counts.get(purpose, 0) + 1
+        model_counts[model] = model_counts.get(model, 0) + 1
+    failed = [row for row in rows if str(row.get("status") or "").lower() != "ok"]
+    return {
+        "calls": len(rows),
+        "failed": len(failed),
+        "prompt_tokens": sum(int(row.get("prompt_tokens") or 0) for row in rows),
+        "completion_tokens": sum(int(row.get("completion_tokens") or 0) for row in rows),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in rows),
+        "purpose_counts": purpose_counts,
+        "model_counts": model_counts,
+        "last_error": str((failed[-1].get("error") if failed else "") or "")[:240],
+    }
+
+
 def summarize_agent_runs(workspace: str, limit: int = 80) -> dict[str, Any]:
     rows = _read_jsonl(os.path.join(workspace, "state", "logs", "agent_runs.jsonl"), limit=limit)
+    api = summarize_api_calls(workspace)
     if not rows:
         return {
-            "calls": 0,
-            "failed": 0,
-            "total_tokens_est": 0,
+            "calls": api["calls"],
+            "failed": api["failed"],
+            "total_tokens_est": api["total_tokens"],
+            "provider_tokens": api["total_tokens"],
+            "prompt_tokens": api["prompt_tokens"],
+            "completion_tokens": api["completion_tokens"],
+            "api_calls": api["calls"],
             "total_elapsed_ms": 0,
             "project_calls": 0,
             "report_calls": 0,
-            "last_error": "",
-            "last_model": "",
+            "last_error": api["last_error"],
+            "last_model": next(reversed(api["model_counts"]), ""),
             "last_provider": "",
             "backend_counts": {},
-            "purpose_counts": {},
+            "purpose_counts": api["purpose_counts"],
             "ollama_lite": _read_json(os.path.join(workspace, "state", "ollama_lite_status.json")),
             "dynamic_ollama": _read_json(os.path.join(workspace, "state", "dynamic_ollama_status.json")),
         }
-    total_tokens = sum(int(r.get("total_tokens_est") or 0) for r in rows)
+    agent_tokens = sum(int(r.get("total_tokens_est") or 0) for r in rows)
     total_elapsed = sum(int(r.get("elapsed_ms") or 0) for r in rows)
     failed = [r for r in rows if str(r.get("status") or "").lower() not in {"ok", "empty"}]
     project_calls = sum(1 for r in rows if r.get("purpose") == "project")
@@ -64,6 +106,8 @@ def summarize_agent_runs(workspace: str, limit: int = 80) -> dict[str, Any]:
         purpose = str(row.get("purpose") or "unknown")
         backend_counts[backend] = backend_counts.get(backend, 0) + 1
         purpose_counts[purpose] = purpose_counts.get(purpose, 0) + 1
+    for purpose, count in api["purpose_counts"].items():
+        purpose_counts[purpose] = purpose_counts.get(purpose, 0) + count
     last = rows[-1]
     last_error = ""
     for row in reversed(rows):
@@ -71,14 +115,18 @@ def summarize_agent_runs(workspace: str, limit: int = 80) -> dict[str, Any]:
             last_error = str(row.get("error") or row.get("stdout_preview") or row.get("stderr_preview") or "")[:240]
             break
     return {
-        "calls": len(rows),
-        "failed": len(failed),
-        "total_tokens_est": total_tokens,
+        "calls": len(rows) + api["calls"],
+        "failed": len(failed) + api["failed"],
+        "total_tokens_est": agent_tokens + api["total_tokens"],
+        "provider_tokens": api["total_tokens"],
+        "prompt_tokens": api["prompt_tokens"],
+        "completion_tokens": api["completion_tokens"],
+        "api_calls": api["calls"],
         "total_elapsed_ms": total_elapsed,
         "project_calls": project_calls,
         "report_calls": report_calls,
-        "last_error": last_error,
-        "last_model": str(last.get("model") or ""),
+        "last_error": api["last_error"] or last_error,
+        "last_model": next(reversed(api["model_counts"]), str(last.get("model") or "")),
         "last_provider": str(last.get("provider") or ""),
         "backend_counts": backend_counts,
         "purpose_counts": purpose_counts,
@@ -141,12 +189,15 @@ def publish_runtime_cost_summary(workspace: str) -> dict[str, Any]:
         f"- Ollama Lite：{ollama_text}\n"
         f"- Dynamic Ollama：{dynamic_text}\n"
         f"- 失败/异常调用：{summary['failed']}\n"
-        f"- 估算 token：{summary['total_tokens_est']}\n"
+        f"- Provider API 调用：{summary.get('api_calls', 0)}\n"
+        f"- Provider 实报 token：{summary.get('provider_tokens', 0)}"
+        f"（输入 {summary.get('prompt_tokens', 0)} / 输出 {summary.get('completion_tokens', 0)}）\n"
+        f"- 总 token（API 实报 + 非 API 估算）：{summary['total_tokens_est']}\n"
         f"- 累计耗时：{_format_duration(summary['total_elapsed_ms'])}\n"
         f"- 最近模型：{summary['last_provider']}/{summary['last_model']}\n\n"
         "## 最近异常\n"
         f"{summary['last_error'] or '暂无最近异常。'}\n\n"
-        "说明：token 是基于字符数的粗略估算，用于观察消耗趋势，不等同于服务商账单。\n"
+        "说明：Direct API 使用服务商返回的 usage；仅无 usage 的 Agent 子进程按字符数估算。\n"
     )
     with open(os.path.join(user_dir, "runtime_cost.md"), "w", encoding="utf-8") as f:
         f.write(text)

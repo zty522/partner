@@ -232,9 +232,9 @@ def launch_gui(workspace_path: str | None = None):
     # Use native Windows style - the stylesheet handles all custom theming.
     # Avoid Fusion + global stylesheet conflict which can cause white screen in PyInstaller builds.
 
-    from .modern import ModernMainWindow
+    from .workspace import PartnerWorkspaceWindow
     try:
-        window = ModernMainWindow(workspace_path=workspace_path, app=app)
+        window = PartnerWorkspaceWindow(workspace_path=workspace_path, app=app)
         window.show()
 
         # Force Qt to paint the window with the dark theme stylesheet immediately.
@@ -283,7 +283,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Partner Desktop GUI v2.0 (Modern)")
+        print("Partner Workspace v4.0 (Pure Event Runtime)")
         print("Powered by PySide6 / Nous Research")
         return
 

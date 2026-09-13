@@ -279,7 +279,55 @@ class AgentAdapter(ABC):
         """Search the web."""
         pass
     
-    @abstractmethod
+    @staticmethod
+    def _extract_commands(raw: str) -> list[str]:
+        """Extract shell commands from a model reply.
+
+        Supports two tool-call dialects:
+          1. ``<bash>cmd</bash>``            — deepseek native shell block
+          2. ``<invoke name="exec_command">…<parameter name="command">cmd
+             </parameter>…</invoke>``        — Hermes-style tool call
+        """
+        import re
+        commands = []
+        for block in re.findall(r"<bash>(.*?)</bash>", raw, flags=re.DOTALL):
+            # MiniMax also emits a complete parameter envelope inside bash.
+            # Unwrap only this known dialect; malformed envelopes remain rejected
+            # by the executor, never interpreted as shell redirections.
+            envelope = re.fullmatch(
+                r'\s*<parameter name="command">(.*?)</parameter>'
+                r'(?:\s*<parameter name="(?:deadlineMs|timeout_ms|yield_time_ms)">\d+</parameter>)*\s*',
+                block, flags=re.DOTALL)
+            if envelope:
+                block = envelope.group(1)
+            commands.append(block.strip())
+        for invoke in ([] if commands else re.findall(
+                r'<invoke name="exec_command">(.*?)</invoke>', raw, flags=re.DOTALL)):
+            for cmd in re.findall(
+                    r'<parameter name="command"[^>]*>(.*?)</parameter>',
+                    invoke, flags=re.DOTALL):
+                commands.append(cmd.strip())
+        # JSON is parsed only as a complete tool object, never by scanning
+        # strings inside shell scripts or returned data for "command" fields.
+        if not commands:
+            import json
+            try:
+                value = json.loads(raw.strip().removeprefix('```json').removesuffix('```').strip())
+                if isinstance(value, dict) and value.get('tool') in ('execute_command', 'exec_command', 'bash'):
+                    command = (value.get('arguments') or {}).get('command')
+                    if isinstance(command, str): commands.append(command)
+            except (ValueError, TypeError):
+                pass
+        # unescape common XML entities inside a command
+        cleaned = []
+        for cmd in commands:
+            cmd = (cmd.replace("&lt;", "<").replace("&gt;", ">")
+                     .replace("&amp;", "&").replace("&quot;", '"')
+                     .replace("&#39;", "'"))
+            if cmd:
+                cleaned.append(cmd)
+        return cleaned
+
     def execute_task(self, prompt: str) -> str:
         """Execute a research task given a natural language prompt.
         Returns the agent's response as text."""
@@ -883,22 +931,8 @@ class HermesAdapter(AgentAdapter):
         return [SearchResult(title="Search Result", url="", snippet=result)]
     
     def execute_task(self, prompt: str) -> str:
-        """Execute a task by writing a prompt file and invoking hermes.
-        
-        For MVP, this writes the prompt to a file that can be picked up
-        by the cron-triggered hermes session.
-        """
-        import subprocess
-        import tempfile
-        import os
-        
-        # Write prompt to temp file
-        prompt_file = os.path.join(self.workspace, "state", "current_task.md")
-        with open(prompt_file, 'w') as f:
-            f.write(prompt)
-        
-        # For MVP, return a placeholder - in production this would invoke hermes
-        return "Task queued for execution by Hermes agent."
+        """Run one bounded project action now and return its terminal text."""
+        return self.chat(prompt, purpose="project")
 
     def _resolve_tools_for_purpose(self, purpose: str) -> str:
         """Resolve the toolset string for a given chat purpose.
@@ -953,9 +987,18 @@ class HermesAdapter(AgentAdapter):
                     (timeout_sec: int|None, retries: int)
                 """
                 try:
-                    from ..harness_core.robust_executor import load_harness_config
-
-                    config = load_harness_config(self.workspace)
+                    import yaml
+                    roots = (Path(self.workspace).resolve(), Path(self.workspace).resolve().parent.parent)
+                    config = {}
+                    for root in roots:
+                        for name in ("config/external_calls.yaml", "external_calls.yaml"):
+                            path = root / name
+                            if path.is_file():
+                                loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                                config = loaded if isinstance(loaded, dict) else {}
+                                break
+                        if config:
+                            break
                     external = config.get("external_calls", {})
                     per_event = external.get("per_event", {})
                     event_map = {
@@ -1081,10 +1124,23 @@ class HermesAdapter(AgentAdapter):
 
         # Try DirectAPI first — bypasses hermes subprocess PIPE deadlock on WSL
         try:
-            from .direct_api import chat as direct_chat
+            from .direct_api import chat as direct_chat, get_last_usage
             t = timeout_sec or 60
-            result = direct_chat(message, purpose=purpose, timeout=t)
+            # Cognitive Event prompts routinely include a bounded project and
+            # memory snapshot.  Reasoning models can spend the old 4096-token
+            # default entirely inside <think> and return no final JSON even
+            # though the provider reports a successful response.  Preserve an
+            # explicit caller limit, otherwise leave enough room for both the
+            # internal reasoning and the requested structured terminal.
+            direct_max_tokens = max_tokens or _env_int(
+                "PARTNER_COGNITIVE_MAX_TOKENS", 8192
+            )
+            result = direct_chat(
+                message, max_tokens=direct_max_tokens, purpose=purpose,
+                timeout=t, workspace=self.workspace,
+            )
             if result:
+                self.last_usage = get_last_usage()
                 logger.info("[HermesAdapter] DirectAPI OK for purpose=%s (%d chars)", purpose, len(result))
                 return result
         except Exception:
@@ -2797,8 +2853,10 @@ class DirectAdapter(AgentAdapter):
     to execute tasks, without delegating to another agent.
     """
     
-    def __init__(self, workspace_path: str):
+    def __init__(self, workspace_path: str, model=None, provider=None):
         self.workspace = workspace_path
+        self.model = model
+        self.provider = provider or "deepseek"
     
     def name(self) -> str:
         return "direct"
@@ -2826,13 +2884,46 @@ class DirectAdapter(AgentAdapter):
         except Exception as e:
             return [SearchResult(title="Search failed", url="", snippet=str(e))]
     
-    def execute_task(self, prompt: str) -> str:
-        """Execute a task directly using Partner's own capabilities."""
-        # For MVP, just return the prompt for the cron job to handle
-        return f"Task recorded: {prompt}"
-    
+    def _chat_retry(self, prompt: str, max_tokens: int, purpose: str,
+                    timeout: int = 60) -> str:
+        """Call the provider with a per-attempt timeout and retry on
+        empty/hung responses.  Includes exponential backoff + jitter to ride
+        out minimax rate limits (HTTP 429) and 9p/WSL network hangs.
+        """
+        from . import direct_api
+        import time as _t
+        import random as _r
+        last = ""
+        for attempt in range(5):
+            raw = direct_api.chat(
+                prompt, max_tokens=max_tokens, purpose=purpose,
+                timeout=timeout, workspace=self.workspace)
+            if raw and raw.strip():
+                return raw
+            last = raw
+            if attempt < 4:
+                backoff = min(2 ** attempt, 16) + _r.uniform(0, 1.5)
+                _t.sleep(backoff)
+        return last
+
+    def chat_once(self, message: str, max_tokens: int = None, purpose: str = "chat", timeout: float = 90) -> str:
+        """One provider attempt; cognitive Events own their retry budget."""
+        from . import direct_api
+        budget = max_tokens if max_tokens is not None else _env_int("PARTNER_COGNITIVE_MAX_TOKENS", 8192)
+        reply = direct_api.chat(message, max_tokens=budget, purpose=purpose,
+                                timeout=timeout, workspace=self.workspace,
+                                task_id=getattr(self,"task_id",""), project_id=getattr(self,"project_id",""),
+                                event_type=getattr(self,"event_type",purpose))
+        self.last_usage = direct_api.get_last_usage()
+        return reply
+
     def chat(self, message: str, max_tokens: int = None, purpose: str = "chat") -> str:
-        return "Direct mode: I can only work through scheduled tasks."
+        """Call the configured provider directly, without Hermes subprocesses."""
+        return self.chat_once(message, max_tokens=max_tokens, purpose=purpose)
+
+    def execute_task(self, prompt: str, *, seconds: float = 240) -> str:
+        from partner.runtime.action_execution import execute
+        return execute(self, prompt, seconds=seconds)
 
 
 class HybridLiteAdapter(AgentAdapter):

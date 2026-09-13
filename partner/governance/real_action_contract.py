@@ -20,7 +20,10 @@ from typing import Any
 ACTION_SIGNALS = (
     "exec:", "web.fetch", "pytest", "code_write", "data_write",
     "external_query", "scientific_run", "external_knowledge_scout",
+    "molecular_external_activity_acquire",
+    "research_adoption_context_shadow",
     "multimodal_browser_observe", "multimodal_community_read", "multimodal_login_resume",
+    "multimodal_safe_navigation", "molecular_docking_holdout",
     "github.clone", "paper.download", "source_acquisition",
 )
 
@@ -78,9 +81,18 @@ def assess(*, workspace_root_path: Path, project_id: str,
         "atomic_search_", "atomic_visit", "scientific_run", "scientific_query",
         "scientific_", "data_write", "data_read", "continuous_project_step",
         "molecular_generation_benchmark", "molecular_diversity_benchmark",
-        "molecular_synth_baseline_benchmark", "molecular_goal_optimization_benchmark"))
+        "molecular_synth_baseline_benchmark", "molecular_goal_optimization_benchmark",
+        "molecular_data_readiness_audit",
+        "molecular_external_activity_acquire",
+        # A matched Candidate recomputes both arms from the same frozen
+        # molecular table.  A falsified hypothesis is still a real scientific
+        # action and must not be mislabeled as "missing_external_action".
+        "molecular_method_candidate_benchmark", "molecular_docking_holdout"))
+    has_atomic_action = bool(has_atomic_action or
+                             "research_adoption_context_shadow" in actions_norm.lower())
     has_atomic_action = bool(has_atomic_action or any(token in actions_norm.lower() for token in (
-        "multimodal_browser_observe", "multimodal_community_read", "multimodal_login_resume")))
+        "multimodal_browser_observe", "multimodal_community_read", "multimodal_login_resume",
+        "multimodal_safe_navigation")))
     new_real_artifacts: list[str] = []
     fake_paths: list[str] = []
     governance_artifacts: list[str] = []

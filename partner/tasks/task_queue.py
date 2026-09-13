@@ -43,6 +43,15 @@ class Task:
     source: str = ""
     sender_id: str = ""
     sender_name: str = ""
+    # Event-flow state is durable so an instance restart resumes the next
+    # semantic checkpoint instead of rebuilding a whole batch plan.
+    event_catalog_version: str = ""
+    flow_id: str = ""
+    flow_type: str = ""
+    current_event_id: str = ""
+    ready_event_ids: List[str] = field(default_factory=list)
+    completed_event_ids: List[str] = field(default_factory=list)
+    suspended_flows: List[dict] = field(default_factory=list)
 
 
 class TaskQueue:

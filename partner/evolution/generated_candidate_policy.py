@@ -11,9 +11,7 @@ from typing import Any
 
 
 POLICIES: dict[str, str] = {
-    "molecular_dynamics_study": "turn_parameter_sweep_v1",
     "literature_github_learning": "turn_source_rotation_v1",
-    "hermes_partner_explore": "turn_code_surface_rotation_v1",
 }
 
 
@@ -21,7 +19,14 @@ def enrich_project_params(project_id: str, strategy_id: str, native_turn: int,
                           params: dict[str, Any]) -> dict[str, Any]:
     result = dict(params)
     recipe = POLICIES.get(project_id, "")
-    if recipe == "turn_parameter_sweep_v1":
+    if recipe == "duplicate_forces_verified_maxmin_v2":
+        result["candidate_recipe"] = recipe
+        # Fresh seeds supported MaxMin under the same-data fingerprint/QED
+        # contract while scaffold round-robin was falsified. Keep the narrower
+        # supported intervention; replicate_seed still changes across turns.
+        result["candidate_variant"] = 3
+        result["force_method_family_expansion"] = True
+    elif recipe == "turn_parameter_sweep_v1":
         # The variant is deterministic/replayable but differs across turns.
         # Domain Events decide how it maps to safe numerical parameters.
         result["candidate_recipe"] = recipe

@@ -110,19 +110,19 @@ def _get_harness_config(key: str, default: Any = None) -> Any:
 
 
 def _count_v2_events() -> int:
-    """统计 v2 模块注册的 Event 数量。"""
+    """兼容旧报告字段：统计 canonical Event 数量。"""
     try:
-        from partner.v2 import get_all_events
-        return len(get_all_events())
+        from partner.event_fabric import build_catalog
+        return len(build_catalog().names())
     except Exception:
         return 0
 
 
 def _count_event_registry() -> int:
-    """统计 Harness EventRegistry 中注册的事件总数。"""
+    """统计 canonical EventCatalog 中注册的事件总数。"""
     try:
-        from partner.mind.harness import default_registry
-        return len(default_registry()._events)
+        from partner.event_fabric import build_catalog
+        return len(build_catalog().names())
     except Exception:
         return 0
 

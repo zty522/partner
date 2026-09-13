@@ -14,7 +14,11 @@ from ..state.config import (
     save_partner_config_data,
     workspace_has_partner_config,
 )
-from ..monitoring.instance_root import resolve_instance_workspace, resolve_partner_root
+from ..monitoring.instance_root import (
+    resolve_global_config_path,
+    resolve_instance_workspace,
+    resolve_partner_root,
+)
 
 # ── Windows ──
 CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -138,6 +142,22 @@ def _resolve_qq_config(workspace: str) -> str:
     for path in candidates:
         if os.path.exists(path):
             return path
+    # Canonical multi-instance config stores an app-scoped path in
+    # global_config.json.  Do not require stale per-instance copies.
+    try:
+        instance_id = os.path.basename(os.path.normpath(workspace))
+        global_path = resolve_global_config_path()
+        with open(global_path, "r", encoding="utf-8") as handle:
+            global_config = json.load(handle)
+        configured = str(
+            ((global_config.get("instances") or {}).get(instance_id) or {}).get("qq_config") or ""
+        ).strip()
+        if configured:
+            canonical = configured if os.path.isabs(configured) else os.path.join(str(resolve_partner_root()), configured)
+            if os.path.exists(canonical):
+                return canonical
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
     return candidates[0]
 
 
@@ -604,9 +624,7 @@ def _bot_start(workspace, platform, quiet=False):
     label = {"qq": "QQ"}.get(platform, platform)
     pp = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if platform == "qq":
-        cfg = os.path.join(workspace, "qq_config.json")
-        if not os.path.exists(cfg):
-            cfg = os.path.join(workspace, "config", "qq_config.json")
+        cfg = _resolve_qq_config(workspace)
         if not os.path.exists(cfg):
             print(f"  ❌ QQ 未配置，请先运行: partner setup")
             return

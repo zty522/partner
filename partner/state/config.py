@@ -174,7 +174,13 @@ class RuntimeConfig:
     autonomous_cron: bool = False
     step_messages: bool = True
     cognition_shadow_mirror: bool = False
+    # Exactly one production component may decide whether a finished
+    # WorkItem continues.  Legacy loops remain readable for audit/benchmarks
+    # but must not own production continuation.
+    continuation_owner: str = "work_item_runtime_v1"
+    legacy_continuation_events_enabled: bool = False
     instance_native_autonomy: bool = False
+    instance_native_auto_continue: bool = True
     instance_native_enabled_instances: List[str] = field(default_factory=list)
     instance_native_max_active: int = 2
     instance_native_max_learning_interruptions_per_failure: int = 1
@@ -241,6 +247,7 @@ def runtime_capability_enabled(workspace: str, capability: str) -> bool:
         "autonomous_cron": False,
         "step_messages": True,
         "cognition_shadow_mirror": False,
+        "legacy_continuation_events_enabled": False,
         "instance_native_autonomy": False,
     }
     return bool(runtime.get(capability, defaults.get(capability, False)))

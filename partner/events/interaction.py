@@ -1,0 +1,254 @@
+"""Interaction Events: three epistemically distinct reads and direct answer."""
+from __future__ import annotations
+
+from typing import Any
+import json
+
+from partner.event_fabric.catalog import EventDefinition
+from ._llm import call_model, json_object
+
+
+def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
+    request = str(params.get("request") or "").strip()
+    upstream = params.get("upstream") if isinstance(params.get("upstream"), dict) else {}
+    prior = params.get("prior") or [
+        value.get("semantic_output", value) for value in upstream.values()
+        if isinstance(value, dict)
+    ]
+    instructions = {
+        "observe": "忠实提取目标、明确约束、期望结果；不得扩张授权。",
+        "counter_read": "攻击已有理解：找遗漏、相反解释、不可证伪目标和过度授权。",
+        "synthesize": "综合原文和前两遍审议，形成最小、可证伪、可验证的最终契约。"
+                     "遇到歧义或信息缺口时，自主采用最合理的默认假设并在 reason 里说明；"
+                     "绝不把问题抛回给用户确认——你要自行理解、自行尝试、自行决定、自行解决。",
+    }
+    raw, usage = call_model(ctx, purpose=f"intent_{role}", prompt=(
+        "你是 Partner 意图审议 Event。" + instructions[role]
+        + "必须区分用户明确要求与暂定方案：constraints 仅包含原文明示约束。"
+        "自行选用的算法、阈值、候选数量写入 assumptions 并标为待验证，不得冒充用户要求。"
+        "route 只能为 direct_answer 或 project_iteration：用户仅问概念、解释差别且无需读取当前外部材料时选 direct_answer；"
+        "需要实际读取文件、检索、计算、修改或推进任务时选 project_iteration。问候语、专业术语和已有项目归属都不能单独决定是否执行工具。"
+        "用户明确只问概念或不启动任务时不得扩张为实验；已有事实需查证的请求不能仅凭口头回答冒充完成。"
+        "结构域范围、物种等事实没有文件或来源证据时保持 unknown，先安排证据检查，不得猜成事实。"
+        "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
+        "详细技术方案留给项目执行阶段，不要在此重复长篇论证。"
+        "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
+          "knowledge_gaps,route,project_hint,reason。\n用户原文="
+        + json.dumps(request, ensure_ascii=False) + "\n用户随附的证据路径（内容须在执行中读取，不可仅凭文件名下结论）="
+        + json.dumps(params.get("attachments") or [], ensure_ascii=False)[:4000] + "\n已有审议="
+        + json.dumps(prior, ensure_ascii=False)[:16000]
+    ))
+    value = json_object(raw)
+    return {"ok": True, "status": "completed", "semantic_output": value,
+            "summary": str(value.get("goal") or value.get("reason") or "意图审议完成"),
+            "token_usage": usage, "model_output": raw}
+
+
+def intent_observe(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return _intent(ctx, params, "observe")
+
+
+def intent_counter_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return _intent(ctx, params, "counter_read")
+
+
+def intent_synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    return _intent(ctx, params, "synthesize")
+
+
+def direct_answer(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    raw, usage = call_model(ctx, purpose="direct_answer", prompt=(
+        "直接回答用户问题。先根据整句语义判断问题的主语、谓语和比较对象，不能因局部词语改答另一个专业问题。"
+        "只回答原命题，不擅自换成更强命题：数值按某公式计算，不等于该数值随时间守恒；记录分段数量，不等于知道它按场景还是固定时长切分。"
+        "未知的切分方式、采样规则、排名方向和参与原子范围必须保留未知，不自行补成事实。"
+        "不为显得专业而增加未经核实的反例、算法身份或必要/充分条件；短问答先清楚回答，再给一句成立的理由。"
+        "用两三句普通中文回答，不展开数学证明或额外举例。"
+        "不得声称使用了工具或获得了当前外部事实；表达自然、清楚、简洁。\n"
+        "对话项目（仅供术语消歧，不代表已执行或已验证）：" + str(params.get('project_id') or '') + "\n用户原文："
+        + str(params.get("request") or "")
+    ))
+    return {"ok": True, "status": "completed", "answer": raw,
+            "summary": raw[:500], "token_usage": usage}
+
+
+def project_init(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Initialise a brand-new project from a user-described direction.
+
+    Triggered when ``interaction.intent_synthesize`` produced a contract
+    whose ``project_hint`` looks like a fresh project name (no existing
+    project matches).  We call into ``project_registry.register_project``
+    and ``governance.project_scaffold.scaffold_project`` so the new
+    project lands on disk with a real brief and an empty
+    ``external_artifacts/`` tree before the next ``project.job_dispatch``
+    runs.  No LLM call — the intent contract already contains the goal.
+
+    Parameters:
+      params["request"]              — raw user text (for diagnostic only)
+      params["intent_contract"]      — dict from upstream intent_synthesize
+      params["project_id_hint"]      — optional override; else we
+                                        normalize from intent_contract.project_hint
+      params["goal"]                 — optional override; else intent_contract.goal
+      params["instance_id"]          — which instance is hosting the project
+      params["workspace"]            — workspace root path
+    """
+    contract = params.get("intent_contract") if isinstance(params.get("intent_contract"), dict) else {}
+    synthesized = (params.get("flow_outputs") or {}).get("understand_3", {}).get("semantic_output", {})
+    if isinstance(synthesized, dict):
+        contract = {**contract, **synthesized}
+    project_hint = (params.get("project_id_hint")
+                    or contract.get("explicit_project_id")
+                    or contract.get("project_hint")
+                    or contract.get("goal")
+                    or params.get("request")
+                    or "")
+    raw = str(project_hint).strip().split()[0] if project_hint else ""
+    if not raw:
+        # Truly empty input — fail-closed so callers know they forgot
+        # to provide a hint.
+        return {"ok": False, "status": "failed",
+                "error": "project_init: empty project_id after normalisation"}
+    import re as _re
+    # Normalise: lowercase ASCII tokens joined by "_" + keep CJK chars.
+    # filesystem on WSL/NTFS supports UTF-8 so CJK is fine as long as
+    # we strip whitespace and path separators.
+    ascii_parts = _re.findall(r"[A-Za-z0-9]+", raw)
+    cjk_chars = _re.findall(r"[\u4e00-\u9fff]", raw)
+    if ascii_parts:
+        project_id = "_".join(ascii_parts).lower()[:48].rstrip("_") or "new_project"
+    elif cjk_chars:
+        project_id = ("".join(cjk_chars)[:16]) or "new_project"
+    else:
+        project_id = "new_project"
+    # Strip any leftover path separators defensively
+    project_id = project_id.replace("/", "_").replace("\\", "_")
+    if not project_id:
+        return {"ok": False, "status": "failed",
+                "error": "project_init: empty project_id after normalisation"}
+    goal = (params.get("goal") or contract.get("goal")
+            or contract.get("desired_outcome") or params.get("request") or "")
+    workspace = str(getattr(ctx, "workspace", "") or params.get("workspace") or "")
+    instance_id = str(getattr(ctx, "intake_instance_id", "") or params.get("origin_instance")
+                      or getattr(ctx, "instance_id", "") or params.get("instance_id") or "")
+    if not workspace:
+        return {"ok": False, "status": "failed",
+                "error": "project_init: workspace missing in ctx/params"}
+    # Order matters.  register_project internally calls _summarize_project
+    # which calls project_dir(...).mkdir() — so if we register first the
+    # scaffold step will see the directory as already-existing and skip the
+    # brief write.  Scaffold first (creates dir + brief), then register
+    # (the registry row then finds the brief and summarises it).
+    scaffold_summary: dict[str, Any] = {}
+    try:
+        from partner.governance.project_scaffold import scaffold_project
+        scaffold_summary = scaffold_project(workspace, instance_id, project_id, goal) or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": "failed", "error": f"scaffold_project: {type(exc).__name__}: {exc}"}
+    # Now the brief tree is real; register so the project shows up in the
+    # global project registry.
+    reg_row: dict[str, Any] = {}
+    try:
+        from partner.projects.project_registry import register_project
+        from pathlib import Path
+        registry_workspace = Path(workspace).expanduser().resolve()
+        if registry_workspace.parent.name == 'instances':
+            registry_workspace = registry_workspace.parent.parent
+        if instance_id and _re.fullmatch(r'[A-Za-z0-9_-]+', instance_id):
+            registry_workspace = registry_workspace / 'instances' / instance_id
+        reg_row = register_project(str(registry_workspace), project_id,
+                                   status="active",
+                                   reason="auto-created by interaction.project_init",
+                                   make_public=True) or {}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": "failed", "error": f"register_project: {type(exc).__name__}: {exc}"}
+    # 3. Write a minimal intent contract for the new project.
+    contract_path = ""
+    try:
+        from pathlib import Path as _Path
+        if workspace:
+            base = _Path(workspace).expanduser().resolve()
+            if base.parent.name == "instances":
+                base = base.parent.parent
+            share = base / "share" / "projects" / project_id
+            # share must already exist thanks to scaffold_project; mkdir is
+            # only a safety net for the edge case where scaffold was skipped
+            # because the registry row already existed but the dir was deleted.
+            share.mkdir(parents=True, exist_ok=True)
+            contract_path = str(share / "project_contract.json")
+            payload = {
+                "project_name": project_id,
+                "current_goal": str(goal)[:600],
+                "current_mainline": "fresh project; first Job pending",
+                "allowed_scope": list(contract.get("explicit_constraints") or contract.get("constraints") or [])[:8],
+                "forbidden_scope": [],
+                "source_roots": [],
+                "completion_criteria": list(contract.get("success_criteria") or [])[:8],
+                "updated_at": _now_iso(),
+                "origin": "interaction.project_init",
+            }
+            import json as _json
+            tmp = contract_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(_json.dumps(payload, ensure_ascii=False, indent=2))
+            import os as _os
+            _os.replace(tmp, contract_path)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "status": "failed", "error": f"project_contract: {type(exc).__name__}: {exc}"}
+    # "created_new" means: this call materially created the brief tree on
+    # disk.  scaffold_project reports skipped_existing=True when the project
+    # root was already there (the registry path may pre-create it via
+    # ``_summarize_project``'s project_dir call, but that does not write
+    # a brief).
+    brief_path = ""
+    try:
+        from pathlib import Path as _Path
+        base = _Path(workspace).expanduser().resolve()
+        if base.parent.name == "instances":
+            base = base.parent.parent
+        brief_path = str(base / "share" / "projects" / project_id / "project_brief.md")
+    except Exception:
+        pass
+    brief_existed_before = bool(scaffold_summary.get("created") and
+                                 "project_brief.md" in (scaffold_summary.get("created") or []))
+    semantic = {
+        "project_id": project_id,
+        "goal": str(goal)[:240],
+        "registry_row": reg_row,
+        "scaffold": scaffold_summary,
+        "contract_path": contract_path,
+        "created_new": brief_existed_before,
+    }
+    import hashlib
+    from pathlib import Path
+    evidence = []
+    for filename in (brief_path, contract_path):
+        path = Path(filename)
+        if not path.is_file() or not path.stat().st_size:
+            return {'ok':False, 'status':'failed', 'error':'project artifact missing or empty after write', 'path':filename}
+        data = path.read_bytes()
+        evidence.append({'path':str(path), 'bytes':len(data),
+                         'sha256':hashlib.sha256(data).hexdigest(),
+                         'excerpt':data.decode('utf-8')[:1800]})
+    semantic['artifact_readback'] = evidence
+    return {"ok": True, "status": "completed",
+            "project_id": project_id,
+            "evidence_refs": [brief_path, contract_path],
+            "semantic_output": semantic,
+            "summary": (f"新项目已注册 {project_id}（brief={bool(scaffold_summary.get('created'))}）"
+                        if semantic["created_new"]
+                        else f"项目 {project_id} 已存在，沿用现有 brief")}
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+
+
+DEFINITIONS = [
+    EventDefinition("interaction.intent_observe", "interaction", "第一遍忠实理解用户意图", intent_observe, execution_method="llm"),
+    EventDefinition("interaction.intent_counter_read", "interaction", "第二遍反向审查意图理解", intent_counter_read, execution_method="llm"),
+    EventDefinition("interaction.intent_synthesize", "interaction", "第三遍形成可证伪意图契约", intent_synthesize, execution_method="llm"),
+    EventDefinition("interaction.direct_answer", "interaction", "无需工具的简单问题直接回答", direct_answer, execution_method="llm"),
+    EventDefinition("interaction.project_init", "interaction", "从用户描述创建新项目并写入 brief/contract", project_init),
+]

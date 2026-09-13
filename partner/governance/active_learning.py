@@ -31,26 +31,87 @@ def _json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _llm_self_evolution_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
-    """Causal critic for internal failures; advisory and allow-list bounded."""
+def _llm_self_evolution_diagnosis(payload: dict[str, Any], *, root: Path) -> dict[str, Any]:
+    """Three-pass causal diagnosis over Episode, source and project evidence."""
     try:
         from partner.adapters.direct_api import chat
-        prompt = (
-            "你是 Partner 内部自进化诊断员，不是在做外部知识主动学习。"
-            "根据机器汇总的 Episode 证据提出因果机制、反证和最小实验；"
-            "recommended_next_option 只能是 bounded_repair、matched_resample、"
-            "collect_more_matched_evidence、collect_episode_task_log_evidence、"
-            "split_failure_class_by_step_type、split_failure_class_by_outcome_reason。"
-            "不能批准生产。输出严格 JSON："
-            "{\"causal_mechanism\":\"...\",\"disconfirming_evidence\":\"...\","
-            "\"minimal_experiment\":\"...\",\"recommended_next_option\":\"...\","
-            "\"confidence\":0.0}。证据=" + json.dumps(payload, ensure_ascii=False)
+        from .deep_context import build_deep_context_pack, render_deep_context
+        failure_class = str(payload.get("failure_class") or "")
+        relevant_code = [
+            "partner/governance/active_learning.py",
+            "partner/governance/manual_runtime.py",
+            "partner/mind/executor.py",
+        ]
+        if "molecular" in json.dumps(payload, ensure_ascii=False).lower() or "algorithm_spec" in json.dumps(payload):
+            relevant_code.extend([
+                "partner/v2/molecular_iteration_events.py",
+                "partner/planner/batch_planner.py",
+            ])
+        pack = build_deep_context_pack(
+            root,
+            project_id=str(payload.get("project_id") or "agent_self_evolution"),
+            purpose="self_evolution_causal_diagnosis",
+            instance_id=str(payload.get("instance_id") or "05"),
+            task_id=str(payload.get("task_id") or ""),
+            episode_refs=[str(value) for value in payload.get("evidence_refs") or []],
+            relevant_code=relevant_code,
+            max_chars=110000,
+            privacy_mode="derived_only",
         )
-        raw = chat(prompt, purpose="classify", max_tokens=1200,
-                   temperature=0.1, timeout=60)
-        cleaned = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.S | re.I)
-        match = re.search(r"\{.*\}", cleaned, re.S)
-        value = json.loads(match.group(0)) if match else {}
+        model_payload = dict(payload)
+        raw_refs = [str(value) for value in model_payload.pop("evidence_refs", [])]
+        model_payload["evidence_ref_hashes"] = [
+            hashlib.sha256(value.encode()).hexdigest()[:16] for value in raw_refs
+        ]
+        evidence = (
+            "机器摘要=" + json.dumps(model_payload, ensure_ascii=False)
+            + "\n深上下文=" + render_deep_context(pack)
+        )
+        roles = (
+            ("self_evolution_evidence_audit", 7000,
+             "只重建失败事实，不提修复。输出 JSON：observed_failure、timeline、source_findings、"
+             "missing_evidence、business_vs_partner_boundary。"),
+            ("self_evolution_counterfactual", 8000,
+             "提出至少三个竞争性根因并设计区分它们的反事实。输出 JSON：causal_hypotheses、"
+             "disconfirming_evidence、counterfactual_tests、reward_hacking_risks。"),
+            ("self_evolution_causal_diagnosis", 9000,
+             "综合前两遍，只输出 JSON：causal_mechanism、disconfirming_evidence、minimal_experiment、"
+             "recommended_next_option、confidence、evidence_refs_used、code_locations、unknowns。"),
+        )
+        drafts: list[dict[str, Any]] = []
+        raw = ""
+        for purpose, budget, instruction in roles:
+            prompt = (
+                "你是 Partner 内部自进化诊断员，不是在做外部知识主动学习。不能批准生产，也不能把业务"
+                "假设被否证冒充框架错误。recommended_next_option 只能是 bounded_repair、matched_resample、"
+                "collect_more_matched_evidence、collect_episode_task_log_evidence、"
+                "split_failure_class_by_step_type、split_failure_class_by_outcome_reason。"
+                + instruction + "\n" + evidence
+            )
+            if drafts:
+                prompt += "\n前序审议=" + json.dumps(drafts, ensure_ascii=False)
+            raw = chat(
+                prompt, purpose=purpose, max_tokens=budget,
+                temperature=0.15, timeout=120, workspace=str(root),
+                instance_id=str(payload.get("instance_id") or payload.get("source_instance") or "05"),
+                project_id="agent_self_evolution",
+                task_id=str(payload.get("task_id") or ""),
+                episode_id=str(payload.get("episode_id") or ""),
+                event_type="agent_active_learning_diagnostic_shadow",
+            )
+            cleaned = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.S | re.I)
+            decoder = json.JSONDecoder()
+            parsed: list[tuple[int, dict[str, Any]]] = []
+            for match in re.finditer(r"\{", cleaned):
+                try:
+                    item, end = decoder.raw_decode(cleaned[match.start():])
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, dict):
+                    parsed.append((end, item))
+            value = max(parsed, key=lambda item: item[0])[1] if parsed else {}
+            drafts.append(value)
+        value = dict(drafts[-1]) if drafts else {}
         if not isinstance(value, dict):
             return {}
         allowed = {
@@ -60,9 +121,49 @@ def _llm_self_evolution_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
         }
         if str(value.get("recommended_next_option") or "") not in allowed:
             value.pop("recommended_next_option", None)
+        value["deliberation_passes"] = [purpose for purpose, _budget, _instruction in roles]
+        value["model_calls"] = len(roles)
+        value["deep_context_manifest"] = pack["manifest_path"]
+        value["deep_context_chars"] = pack["manifest"]["context_chars"]
+        value["deep_context_coverage"] = pack["manifest"]["coverage"]
         return value
     except Exception as exc:
         return {"error": type(exc).__name__}
+
+
+def _audit_causal_diagnosis(*, failure_class: str, episodes: list[dict[str, Any]],
+                            llm_diagnosis: dict[str, Any]) -> dict[str, Any]:
+    """Keep a model's causal story inside what the persisted Episode proves."""
+    mechanism = str(llm_diagnosis.get("causal_mechanism") or "")
+    serialized = json.dumps(episodes, ensure_ascii=False)
+    audit = {
+        "schema_version": 1,
+        "llm_diagnosis_is_hypothesis": True,
+        "episode_supports_failure_class": bool(failure_class and failure_class in serialized),
+        "episode_supports_parameter_provenance": False,
+        "unsupported_causal_claims": [],
+        "verified_mechanism": "",
+        "accepted_for_candidate_design": False,
+    }
+    # A terminal error can prove the missing contract at the handler boundary,
+    # but without an input snapshot it cannot distinguish generation,
+    # serialization and dispatch loss.  This was the exact overclaim exposed
+    # by the 02 DSL failure.
+    if "algorithm_spec" in mechanism or "algorithm_spec" in serialized:
+        audit["verified_mechanism"] = (
+            "llm_greedy_dsl reached the Event handler without a valid algorithm_spec; "
+            "the persisted Episode does not identify whether generation, parsing, serialization, "
+            "or dispatch caused the absence"
+        )
+        provenance_claim = any(token in mechanism.lower() for token in (
+            "dispatcher", "planner", "透传", "剥掉", "未计算", "调用方"))
+        if provenance_claim:
+            audit["unsupported_causal_claims"].append(
+                "the Episode has no parameter-provenance snapshot, so dispatcher/planner attribution is unverified")
+        audit["accepted_for_candidate_design"] = True
+    elif mechanism and audit["episode_supports_failure_class"]:
+        audit["verified_mechanism"] = "failure class is observed; the proposed causal mechanism remains unverified"
+    return audit
 
 
 def _state_failure_classes(state: dict[str, Any]) -> list[str]:
@@ -278,7 +379,8 @@ def select_agent_experiment(workspace: str, *, instance_ids: list[str] | None = 
 
 
 def record_agent_experiment_feedback(workspace: str, *, context_key: str, option_id: str,
-                                     success: bool, evidence_refs: list[str]) -> dict[str, Any]:
+                                     success: bool, evidence_refs: list[str],
+                                     observation_id: str = "") -> dict[str, Any]:
     """Update active-learning memory only from explicit verifiable evidence."""
     if not context_key or not option_id or not evidence_refs:
         return {"ok": False, "status": "invalid_feedback",
@@ -288,20 +390,26 @@ def record_agent_experiment_feedback(workspace: str, *, context_key: str, option
     memory_path = root / "share/mind/governance/active_learning/memory.json"
     memory = ActiveLearningMemory.from_dict(_json(memory_path))
     before = memory.success_probability(context_key, option_id)
-    memory.observe(context_key, option_id, success=bool(success))
+    accepted = memory.observe(context_key, option_id, success=bool(success),
+                              observation_id=str(observation_id or ""))
     after = memory.success_probability(context_key, option_id)
-    atomic_json(memory_path, {**memory.to_dict(), "updated_at": now_iso()})
+    if accepted:
+        atomic_json(memory_path, {**memory.to_dict(), "updated_at": now_iso()})
     feedback_id = hashlib.sha256(json.dumps({"context": context_key, "option": option_id,
                                              "success": bool(success), "evidence": evidence_refs},
                                             sort_keys=True).encode()).hexdigest()[:16]
     event = append_evolution_event(
-        str(root), "active_learning/feedback_recorded", subject_id=f"feedback_{feedback_id}",
+        str(root), ("active_learning/feedback_recorded" if accepted
+                    else "active_learning/duplicate_feedback_ignored"),
+        subject_id=f"feedback_{feedback_id}",
         project_id="agent_self_evolution",
         payload={"context_key": context_key, "option_id": option_id, "success": bool(success),
                  "success_probability_before": before, "success_probability_after": after},
         evidence_refs=evidence_refs, idempotency_key=f"active-feedback:{feedback_id}",
     )
-    return {"ok": True, "status": "feedback_recorded", "memory_path": str(memory_path),
+    return {"ok": True, "status": ("feedback_recorded" if accepted
+                                     else "duplicate_feedback_ignored"),
+            "observation_id": str(observation_id or ""),
             "before": before, "after": after, "event": event,
             "production_mutation": False}
 
@@ -414,7 +522,11 @@ def diagnose_agent_failure(workspace: str, *, failure_class: str,
             unmatched_signatures.update(set(mechanisms))
         elif not starts:
             missing_evidence += 1
-        episodes.append({"episode_id": state.get("episode_id"), "state_path": str(state_path),
+        episodes.append({"episode_id": state.get("episode_id"),
+                         "task_id": state.get("task_id"),
+                         "instance_id": state.get("instance_id"),
+                         "project_id": state.get("project_id"),
+                         "state_path": str(state_path),
                          "unmatched_step_types": missing,
                          "mechanism_signatures": mechanisms})
     count = len(episodes)
@@ -449,7 +561,14 @@ def diagnose_agent_failure(workspace: str, *, failure_class: str,
         "evidence_coverage": round(evidence_coverage, 4),
         "mechanism_counts": dict(unmatched_signatures),
         "top_signature": top_signature,
-    })
+        "instance_id": str((episodes[0] if episodes else {}).get("instance_id") or "05"),
+        "project_id": str((episodes[0] if episodes else {}).get("project_id") or "agent_self_evolution"),
+        "task_id": str((episodes[0] if episodes else {}).get("task_id") or ""),
+        "episode_id": str((episodes[0] if episodes else {}).get("episode_id") or ""),
+        "evidence_refs": accepted_refs,
+    }, root=root)
+    claim_audit = _audit_causal_diagnosis(
+        failure_class=failure_class, episodes=episodes, llm_diagnosis=llm_diagnosis)
     # The LLM can refine the experiment choice only inside the hard allow-list;
     # sparse/unreadable evidence always keeps the conservative machine choice.
     if (evidence_coverage >= 0.6
@@ -474,6 +593,7 @@ def diagnose_agent_failure(workspace: str, *, failure_class: str,
         "episodes": episodes, "recommended_next_option": next_option,
         "semantic_kind": "partner_self_evolution",
         "llm_diagnosis": llm_diagnosis,
+        "claim_audit": claim_audit,
         "llm_role": "bounded_causal_critic_not_production_approver",
         "claim_scope": "diagnosis from persisted Episode/task-log evidence; not proof of repair efficacy",
         "execution_authorized": False, "production_mutation": False,
@@ -493,6 +613,8 @@ def diagnose_agent_failure(workspace: str, *, failure_class: str,
     return {"ok": True, "status": "diagnosis_completed", "diagnosis": result,
             "path": str(output), "files": [str(output)], "event": event,
             "summary": f"{failure_class}: {classification}; next={next_option}",
+            "_model_calls": int(llm_diagnosis.get("model_calls") or
+                                bool(llm_diagnosis and not llm_diagnosis.get("error"))),
             "production_mutation": False}
 
 

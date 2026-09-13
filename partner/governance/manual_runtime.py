@@ -355,6 +355,10 @@ def preflight_manual_artifact_truth(workspace: str, params: dict[str, Any]) -> d
     actions = [str(value) for value in params.get("actions_executed") or [] if str(value).strip()]
     promoted = _promoted_manual_policy(workspace, project_id) if not _marker(goal, "policy_arm") else {}
     effective_goal = goal
+    if str(params.get("action_selection_id") or "").strip():
+        effective_goal += (
+            f" [action_selection_id={str(params['action_selection_id']).strip()}]"
+        )
     if promoted:
         effective_goal += " " + " ".join(f"[{key}={value}]" for key, value in promoted.items())
     policy_arm = _marker(effective_goal, "policy_arm")
@@ -438,6 +442,82 @@ def _task_failure_signature(workspace: str, task_id: str) -> tuple[str, str]:
     return owner, mechanism
 
 
+def _native_business_measurement(workspace: str, task_id: str,
+                                 action_id: str) -> dict[str, Any]:
+    """Project-specific terminal gate derived from the real Event result.
+
+    A generated PDF and a completed handler prove execution, not business
+    improvement.  For actions with an explicit measurement contract, require
+    that contract here before granting ``business_progress`` Reward.
+    """
+    task_dir = Path(workspace) / "state" / "tasks" / task_id
+    payload: dict[str, Any] = {}
+    for path in sorted(task_dir.glob("_step_*.result.json")):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        outer = row.get("result") if isinstance(row.get("result"), dict) else {}
+        inner = outer.get("result") if isinstance(outer.get("result"), dict) else outer
+        inner_strategy = str(inner.get("strategy_id") or "")
+        detail_metrics = inner.get("metrics") if isinstance(inner.get("metrics"), dict) else {}
+        method_id = str(detail_metrics.get("method_id") or "")
+        if not inner_strategy and method_id:
+            inner_strategy = "molecular_" + method_id
+        if not inner_strategy and str(row.get("event_type") or "") == "molecular_docking_holdout":
+            inner_strategy = "molecular_1bvr_docking_holdout"
+        if not action_id or inner_strategy == action_id:
+            payload = inner
+            if inner_strategy:
+                payload = {**payload, "strategy_id": inner_strategy}
+            break
+    if not payload:
+        return {"applicable": False, "passed": True, "reason": "no_typed_measurement_contract"}
+    metrics = payload.get("business_metrics") if isinstance(payload.get("business_metrics"), dict) else {}
+    passed = bool(payload.get("ok", True))
+    reason = "event_reported_ok"
+    if action_id == "01_source_fact_check":
+        passed = int(metrics.get("sources_reachable") or 0) >= 1
+        reason = "at_least_one_source_must_be_reachable"
+    elif action_id == "01_evidence_backed_draft":
+        passed = (int(metrics.get("grounded_drafts") or 0) >= 1
+                  and int(metrics.get("claims_with_source") or 0) >= 1)
+        reason = "draft_requires_claim_level_source"
+    elif action_id == "03_md_integrator_comparison":
+        passed = (int(metrics.get("integrators_compared") or 0) >= 2
+                  and int(metrics.get("stable_simulations") or 0) >= 1)
+        reason = "matched_integrator_comparison_required"
+    elif action_id == "04_adoption_effect_probe":
+        passed = (int(metrics.get("adoption_contexts_consumed") or 0) >= 1
+                  and int(metrics.get("adoption_checks_passed") or 0)
+                  == int(metrics.get("adoption_checks_total") or -1))
+        reason = "typed_external_evidence_must_change_later_action_context"
+    elif action_id in {
+        "molecular_scaffold_cap", "molecular_pareto_diverse",
+        "molecular_maxmin_fingerprint", "molecular_scaffold_round_robin",
+        "molecular_llm_greedy_dsl",
+    }:
+        passed = bool(int(metrics.get("candidate_improved") or 0))
+        reason = "candidate_must_beat_frozen_molecular_baseline"
+    elif action_id == "molecular_1bvr_docking_holdout":
+        passed = float(metrics.get("candidate_minus_baseline_docking_score") or 0.0) < 0.0
+        reason = "candidate_docking_score_must_be_lower_than_matched_baseline"
+    return {"applicable": True, "passed": bool(passed), "reason": reason,
+            # The discovery pass intentionally calls this function with an
+            # empty action_id. Preserve the typed Event strategy found in the
+            # result; returning the empty filter here used to erase identity
+            # and disabled both measurement gates and duplicate detection.
+            "strategy_id": str(payload.get("strategy_id") or action_id),
+            "metrics": metrics}
+
+
+_DETERMINISTIC_PROBE_ACTIONS = {
+    "05_event_contract_inventory",
+    "05_failure_path_regression",
+    "05_candidate_gap_matrix",
+}
+
+
 def _resolve_project_id(workspace: str, iid: str, params: dict[str, Any]) -> str:
     """Resolve project identity from the task before consulting old role defaults."""
     explicit = str(params.get("project_id") or "").strip()
@@ -468,7 +548,8 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
                               handoff_consumed: bool = False,
                               failure_owner: str = "", failure_mechanism: str = "",
                               monitor_only: bool = False,
-                              learning_only: bool = False) -> dict[str, Any]:
+                              learning_only: bool = False,
+                              completion_dimensions: dict[str, Any] | None = None) -> dict[str, Any]:
     root = workspace_root(workspace)
     path = root / "share" / "mind" / "governance" / "experience_guided_policy" / "trajectories.jsonl"
     trajectory_id = "traj_manual_" + hashlib.sha256(f"{iid}|{task_id}".encode()).hexdigest()[:16]
@@ -487,14 +568,20 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         value.startswith("research_active_learning_")
         or value.startswith("agent_active_learning_")
         or value.startswith("learning_")
+        or value in {"external_knowledge_scout", "molecular_external_activity_acquire"}
         or value in {"sprint18_learning_cycle", "targetdiff_active_learning",
                      "targetdiff_active_robustness", "targetdiff_uncertainty_diagnostic",
                      "targetdiff_uncertainty_candidate", "research_adoption_context_shadow"}
         for value in meaningful
     )
+    adoption_action = any(value in meaningful for value in {
+        "research_adoption_context_shadow", "molecular_external_activity_acquire",
+    })
+    candidate_no_change_action = "learning_candidate_no_change" in meaningful
     isolated_learning = bool(
         (bool(_marker(goal, "sprint18"))
-         or ("[instance_native=true]" in goal and "[native_kind=learning]" in goal))
+         or ("[instance_native=true]" in goal and any(marker in goal for marker in (
+             "[native_kind=learning]", "[native_kind=external_learning]"))))
         and research_learning
     )
     generic_findings = {
@@ -503,16 +590,31 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
     }
     substantive_findings = [value for value in findings if value.strip().lower() not in generic_findings]
     native_runtime_task = "[instance_native=true]" in goal
+    explicit_selection_id = _marker(goal, "action_selection_id")
+    selection_findings = list(substantive_findings)
+    if explicit_selection_id:
+        selection_findings.append(f"动作选择={explicit_selection_id}")
     selection = _native_action_selection(
-        root, substantive_findings,
+        root, selection_findings,
         iid=(iid if native_runtime_task else ""),
         project_id=(project_id if native_runtime_task else ""), actions=actions,
     )
+    selection_parameters = selection.get("parameters") or {}
+    selection_arm_id = str(selection.get("arm_id") or "")
     native_action_id = str(
-        selection.get("arm_id")
-        or (selection.get("parameters") or {}).get("strategy_id")
+        selection_parameters.get("strategy_id")
         or selection.get("event_type") or ""
     )
+    discovered = _native_business_measurement(workspace, task_id, "")
+    if discovered.get("strategy_id"):
+        native_action_id = str(discovered.get("strategy_id") or "")
+    self_evolution_action = (
+        native_action_id == "05_code_candidate_autonomous"
+        or candidate_no_change_action
+    )
+    business_measurement = _native_business_measurement(
+        workspace, task_id, native_action_id
+    ) if native_action_id else {"applicable": False, "passed": True}
     semantic_findings = {
         _stable_semantic_finding(value)
         for value in substantive_findings if str(value).strip()
@@ -538,6 +640,16 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
                 continue
             if str((prior.get("outcome") or {}).get("status") or "") != "completed":
                 continue
+            # These 05 actions inspect the same source contracts and execute
+            # the same bounded probes. A new task/Receipt/PDF path does not
+            # make identical typed metrics new evidence. Treat it as a
+            # duplicate even when presentation prose changed between runs.
+            prior_measurement = (prior.get("outcome") or {}).get("business_measurement") or {}
+            if (native_action_id in _DETERMINISTIC_PROBE_ACTIONS
+                    and bool(business_measurement.get("metrics"))
+                    and prior_measurement.get("metrics") == business_measurement.get("metrics")):
+                duplicate_outcome = True
+                break
             prior_findings = {
                 _stable_semantic_finding(value)
                 for value in (prior.get("outcome") or {}).get("evidence") or []
@@ -550,12 +662,36 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         duplicate_outcome = False
     business_progress = bool(
         not monitor_only and outcome_status == "completed"
+        and not research_learning and not self_evolution_action
         and not isolated_learning and not learning_only and not duplicate_outcome
+        and bool(business_measurement.get("passed", True))
         and artifacts and substantive_findings and meaningful and fingerprint
     )
     learning_progress = bool(
         not monitor_only and outcome_status == "completed" and research_learning
-        and not duplicate_outcome and evidence_refs and findings and meaningful and fingerprint
+        and not candidate_no_change_action
+        and not duplicate_outcome and (evidence_refs or (adoption_action and artifacts))
+        and findings and meaningful and fingerprint
+    )
+    knowledge_adoption_progress = bool(
+        learning_progress and adoption_action
+        and artifacts and substantive_findings
+    )
+    self_evolution_observation = bool(
+        not monitor_only and outcome_status == "completed" and self_evolution_action
+        and artifacts and substantive_findings and fingerprint
+    )
+    self_evolution_progress = bool(
+        self_evolution_observation and not duplicate_outcome
+        and not any(token in " ".join(substantive_findings).lower()
+                    for token in ("rejected", "inconclusive", "no_new_candidate",
+                                  "production_effective=false"))
+    )
+    falsified_business_hypothesis = bool(
+        not monitor_only and outcome_status == "completed"
+        and business_measurement.get("applicable") is True
+        and business_measurement.get("passed") is False
+        and artifacts and substantive_findings and meaningful and fingerprint
     )
     accepted = outcome_status == "completed"
     full_artifact_contract = bool(accepted and artifacts)
@@ -570,13 +706,27 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         "meaningful_event": 0.05 if meaningful and not monitor_only else 0.0,
         "business_progress": 0.45 if business_progress else 0.0,
         "learning_progress": 0.30 if learning_progress else 0.0,
-        "novel_evidence": 0.20 if business_progress else (0.10 if learning_progress else 0.0),
+        "self_evolution_progress": 0.30 if self_evolution_progress else 0.0,
+        "novel_evidence": (0.20 if business_progress else
+                           (0.10 if learning_progress or falsified_business_hypothesis else 0.0)),
         "handoff_consumed": 0.15 if handoff_consumed and not monitor_only else 0.0,
     }
+    if falsified_business_hypothesis:
+        # A completed falsification is useful evidence but a negative signal
+        # for choosing this business arm again.  Normalize procedural credits
+        # so the action's total Reward is exactly -0.1, rather than the generic
+        # -0.45 reserved for execution/verification failure.
+        positive = sum(value for value in reward_components.values() if value > 0)
+        reward_components["falsified_hypothesis"] = round(-(positive + 0.1), 4)
     reward = (0.0 if monitor_only else (
-        round(min(1.0, sum(reward_components.values())), 4) if (business_progress or learning_progress)
-        else (-0.1 if accepted and duplicate_outcome
+        round(min(1.0, sum(reward_components.values())), 4)
+        if falsified_business_hypothesis
+        else (round(min(1.0, sum(reward_components.values())), 4)
+        if (business_progress or learning_progress or self_evolution_progress)
+        else (0.0 if self_evolution_observation and not duplicate_outcome
+              else (-0.1 if accepted and duplicate_outcome
               else round(-0.45 + reward_components["partial_artifact"], 4))
+             ))
     ))
     strategy_id = (_marker(goal, "strategy_id") or native_action_id
                    or "manual_stable_grounded_v1")
@@ -604,7 +754,8 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         "kind": "manual_project_iteration",
         "state": {"source_families": source_families, "receipt_id": receipt.get("receipt_id", ""),
                   "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
-                  "continuation_requested": bool(continuation_requested)},
+                  "continuation_requested": bool(continuation_requested),
+                  "completion_dimensions": dict(completion_dimensions or {})},
         "action": {
             "action_key": f"{iid}:manual_project_iteration:{action_identity}",
             "event_types": actions,
@@ -614,6 +765,10 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
             "experiment_id": experiment_id,
             "match_key": match_key,
             "native_action_id": native_action_id,
+            "selection_arm_id": selection_arm_id or native_action_id,
+            "experience_candidate_id": str(
+                selection_parameters.get("experience_candidate_id") or ""
+            ),
             "action_selection_id": str(selection.get("selection_id") or ""),
         },
         "outcome": {
@@ -621,16 +776,26 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
             "evidence": [f"receipt_id={receipt.get('receipt_id', '')}", *findings],
             "outcome_fingerprint": fingerprint, "monitor_only": bool(monitor_only),
             "business_progress": business_progress, "learning_progress": learning_progress,
-            "novel_evidence": bool(business_progress or learning_progress),
+            "knowledge_adoption_progress": knowledge_adoption_progress,
+            "self_evolution_observation": self_evolution_observation,
+            "self_evolution_progress": self_evolution_progress,
+            "candidate_no_change": candidate_no_change_action,
+            "business_measurement": business_measurement,
+            "novel_evidence": bool(
+                business_progress or learning_progress or falsified_business_hypothesis
+            ),
             "duplicate_outcome": bool(duplicate_outcome),
             "semantic_signature": semantic_signature,
             "handoff_consumed": bool(handoff_consumed),
             "false_success": (bool(false_success) if false_success is not None
-                              else bool(truth_audit is not None and not truth_audit.get("passed"))),
+                              else bool(truth_audit and not truth_audit.get("passed"))),
             "truth_audit": truth_audit or {},
             "artifact_completion": "full" if full_artifact_contract else ("partial" if partial_artifact else "none"),
-            "failure_owner": failure_owner,
-            "failure_mechanism": failure_mechanism,
+            "failure_owner": (failure_owner or
+                              ("business_hypothesis" if falsified_business_hypothesis else "")),
+            "failure_mechanism": (failure_mechanism or
+                                  ("business/hypothesis_falsified"
+                                   if falsified_business_hypothesis else "")),
         },
         "reward": reward,
         "reward_components": reward_components,
@@ -640,7 +805,8 @@ def _record_manual_trajectory(workspace: str, *, iid: str, project_id: str, task
         ),
         "learning_observation_eligible": bool(
             iid in {"01", "02", "03", "04", "05"}
-            and (outcome_status == "failed" or policy_decision or experiment_id or research_learning)
+            and (outcome_status == "failed" or policy_decision or experiment_id
+                 or research_learning or falsified_business_hypothesis)
             and action_identity != "generic_or_unobserved"
         ),
         "created_at": now_iso(),
@@ -659,6 +825,9 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
     learning_evidence_roots = [
         (governance_root / "research_learning").resolve(),
         (governance_root / "active_learning").resolve(),
+        (workspace_root(workspace) / "external/code").resolve(),
+        (workspace_root(workspace) / "external/literature").resolve(),
+        (workspace_root(workspace) / "external/insights").resolve(),
     ]
     for value in params.get("evidence_refs") or []:
         try:
@@ -668,6 +837,21 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
         except (OSError, ValueError):
             continue
     inputs = [str(value) for value in params.get("inputs") or [] if str(value).strip()]
+    declared_learning_handoff = False
+    try:
+        task_value = json.loads((Path(workspace) / "state/tasks" / task_id /
+                                 "task_instance.json").read_text(encoding="utf-8"))
+        last_plan = ((task_value.get("metadata") or {}).get("last_plan") or [])
+        for planned in last_plan if isinstance(last_plan, list) else []:
+            planned_params = planned.get("parameters") or {}
+            evidence_path = str(planned_params.get("learning_evidence_path") or "")
+            if (planned_params.get("learning_handoff_consumed") is True
+                    and evidence_path and evidence_path in inputs
+                    and Path(evidence_path).is_file()):
+                declared_learning_handoff = True
+                break
+    except (OSError, TypeError, ValueError):
+        declared_learning_handoff = False
     truth_inputs = list(inputs)
     for value in _verified_candidate_sources(workspace, task_id):
         if value not in truth_inputs:
@@ -682,6 +866,8 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
     goal = str(params.get("goal") or "").strip()
     delivery_confirmed = bool(params.get("delivery_confirmed"))
     completion_ok = bool(params.get("completion_ok"))
+    execution_ok = bool(params.get("execution_ok", completion_ok))
+    local_observation_requested = bool(params.get("local_observation_confirmed"))
     expected_observation_completed = bool(params.get("expected_observation_completed"))
     campaign_monitor = "campaign_report_delivery" in actions
     failure_owner, failure_mechanism = _task_failure_signature(workspace, task_id)
@@ -691,6 +877,10 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
                 if not _marker(goal, "policy_arm") and not sprint18_isolated
                 and not campaign_monitor else {})
     effective_goal = goal
+    if str(params.get("action_selection_id") or "").strip():
+        effective_goal += (
+            f" [action_selection_id={str(params['action_selection_id']).strip()}]"
+        )
     if promoted:
         effective_goal += " " + " ".join(f"[{key}={value}]" for key, value in promoted.items())
 
@@ -728,16 +918,36 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             for value in actions
         )
     )
-    native_learning_action = bool(
+    known_native_learning_action = any(
+        value.startswith("agent_active_learning_") for value in actions
+    )
+    known_native_project_action = any(
+        value in {"native_project_action", "continuous_project_step", "molecular_generation_step",
+                  "molecular_generation_benchmark", "molecular_diversity_benchmark",
+                  "molecular_synth_baseline_benchmark", "molecular_goal_optimization_benchmark",
+                  "molecular_data_readiness_audit", "molecular_method_candidate_benchmark",
+                  "molecular_docking_holdout", "molecular_external_activity_acquire",
+                  "external_knowledge_scout", "research_adoption_context_shadow"}
+        for value in actions
+    )
+    # STOP_PROJECT is a transport boundary and older payloads may not preserve
+    # the internal markers in root_user_request.  The explicit local-observation
+    # bit is produced only by the native executor, so combine it with a known
+    # native Event instead of silently degrading a background job into a manual
+    # delivery job.  An ordinary task cannot opt in with an arbitrary action.
+    native_runtime_task = bool(
         "[instance_native=true]" in goal
-        and "[native_kind=learning]" in goal
-        and any(value.startswith("agent_active_learning_") for value in actions)
+        or "native_project_action" in actions
+        or (local_observation_requested
+            and (known_native_learning_action or known_native_project_action))
+    )
+    native_learning_action = bool(
+        native_runtime_task and known_native_learning_action
+        and ("[native_kind=learning]" in goal or local_observation_requested)
     )
     native_project_action = bool(
-        "[instance_native=true]" in goal
-        and "[native_kind=project]" in goal
-        and any(value in {"continuous_project_step", "molecular_generation_step"}
-                for value in actions)
+        native_runtime_task and known_native_project_action
+        and ("[native_kind=project]" in goal or local_observation_requested)
     )
     # A matched experiment is an offline observation, not a user delivery.  A
     # flaky external channel must not turn a truthful, durably archived arm
@@ -747,6 +957,30 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
         (matched_experiment or isolated_learning_action or native_learning_action) and artifacts
         and all(Path(value).is_file() and Path(value).stat().st_size > 0 for value in artifacts)
     )
+    # Background instance-native project work deliberately does not notify QQ
+    # for every Event.  Accept its local evidence only when the caller marked
+    # the observation, execution succeeded, and every declared artifact is a
+    # real non-empty file.  This is not a bypass for ordinary manual tasks.
+    if native_runtime_task and artifacts:
+        local_observation_confirmed = bool(
+            execution_ok and completion_ok
+            and all(Path(value).is_file() and Path(value).stat().st_size > 0
+                    for value in artifacts)
+        )
+    from .outcome_contract import evaluate_outcome
+    completion_dimensions = evaluate_outcome(
+        execution_ok=execution_ok,
+        verification_ok=completion_ok,
+        has_artifacts=bool(artifacts),
+        delivery_confirmed=delivery_confirmed,
+        local_observation_confirmed=local_observation_confirmed,
+        background=native_runtime_task,
+        requires_user_delivery=bool(
+            artifacts and not native_runtime_task and not local_observation_confirmed
+        ),
+        production_effective=bool(params.get("production_effective", False)),
+        publication_attempted=bool(params.get("publication_attempted", False)),
+    ).to_dict()
     # Truth is evaluated before delivery acceptance.  A file rejected by the
     # truth gate must retain that precise negative label even though it was
     # intentionally withheld from the user channel.
@@ -805,63 +1039,7 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
                 "project_state_mutated": False, "production_effective": False,
                 "delivery_confirmed": delivery_confirmed}
 
-    # Sprint18 §6 follow-up: delivery failure alone must not void an otherwise
-    # completed run. If the task shipped real artifacts (verified by file
-    # existence + size) and the actions were batch_plan-class, treat the
-    # work as accepted and tag the QQ/email delivery failure separately.
-    real_artifacts = [
-        value for value in (artifacts or [])
-        if Path(str(value)).is_file() and Path(str(value)).stat().st_size > 0
-    ]
-    promoted = _promoted_manual_policy(workspace, project_id) if not _marker(goal, "policy_arm") else {}
-    effective_goal = goal
-    if promoted:
-        effective_goal += " " + " ".join(f"[{key}={value}]" for key, value in promoted.items())
-    policy_arm = _marker(effective_goal, "policy_arm")
-    delivery_failure_only = (
-        bool(params.get("execution_ok", completion_ok))
-        and bool(real_artifacts)
-        and not delivery_confirmed
-        and not local_observation_confirmed
-        and policy_arm not in {"baseline", "candidate", "production"}
-        and any(
-            value.startswith(prefix)
-            or value in ("generate_text", "create_file")
-            for value in actions
-            for prefix in (
-                "atomic_", "batch_plan", "web_fetch", "web_search",
-                "push_files", "execute_code", "execute_candidate",
-                "partner_", "molecular_", "literature_", "agent_",
-                "research_", "xiaohongshu_",
-            )
-        )
-    )
-    if delivery_failure_only:
-        from .manual_runtime_helpers import record_delivery_failure
-        try:
-            record_delivery_failure(workspace, task_id, iid=iid, project_id=project_id,
-                                    artifacts=real_artifacts, actions=actions)
-        except Exception:
-            pass
-        receipt = {
-            "receipt_id": "delivery_" + hashlib.sha256(task_id.encode()).hexdigest()[:16],
-            "delivery_confirmed": False, "delivery_skipped": True,
-        }
-        trajectory_findings = list(findings or [])
-        trajectory_findings.append("delivery_only_failure: artifacts accepted despite channel ack failure")
-        trajectory = _record_manual_trajectory(
-            workspace, iid=iid, project_id=project_id, task_id=task_id,
-            receipt=receipt, inputs=inputs, artifacts=real_artifacts,
-            actions=actions, findings=trajectory_findings,
-            goal=effective_goal, outcome_status="completed",
-        )
-        return {"ok": True, "status": "delivery_only_failure_accepted",
-                "manual_task_id": task_id, "trajectory": trajectory,
-                "project_state_mutated": False, "production_effective": True,
-                "delivery_confirmed": False,
-                "artifacts": real_artifacts}
-
-    if not completion_ok or (artifacts and not delivery_confirmed and not local_observation_confirmed):
+    if not completion_dimensions["work_accepted"]:
         partial_artifacts = _task_partial_artifacts(workspace, task_id)
         for value in partial_artifacts:
             if value not in artifacts:
@@ -881,9 +1059,10 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             receipt={}, inputs=inputs, artifacts=artifacts, actions=actions or ["batch_plan"],
             findings=findings or ["manual acceptance failed"], goal=effective_goal,
             outcome_status="failed", false_success=bool(artifacts),
-            continuation_requested=continuation_requested,
-            failure_owner=failure_owner, failure_mechanism=failure_mechanism,
-        )
+                continuation_requested=continuation_requested,
+                failure_owner=failure_owner, failure_mechanism=failure_mechanism,
+                completion_dimensions=completion_dimensions,
+            )
         account_canary(accepted=False, false_success=bool(artifacts))
         return result
 
@@ -1177,7 +1356,11 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
         "stop_reason": stop_reason,
         "project_status": "completed" if not next_actions else "active",
         "delivery_confirmed": delivery_confirmed,
-        "requires_delivery": bool(artifacts),
+        # Receipt persistence consumes the already-decided completion mode;
+        # it must not recreate a contradictory delivery policy from one bit.
+        "requires_delivery": bool(
+            artifacts and completion_dimensions.get("notification") == "failed"
+        ),
         # Hermes 2026-08-27 fix: forward the opt-in flag from the upstream
         # shape-(a) check. Without this propagation, the manual_runtime
         # handoff downgrade is silently undone by record_iteration.
@@ -1195,12 +1378,16 @@ def record_manual_task_outcome(workspace: str, params: dict[str, Any]) -> dict[s
             goal=effective_goal, truth_audit=truth_audit,
             continuation_requested=continuation_requested,
             handoff_consumed=bool(
-                continuation_requested and previous
-                and _handoff_present(previous.artifacts, inputs)
+                declared_learning_handoff
+                or (continuation_requested and previous
+                    and _handoff_present(previous.artifacts, inputs))
             ),
             monitor_only=expected_observation_completed,
+            completion_dimensions=completion_dimensions,
         )
         account_canary(accepted=True)
+    result["completion_dimensions"] = completion_dimensions
+    result["local_observation_confirmed"] = local_observation_confirmed
 # self_evolve_annotation: candidate_id=repair_to_pr_1ca6fab61c0d4d94 failure_class=lifecycle.unclosed_model_call intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_2a4a11789d7c11da failure_class=planning.semantic_preflight intervention=mechanism_specific_bounded_repair
 # self_evolve_annotation: candidate_id=repair_to_pr_341758ef8d7306a1 failure_class=tool.execute_code.failed intervention=mechanism_specific_bounded_repair

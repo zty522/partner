@@ -208,14 +208,10 @@ class SelfReview:
             return 0
 
     def _collect_event_types(self) -> list[str]:
-        """Collect harness event types from the default EventRegistry."""
+        """Collect canonical event types from the frozen EventCatalog."""
         try:
-            from partner.mind.harness import default_registry  # type: ignore
-
-            registry = default_registry()
-            if hasattr(registry, "_events"):
-                return sorted(registry._events.keys())
-            return []
+            from partner.event_fabric import build_catalog
+            return build_catalog(workspace=self._workspace).names()
         except Exception as exc:
             logger.debug("[SELF_REVIEW] event type collection failed: %s", exc)
             return []

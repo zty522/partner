@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -34,10 +35,31 @@ def _load_control(workspace: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {"schema_version": 1, "promoted": {}}
 
 
+def _load_issue(workspace: str, issue_id: str) -> dict[str, Any]:
+    """Project the append-only Issue ledger to the latest requested record."""
+    if not issue_id:
+        return {}
+    try:
+        lines = (workspace_root(workspace) / "share/mind/governance/issues.jsonl").read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    selected: dict[str, Any] = {}
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict) and str(value.get("issue_id") or "") == issue_id:
+            selected = value
+    return selected
+
+
 def authorize_production_canary(
     workspace: str, *, candidate_id: str, readiness_attestation_path: str,
     authorization_ref: str, max_accepted_tasks: int = 12,
     duration_hours: int = 168, allowed_instances: list[str] | None = None,
+    issue_id: str = "",
 ) -> dict[str, Any]:
     """Authorize bounded real-traffic sampling without claiming promotion."""
     candidate = load_candidate(workspace, candidate_id)
@@ -66,6 +88,10 @@ def authorize_production_canary(
                            (candidate.get("execution_contract") or {}).get("allowed_instances") or [])
     if not allowed or not set(allowed) <= contract_allowed:
         return {"ok": False, "status": "canary_instance_scope_invalid"}
+    issue = _load_issue(workspace, issue_id)
+    if issue_id and (not issue or str(issue.get("status") or "") not in {"open", "investigating"}):
+        return {"ok": False, "status": "canary_issue_binding_invalid",
+                "issue_id": issue_id}
     now = datetime.now(timezone.utc).astimezone()
     canary_id = "canary_" + hashlib.sha256(
         f"{candidate_id}|{authorization_ref}|{now.isoformat()}".encode()
@@ -87,6 +113,11 @@ def authorize_production_canary(
         "authorized_at": now_iso(),
         "expires_at": (now + timedelta(hours=max(1, min(int(duration_hours), 24 * 30)))).isoformat(),
         "authorization_ref": str(authorization_ref),
+        "issue_binding": ({"issue_id": issue_id,
+                           "category": str(issue.get("category") or ""),
+                           "summary": str(issue.get("summary") or ""),
+                           "evidence": list(issue.get("evidence") or [])}
+                          if issue_id else {}),
         "readiness_attestation_path": str(Path(readiness_attestation_path).resolve()),
         "full_production_ready": False,
         "production_route_effective": True,
@@ -99,10 +130,11 @@ def authorize_production_canary(
     event = append_evolution_event(
         workspace, "policy/canary_activated", subject_id=candidate_id,
         project_id="literature_github_learning",
-        payload={key: record[key] for key in (
+        payload={**{key: record[key] for key in (
             "canary_id", "decision_key", "candidate_id", "allowed_instances",
             "max_accepted_tasks", "expires_at", "production_route_effective",
             "candidate_projection_production_effective")},
+                 "issue_id": str((record.get("issue_binding") or {}).get("issue_id") or "")},
         evidence_refs=[readiness_attestation_path],
         idempotency_key=f"policy-canary-activated:{canary_id}",
     )
@@ -229,6 +261,116 @@ def run_rollback_drill(workspace: str, *, candidate_id: str,
               "route_after_rollback": after, "completed_at": now_iso()}
     path = (workspace_root(workspace) / "share/mind/governance/experience_guided_policy/rollback_drills"
             / f"{candidate_id}.json")
+    atomic_json(path, result)
+    result["path"] = str(path)
+    return result
+
+
+def run_issue_bound_context_canary(
+    workspace: str, *, candidate_id: str, readiness_attestation_path: str,
+    issue_id: str, query: str, authorization_ref: str,
+) -> dict[str, Any]:
+    """Run baseline -> real Candidate Event -> outcome -> rollback for one Issue.
+
+    This is intentionally a single bounded observation, not a promotion.  It
+    uses the production policy resolver and the same allow-listed Candidate
+    execution boundary as a live task, then always rolls the route back in a
+    ``finally`` block.
+    """
+    from .candidate_execution import execute_candidate
+    from .context_selector import select_context
+    from .research_adoption import select_research_adoption_context, write_candidate_context_artifact
+
+    root = workspace_root(workspace)
+    issue = _load_issue(str(root), issue_id)
+    if (not issue or str(issue.get("status") or "") not in {"open", "investigating"}
+            or str(issue.get("category") or "") != "context"):
+        return {"ok": False, "status": "canary_issue_not_applicable", "issue_id": issue_id}
+    candidate = load_candidate(str(root), candidate_id) or {}
+    defaults = dict((candidate.get("execution_contract") or {}).get("default_params") or {})
+    research_project_id = str(defaults.get("research_project_id") or "")
+    project_id = str(issue.get("project_id") or "literature_github_learning")
+    _, baseline_context = select_context(
+        str(root), query, instance_id="04", project_id=project_id, budget_chars=9000)
+    baseline = {
+        "chars": len(baseline_context),
+        "latest_receipt_protected": "protected_project_handoff" in baseline_context,
+        "trajectory_count": baseline_context.count("<!-- trajectory:"),
+        "research_evidence_count": baseline_context.count("<!-- research_evidence:"),
+        "issue_reproduced": ("protected_project_handoff" not in baseline_context
+                             and "<!-- trajectory:" not in baseline_context),
+    }
+    activation = authorize_production_canary(
+        str(root), candidate_id=candidate_id,
+        readiness_attestation_path=readiness_attestation_path,
+        authorization_ref=authorization_ref, max_accepted_tasks=2,
+        duration_hours=1, allowed_instances=["04"], issue_id=issue_id)
+    if not activation.get("ok"):
+        return {"ok": False, "status": "canary_activation_failed",
+                "issue_id": issue_id, "baseline": baseline, "activation": activation}
+    canary_id = str((activation.get("canary") or {}).get("canary_id") or "")
+    output = (root / "share/mind/governance/experience_guided_policy/production_canary_evaluations"
+              / canary_id)
+    output.mkdir(parents=True, exist_ok=True)
+    ctx = SimpleNamespace(workspace=str(root),
+                          task_instance=SimpleNamespace(working_dir=str(output)))
+    route_before = resolve_production_canary(
+        str(root), instance_id="04", user_message="研究 GitHub 源码和文献证据并对比")
+    execution: dict[str, Any] = {}
+    accounting: dict[str, Any] = {}
+    rollback: dict[str, Any] = {}
+    try:
+        execution = execute_candidate(
+            str(root), candidate_id, ctx=ctx,
+            handlers={"research_adoption_context_shadow": lambda event_ctx, event_params:
+                      write_candidate_context_artifact(select_research_adoption_context(
+                          str(root), query=str(event_params.get("query") or query),
+                          project_id=str(event_params.get("project_id") or project_id),
+                          research_project_id=str(event_params.get("research_project_id")
+                                                  or research_project_id),
+                          instance_id="04",
+                          budget_chars=int(event_params.get("budget_chars") or 9000)), output)},
+            params={"query": query, "project_id": project_id,
+                    "research_project_id": research_project_id, "instance_id": "04"},
+            instance_id="04", execution_id=f"issue_canary_{canary_id}", mode="canary")
+        accepted = bool(
+            baseline["issue_reproduced"] and route_before.get("active") is True
+            and execution.get("ok") is True and execution.get("latest_receipt_id")
+            and len(execution.get("trajectory_refs") or []) >= 1
+            and len(execution.get("research_evidence_refs") or []) >= 2
+            and all(Path(str(path)).is_file() for path in execution.get("files") or []))
+        accounting = record_production_canary_outcome(
+            str(root), canary_id=canary_id, task_id=f"issue_canary_{issue_id}",
+            accepted=accepted, false_success=False, truth_gate_failed=not accepted)
+    finally:
+        rollback = rollback_production_canary(
+            str(root), reason="issue_bound_canary_observation_complete",
+            expected_canary_id=canary_id)
+    route_after = resolve_production_canary(
+        str(root), instance_id="04", user_message="研究 GitHub 源码和文献证据并对比")
+    passed = bool(execution.get("ok") and baseline["issue_reproduced"]
+                  and accounting.get("ok") and rollback.get("ok")
+                  and route_before.get("active") is True and route_after.get("active") is False)
+    result = {
+        "schema_version": 1, "ok": passed,
+        "status": "issue_bound_canary_passed" if passed else "issue_bound_canary_failed",
+        "issue": {"issue_id": issue_id, "summary": issue.get("summary"),
+                  "category": issue.get("category"), "evidence": issue.get("evidence")},
+        "candidate_id": candidate_id, "canary_id": canary_id,
+        "baseline": baseline,
+        "candidate": {"ok": execution.get("ok"),
+                      "status": execution.get("status"),
+                      "latest_receipt_id": execution.get("latest_receipt_id"),
+                      "trajectory_refs": execution.get("trajectory_refs"),
+                      "research_evidence_refs": execution.get("research_evidence_refs"),
+                      "files": execution.get("files"),
+                      "production_effective": execution.get("production_effective")},
+        "route_before_rollback": route_before, "accounting": accounting,
+        "rollback": rollback, "route_after_rollback": route_after,
+        "completed_at": now_iso(),
+        "interpretation": "one real Issue canary observation; not a production promotion",
+    }
+    path = output / "issue_bound_canary_result.json"
     atomic_json(path, result)
     result["path"] = str(path)
     return result

@@ -619,20 +619,19 @@ class OODAEngine:
         except Exception:
             pass
         
-        # Try direct enqueue first (bypasses inbox for immediate processing)
+        # Submit through the same durable application/Event boundary as every
+        # user-facing channel.  OODA is a producer, never a second executor.
         try:
-            from partner.mind.executor import enqueue_user_message
-            enqueue_user_message(
-                text=text,
-                sender_id=f"ooda_{self.instance_id}",
-                sender_name=f"OODA-{self.instance_id}",
-                source="ooda_engine",
-                message_id=f"ooda_{self.instance_id}_round_{round_n}_{int(time.time())}",
+            from partner.application import PartnerApplicationService
+            accepted = PartnerApplicationService(self.workspace).submit(
+                text, channel="local", sender_id=f"ooda_{self.instance_id}",
+                sender_name=f"OODA-{self.instance_id}", persona_hint=self.instance_id,
             )
-            logger.info("[OODA-v4] direct-enqueued phase=%s round=%d", phase, round_n)
-            return True
+            logger.info("[OODA-v4] Event Job accepted=%s phase=%s round=%d",
+                        accepted.accepted, phase, round_n)
+            return bool(accepted.accepted)
         except ImportError:
-            pass  # fall through to inbox method
+            pass
         phase = decision.get("phase", "unknown")
         round_n = decision.get("round_num", 0)
 

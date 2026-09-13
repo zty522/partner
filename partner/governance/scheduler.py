@@ -188,15 +188,17 @@ def set_active_slots(workspace_root: str, instance_ids: list[str], *, reason: st
                          f"(runtime.instance_native_max_active={effective})")
     previous = load_scheduler(workspace_root)
     previous_active = list(previous.get("active_slots") or [])
-    paused = [value for value in ALL_INSTANCES if value not in normalized]
-    set_paused(workspace_root, paused, True)
-    set_paused(workspace_root, normalized, False)
+    # Slot admission and operator pause are orthogonal.  The old implementation
+    # marked every temporarily unselected lane as persistently paused, so the
+    # next resource sweep could never rotate it back in and could even replace
+    # an explicitly selected single-lane canary with the other four lanes.
+    paused = list(load_control(workspace_root).get("paused_instances") or [])
     capacity = resource_capacity_snapshot(workspace_root)
     data = {
         "version": 1,
         "max_active": effective,
         "active_slots": normalized,
-        "paused_instances": paused,
+        "paused_instances": sorted(str(value) for value in paused),
         "roles": ROLES,
         "resource_capacity": capacity,
         "reason": str(reason),

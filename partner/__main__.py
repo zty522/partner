@@ -1,542 +1,95 @@
-"""Support 'python -m partner' entry point (main module)."""
-
-# ---- Module-level sys.path + cwd guard (Sprint18 §6 follow-up) ----
-# Without this, hermes background launches that don't chdir into the partner
-# repo cause ModuleNotFoundError for `partner.state.config` and shells/*.
-import os as _os_init
-import sys as _sys_init
-_partner_root = _os_init.path.dirname(_os_init.path.abspath(__file__))  # partner/
-_project_root = _os_init.path.dirname(_partner_root)  # /mnt/e/work/partner
-if _project_root not in _sys_init.path:
-    _sys_init.path.insert(0, _project_root)
-try:
-    if _os_init.getcwd() != _project_root:
-        _os_init.chdir(_project_root)
-except Exception:
-    pass
-# ---- end module-level guard ----
+"""Partner CLI and pure-Event instance entrypoint."""
+from __future__ import annotations
 
 import argparse
-import json
 import os
-import re
 import sys
-import time
-import logging
-from datetime import datetime
-
-from partner.monitoring.instance_root import resolve_instance_workspace
-from partner.workspace.workspace_layout import append_history, ensure_instance_layout
-
-def validate_pdf(file_path):
-    """Validate basic PDF structure without claiming that its content is correct."""
-    try:
-        with open(file_path, "rb") as f:
-            header = f.read(5)
-            if header != b"%PDF-":
-                return False, "Invalid PDF magic number"
-            f.seek(0, 2)
-            file_size = f.tell()
-            if file_size < 1024:
-                return False, "PDF is too small to be a user report"
-            f.seek(max(0, file_size - 2048))
-            if b"%%EOF" not in f.read():
-                return False, "Missing PDF EOF marker"
-            f.seek(0)
-            content_sample = f.read(min(file_size, 65536))
-            if b" obj" not in content_sample and b"xref" not in content_sample:
-                return False, "Missing PDF object structure"
-        return True, "Valid PDF structure"
-    except Exception as e:
-        return False, f"Error validating PDF: {e}"
-
-
-
-# Set UTF-8 encoding for cross-platform compatibility
-os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-os.environ.setdefault("PYTHONUTF8", "1")
-for _stream_name in ("stdout", "stderr"):
-    _stream = getattr(sys, _stream_name, None)
-    if hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+from pathlib import Path
 
 
 KNOWN_CLI_COMMANDS = frozenset({
-    "setup", "status", "help", "doctor", "start", "stop", "restart",
-    "bot", "update", "instance", "showcase", "server", "ollama",
-    "onboard", "gateway", "world-model", "wm", "tui",
-    "queue", "config",
+    "setup", "status", "help", "doctor", "start", "stop", "restart", "bot",
+    "update", "instance", "showcase", "server", "ollama", "onboard", "gateway",
+    "world-model", "wm", "tui", "queue", "config", "desktop",
 })
 
 
 def _looks_like_instance_launch(argv: list[str]) -> bool:
-    # If first arg is a known CLI command, it's NOT an instance launch
-    if argv and argv[0] in KNOWN_CLI_COMMANDS:
-        return False
-    return any(arg == "--instance-id" or arg.startswith("--instance-id=") or
-               arg == "--workspace" or arg.startswith("--workspace=")
-               for arg in argv)
+    return bool(not (argv and argv[0] in KNOWN_CLI_COMMANDS) and any(
+        item == "--instance-id" or item.startswith("--instance-id=")
+        or item == "--workspace" or item.startswith("--workspace=") for item in argv))
+
+
+def validate_pdf(file_path: str) -> tuple[bool, str]:
+    try:
+        with open(file_path, "rb") as handle:
+            if handle.read(5) != b"%PDF-":
+                return False, "Invalid PDF magic number"
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size < 1024:
+                return False, "PDF is too small to be a user report"
+            handle.seek(max(0, size - 2048))
+            if b"%%EOF" not in handle.read():
+                return False, "Missing PDF EOF marker"
+        return True, "Valid PDF structure"
+    except Exception as exc:
+        return False, f"Error validating PDF: {exc}"
 
 
 def correct_extension(file_data: bytes, filename: str) -> str:
-    """根据文件内容魔数纠正扩展名：PNG/JPEG 图片保持，文本内容纠正为 .md/.txt。
-
-    解决"截图空内容"问题的一环：浏览器截图失败后步骤产物是 markdown 文本，
-    但文件名带 .png 被直接发送。此处按内容真实类型修正，QQ 端收到正确类型。
-    """
-    try:
-        if file_data[:8] == b"\x89PNG\r\n\x1a\n":
-            return filename if filename.lower().endswith(".png") else os.path.splitext(filename)[0] + ".png"
-        if file_data[:3] in (b"\xff\xd8\xff", b"GIF"):
-            return filename if filename.lower().endswith((".jpg", ".jpeg", ".gif")) else os.path.splitext(filename)[0] + ".jpg"
-        if file_data[:2] == b"\x89" or file_data[:4] == b"II*\x00" or file_data[:4] == b"MM\x00*":
-            return filename if filename.lower().endswith(".tif") else os.path.splitext(filename)[0] + ".tif"
-        # 文本内容：纠正为 md/txt
-        ext = os.path.splitext(filename)[1].lower()
-        if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
-            try:
-                _text = file_data[:512].decode("utf-8")
-                if _text.lstrip().startswith(("#", "<", "{")) or "\n" in _text:
-                    return os.path.splitext(filename)[0] + ".md"
-            except UnicodeDecodeError:
-                pass
-    except Exception:
-        pass
+    stem, extension = os.path.splitext(filename)
+    if file_data[:8] == b"\x89PNG\r\n\x1a\n":
+        return filename if extension.lower() == ".png" else stem + ".png"
+    if file_data[:3] == b"\xff\xd8\xff":
+        return filename if extension.lower() in {".jpg", ".jpeg"} else stem + ".jpg"
+    if extension.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}:
+        try:
+            text = file_data[:512].decode("utf-8")
+            if text.lstrip().startswith(("#", "<", "{")) or "\n" in text:
+                return stem + ".md"
+        except UnicodeDecodeError:
+            pass
     return filename
 
 
-def _run_instance_mode(argv: list[str]):
-    # cwd + sys.path are guaranteed by the module-level guard at import time.
+def _run_instance_mode(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="python -m partner")
     parser.add_argument("--instance-id", default=os.environ.get("PARTNER_INSTANCE_ID", "default"))
     parser.add_argument("--workspace", default=os.environ.get("PARTNER_WORKSPACE", ""))
     args = parser.parse_args(argv)
-
-    if args.instance_id != "default" or args.workspace:
-        os.environ["PARTNER_INSTANCE_ID"] = args.instance_id
-    if args.workspace:
-        os.environ["PARTNER_WORKSPACE"] = args.workspace
-
-    workspace = args.workspace or str(resolve_instance_workspace(args.instance_id))
-    ensure_instance_layout(workspace)
-    # Recover this bot application's own user target from its own inbound
-    # history. QQ Official OpenIDs are app-scoped and must never be copied
-    # across the five instance bots.
-    try:
-        from partner.evolution.sprint18_unified_patch import restore_instance_openid
-        touched = restore_instance_openid(workspace)
-        if touched:
-            print(f"{args.instance_id}: instance-scoped QQ target recovered", flush=True)
-    except Exception as exc:
-        print(f"{args.instance_id}: QQ target recovery skipped: {exc}", flush=True)
+    from partner.monitoring.instance_root import resolve_instance_workspace
+    workspace = Path(args.workspace or resolve_instance_workspace(args.instance_id)).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
     from partner.monitoring.run_control import is_instance_paused
-    if is_instance_paused(workspace, args.instance_id):
+    if is_instance_paused(str(workspace), args.instance_id):
         print(f"Partner instance '{args.instance_id}' is persistently paused; startup skipped.", flush=True)
         return
-    if args.instance_id in {"01", "02", "03", "04", "05"}:
-        from partner.governance.scheduler import assert_start_allowed
-        try:
-            assert_start_allowed(workspace, args.instance_id)
-        except RuntimeError as exc:
-            print(f"Partner instance '{args.instance_id}' startup denied by two-slot scheduler: {exc}", flush=True)
-            return
-    # Check for stale PID file from a killed instance
-    pid_file = os.path.join(workspace, "instance.pid")
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file) as f:
-                old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)
-        except (FileNotFoundError, ValueError, OSError):
-            # Process is dead — remove stale PID and proceed
-            try:
-                os.remove(pid_file)
-            except Exception:
-                pass
-            # Do not unlink instance_runtime.lock here.  PID visibility is not
-            # reliable across WSL/container namespaces: an active process can
-            # appear dead to ``os.kill(pid, 0)``.  Unlinking its locked inode
-            # lets a second process lock a newly-created file and both consume
-            # the same inbox.  flock on the stable path is the authority;
-            # stale unlocked files are harmless and acquired below.
+    from partner.monitoring.instance_lock import InstanceAlreadyRunning, acquire_instance_lock
     try:
-        from partner.monitoring.instance_lock import InstanceAlreadyRunning, acquire_instance_lock
-
-        _instance_lock = acquire_instance_lock(workspace, args.instance_id)
+        lock = acquire_instance_lock(str(workspace), args.instance_id)
     except InstanceAlreadyRunning as exc:
-        print(f"Partner instance '{args.instance_id}' is already running; this duplicate start will exit. {exc}")
+        print(f"Partner instance '{args.instance_id}' is already running: {exc}", flush=True)
         return
-
-    # Write PID file BEFORE any imports that may fail (e.g. shells/QQ bridge).
-    # This ensures the GUI can detect the instance as running even when QQ is
-    # not configured or shell imports fail due to missing cwd/PYTHONPATH.
+    (workspace / "instance.pid").write_text(str(os.getpid()), encoding="utf-8")
+    os.environ["PARTNER_INSTANCE_ID"] = args.instance_id
+    os.environ["PARTNER_WORKSPACE"] = str(workspace)
+    from partner.runtime.instance_host import run_instance_host
     try:
-        pid_path = os.path.join(workspace, "instance.pid")
-        with open(pid_path, "w") as f:
-            f.write(str(os.getpid()))
-    except Exception as exc:
-        print(f"Failed to write PID file: {exc}", flush=True)
-
-    from partner.state.config import PartnerConfig, resolve_partner_config_path, save_partner_config_data, _config_root
-    from partner.core.core import Partner
-    from partner.monitoring.restart_tracker import RestartTracker
-
-    tracker = RestartTracker(workspace)
-    tracker.record_restart()
-
-    # QQ bridge import is optional — the instance works fine without it.
-    QQQfficialBridge = None
-    QQMessageType = None
-    try:
-        from shells.frontend.qq_bot.qq_official_bridge import QQQfficialBridge as _QQB, QQMessageType as _QQT
-        QQQfficialBridge = _QQB
-        QQMessageType = _QQT
-    except ImportError:
-        pass
-
-    from partner.mind import set_file_push_callback, set_push_callback
-    if tracker.should_stop():
-        count = tracker.get_restart_count()
-        print(
-            f"Partner 实例 '{args.instance_id}' 在最近1小时内启动/重启 "
-            f"{count} 次。可能是手动重启、部署重启或异常恢复；本次继续启动。"
-            f"如需确认真实崩溃，请查看日志。"
-        )
-
-    cfg_path = resolve_partner_config_path(workspace)
-    if not os.path.exists(cfg_path):
-        root_workspace = str(resolve_instance_workspace(args.instance_id).parent.parent)
-        root_cfg_path = resolve_partner_config_path(root_workspace)
-        if os.path.exists(root_cfg_path):
-            try:
-                with open(root_cfg_path, "r", encoding="utf-8") as f:
-                    root_cfg = json.load(f)
-                root_cfg.setdefault("workspace", {})
-                root_cfg["workspace"]["path"] = workspace
-                save_partner_config_data(workspace, root_cfg)
-                cfg_path = resolve_partner_config_path(workspace)
-                print(f"Recovered missing instance config from {root_cfg_path}")
-            except Exception as exc:
-                print(f"Failed to recover instance config from {root_cfg_path}: {exc}")
-    partner_cfg = PartnerConfig.load(cfg_path)
-    partner_cfg.workspace.path = workspace
-    partner = Partner(partner_cfg)
-    partner.start()
-    partner.start_mind()
-
-    # Defensive: pre-define ``_qq_bridge`` and ``cfg`` so the Sprint18 §6
-    # background bridge thread block below does not raise UnboundLocalError
-    # in the manual_stable instance_mode path.
-    _qq_bridge = None
-    cfg = ""
-
-    # ---- Sprint18 §6 follow-up: start QQ bridge in background thread -------
-    # Without this, push_text_now returns ok=False silently because the
-    # bridge object exists in this process but never had start() called.
-    # The 5 instances used to fall back to writing dialog_history only,
-    # so users saw no QQ messages for months.  Starting the bridge here
-    # gives each instance its own WebSocket to the QQ Official Platform,
-    # which dedups per app_id at the platform level.
-    # Ensure _qq_bridge exists as a name in this function scope before the
-    # bridge thread block runs (line ~220) — defensive for instance mode.
-    _qq_bridge = None
-    try:
-        from shells.frontend.qq_bot.qq_official_bridge import create_bridge
-        if _qq_bridge is None and os.path.exists(cfg) and QQQOfficialBridge is not None:
-            qq_bridge_obj = create_bridge(workspace, config_path=cfg)
-            import threading as _qq_thread
-            _qq_thread.Thread(target=qq_bridge_obj.start, daemon=True,
-                              name="qq-bridge-launcher").start()
-            _qq_bridge = qq_bridge_obj
-            set_push_callback(_push_to_last_user)  # re-register now that bridge is live
-            print(f"{args.instance_id}: QQ bridge thread started", flush=True)
-    except Exception as exc:  # noqa: BLE001
-        print(f"{args.instance_id}: QQ bridge thread start failed: {exc}", flush=True)
-    # ---- BDK-driven learn trigger poller (opt-in) ------------------------
-    # When PARTNER_LEARN_TRIGGER_ENABLE=1 AND instance is 04 (literature),
-    # start a background poller that watches desktop_inbox.jsonl for
-    # `{source: learn_trigger, text: /learn_from_hermes}` markers and runs
-    # partner.learn.learn_from_hermes.main() when found.  This lets 04
-    # self-trigger external learning from its own inbox.
-    if os.environ.get("PARTNER_LEARN_TRIGGER_ENABLE") == "1" and args.instance_id == "04":
+        run_instance_host(str(workspace), args.instance_id)
+    finally:
         try:
-            from partner.learn.inbox_trigger import start_learn_trigger_poller
-            thread = start_learn_trigger_poller(
-                workspace=workspace,
-                inbox_path=os.path.join(workspace, "instances", "04", "state",
-                                          "desktop_inbox.jsonl"),
-            )
-            print(f"04 instance learn-trigger poller started (thread={thread.name}, daemon={thread.daemon})", flush=True)
-        except Exception as exc:
-            print(f"Learn-trigger poller failed to start: {type(exc).__name__}: {exc}", flush=True)
-    # ----------------------------------------------------------------------
-
-    # Auto-sync skills from central registry on startup
-    try:
-        from partner.skills.skill_center import sync_skills_to_instance
-        count = sync_skills_to_instance(args.instance_id)
-        print(f"Instance {args.instance_id} skills synced from central registry ({count} skills)", flush=True)
-    except Exception as exc:
-        print(f"Skill sync skipped: {exc}", flush=True)
-
-    # Sprint18 §6 follow-up: ALWAYS resolve qq_config via the canonical
-    # global_config.json. Each instance's qq_config path is declared under
-    # ``instances[<iid>].qq_config`` relative to partner_dir. This way the
-    # bot's app_id / app_secret are sourced from a single file the user
-    # edits, not from per-instance copies.
-    cfg = ""
-    try:
-        from partner.monitoring.instance_root import (
-            resolve_partner_root, resolve_global_config_path,
-        )
-        global_cfg_path = resolve_global_config_path()
-        if global_cfg_path.exists():
-            with open(global_cfg_path) as _gfh:
-                _global_cfg = json.load(_gfh)
-            inst_cfg = (
-                (_global_cfg.get("instances") or {})
-                .get(args.instance_id, {})
-                .get("qq_config")
-            )
-            if inst_cfg:
-                partner_dir = str(resolve_partner_root())
-                candidate = os.path.join(partner_dir, inst_cfg)
-                if os.path.exists(candidate):
-                    cfg = candidate
-                else:
-                    # Relative to workspace root if partner_dir mismatch
-                    ws_candidate = os.path.join(
-                        os.path.dirname(workspace) + "/..", inst_cfg
-                    )
-                    if os.path.exists(ws_candidate):
-                        cfg = ws_candidate
-    except Exception:
-        pass
-    if not cfg or not os.path.exists(cfg):
-        # Fallback: instance state dir copy
-        for fallback in (
-            os.path.join(_config_root(workspace), "qq_config.json"),
-            os.path.join(workspace, "qq_config.json"),
-            os.path.join(workspace, "state", "qq_config.json"),
-        ):
-            if os.path.exists(fallback):
-                cfg = fallback
-                break
-    # ── 通用历史记录写入（所有实例都需要，无论有无 QQ） ──
-    _qq_bridge = None  # may be set below if QQ config exists
-
-    def _history_file_attachment(file_data: bytes, filename: str = "") -> dict | None:
-        if not file_data:
-            return None
-        safe_name = os.path.basename(str(filename or "partner_file").strip()) or "partner_file"
-        safe_name = re.sub(r'[<>:\"/\\|?*\x00-\x1f]+', "_", safe_name).strip(" ._") or "partner_file"
-        # 内容类型校验：扩展名与文件真实类型不符时纠正（防止 md 文本冒充 png/jpg 发送）
-        safe_name = correct_extension(file_data, safe_name)
-        stored_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
-        from partner.workspace.workspace_layout import outgoing_dir
-        out_dir = outgoing_dir(workspace)
-        os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, stored_name)
-        try:
-            with open(path, "wb") as f:
-                f.write(file_data)
-        except Exception:
-            return None
-        return {
-            "type": "file",
-            "name": safe_name,
-            "stored_name": stored_name,
-            "size": len(file_data),
-            "rel_path": os.path.relpath(path, workspace).replace("\\", "/"),
-            "server_path": path,
-        }
-
-    def _append_proactive_history(content: str, openid: str = "", *, kind: str = "message", attachments: list | None = None):
-        text = str(content or "").strip()
-        if not text:
-            return
-        if text in {"思考中.......", "思考中......", "思考中……", "Thinking..."}:
-            return
-        row = {
-            "role": "assistant",
-            "content": text,
-            "timestamp": datetime.now().isoformat(),
-            "source": "qq",
-            "channel": "proactive",
-            "sender_id": "partner",
-            "sender_name": "Partner",
-            "target_id": openid,
-            "group_id": "",
-            "delivery": kind,
-        }
-        if attachments:
-            row["attachments"] = attachments
-        try:
-            append_history(workspace, row, ("qq_chat_history.jsonl", "dialog_history.jsonl"))
-        except Exception:
+            (workspace / "instance.pid").unlink()
+        except OSError:
             pass
-        # Also write to daily dialogue log (newest at top)
-        if text.startswith("已停止「"):
-            return
-        try:
-            from partner.workspace.workspace_manager import get_dialogue_path
-            fpath = get_dialogue_path(workspace)
-            ts = datetime.now().strftime("%H:%M:%S")
-            os.makedirs(os.path.dirname(fpath), exist_ok=True)
-            entry = f"[{ts}] [Partner] Partner\n  A: {text}\n\n"
-            old_content = b""
-            try:
-                with open(fpath, "rb") as f:
-                    old_content = f.read()
-            except FileNotFoundError:
-                pass
-            with open(fpath, "wb") as f:
-                f.write(entry.encode("utf-8"))
-                f.write(old_content)
-        except Exception:
-            pass
-
-    def _push_to_last_user(content: str):
-        from partner.core.delivery_context import local_delivery_target
-
-        local_target = local_delivery_target(workspace)
-        if local_target:
-            _append_proactive_history(content, local_target, kind="message")
-            return True
-        ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
-        try:
-            with open(ctx_path, "r", encoding="utf-8") as f:
-                ctx = json.load(f)
-        except Exception:
-            _append_proactive_history(content, "", kind="message")
-            return False
-        openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
-        if not openid:
-            _append_proactive_history(content, "", kind="message")
-            return False
-        if openid in ("desktop_gui", "tui", "tui_user"):
-            _append_proactive_history(content, openid, kind="message")
-            return True
-        # QQ user — send via bridge if available
-        if _qq_bridge is not None:
-            ok = _qq_bridge.send_proactive(openid, content, QQMessageType.PRIVATE, bypass_quiet=True)
-            if ok:
-                _append_proactive_history(content, openid, kind="message")
-                return True
-            # Fail closed.  A QQ NACK belongs to this instance/bot app and
-            # must remain a delivery failure. Relaying it through instance 03
-            # destroys instance attribution and uses an OpenID from a
-            # different application namespace.
-            _append_proactive_history(content, openid, kind="message")
-            return False
-        # No bridge — just write to history
-        _append_proactive_history(content, openid, kind="message")
-        return False
-
-    set_push_callback(_push_to_last_user)
-
-    def _push_file_to_last_user(file_data: bytes, filename: str = "", caption: str = ""):
-        attachment = _history_file_attachment(file_data, filename)
-        attachments = [attachment] if attachment else []
-        from partner.core.delivery_context import local_delivery_target
-
-        local_target = local_delivery_target(workspace)
-        if local_target:
-            _append_proactive_history(
-                caption or filename or "Partner 阶段汇报",
-                local_target,
-                kind="file",
-                attachments=attachments,
-            )
-            return True
-        ctx_path = os.path.join(workspace, "state", "qq_user_context.json")
-        try:
-            with open(ctx_path, "r", encoding="utf-8") as f:
-                ctx = json.load(f)
-        except Exception as exc:
-            print(f"QQ proactive file push skipped: no qq_user_context.json ({exc})")
-            _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-            return False
-        openid = (ctx.get("openid") or ctx.get("last_openid") or ctx.get("last_group_openid") or "").strip()
-        if not openid:
-            print("QQ proactive file push skipped: missing openid in qq_user_context.json")
-            _append_proactive_history(caption or filename or "Partner 阶段汇报", "", kind="file", attachments=attachments)
-            return False
-        text = caption or filename or "Partner 阶段汇报"
-        if openid == "desktop_gui":
-            _append_proactive_history(text, openid, kind="file", attachments=attachments)
-            return True
-        # QQ user — send via bridge if available
-        if _qq_bridge is not None:
-            extension = os.path.splitext(filename or "")[1].lower()
-            qq_file_type = 1 if extension in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp") else 4
-            ok = _qq_bridge.send_file_proactive(
-                openid,
-                file_data,
-                qq_file_type,
-                QQMessageType.PRIVATE,
-                text_content=text,
-                file_name=filename,
-            )
-            if ok:
-                _append_proactive_history(text, openid, kind="file", attachments=attachments)
-                return True
-            # Keep the failure attached to this bot application.  Cross-bot
-            # fallback is not a valid acknowledgement for the originating
-            # instance.
-            _append_proactive_history(text, openid, kind="file", attachments=attachments)
-            return False
-        # No bridge — just write to history
-        _append_proactive_history(text, openid, kind="file", attachments=attachments)
-        return False
-
-    set_file_push_callback(_push_file_to_last_user)
-
-    # ── QQ bridge setup（可选） ──
-    # Local/manual validation must remain usable while QQ networking is down.
-    # This opt-in runtime switch does not alter qq_config.json and does not
-    # weaken QQ delivery truth for normal launches; it only skips constructing
-    # the bridge so desktop_inbox and local history can be tested independently.
-    qq_disabled = os.environ.get("PARTNER_DISABLE_QQ", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
-    if os.path.exists(cfg) and QQQfficialBridge is not None and not qq_disabled:
-        _qq_bridge = QQQfficialBridge(workspace)
-        _qq_bridge.load_config_from_file(cfg)
-        try:
-            _qq_bridge.start()
-        except KeyboardInterrupt:
-            raise
-        except Exception as exc:
-            print(f"QQ bridge failed, keeping Partner mind loop alive: {exc}")
-        print("QQ bridge stopped or unavailable; Partner mind loop remains running.")
-        try:
-            while True:
-                time.sleep(60)
-        except KeyboardInterrupt:
-            sys.exit(0)
-        return
-
-    if qq_disabled:
-        print(f"Partner instance '{args.instance_id}': QQ disabled for this launch; local inbox remains active.")
-    else:
-        print(f"Partner instance '{args.instance_id}': no qq_config.json found at {cfg}; running without QQ bridge.")
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        sys.exit(0)
+        del lock
 
 
-def main():
+def main() -> None:
     argv = sys.argv[1:]
     if _looks_like_instance_launch(argv):
         _run_instance_mode(argv)
         return
-
     from partner.cli import main as cli_main
     cli_main()
 

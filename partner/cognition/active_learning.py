@@ -93,11 +93,18 @@ def rank_active_learning_options(
 class ActiveLearningMemory:
     """Small evidence memory for action success; raw Episodes stay external."""
     outcomes: dict[str, dict[str, int]] = field(default_factory=dict)
+    observation_ids: set[str] = field(default_factory=set)
 
-    def observe(self, context_key: str, option_id: str, *, success: bool) -> None:
+    def observe(self, context_key: str, option_id: str, *, success: bool,
+                observation_id: str = "") -> bool:
+        if observation_id and observation_id in self.observation_ids:
+            return False
         key = f"{context_key}|{option_id}"
         counts = self.outcomes.setdefault(key, {"success": 0, "failure": 0})
         counts["success" if success else "failure"] += 1
+        if observation_id:
+            self.observation_ids.add(observation_id)
+        return True
 
     def success_probability(self, context_key: str, option_id: str) -> float:
         counts = self.outcomes.get(f"{context_key}|{option_id}", {})
@@ -105,11 +112,16 @@ class ActiveLearningMemory:
                 (int(counts.get("success") or 0) + int(counts.get("failure") or 0) + 2))
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": 1, "outcomes": self.outcomes}
+        return {"schema_version": 2, "outcomes": self.outcomes,
+                "observation_ids": sorted(self.observation_ids)}
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "ActiveLearningMemory":
         rows = dict((value or {}).get("outcomes") or {})
-        return cls({str(key): {"success": int(counts.get("success") or 0),
-                               "failure": int(counts.get("failure") or 0)}
-                    for key, counts in rows.items() if isinstance(counts, dict)})
+        return cls(
+            outcomes={str(key): {"success": int(counts.get("success") or 0),
+                                 "failure": int(counts.get("failure") or 0)}
+                      for key, counts in rows.items() if isinstance(counts, dict)},
+            observation_ids={str(item) for item in (value or {}).get("observation_ids") or []
+                             if str(item)},
+        )

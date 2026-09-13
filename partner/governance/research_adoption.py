@@ -199,8 +199,9 @@ def compile_research_candidate(
         "strategy_id": CANDIDATE_STRATEGY, "source_episode_ids": source_refs,
         "failure_classes": ["context.continuity", "project.handoff_loss"],
         "applicability": ["bounded manual project task", "existing project Receipt",
-                          "same-project trajectory evidence", "shadow evaluation"],
-        "non_applicability": ["production activation", "cross-project memory",
+                          "same-project trajectory evidence", "shadow evaluation",
+                          "Issue-bound reversible production canary after readiness checks"],
+        "non_applicability": ["full production promotion without readiness", "cross-project memory",
                               "autonomous Campaign", "model weight training"],
         "counterexamples": ["no project Receipt", "no same-project trajectory",
                             "research evidence fails source diversity"],
@@ -253,7 +254,12 @@ def _rank_trajectories(workspace: str, *, query: str, project_id: str,
         # Negative examples remain retrievable when their mechanism matches the query.
         failure = str(outcome.get("failure_mechanism") or "")
         failure_bonus = 2.0 if failure and (_tokens(failure) & query_tokens) else 0.0
-        score = overlap * 3.0 + reward + evidence_bonus + progress_bonus + failure_bonus
+        trajectory_id = str(row.get("trajectory_id") or "")
+        # A frozen matched experiment names its oracle trajectory explicitly.
+        # Token overlap must never crowd that required record out of Top-K.
+        exact_bonus = 10_000.0 if trajectory_id and trajectory_id in query else 0.0
+        score = (exact_bonus + overlap * 3.0 + reward + evidence_bonus
+                 + progress_bonus + failure_bonus)
         ranked.append((score, index, row))
     ranked.sort(key=lambda value: (-value[0], -value[1]))
     return [row for _, _, row in ranked[:max(0, int(limit))]]

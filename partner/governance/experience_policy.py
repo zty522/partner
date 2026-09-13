@@ -170,6 +170,161 @@ def append_expected_observation_correction(workspace: str, *, trajectory_id: str
             "trajectory": corrected, "path": str(path)}
 
 
+def append_business_hypothesis_correction(
+    workspace: str,
+    *,
+    trajectory_id: str,
+    evidence_refs: list[str] | None = None,
+    action_selection_id: str = "",
+    selection_arm_id: str = "",
+    native_action_id: str = "",
+) -> dict[str, Any]:
+    """Append a truthful revision for a completed but falsified experiment.
+
+    Completing a matched experiment is useful project learning, but it is not
+    business improvement. Preserve the original row, remove the false positive
+    Reward, and retain a small negative action signal for the next selection.
+    """
+    root = workspace_root(workspace)
+    path = root / "share/mind/governance/experience_guided_policy/trajectories.jsonl"
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    except OSError:
+        pass
+    prior = next((row for row in reversed(rows)
+                  if str(row.get("trajectory_id") or "") == trajectory_id), None)
+    if not prior:
+        return {"ok": False, "status": "trajectory_not_found"}
+    if ((prior.get("correction") or {}).get("kind")
+            == "append_only_business_hypothesis_correction"):
+        return {"ok": True, "status": "already_corrected",
+                "trajectory": prior, "path": str(path)}
+    corrected = json.loads(json.dumps(prior))
+    corrected["schema_version"] = max(3, int(corrected.get("schema_version") or 0))
+    corrected["revision"] = int(prior.get("revision") or 1) + 1
+    corrected["corrected_at"] = now_iso()
+    corrected["correction"] = {
+        "kind": "append_only_business_hypothesis_correction",
+        "evidence_refs": [str(value) for value in evidence_refs or []],
+    }
+    action = corrected.setdefault("action", {})
+    if action_selection_id:
+        action["action_selection_id"] = str(action_selection_id)
+    if selection_arm_id:
+        action["selection_arm_id"] = str(selection_arm_id)
+    if native_action_id:
+        action["native_action_id"] = str(native_action_id)
+        action["strategy_id"] = str(native_action_id)
+    corrected.setdefault("outcome", {}).update({
+        "status": "completed",
+        "business_progress": False,
+        "learning_progress": False,
+        "novel_evidence": False,
+        "false_success": False,
+        "failure_owner": "business_hypothesis",
+        "failure_mechanism": "business/hypothesis_falsified",
+    })
+    corrected["reward_components"] = {
+        "accepted_completed": 0.0, "artifact_contract": 0.0,
+        "partial_artifact": 0.0, "delivery_contract": 0.0,
+        "meaningful_event": 0.0, "business_progress": 0.0,
+        "learning_progress": 0.0, "self_evolution_progress": 0.0,
+        "novel_evidence": 0.0, "handoff_consumed": 0.0,
+        "falsified_hypothesis": -0.1,
+    }
+    corrected["reward"] = -0.1
+    corrected["policy_eligible"] = False
+    corrected["learning_observation_eligible"] = True
+    append_jsonl(path, corrected)
+    return {"ok": True, "status": "business_hypothesis_correction_appended",
+            "trajectory": corrected, "path": str(path)}
+
+
+def append_false_success_label_correction(workspace: str, *, trajectory_id: str,
+                                          reason: str) -> dict[str, Any]:
+    """Correct a failed terminal that never claimed success.
+
+    Older projection code treated an empty truth-audit dict as a failed audit.
+    The original row remains immutable; this narrow correction only removes
+    the false-success label and never improves Reward or policy eligibility.
+    """
+    root = workspace_root(workspace)
+    path = root / "share/mind/governance/experience_guided_policy/trajectories.jsonl"
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, ValueError, TypeError):
+        rows = []
+    prior = next((row for row in reversed(rows)
+                  if str(row.get("trajectory_id") or "") == trajectory_id), None)
+    if not prior:
+        return {"ok": False, "status": "trajectory_not_found"}
+    outcome = dict(prior.get("outcome") or {})
+    if (str(outcome.get("status") or "") != "failed"
+            or outcome.get("false_success") is not True
+            or outcome.get("truth_audit")):
+        return {"ok": False, "status": "correction_precondition_failed"}
+    corrected = json.loads(json.dumps(prior))
+    corrected["revision"] = int(prior.get("revision") or 1) + 1
+    corrected["corrected_at"] = now_iso()
+    corrected["correction"] = {
+        "kind": "append_only_false_success_label_correction",
+        "reason": str(reason),
+    }
+    corrected.setdefault("outcome", {})["false_success"] = False
+    corrected["policy_eligible"] = False
+    append_jsonl(path, corrected)
+    return {"ok": True, "status": "false_success_label_corrected",
+            "trajectory": corrected, "path": str(path)}
+
+
+def append_candidate_no_change_correction(workspace: str, *, trajectory_id: str,
+                                          reason: str) -> dict[str, Any]:
+    """Neutralize a no-new-code observation without erasing its evidence."""
+    root = workspace_root(workspace)
+    path = root / "share/mind/governance/experience_guided_policy/trajectories.jsonl"
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, ValueError, TypeError):
+        rows = []
+    prior = next((row for row in reversed(rows)
+                  if str(row.get("trajectory_id") or "") == trajectory_id), None)
+    if not prior:
+        return {"ok": False, "status": "trajectory_not_found"}
+    corrected = json.loads(json.dumps(prior))
+    corrected["revision"] = int(prior.get("revision") or 1) + 1
+    corrected["corrected_at"] = now_iso()
+    corrected["correction"] = {
+        "kind": "append_only_candidate_no_change_neutralization",
+        "reason": str(reason),
+    }
+    corrected.setdefault("outcome", {}).update({
+        "business_progress": False, "learning_progress": False,
+        "knowledge_adoption_progress": False, "self_evolution_progress": False,
+        "self_evolution_observation": True, "candidate_no_change": True,
+        "novel_evidence": False, "false_success": False,
+    })
+    corrected["reward_components"] = {
+        "accepted_completed": 0.0, "artifact_contract": 0.0,
+        "partial_artifact": 0.0, "delivery_contract": 0.0,
+        "meaningful_event": 0.0, "business_progress": 0.0,
+        "learning_progress": 0.0, "self_evolution_progress": 0.0,
+        "novel_evidence": 0.0, "handoff_consumed": 0.0,
+    }
+    corrected["reward"] = 0.0
+    corrected["policy_eligible"] = False
+    corrected["learning_observation_eligible"] = False
+    append_jsonl(path, corrected)
+    return {"ok": True, "status": "candidate_no_change_neutralized",
+            "trajectory": corrected, "path": str(path)}
+
+
 def append_campaign_monitor_correction(workspace: str, *, trajectory_id: str,
                                        evidence_refs: list[str] | None = None) -> dict[str, Any]:
     """Neutralize a Campaign control-plane report mislabelled as business work."""
@@ -292,6 +447,9 @@ def append_learning_success_correction(workspace: str, *, trajectory_id: str,
     allowed = (
         (root / "share/mind/governance/active_learning").resolve(),
         (root / "share/mind/governance/research_learning").resolve(),
+        (root / "external/code").resolve(),
+        (root / "external/literature").resolve(),
+        (root / "external/insights").resolve(),
     )
     verified: list[str] = []
     for value in evidence_refs:

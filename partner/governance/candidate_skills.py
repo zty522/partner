@@ -234,6 +234,7 @@ def project_candidate_decision(
     record["version"] = int(record.get("version") or 0) + 1
     if decision == "rejected":
         record["status"] = "rejected"
+        record["production_effective"] = False
     record["shadow_evidence"] = {
         "experiment_id": experiment_id,
         "decision": decision,

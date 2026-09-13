@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "context_id": "context_aa17d29ca0bcfe9d",
+  "created_at": "2026-09-12T00:52:27+08:00",
+  "project_id": "p",
+  "instance_id": "01",
+  "task_id": "",
+  "purpose": "project_action_deliberation",
+  "privacy_mode": "derived_only",
+  "sections": [
+    {
+      "kind": "project_truth",
+      "source_id": "project:p:current",
+      "chars": 84,
+      "sha256": "f890fdb4e5df72231a6dfbcade2d87c9b10bc027e4d875729e2070e889009954",
+      "local_path_hash": ""
+    },
+    {
+      "kind": "verified_trajectories",
+      "source_id": "project:p:trajectories:last8",
+      "chars": 2,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "local_path_hash": ""
+    },
+    {
+      "kind": "acceptance_contract",
+      "source_id": "repo:docs/sprint33_三条认知黄金链与深上下文验收.md",
+      "chars": 465,
+      "sha256": "a6efd890409dcf72a5a1e386e3ad0c2acf265b6f19f8c3ff28ae2ba34297f7d5",
+      "local_path_hash": "feb46674dac313ec"
+    },
+    {
+      "kind": "acceptance_contract",
+      "source_id": "repo:docs/architecture/project_centered_application.md",
+      "chars": 267,
+      "sha256": "1134c3e030992f836da319717b7a991409a50182fbeae19a423d798d82dd6f9a",
+      "local_path_hash": "4c5057096b2c690a"
+    },
+    {
+      "kind": "relevant_source",
+      "source_id": "repo:partner/governance/project_action_selector.py",
+      "chars": 1697,
+      "sha256": "544c35b518c6c9162916fc56d878cfa31ba55f3fcfd0d891cffc7a33d8e712e8",
+      "local_path_hash": "d9a98a4e7ca8b2c3"
+    }
+  ],
+  "omissions": [],
+  "context_chars": 2515,
+  "estimated_prompt_tokens": 629,
+  "coverage": {
+    "project_truth": true,
+    "trajectory": true,
+    "belief_history": false,
+    "acceptance_contract": true,
+    "episode_evidence": false,
+    "relevant_source": true
+  }
+}

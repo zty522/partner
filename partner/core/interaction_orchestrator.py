@@ -339,17 +339,20 @@ def _try_direct_reply_llm_based(self, text: str) -> Optional[InteractionDecision
                 priority=3,
             )
 
-        # Fallback: legacy classifier (intent_classifier.txt) for backward compatibility
-        intent_result = _classify_intent_for_approval(adapter, text)
-        if intent_result and intent_result.get("intent") in ("approve", "reject", "approve_partial", "reject_partial"):
-            logger.info("[ROUTING] LLM (legacy) classified as %s: %s", intent_result["intent"], text[:60])
+        # Only use the legacy classifier when the primary classifier failed to
+        # return a contract.  Running both for every ordinary message doubled
+        # cost without adding routing information.
+        legacy_result = (_classify_intent_for_approval(adapter, text)
+                         if intent_result is None else None)
+        if legacy_result and legacy_result.get("intent") in ("approve", "reject", "approve_partial", "reject_partial"):
+            logger.info("[ROUTING] LLM (legacy) classified as %s: %s", legacy_result["intent"], text[:60])
             return InteractionDecision(
                 reply_to_user="",
                 need_lifeline_update=False,
                 event_type="apply_architecture_improvement",
-                event_kind=intent_result["intent"],
-                task_title=f"架构改进{intent_result['intent']}",
-                task_description=_build_approval_payload(text, intent_result),
+                event_kind=legacy_result["intent"],
+                task_title=f"架构改进{legacy_result['intent']}",
+                task_description=_build_approval_payload(text, legacy_result),
                 priority=3,
             )
 
@@ -612,6 +615,9 @@ class InteractionDecision:
     artifact_freshness_policy: str = "new"
     reuse_existing_artifact: bool = False
     reuse_reason: str = ""
+    event_catalog_version: str = ""
+    event_flow_id: str = ""
+    event_flow_type: str = ""
 
 
 
@@ -1584,18 +1590,33 @@ expected_artifacts：
             logger.warning("[DIRECT_LLM] failed: %s", exc)
         return "收到"
 
-    def handle_message(self, sender_id: str, sender_name: str, text: str) -> InteractionDecision:
+    def handle_message(self, sender_id: str, sender_name: str, text: str,
+                       application_job_id: str = "",
+                       application_project_id: str = "",
+                       application_event_catalog_version: str = "",
+                       application_event_flow_id: str = "",
+                       application_event_flow_type: str = "") -> InteractionDecision:
         task = None
         cleaned_text = text
         try:
             from ..harness_core import TaskInstance, parse_continue_project_marker
 
             cleaned_text, continue_from_project = parse_continue_project_marker(text)
+            task_metadata = {"sender_id": sender_id, "sender_name": sender_name,
+                             "entry": "interaction_orchestrator"}
+            if application_job_id:
+                task_metadata["application_job_id"] = application_job_id
+            if application_event_catalog_version:
+                task_metadata["event_catalog_version"] = application_event_catalog_version
+            if application_event_flow_id:
+                task_metadata["event_flow_id"] = application_event_flow_id
+            if application_event_flow_type:
+                task_metadata["event_flow_type"] = application_event_flow_type
             task = TaskInstance.create(
                 self.workspace,
                 text,
                 continue_from_project=continue_from_project,
-                metadata={"sender_id": sender_id, "sender_name": sender_name, "entry": "interaction_orchestrator"},
+                metadata=task_metadata,
             )
         except Exception as exc:
             logger.debug(f"failed to create task instance: {exc}")
@@ -1634,6 +1655,52 @@ expected_artifacts：
             self._record_event_decision(sender_id, cleaned_text, decision)
             self._apply_lifeline_update(
                 decision, sender_id=sender_id, sender_name=sender_name, raw_text=cleaned_text,
+            )
+            self._update_sender_dialog_state(sender_id, decision, cleaned_text)
+            return decision
+
+        # Instance-native continuations are already authenticated, bounded and
+        # typed by the durable runtime.  Sending them through conversational
+        # approval/direct-reply/routing classifiers spent several calls per
+        # turn and could not change the permitted Event.  Compile them directly
+        # to the normal batch-plan/Event path; the planner's native router and
+        # all Receipt/truth gates still apply.
+        if "[instance_native=true]" in cleaned_text and re.search(
+                r"\[native_kind=(?:project|learning)\]", cleaned_text):
+            decision = self._batch_plan_for_message(cleaned_text, sender_id)
+            decision.event_kind = "instance_native"
+            decision.stop_after_completion = True
+            if task:
+                decision.task_instance_id = task.task_id
+                decision.task_working_dir = task.working_dir
+                decision.continue_from_project = task.continue_from_project
+            self._record_event_decision(sender_id, cleaned_text, decision)
+            self._apply_lifeline_update(
+                decision, sender_id=sender_id, sender_name=sender_name,
+                raw_text=cleaned_text,
+            )
+            self._update_sender_dialog_state(sender_id, decision, cleaned_text)
+            return decision
+
+        # A project was already selected by the shared application service.
+        # Do not let the conversational lifeline create a new project from the
+        # request sentence; planning and execution still use normal Events.
+        if application_job_id and application_project_id:
+            decision = self._batch_plan_for_message(cleaned_text, sender_id)
+            decision.target_project = application_project_id
+            decision.event_kind = "application_job"
+            decision.stop_after_completion = True
+            decision.event_catalog_version = application_event_catalog_version
+            decision.event_flow_id = application_event_flow_id
+            decision.event_flow_type = application_event_flow_type
+            if task:
+                decision.task_instance_id = task.task_id
+                decision.task_working_dir = task.working_dir
+                decision.continue_from_project = task.continue_from_project
+            self._record_event_decision(sender_id, cleaned_text, decision)
+            self._apply_lifeline_update(
+                decision, sender_id=sender_id, sender_name=sender_name,
+                raw_text=cleaned_text,
             )
             self._update_sender_dialog_state(sender_id, decision, cleaned_text)
             return decision
@@ -2564,6 +2631,9 @@ Mind pool 状态：{json.dumps(pool_stats, ensure_ascii=False)[:300]}
                 source="qq",
                 sender_id=sender_id,
                 sender_name=sender_name or "QQ用户",
+                event_catalog_version=decision.event_catalog_version,
+                flow_id=decision.event_flow_id,
+                flow_type=decision.event_flow_type,
             )
             self.task_queue.add_task(task)
             decision.queue_task_id = task.id

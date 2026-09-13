@@ -36,12 +36,16 @@ Thumbs.db
 
 # Partner - workspace (user data, not code)
 workspace/
+# `workspace/` above is user data, but the desktop GUI's workspace package is
+# product source and must ship with the launcher.
+!shells/frontend/desktop_gui/workspace/
+!shells/frontend/desktop_gui/workspace/**
 state/
-# `state/` above is runtime data, but this one file is Python source.  Keep the
-# exception narrow so instance/workspace state remains ignored.
+# `state/` above is runtime data, while ``partner/state`` is an importable
+# source package required by setup, GUI/TUI and QQ.
 !partner/state/
 partner/state/*
-!partner/state/config.py
+!partner/state/*.py
 knowledge/
 logs/
 ideas/

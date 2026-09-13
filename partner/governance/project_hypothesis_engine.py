@@ -18,8 +18,16 @@ GRAMMARS: dict[str, list[dict[str, Any]]] = {
         {"event": "continuous_project_step", "strategy": "01_claim_evidence_matrix", "key": "evidence_variant", "low": 1, "high": 5, "measures": ["records_with_source_evidence", "publish_authorized"]},
         {"event": "continuous_project_step", "strategy": "01_source_fact_check", "key": "evidence_variant", "low": 1, "high": 5, "measures": ["sources_checked", "sources_reachable"]}],
     "molecular_generation": [
+        {"event": "molecular_method_candidate_benchmark", "strategy": "molecular_method_hypothesis",
+         "key": "candidate_variant", "low": 1, "high": 5,
+         "measures": ["candidate_improved", "scaffold_count_delta",
+                      "fingerprint_diversity_delta", "mean_qed_delta"]},
         {"event": "molecular_generation_benchmark", "strategy": "", "key": "experiment_seed", "low": 20260901, "high": 20260999, "measures": ["validity", "uniqueness", "mean_qed"]},
-        {"event": "molecular_synth_baseline_benchmark", "strategy": "", "key": "experiment_seed", "low": 20260901, "high": 20260999, "measures": ["mean_qed", "mean_sa", "uniqueness"]}],
+        {"event": "molecular_synth_baseline_benchmark", "strategy": "", "key": "experiment_seed", "low": 20260901, "high": 20260999, "measures": ["mean_qed", "mean_sa", "uniqueness"]},
+        {"event": "molecular_docking_holdout", "strategy": "molecular_1bvr_docking_holdout",
+         "key": "ligands_per_arm", "low": 2, "high": 6,
+         "measures": ["baseline_mean_vina_score", "candidate_mean_vina_score",
+                      "candidate_minus_baseline_docking_score"]}],
     "molecular_dynamics_study": [
         {"event": "continuous_project_step", "strategy": "03_md_timestep_stability", "key": "candidate_variant", "low": 1, "high": 5, "measures": ["worst_relative_energy_drift", "stable_simulations"]},
         {"event": "continuous_project_step", "strategy": "03_md_temperature_sweep", "key": "candidate_variant", "low": 1, "high": 5, "measures": ["worst_relative_energy_drift", "stable_simulations"]}],
@@ -53,11 +61,23 @@ def _rows(root: Path, project_id: str) -> list[dict[str, Any]]:
     return output
 
 
-def _llm(prompt: str) -> dict[str, Any]:
+PROJECT_INSTANCES = {
+    "xiaohongshu_operations": "01",
+    "molecular_generation": "02",
+    "molecular_dynamics_study": "03",
+    "literature_github_learning": "04",
+    "hermes_partner_explore": "05",
+}
+
+
+def _llm(prompt: str, *, root: Path, project_id: str,
+         purpose: str = "hypothesis_candidate_design") -> dict[str, Any]:
     try:
         from partner.adapters.direct_api import chat
-        raw = chat(prompt, purpose="classify", max_tokens=1800,
-                   temperature=0.2, timeout=90)
+        raw = chat(prompt, purpose=purpose, max_tokens=1800,
+                   temperature=0.2, timeout=90, workspace=str(root),
+                   instance_id=PROJECT_INSTANCES.get(project_id, ""),
+                   project_id=project_id, event_type="project_hypothesis_propose")
         cleaned = re.sub(r"<think>.*?</think>", "", str(raw or ""), flags=re.S | re.I)
         match = re.search(r"\{.*\}", cleaned, re.S)
         value = json.loads(match.group(0)) if match else {}
@@ -95,7 +115,10 @@ def _evaluate(path: Path, candidate: dict[str, Any], rows: list[dict[str, Any]])
         return candidate
     candidate_id = str(candidate.get("candidate_id") or "")
     samples = [row for row in rows
-               if (row.get("action") or {}).get("native_action_id") == candidate_id]
+               if str((row.get("action") or {}).get("selection_arm_id")
+                      or (row.get("action") or {}).get("experience_candidate_id")
+                      or (row.get("action") or {}).get("native_action_id") or "")
+               == candidate_id]
     if not samples:
         return candidate
     evidence = "\n".join(str(item)
@@ -182,11 +205,13 @@ def candidate_options(root: Path, project_id: str,
         if candidate.get("decision") in {"proposed_canary", "continue_canary"}:
             return [_option(candidate)], candidate
         last_step = int(candidate.get("proposed_project_step") or 0)
-        if project_steps - last_step < 3:
+        cooldown = 1 if project_id == "molecular_generation" else 3
+        if project_steps - last_step < cooldown:
             return [], candidate
-    recent = rows[-3:]
+    negative_window = 2 if project_id == "molecular_generation" else 3
+    recent = rows[-negative_window:]
     grammar = GRAMMARS.get(project_id, [])
-    if len(recent) < 3 or not grammar:
+    if len(recent) < negative_window or not grammar:
         return [], {}
     if any(float(row.get("reward") or 0.0) > 0 for row in recent):
         return [], {}
@@ -208,7 +233,8 @@ partner_self_evolution. Return strict JSON with grammar_index, variant, hypothes
 falsifier, expected_observation, rationale, intervention_kind.
 """ + "\n\n" + project_reasoning_contract() + "\n\n" + json.dumps(
         {"project_id": project_id, "history": compact, "grammar": grammar}, ensure_ascii=False)
-    proposal = _llm(prompt)
+    proposal = _llm(prompt, root=root, project_id=project_id,
+                    purpose="hypothesis_candidate_design")
     try:
         index = _grammar_index(proposal.get("grammar_index"), grammar, proposal)
         selected = grammar[index]
@@ -221,7 +247,8 @@ falsifier, expected_observation, rationale, intervention_kind.
         "Return strict JSON with contract_mismatch, unsupported_claims, strongest_counterexample, "
         "recommended_belief_update. You cannot approve production.\n"
         + project_reasoning_contract() + "\n"
-        + json.dumps({"proposal": proposal, "selected_grammar": selected}, ensure_ascii=False)
+        + json.dumps({"proposal": proposal, "selected_grammar": selected}, ensure_ascii=False),
+        root=root, project_id=project_id, purpose="hypothesis_candidate_critic",
     )
     identity = hashlib.sha256(json.dumps({"project": project_id, "step": project_steps,
                                           "selected": selected, "variant": variant,
