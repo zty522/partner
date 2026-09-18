@@ -11,6 +11,15 @@ from partner.runtime.action_execution import write_json
 def enqueue_if_due(worker,job,state,now=None):
     now=time.time() if now is None else now
     if job.channel!='qq' or job.flow_type=='message_delivery': return None
+    if job.flow_type in {'autonomous_evolution','project_cycle'}:
+        # The bounded cycle has already delivered its project result. Repeated
+        # project-wait messages during post-delivery investigation are misleading
+        # and run an additional LLM graph inside the experiment's worker slot.
+        ack=worker.root/'state/cycles'/job.job_id/'report_ack.json'
+        try: delivered=json.loads(ack.read_text())
+        except (OSError,ValueError): delivered={}
+        if delivered.get('delivery_state')=='sent' and delivered.get('pdf_delivered') is True:
+            return None
     folder=worker.root/'state/application/wait_notices';folder.mkdir(parents=True,exist_ok=True)
     path=folder/(job.job_id+'.json')
     if path.exists(): saved=json.loads(path.read_text())

@@ -1,3 +1,21 @@
+"""MAINTENANCE_ONLY_INDEXING / BULK-RESCAN.
+
+This module performs bounded bulk ingestion via ``os.walk`` only under explicit one-shot maintenance hooks (e.g.
+``scripts/refresh_resource_indexes.py`` and the dedicated bootstrap paths under ``partner/index/resource_catalog.py``).
+Production Event code MUST NOT import this module to walk the
+filesystem.  Read access in production goes through the indexed
+resource layer (``partner/index/*.py``).  See
+``docs/operations/read_discipline_audit_20260917.md``.
+"""
+
+"""Maintenance-only bulk indexing.  No production read-path code.
+
+The ``os.walk`` calls in this module are bounded by an explicit root
+and an exclude list; they are only invoked from one-shot bootstrap /
+acquisition jobs (``refresh_resource_indexes.py`` etc.), never from
+the Event hot path.  See ``docs/operations/read_discipline_audit_20260917.md``
+for the full rule.
+"""
 """Code Knowledge — frontend code analysis and pattern comparison for Partner's self-evolution system.
 
 Part of the 5-step self-evolution cycle. Analyzes external and internal frontend code
@@ -12,7 +30,7 @@ Output:
   Each comparison produces a structured diff list. generate_frontend_improvements()
   converts each diff into a full improvement plan consumable by SelfEvolveEngine
   and plan_formation.py, with correct target_module paths under
-  shells/frontend/desktop_gui/modern/.
+  partner/web/frontend_src/src/.
 
 Usage:
     from partner.evolution.code_knowledge import CodeKnowledge
@@ -38,7 +56,7 @@ logger = logging.getLogger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 PARTNER_GUI_ROOT = Path(
-    "/mnt/e/work/partner/shells/frontend/desktop_gui/modern"
+    "/mnt/e/work/partner/partner/web/frontend_src/src"
 )
 
 KNOWN_SOURCES: dict[str, str] = {
@@ -402,7 +420,7 @@ class CodeKnowledge:
 
         Maps external components to Partner equivalents (if they exist), finds
         gaps, and generates concrete diff suggestions with real file paths
-        under shells/frontend/desktop_gui/modern/.
+        under partner/web/frontend_src/src/.
 
         Args:
             patterns: UIPattern extracted from an external source.
@@ -1003,7 +1021,7 @@ class CodeKnowledge:
             enhancements.append(
                 (
                     "Add ANSI color code rendering support to ChatBubble._render_content",
-                    "shells/frontend/desktop_gui/modern/widgets.py",
+                    "partner/web/frontend_src/src/components/Widget.tsx",
                     "medium",
                 )
             )
@@ -1013,7 +1031,7 @@ class CodeKnowledge:
             enhancements.append(
                 (
                     "Add sticky-scroll (auto-follow bottom) behavior to chat scroll area",
-                    "shells/frontend/desktop_gui/modern/pages/chat.py",
+                    "partner/web/frontend_src/src/pages/RunConsole.tsx",
                     "medium",
                 )
             )
@@ -1023,7 +1041,7 @@ class CodeKnowledge:
             enhancements.append(
                 (
                     "Add keyboard navigation (Tab/Enter/Escape) to chat input area",
-                    "shells/frontend/desktop_gui/modern/widgets.py",
+                    "partner/web/frontend_src/src/components/Widget.tsx",
                     "low",
                 )
             )
@@ -1033,7 +1051,7 @@ class CodeKnowledge:
             enhancements.append(
                 (
                     "Add animated expand/collapse transition to EventStepWidget",
-                    "shells/frontend/desktop_gui/modern/widgets.py",
+                    "partner/web/frontend_src/src/components/Widget.tsx",
                     "low",
                 )
             )
@@ -1043,7 +1061,7 @@ class CodeKnowledge:
             enhancements.append(
                 (
                     "Add raw ANSI output rendering for terminal log views (like RawAnsi.tsx)",
-                    "shells/frontend/desktop_gui/modern/widgets.py",
+                    "partner/web/frontend_src/src/components/Widget.tsx",
                     "high",
                 )
             )
@@ -1089,7 +1107,7 @@ class CodeKnowledge:
                         f"vs Partner's {partner_component_count}. "
                         f"Consider adding reusable widget components."
                     ),
-                    suggested_target="shells/frontend/desktop_gui/modern/widgets.py",
+                    suggested_target="partner/web/frontend_src/src/components/Widget.tsx",
                     suggestion_detail=(
                         f"Based on {source_name}'s component architecture, "
                         f"add new reusable widgets to widgets.py following the "
@@ -1114,7 +1132,7 @@ class CodeKnowledge:
                         f"(more dynamic than current {partner_layout}). "
                         f"Add flexible layout components to improve responsiveness."
                     ),
-                    suggested_target="shells/frontend/desktop_gui/modern/widgets.py",
+                    suggested_target="partner/web/frontend_src/src/components/Widget.tsx",
                     suggestion_detail=(
                         f"Create a FlexContainer widget that wraps QVBoxLayout/QHBoxLayout "
                         f"with stretch factors, inspired by {source_name}'s Box component."
@@ -1139,7 +1157,7 @@ class CodeKnowledge:
                         f"— Partner GUI lacks these interaction patterns. "
                         f"Enhance keyboard navigation and event handling."
                     ),
-                    suggested_target="shells/frontend/desktop_gui/modern/widgets.py",
+                    suggested_target="partner/web/frontend_src/src/components/Widget.tsx",
                     suggestion_detail=(
                         f"Add {', '.join(sorted(missing_interactions))} "
                         f"event handling to input widgets, inspired by {source_name}."
@@ -1184,7 +1202,7 @@ class CodeKnowledge:
                         f"but Partner's input area lacks keyboard interaction handler. "
                         f"Add keyPressEvent for Enter-to-send, Escape-to-cancel."
                     ),
-                    suggested_target="shells/frontend/desktop_gui/modern/pages/chat.py",
+                    suggested_target="partner/web/frontend_src/src/pages/RunConsole.tsx",
                     suggestion_detail=(
                         "Add keyPressEvent override to the chat input QPlainTextEdit "
                         "to handle Enter (send), Shift+Enter (newline), Escape (clear)."
@@ -1203,7 +1221,7 @@ class CodeKnowledge:
 
         # Ensure the target starts with shells/frontend/... relative path
         if not target.startswith("shells/frontend/"):
-            target = f"shells/frontend/desktop_gui/modern/{target.lstrip('/')}"
+            target = f"partner/web/frontend_src/src/{target.lstrip('/')}"
 
         change_type, function_name, new_code = self._synthesize_implementation(
             diff, target

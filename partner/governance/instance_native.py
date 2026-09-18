@@ -28,7 +28,7 @@ PROJECTS = {
     "02": ("molecular_generation", "分子生成方法创新与实践"),
     "03": ("molecular_dynamics_study", "分子动力学模拟学习与尝试"),
     "04": ("literature_github_learning", "文献与 GitHub 代码真实学习、复现和采用"),
-    "05": ("hermes_partner_explore", "hermes 与 partner 代码探索并写新 skill 与 event"),
+    "05": ("partner_explore", "hermes 与 partner 代码探索并写新 skill 与 event"),
 }
 TERMINAL = {"done", "failed"}
 BUSY = {"created", "planning", "running", "waiting", "executing"}
@@ -205,6 +205,91 @@ def instance_busy(workspace: str | Path, instance_id: str) -> bool:
     return False
 
 
+# ``state/application/jobs/<job_id>.json`` is a *projection* of the
+# authoritative Job store, emitted through an outbox that retries failed
+# exports.  A freshly enqueued Job can therefore be absent from the projection
+# for an unbounded time.  A pending owner older than this bound is a wedged
+# record rather than a live continuation, so it must not block the instance
+# forever.
+_PENDING_STALE_SECONDS = 12 * 60 * 60
+
+
+def _pending_row_is_live(row: dict[str, Any]) -> bool:
+    """False when a pending row is older than the staleness bound."""
+    stamp = row.get("updated_at") or row.get("created_at")
+    try:
+        value = float(stamp)
+    except (TypeError, ValueError):
+        return True
+    if value > 1e11:  # milliseconds since epoch
+        value /= 1000.0
+    return (time.time() - value) <= _PENDING_STALE_SECONDS
+
+
+def _has_pending_native_job(workspace: str | Path, instance_id: str) -> bool:
+    """True when the instance already has a queued/dispatched/running native Job.
+
+    Sprint 37: instance_busy() only inspects task_instance completion status,
+    which a freshly queued Job has not reached yet.  Without this check a
+    periodic readmission sweep queues a duplicate step on every interval, so the
+    queue grows without bound.  Only native self-seeded Jobs count -- an explicit
+    application Job keeps its own admission path.
+
+    Two stores are consulted and the result is their UNION:
+
+    * the authoritative Job store (``workspace_dir/jobs.db`` via
+      ``job_repository``), which is what the worker actually claims from;
+    * the per-job JSON projection, so the guard also holds in offline and test
+      setups that never initialise a Job database.
+
+    Union rather than "DB wins" is deliberate: a false *pending* only delays one
+    continuation, while a false *free* re-creates the unbounded queue.  Reading
+    the projection alone (the earlier implementation) was exactly that false
+    free: the outbox-backed projection lagged the enqueue, so the guard could
+    not see the Job it had just queued.
+    """
+    root = workspace_root(str(workspace))
+    target = str(instance_id)
+
+    def _is_native_pending(row: dict[str, Any]) -> bool:
+        if str(row.get("assigned_instance") or "") != target:
+            return False
+        if not str(row.get("sender_id") or "").startswith("partner_"):
+            return False
+        if str(row.get("status") or "") not in ("queued", "dispatched", "running"):
+            return False
+        return _pending_row_is_live(row)
+
+    # 1) Authoritative Job store.
+    try:
+        from partner.index.job_repository import connect_existing
+        repo = connect_existing(root)
+        for row in repo.list_by_status(("queued", "dispatched", "running"), limit=500):
+            if str(row.get("assigned_instance") or "") != target:
+                continue
+            try:
+                record = repo.get_record(row["job_id"]) or row
+            except Exception:  # noqa: BLE001 -- fall back to the list row
+                record = row
+            if _is_native_pending(record):
+                return True
+    except Exception:  # noqa: BLE001 -- no Job store: rely on the projection
+        pass
+
+    # 2) Durable projection.
+    jobs_dir = root / "state/application/jobs"
+    if not jobs_dir.is_dir():
+        return False
+    for path in jobs_dir.glob("*.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if _is_native_pending(row):
+            return True
+    return False
+
+
 def _pending_dispatch_exists(workspace: str | Path, instance_id: str,
                              message_id: str) -> bool:
     """Return whether a pending native message still has a durable owner."""
@@ -266,8 +351,13 @@ def _active_application_job_id(workspace: str | Path, instance_id: str) -> str:
             row = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError):
             continue
+        # Native self-seeded continuations (sender_id=partner_XX_self) are not
+        # "explicit user jobs" and must not block their own next terminal from
+        # advancing the state machine (Sprint 37: submit_native writes them to
+        # the same application/jobs dir the explicit path uses).
         if (str(row.get("assigned_instance") or "") == instance_id
-                and str(row.get("status") or "") in {"dispatched", "running"}):
+                and str(row.get("status") or "") in {"dispatched", "running"}
+                and not str(row.get("sender_id") or "").startswith("partner_")):
             candidates.append((str(row.get("updated_at") or row.get("created_at") or ""),
                                str(row.get("job_id") or "")))
     return max(candidates, default=("", ""))[1]
@@ -551,6 +641,16 @@ def _ensure_episode(workspace: str | Path, instance_id: str, task_id: str) -> di
 def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
              request: str) -> dict[str, Any]:
     root = workspace_root(str(workspace))
+    # Sprint 37 (queue-runaway fix): one continuation owner per instance.
+    # recover_or_start, every handle_terminal branch and the learning branches
+    # all funnel through here, so this is the single choke point that makes the
+    # native queue self-limiting -- an instance may hold at most one
+    # queued/dispatched/running native Job at a time.  Before this guard a
+    # re-processing bridge seeded a fresh Job on every sweep and the queue grew
+    # without bound (measured +14/min vs ~1.4/min drain).
+    if _has_pending_native_job(workspace, state.instance_id):
+        return {"ok": False, "status": "native_pending_exists",
+                "instance_id": state.instance_id}
     # Every actual native continuation crosses a Selector Event.  The selector
     # may later be LLM-ranked, but the executable boundary remains typed and
     # deterministic: one project concurrency key, explicit prerequisite and
@@ -617,25 +717,37 @@ def _enqueue(workspace: str | Path, state: NativeInstanceState, *, kind: str,
         "created_at": now_iso(),
         "selector_selection_id": selection.selection_id,
     }
-    inbox = root / "instances" / state.instance_id / "state/desktop_inbox.jsonl"
-    inbox.parent.mkdir(parents=True, exist_ok=True)
-    with inbox.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    state.pending_message_id = message_id
+    # Sprint 37: native continuation must enter the Application Job queue that
+    # the production worker actually consumes (state/application/jobs), not the
+    # retired desktop_inbox.jsonl.  Reuse PartnerApplicationService so the job
+    # gets a real flow (project_iteration / learning_improvement_cycle /
+    # self_improvement_cycle) and is discoverable by EventWorker._queue_jobs.
+    from partner.application.service import PartnerApplicationService
+    svc = PartnerApplicationService(str(root))
+    submission = svc.submit_native(
+        text=headed_request,
+        instance_id=state.instance_id,
+        project_id=state.project_id,
+        kind=kind,
+    )
+    if not submission.accepted:
+        return {"ok": False, "status": "native_submit_failed",
+                "instance_id": state.instance_id,
+                "error": str(submission.message)}
+    state.pending_message_id = submission.job_id or message_id
     state.pending_kind = kind
+    state.active_application_job_id = submission.job_id or state.active_application_job_id
     state.phase = ({"learning": "LEARNING_DISPATCHED",
                     "external_learning": "EXTERNAL_LEARNING_DISPATCHED"}
                    .get(kind, "PROJECT_DISPATCHED"))
     state.reason = "meaningful terminal-triggered transition"
     save_state(workspace, state)
     _append_event(workspace, "native_task_dispatched", state,
-                  message_id=message_id, kind=kind)
+                  message_id=message_id, kind=kind,
+                  application_job_id=submission.job_id)
     return {"ok": True, "status": "dispatched", "message_id": message_id,
-            "kind": kind, "instance_id": state.instance_id}
+            "kind": kind, "instance_id": state.instance_id,
+            "application_job_id": submission.job_id}
 
 
 def recover_or_start(workspace: str | Path, instance_id: str) -> dict[str, Any]:
@@ -662,24 +774,40 @@ def recover_or_start(workspace: str | Path, instance_id: str) -> dict[str, Any]:
             "application_job_id": application_owner,
         }
     if state.application_bounded and state.active_application_job_id:
-        # A completed bounded Job must remain stopped after its durable
-        # terminal.  The job leaves the active application index before every
-        # consumer has necessarily observed that terminal, so consulting only
-        # _active_application_job_id() creates a small window in which startup
-        # recovery can seed an unrelated autonomous turn.
-        state.phase = "BLOCKED"
-        state.reason = "bounded application job completed; waiting for next explicit user request"
-        save_state(workspace, state)
-        return {
-            "ok": True,
-            "status": "bounded_application_wait",
-            "instance_id": instance_id,
-            "application_job_id": state.active_application_job_id,
-        }
+        # Sprint 37: a bounded marker whose Job no longer exists at all (rotated
+        # / pruned terminals) would otherwise stop autonomous continuation
+        # forever -- there is no future explicit user request to clear it.  Only
+        # a *live* bounded Job may hold the instance; a stale marker is cleared
+        # so readmission can resume the project.
+        _jobs = workspace_root(str(workspace)) / "state/application/jobs"
+        if not (_jobs / f"{state.active_application_job_id}.json").exists():
+            stale_job = state.active_application_job_id
+            state.application_bounded = False
+            state.active_application_job_id = ""
+            state.phase = "WAITING"
+            state.reason = "cleared stale bounded application marker"
+            save_state(workspace, state)
+            _append_event(workspace, "native_stale_bounded_marker_cleared", state,
+                          stale_job_id=stale_job)
+        else:
+            # A completed bounded Job must remain stopped after its durable
+            # terminal.  The job leaves the active application index before every
+            # consumer has necessarily observed that terminal, so consulting only
+            # _active_application_job_id() creates a small window in which startup
+            # recovery can seed an unrelated autonomous turn.
+            state.phase = "BLOCKED"
+            state.reason = "bounded application job completed; waiting for next explicit user request"
+            save_state(workspace, state)
+            return {
+                "ok": True,
+                "status": "bounded_application_wait",
+                "instance_id": instance_id,
+                "application_job_id": state.active_application_job_id,
+            }
     if state.phase == "BLOCKED":
         return {"ok": False, "status": "blocked_requires_evidence_change",
                 "instance_id": instance_id, "reason": state.reason}
-    if instance_busy(workspace, instance_id):
+    if instance_busy(workspace, instance_id) or _has_pending_native_job(workspace, instance_id):
         state.phase, state.reason = "WAIT_TASK", "instance already has a live task"
         save_state(workspace, state)
         return {"ok": True, "status": "busy", "instance_id": instance_id}

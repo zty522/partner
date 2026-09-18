@@ -48,7 +48,7 @@ class EventFlowRunner:
                   "node_id": node.node_id, "project_id": state.project_id,
                   "instance_id": state.instance_id}
         if state.current_event_id and state.waiting_task_id:
-            event = self.ledger.event_index()[state.current_event_id]
+            event = self.ledger.get_event_history(state.current_event_id)
             from .models import EventEnvelope
             event = EventEnvelope(**{k:v for k,v in event.items() if k in EventEnvelope.__dataclass_fields__})
         else:

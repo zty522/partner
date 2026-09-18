@@ -234,6 +234,7 @@ class Browser:
 
     def dispatch(self, action, args):
         handlers = {'xhs_account': lambda _: self.account(), 'xhs_posts': self.posts,
+                    'read_page': self.read_page,
                     'xhs_prepare': self.prepare, 'xhs_publish': self.publish,
                     'video_capture': self.video, 'video_download': self.download,
                     'inspect': lambda _: {'url': self.page.url, 'title': self.page.title(),
@@ -242,9 +243,28 @@ class Browser:
                         'login_svg': self.page.locator('.douyin_login_new_class svg').evaluate_all('''xs=>xs.map(x=>({viewBox:x.getAttribute('viewBox'),parent:x.parentElement.className}))'''),
                         'videos': self.page.locator('video').evaluate_all('(vs)=>vs.map(v=>({duration:v.duration,visible:!!v.getClientRects().length}))')},
                     'stop': lambda _: {'stopping': True}}
+        if action not in handlers:
+            raise ValueError('Unsupported browser operation; available operations: ' + ', '.join(sorted(handlers)))
         result = handlers[action](args)
         result.update(background_only=True, browser_visible=False, audio_muted=True)
         return result
+
+    def read_page(self,args):
+        """Bounded read-only discovery; retain blocked pages as evidence."""
+        import uuid
+        error=''
+        try:self.go(args['url'])
+        except Exception as exc:error=str(exc)[:500]
+        title=self.page.title();url=self.page.url
+        text=self.page.locator('body').inner_text()[:40000]
+        links=self.page.locator('a[href]').evaluate_all('(xs)=>xs.map(a=>({url:a.href,text:(a.innerText||"").slice(0,200)})).filter(a=>a.url.startsWith("https://")).slice(0,300)')
+        path=self.root/'captures'/'reading'/f'{uuid.uuid4().hex}.png';path.parent.mkdir(parents=True,exist_ok=True)
+        self.page.screenshot(path=str(path),full_page=False)
+        blocked=bool(error or self.login_wall() or any(token in title+'\n'+text for token in
+            ('IP存在风险','验证码','安全验证','完成验证','访问频繁','captcha','Access Denied')))
+        return {'requested_url':args['url'],'source_url':url,'title':title,'text':text,'links':links,
+                'screenshot':str(path),'observed_at':time.time(),'status':'blocked' if blocked else 'read',
+                'error':error,'content_is_untrusted':True}
 
     def download(self, args):
         # Download only media exposed by a genuinely playable page in this browser session.

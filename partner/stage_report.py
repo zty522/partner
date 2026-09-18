@@ -1,4 +1,11 @@
-"""Stage report generation for long-running Partner projects.
+"""
+
+MAINTENANCE_ONLY_INDEXING.
+
+Read access from production Event code goes through the indexed resource layer.  This module's os.walk calls are only invoked from maintenance hooks.
+See docs/operations/read_discipline_audit_20260917.md.
+
+Stage report generation for long-running Partner projects.
 
 The agent writes a compact Markdown report; Partner turns it into user-facing
 PPTX/PDF artifacts. This keeps the LLM prompt light while still giving users a

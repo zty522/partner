@@ -60,15 +60,13 @@ def _tokens(value: Any) -> set[str]:
 
 def _correction_state(directory: Path) -> dict[str, str]:
     state: dict[str, str] = {}
-    try:
-        lines = (directory / "corrections.jsonl").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return state
-    for line in lines:
-        try:
-            row = json.loads(line)
-        except (TypeError, ValueError):
-            continue
+    from partner.index.stream_projection import StreamProjection
+    from partner.index.sqlite_base import get_connection
+    path=directory/'corrections.jsonl'
+    repo=StreamProjection(directory.parents[3]);repo.sync(path)
+    rows=get_connection(repo.db).execute("SELECT payload FROM records WHERE path=? ORDER BY offset",(str(path.resolve()),))
+    for payload in rows:
+        row=json.loads(payload[0])
         import_id = str(row.get("import_id") or "") if isinstance(row, dict) else ""
         action = str(row.get("action") or "") if isinstance(row, dict) else ""
         if import_id and action in {"invalidate", "reinstate"}:
@@ -83,7 +81,9 @@ def load_valid_cognition_shadows(
     directory = workspace_root(workspace) / "share" / "mind" / "governance" / "cognition_shadow"
     corrections = _correction_state(directory)
     rows: list[dict[str, Any]] = []
-    for path in sorted(directory.glob("cognition_shadow_*.json")):
+    from partner.index.resource_catalog import ResourceCatalog
+    for item in ResourceCatalog(workspace_root(workspace)).query('cognition',scope=project_id or None,limit=100):
+        path=Path(item['path'])
         try:
             archive = json.loads(path.read_text(encoding="utf-8"))
             import_id = str(archive.get("import_id") or "")

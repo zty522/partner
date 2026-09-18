@@ -106,6 +106,8 @@ class EventFlowStore:
         temporary = target.with_suffix(f".tmp.{os.getpid()}")
         temporary.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(target)
+        from partner.index.resource_catalog import register_runtime
+        register_runtime(target, state.to_dict())
         return target
 
     def load(self, flow_id: str) -> EventFlowState:

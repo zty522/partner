@@ -38,11 +38,16 @@ continue_project / active_learning / self_evolution / waiting / report / complet
     if value.get("primary_route") == "continue_project":
         outputs = facts.get("event_outputs") or params.get("flow_outputs") or {}
         verified = bool((outputs.get("verify") or {}).get("business_delta"))
+        reflect_out = outputs.get("reflect") or {}
+        reflect_weight = (reflect_out.get("semantic_output") or {}).get("weight")
         if not verified:
             value["continuation_kind"] = "remediation"
             value["business_delta"] = False
             if not value.get("next_event_candidates") and not value.get("resume_event"):
                 value.update(primary_route="waiting", reason="本轮未推进且没有具体修复动作，保留阻塞证据")
+        if reflect_weight is not None and reflect_weight < 0.25 and value.get("primary_route") != "waiting":
+            value["weight_at_route"] = reflect_weight
+            value.update(primary_route="waiting", reason=f"reflect 权重 {reflect_weight} 偏低，先保留证据")
     return {"ok": True, "status": "completed", "semantic_output": value,
             "next_event_candidates": value.get("next_event_candidates") or [],
             "summary": str(value.get("reason") or value.get("primary_route")), "token_usage": usage}

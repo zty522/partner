@@ -163,7 +163,7 @@ def run_sprint19_acceptance(workspace: str | Path, *, project_id: str = "",
     root = workspace_root(str(workspace))
     projects = [project_id] if project_id else [
         "xiaohongshu_operations", "molecular_generation", "molecular_dynamics_study",
-        "literature_github_learning", "hermes_partner_explore",
+        "literature_github_learning", "partner_explore",
     ]
     project_results = [audit_project_iteration(root, value) for value in projects]
     active = audit_active_learning(root, instance_id)

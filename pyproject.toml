@@ -33,8 +33,6 @@ dependencies = [
     "reportlab>=4.0",
     "json5>=0.9",
     "json-repair>=0.30",
-    "textual>=0.70",
-    "PySide6>=6.7; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +48,6 @@ stt-funasr = ["funasr>=1.0"]
 tts-cosyvoice = ["torchaudio>=2.0"]
 # Development
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
-desktop = ["PySide6>=6.7"]
 content = ["playwright>=1.40", "yt-dlp>=2024.12.0", "pillow>=10.0", "pytesseract>=0.3"]
 reports = ["matplotlib>=3.8", "pillow>=10.0", "cairosvg>=2.7", "rdkit>=2023.9", "PyMuPDF>=1.23"]
 cytobridge = ["cytobridge-agent>=1.0.0"]
@@ -75,7 +72,6 @@ include = ["partner*", "shells*"]
 [tool.setuptools.package-data]
 partner = ["assets/*", "assets/icons/*", "agents/manifests/*.json", "protocols/*.json"]
 shells = [
-    "frontend/desktop_gui/assets/*",
     "*.bat",
     "*.ps1",
     "*.sh",

@@ -22,9 +22,9 @@ KINDS = {
     'csv_line': 'source_refs:[CSV,...], x: column, y: column, labels:[], x_label, y_label; optional subtract_initial:true',
     'convergence': 'source_refs:[CSV,...], time_column, energy_column; measured step vs max relative energy error, dimensionless unless source says otherwise',
     'pdb_structure': 'source_refs:[PDB], residues:[integers] OR residue_source:E-ID of pocket JSON with residues_key:target_residue_set (use whole set); chain, local:false for whole protein or true for pocket, optional pose_path (MODEL 1 only); coordinates in angstrom',
-    'molecular_diversity': 'source_refs:[candidate JSON], rows_key:candidates, smiles_key:canonical_smiles; compute actual Morgan r=2 2048-bit similarities and Murcko scaffold counts',
-    'molecule_grid': 'source_refs:[JSON], rows_key:candidates, smiles_key:canonical_smiles, id_key:candidate_id, indices:[0,...] (max 6)',
-    'distribution': 'source_refs:[JSON], rows_key: dot-separated array key, value_key: numeric field, x_label with evidenced units',
+    'molecular_diversity': 'source_refs:[candidate JSON or JSONL], rows_key:candidates (JSONL root array uses empty string), smiles_key:canonical_smiles; compute actual Morgan r=2 2048-bit similarities and Murcko scaffold counts',
+    'molecule_grid': 'source_refs:[JSON or JSONL], rows_key:candidates (JSONL root array uses empty string), smiles_key:canonical_smiles, id_key:candidate_id, indices:[0,...] (max 6)',
+    'distribution': 'source_refs:[JSON or JSONL], rows_key: dot-separated array key (JSONL root uses empty string), value_key: numeric field, x_label with evidenced units',
     'experiment_timeline': 'source_refs:[JSON] containing groups.*.future_state_timeline and func_ticks; separate clocks explicitly shown',
     'test_matrix': 'source_refs:[baseline_receipt.json,candidate_receipt.json], labels:[baseline,candidate]; exact same testcase identity required',
     'code_excerpt': 'source_refs:[text/code], start_line, end_line (max 24); actual source only',
@@ -43,6 +43,13 @@ def select(data, key):
     for part in str(key or '').split('.'):
         if part: data = data[int(part)] if isinstance(data, list) else data[part]
     return data
+
+
+def json_data(path):
+    path = Path(path)
+    if path.suffix.lower() == '.jsonl':
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return json.loads(path.read_text())
 
 
 def csv_data(path):
@@ -177,7 +184,7 @@ def render(plan, directory, allowed_paths):
                 from rdkit.Chem import rdFingerprintGenerator
                 from rdkit.Chem.Scaffolds import MurckoScaffold
                 from collections import Counter
-                rows=select(json.loads(paths[0].read_text()),plan.get('rows_key','candidates'))
+                rows=select(json_data(paths[0]),plan.get('rows_key','candidates'))
                 mols=[Chem.MolFromSmiles(r[plan.get('smiles_key','canonical_smiles')]) for r in rows]
                 if len(mols)<2 or any(m is None for m in mols):raise ValueError('diversity needs at least two valid actual molecules')
                 generator=rdFingerprintGenerator.GetMorganGenerator(radius=2,fpSize=2048)
@@ -191,7 +198,7 @@ def render(plan, directory, allowed_paths):
             elif kind == 'molecule_grid':
                 from rdkit import Chem
                 from rdkit.Chem import Draw
-                rows=select(json.loads(paths[0].read_text()),plan.get('rows_key','candidates'))
+                rows=select(json_data(paths[0]),plan.get('rows_key','candidates'))
                 indices=plan.get('indices',list(range(min(6,len(rows)))))
                 if not 1<=len(indices)<=6: raise ValueError('select 1–6 readable molecules')
                 chosen=[rows[int(i)] for i in indices]; smiles=[r[plan.get('smiles_key','canonical_smiles')] for r in chosen]
@@ -200,7 +207,7 @@ def render(plan, directory, allowed_paths):
                 Draw.MolsToGridImage(mols,molsPerRow=2,subImgSize=(650,400),legends=[str(r.get(plan.get('id_key','candidate_id'),'')) for r in chosen]).save(target)
                 measured={'indices':indices,'smiles':smiles}
             elif kind == 'distribution':
-                rows=select(json.loads(paths[0].read_text()),plan.get('rows_key',''))
+                rows=select(json_data(paths[0]),plan.get('rows_key',''))
                 values=[float(select(r,plan['value_key'])) for r in rows]
                 if not values or not all(math.isfinite(v) for v in values): raise ValueError('no finite measured values')
                 ax.hist(values,bins=min(12,max(3,int(math.sqrt(len(values))))),color='#416d91',edgecolor='white')

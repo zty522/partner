@@ -11,9 +11,10 @@ from typing import Any
 
 
 EVENT_SERIES = {
-    "interaction", "project", "active_learning", "self_evolution",
+    "interaction", "project", "active_learning", "self_evolution", "evolution",
     "planning", "memory", "presentation", "delivery", "runtime",
-    "selector", "frontend", "visualization",
+    "selector", "frontend", "visualization", "notification", "acceptance",
+    "improvement"
 }
 TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 

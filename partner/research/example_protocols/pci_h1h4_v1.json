@@ -1,0 +1,205 @@
+{
+  "allowed_modification_objects": [
+    {
+      "forbidden": [
+        "hard-coded values that mask prompt vs. behaviour"
+      ],
+      "must_record": "diff + fingerprint + parent prompt_id",
+      "object": "policy_prompt",
+      "scope": "versioned prompt block consumed by the LLM"
+    },
+    {
+      "forbidden": [
+        "altering the evaluator or evaluation script"
+      ],
+      "must_record": "diff + fingerprint + parent skill_id",
+      "object": "skill_yaml",
+      "scope": "versioned skill manifest, no executable code change"
+    },
+    {
+      "forbidden": [
+        "modifying the evaluator, the model, or the runtime scheduler"
+      ],
+      "must_record": "diff + fingerprint + parent flow_id",
+      "object": "flow_yaml",
+      "scope": "declarative flow only; no event code"
+    }
+  ],
+  "baseline_protocols": [
+    "static-agent",
+    "reflection-only",
+    "gepa-pilot"
+  ],
+  "budget": {
+    "candidate_attempts": 8,
+    "cost_usd_ceiling": 30.0,
+    "external_actions": 20,
+    "llm_calls": 800,
+    "wallclock_seconds": 7200
+  },
+  "controls": [
+    "matched_seed",
+    "matched_baseline_code"
+  ],
+  "evaluator_boundaries": [
+    {
+      "blind": true,
+      "input": "task episode + ground truth",
+      "isolation": "filesystem",
+      "name": "hidden_oracle",
+      "output": "binary score + per-metric JSON"
+    },
+    {
+      "blind": true,
+      "input": "candidate report + baseline report",
+      "isolation": "process",
+      "name": "junitxml_diff",
+      "output": "added/removed/modified test outcomes"
+    }
+  ],
+  "evidence_requirements": [
+    "All baseline/candidate runs use the same code commit SHA",
+    "All runs record run_id, parent_protocol_id, parent_run_id",
+    "All hidden test answers never enter product state",
+    "All run reports include a per-metric table with effect size and CI"
+  ],
+  "expected_direction": {
+    "hidden_task_quality_delta": "higher_is_better",
+    "regression_count": "lower_is_better"
+  },
+  "human_intervention_taxonomy": [
+    {
+      "default": "defer",
+      "expected_response": "operator decision",
+      "label": "data_hygiene_question",
+      "trigger": "external source ambiguous"
+    },
+    {
+      "default": "block",
+      "expected_response": "operator halt",
+      "label": "ethics_concern",
+      "trigger": "task instruction conflicts with safety policy"
+    }
+  ],
+  "hypotheses": [
+    {
+      "claim": "Event-bound structured intervention produces more reliable continual improvement than unstructured reflection or prompt rewrites.",
+      "expected_effect_size": 0.1,
+      "falsification_condition": "Within equal budget, the Event-bound arm does not exceed a plain reflection baseline on the held-out project family.",
+      "id": "H1",
+      "minimum_sample_size": 12,
+      "required_evidence": [
+        "Paired baseline/candidate on matched inputs",
+        "Effect-size bootstrap CI",
+        "Reverse replication on at least one cross-domain family"
+      ]
+    },
+    {
+      "claim": "Combining self-experience and external knowledge resolves gaps neither source can resolve alone.",
+      "expected_effect_size": 0.08,
+      "falsification_condition": "Combined arm never exceeds the stronger single-source arm on the same budget.",
+      "id": "H2",
+      "minimum_sample_size": 12,
+      "required_evidence": [
+        "Paired per-family comparison",
+        "Negative cases where one source dominates"
+      ]
+    },
+    {
+      "claim": "Choosing learning actions based on identified gap, expected value, and cost outperforms fixed-cadence learning.",
+      "expected_effect_size": 0.05,
+      "falsification_condition": "Fixed-cadence schedule matches or beats cost-aware selection.",
+      "id": "H3",
+      "minimum_sample_size": 9,
+      "required_evidence": [
+        "Equal-budget A/B on three project families"
+      ]
+    },
+    {
+      "claim": "Frozen expectations, independent tests, and regression constraints reduce erroneous promotions and predict future performance.",
+      "expected_effect_size": 0.04,
+      "falsification_condition": "Visible-test gains do not predict hidden-task gains, or the system promotes a regression more than 1 in 20 rounds.",
+      "id": "H4",
+      "minimum_sample_size": 12,
+      "required_evidence": [
+        "Held-out family results",
+        "Promotion audit table"
+      ]
+    }
+  ],
+  "kind": "research_protocol",
+  "metadata": {
+    "generated_at": "2026-09-17T19:30:00+08:00",
+    "generated_by": "hermes-m0-static-implementation",
+    "paper_section": "Section 2 / 8"
+  },
+  "minimum_meaningful_effect": {
+    "hidden_task_quality_delta": 0.03
+  },
+  "primary_delta_metrics": [
+    {
+      "aggregation": "ci",
+      "ci_method": "bootstrap_paired_95",
+      "direction": "higher_is_better",
+      "kind": "hidden_task_quality_delta",
+      "minimum_meaningful_effect": 0.03,
+      "name": "hidden_task_quality_delta",
+      "notes": "Paired delta candidate - baseline per (family, model, seed, protocol). Only computed when both arms have numeric task_quality."
+    }
+  ],
+  "primary_metrics": [
+    {
+      "aggregation": "mean",
+      "direction": "higher_is_better",
+      "kind": "task_quality",
+      "minimum_meaningful_effect": 0.03,
+      "name": "task_quality",
+      "notes": "Per-task single-arm score produced by fixture.score(); values in [0,1]; missing_reason recorded separately."
+    }
+  ],
+  "protocol_id": "PCI-H1H4-v1",
+  "schema_version": "research.protocol/v1",
+  "secondary_metrics": [
+    {
+      "aggregation": "auc",
+      "direction": "higher_is_better",
+      "name": "learning_curve_auc"
+    },
+    {
+      "aggregation": "mean",
+      "direction": "lower_is_better",
+      "name": "regression_count"
+    },
+    {
+      "aggregation": "mean",
+      "direction": "lower_is_better",
+      "name": "calibration_brier"
+    },
+    {
+      "aggregation": "mean",
+      "direction": "lower_is_better",
+      "name": "human_intervention_count"
+    },
+    {
+      "aggregation": "mean",
+      "direction": "lower_is_better",
+      "name": "cost_usd_total"
+    }
+  ],
+  "stop_rules": [
+    {
+      "action": "terminate and report reject/inconclusive",
+      "when": "candidate_attempts exhausted"
+    },
+    {
+      "action": "halt and require protocol amendment",
+      "when": "regression_count > 0 across 2 consecutive rounds"
+    },
+    {
+      "action": "freeze state, emit report",
+      "when": "budget.wallclock_seconds elapsed"
+    }
+  ],
+  "title": "Partner continual improvement benchmark, hypotheses H1-H4, default arm",
+  "version": "1.0.0"
+}

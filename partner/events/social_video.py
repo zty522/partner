@@ -30,7 +30,7 @@ def _stage(name: str):
         identity = {key:str(getattr(ctx,key,'') or '') for key in
                     ('workspace','job_id','project_id','instance_id','intake_instance_id','channel','sender_id')}
         work = str(directory)
-        key = 'social:' + str(params.get('event_id') or request['params']['run_id']) + ':' + name
+        key = 'social:' + str(params.get('event_id') or params.get('run_id') or ctx.job_id) + ':' + name
         task = manager.submit(key, identity, {**params, '_stage':name,
             '_background_operation':'social_stage', 'action_work':work},
             seconds=7500 if name=='video_transcribe' else 1800 if name.startswith('video_') else 300)

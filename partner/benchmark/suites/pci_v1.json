@@ -1,0 +1,63 @@
+{
+  "suite_id": "pci_v1",
+  "title": "Partner Continual Improvement Benchmark v1",
+  "version": "1.0.0",
+  "schema_version": "benchmark/v1",
+  "domains": [
+    "software_data_pipeline",
+    "scientific_analysis_planning",
+    "research_reporting"
+  ],
+  "tracks": [
+    "experience_only",
+    "external_only",
+    "joint",
+    "no_change",
+    "static_baseline",
+    "reflection_only"
+  ],
+  "task_families": [
+    "data_pipeline_csv",
+    "scientific_planning",
+    "research_reporting"
+  ],
+  "protocol_id": "PCI-H1H4-v1",
+  "fixture_root": "partner/benchmark/fixtures",
+  "split_definitions": {
+    "train": [],
+    "dev": [],
+    "held_out": [],
+    "note": "Held-out labels are pinned to the dataset author; this manifest declares which families are in each split once the synthetic seeds are upgraded to materialised data (see docs/operations/benchmark_data_card_template.md)."
+  },
+  "baseline_arms": [
+    {"name": "static-agent", "fixture": "partner.benchmark.fixtures.software_pipeline"},
+    {"name": "reflection-only", "fixture": "partner.benchmark.fixtures.software_pipeline"},
+    {"name": "external-only", "fixture": "partner.benchmark.fixtures.scientific_planning"},
+    {"name": "joint", "fixture": "partner.benchmark.fixtures.research_reporting"},
+    {"name": "no-change", "fixture": "partner.benchmark.fixtures.software_pipeline"}
+  ],
+  "ablation_arms": [
+    {"name": "h1-ablated", "fixture": "partner.benchmark.fixtures.software_pipeline", "drop": "H1"},
+    {"name": "h2-ablated", "fixture": "partner.benchmark.fixtures.scientific_planning", "drop": "H2"},
+    {"name": "h3-ablated", "fixture": "partner.benchmark.fixtures.software_pipeline", "drop": "H3"},
+    {"name": "h4-ablated", "fixture": "partner.benchmark.fixtures.research_reporting", "drop": "H4"}
+  ],
+  "scoring": {
+    "primary_metric": "hidden_task_quality_delta",
+    "secondary_metrics": [
+      "learning_curve_auc",
+      "regression_count",
+      "calibration_brier",
+      "human_intervention_count",
+      "cost_usd_total"
+    ],
+    "missing_handling": "no_data",
+    "zero_denominator_handling": "explicit_no_data_row, not zero"
+  },
+  "isolation": {
+    "default_workspace": "separate from production partner_workspace",
+    "qq_blocked_by_default": true,
+    "production_promotion_blocked": true
+  },
+  "notes": "v1 covers three domains with one synthetic fixture each. Materialising additional families and real科研 datasets requires cloning external repos; see docs/dependencies/external_sources.yaml."
+}

@@ -1,13 +1,18 @@
-"""Recoverable instance worker for pinned canonical Event Flows.
+"""Production Event worker (shared-mode pool).
 
-The worker owns scheduling mechanics only.  Understanding, project reasoning,
-learning, evolution, presentation and delivery remain ordinary catalog Events.
+Read discipline: queue discovery is authoritative via ``JobRepository``
+(installed by ``partner.index.worker_patch`` — ``list_by_status`` /
+``claim_job`` / ``upsert_from_record``).  The legacy ``os.scandir``
+``_queue_jobs`` is a bounded single-directory enumeration kept only as a
+fallback when the index DB is unavailable.  No full-tree walk.
 """
+
 from __future__ import annotations
 
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import signal
 import threading
@@ -22,6 +27,8 @@ from partner.application.models import JobRecord
 from partner.event_fabric import EventFlowController, EventFlowStore, EventLedger, EventSummary, build_catalog
 from partner.event_fabric.runner import EventFlowRunner
 from partner.event_flows import build_flow_registry
+
+logger = logging.getLogger("partner.runtime.event_worker")
 
 
 def _root(path: str | os.PathLike) -> Path:
@@ -105,6 +112,14 @@ class EventWorker:
         if self.shared_mode:
             self.lock_dir.mkdir(parents=True, exist_ok=True)
             self._cleanup_stale_locks()
+        # Install index fast-paths (idempotent, safe to call per worker).
+        try:
+            from partner.index.ledger_patch import install_at_event_worker_init
+            from partner.index.worker_patch import install_job_repository_path_on_event_worker
+            install_at_event_worker_init()
+            install_job_repository_path_on_event_worker()
+        except Exception:
+            pass  # fall back to legacy readers if index DB is not yet built
 
     def stop(self, *_args: Any) -> None:
         self._stopping = True
@@ -127,6 +142,48 @@ class EventWorker:
         temporary = path.with_suffix(f".tmp.{os.getpid()}")
         temporary.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, path)
+
+    def _queue_jobs(self):
+        """Discover new jobs each poll without rereading immutable history.
+
+        Terminal records are rechecked within 30 seconds so externally resumed
+        jobs remain discoverable. Active records are never cached. Directory
+        enumeration also removes deleted entries; this cache is not queue truth.
+        """
+        cache = getattr(self, '_terminal_job_cache', None)
+        if cache is None:
+            cache = self._terminal_job_cache = {}
+        now = time.monotonic()
+        seen = set()
+        try:
+            with os.scandir(self.jobs_dir) as entries:
+                paths = [Path(entry.path) for entry in entries
+                         if entry.name.endswith('.json')]
+        except FileNotFoundError:
+            return
+        for path in paths:
+            seen.add(path.name)
+            previous = cache.get(path.name)
+            if previous and now < previous[0]:
+                continue
+            try:
+                stat = path.stat()
+                signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except OSError:
+                cache.pop(path.name, None)
+                continue
+            if previous and previous[1] == signature:
+                cache[path.name] = (now + 30, signature)
+                continue
+            job = self._load_job(path)
+            if job and job.status in {'completed', 'failed', 'cancelled'}:
+                cache[path.name] = (now + 30, signature)
+                continue
+            cache.pop(path.name, None)
+            if job:
+                yield job, path
+        for name in cache.keys() - seen:
+            del cache[name]
 
     def _try_acquire_lock(self, job_id: str) -> bool:
         from partner.runtime.background_actions import identity
@@ -184,6 +241,26 @@ class EventWorker:
         except (OSError, ProcessLookupError, ValueError):
             return False
 
+    def _isolate_broken_job(self, job: JobRecord, reason: str) -> None:
+        """Fail and record a queued Job whose flow state is unrecoverable.
+
+        Mirrors the failed terminal into the authoritative JobRepository and
+        the JSON projection so the queue is clean and the failure is durable
+        evidence — never a silent retry loop."""
+        try:
+            job.status = "failed"
+            job.error = reason
+            from datetime import datetime, timezone
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+            from partner.index.job_repository import init as _init_jobs
+            repo = _init_jobs(self.root)
+            repo.upsert_from_record(
+                job.to_dict(), actor=f"EventWorker.{self.instance_id}",
+                projection_path=self.jobs_dir / f"{job.job_id}.json",
+            )
+        except Exception as exc:
+            logger.error("failed to isolate broken job %s: %s", job.job_id, exc)
+
     def next_job(self) -> JobRecord | None:
         # ADR 0100: shared workers pick ANY queued/dispatched/running job
         # from the global queue — they are not bound to one instance's
@@ -191,14 +268,25 @@ class EventWorker:
         # (that concept is being retired; workers are resource-scaled).
         if self.shared_mode:
             rows: list[tuple[JobRecord, Path]] = []
-            for path in self.jobs_dir.glob("*.json"):
-                job = self._load_job(path)
+            for job, path in self._queue_jobs():
                 if (job and job.status in {"queued", "dispatched", "running"}
                         and job.flow_id):
                     rows.append((job, path))
             rows.sort(key=lambda pair: pair[0].created_at)
             for job, _path in rows:
-                state = self.store.load(job.flow_id)
+                try:
+                    state = self.store.load(job.flow_id)
+                except (FileNotFoundError, ValueError, OSError) as exc:
+                    # A queued Job whose flow state file is missing/corrupt
+                    # (stale queue from an earlier run, or a crash between
+                    # flow save and job enqueue) must not take down the whole
+                    # shared worker.  Isolate it as failed and continue.
+                    logger.error(
+                        "isolate job %s: flow %s missing/corrupt: %s",
+                        job.job_id, job.flow_id, exc,
+                    )
+                    self._isolate_broken_job(job, f"flow_missing:{job.flow_id}")
+                    continue
                 control = self.root / "state/application/controls" / f"{job.job_id}.json"
                 if state.next_check_at > time.time() and not control.exists():
                     continue
@@ -225,13 +313,47 @@ class EventWorker:
             except (OSError, TypeError, ValueError):
                 return None
         rows: list[JobRecord] = []
-        for path in self.jobs_dir.glob("*.json"):
-            job = self._load_job(path)
+        for job, path in self._queue_jobs():
             if (job and job.assigned_instance == self.instance_id
                     and job.status in {"queued", "dispatched", "running"} and job.flow_id):
                 rows.append(job)
         rows.sort(key=lambda value: value.created_at)
         return rows[0] if rows else None
+
+    def _emit_progress_message(self, *, job, flow_state, node_id, node_output):
+        import sys; sys.stderr.write("[TRACE_EMIT] ENTER node=" + node_id + " flow_type=" + str(flow_state.flow_type) + chr(10)); sys.stderr.flush()
+        """Run notification.emit_progress after a round node completes.
+
+        Translates the just-completed node's output into a short Chinese
+        progress message and writes it to the outbound queue. Failures
+        are caught at the caller; this helper raises only on truly
+        unexpected errors (e.g. invalid flow_type).
+        """
+        from partner.events.emit_progress import emit_progress
+        # EventContext is defined in this module (line 44); do not import it
+        # from partner.event_fabric (it is not exported there — that import
+        # raised ImportError and silently swallowed the whole emit_progress call).
+        ctx = EventContext(
+            workspace=str(self.root),
+            instance_workspace=str(self.root / "instances" / (
+                job.assigned_instance or job.origin_instance or self.instance_id)),
+            instance_id=job.assigned_instance or job.origin_instance or self.instance_id,
+            project_id=job.project_id,
+            job_id=job.job_id,
+            channel=job.channel or "local",
+            sender_id=job.sender_id or "",
+            intake_instance_id=str(getattr(job, "intake_instance_id", "") or ""),
+            adapter=self.adapter,
+        )
+        params = {
+            "completed_node_id": node_id,
+            "node_output": node_output,
+            "flow_id": flow_state.flow_id,
+            "task_id": flow_state.task_id or job.job_id,
+            "instance_id": ctx.instance_id,
+            "flow_type": flow_state.flow_type,
+        }
+        import sys as _sys; _result = emit_progress(ctx, params); _sys.stderr.write("[TRACE_EMIT] EXIT ok=" + str(_result.get("ok")) + " text=" + str(_result.get("progress_text",""))[:80] + chr(10)); _sys.stderr.flush()
 
     def _apply_control(self, job: JobRecord, state: Any) -> bool:
         path = self.root / "state/application/controls" / f"{job.job_id}.json"
@@ -261,6 +383,17 @@ class EventWorker:
             return True
         if state.status == 'paused':
             return False
+        from partner.runtime.request_budget import expired
+        if (job.flow_type in {'project_iteration','new_project','browser_video_learning','xhs_authoring'}
+                and expired(job.intent_contract) and not state.waiting_task_id):
+            state.status = 'paused'
+            self.store.save(state)
+            job.status = 'paused'
+            job.error = '本次观察时段结束，停止新增业务动作；目标是否达成以已有证据为准。'
+            self._save_job(job)
+            if job.report_policy != 'none':
+                self._maybe_start_report(job)
+            return True
         try:
             definition = self.flows.get(state.flow_type, version=state.definition_version)
         except KeyError:
@@ -298,6 +431,12 @@ class EventWorker:
             if job.suspended_flows:
                 suspended = dict(job.suspended_flows.pop())
                 parent = self.store.load(str(suspended["parent_flow_id"]))
+                if suspended.get('kind') == 'cycle':
+                    from partner.runtime.cycle_children import merge_child
+                    merge_child(self, parent, state, suspended)
+                if suspended.get('kind')=='domain_handoff':
+                    from partner.runtime.domain_handoff import merge_video_result
+                    merge_video_result(parent,state)
                 try:
                     self.controller.resume(parent, child_flow_id=state.flow_id)
                 except ValueError:
@@ -347,7 +486,7 @@ class EventWorker:
             event_id = state.current_event_id
             summary = next((row for row in self.ledger.recent_summaries(
                 limit=10000, include_audit=True) if row.get("event_id") == event_id), None)
-            event = self.ledger.event_index().get(event_id, {})
+            event = self.ledger.get_event_history(event_id)
             node_id = str(event.get("node_id") or "")
             if summary and node_id in state.ready_node_ids:
                 semantic = summary.get("semantic_output") or {}
@@ -399,8 +538,8 @@ class EventWorker:
         self.adapter.project_id = job.project_id
         self.adapter.event_type = definition.node(node_id).event_type
         ctx = EventContext(
-            workspace=str(self.root), instance_workspace=str(self.instance_workspace),
-            instance_id=self.instance_id, project_id=job.project_id,
+            workspace=str(self.root), instance_workspace=str(self.root / 'instances' / (job.assigned_instance or job.origin_instance or self.instance_id)),
+            instance_id=job.assigned_instance or job.origin_instance or self.instance_id, project_id=job.project_id,
             job_id=job.job_id, channel=job.channel, sender_id=job.sender_id,
             intake_instance_id=str(getattr(job, "intake_instance_id", "") or ""),
             adapter=self.adapter,
@@ -408,13 +547,16 @@ class EventWorker:
         initial = {
             "request": job.request, "channel": job.channel,
             "sender_id": job.sender_id, "origin_instance": job.origin_instance,
-            "project_id": job.project_id, "instance_id": self.instance_id,
+            "project_id": job.project_id, "instance_id": ctx.instance_id,
             "job_id": job.job_id, "root_event_id":job.root_event_id, "report_policy": job.report_policy,
             "intent_contract": job.intent_contract,
             "attachments": job.attachments,
         }
         if job.suspended_flows:
             initial.update(dict(job.suspended_flows[-1].get("context") or {}))
+        if state.flow_type == 'project_cycle':
+            from partner.events.cycle import enrich
+            initial = enrich(ctx, initial, state.node_outputs)
         from partner.runtime.wait_notifications import dispatch_if_due
         await dispatch_if_due(self,job,state,ctx)
         pending=asyncio.create_task(self.runner.run_ready_node(state,definition,node_id,ctx,initial))
@@ -422,6 +564,20 @@ class EventWorker:
             done,_=await asyncio.wait({pending},timeout=30)
             if not done: await dispatch_if_due(self,job,state,ctx)
         result=await pending
+        # SIDE-BAND: per-event progress message (only for round-style flows).
+        # emit_progress runs after a node completes; it enqueues a short
+        # Chinese message to the same outbound queue used by message_critic -> send.
+        # Failures are isolated — they must not block the round.
+        if (result.output.get("ok") and result.flow_state.flow_type in
+                {"project_cycle_round", "project_iteration_round"}):
+            try:
+                self._emit_progress_message(
+                    job=job, flow_state=result.flow_state,
+                    node_id=node_id, node_output=result.output,
+                )
+            except Exception as exc:
+                # Side-band failure must not affect round advancement.
+                pass
         if result.output.get("status") == "waiting":
             self._save_job(job)
             return False
@@ -451,6 +607,14 @@ class EventWorker:
             job.status = "running"
         if result.flow_state.status == "failed":
             job.error = str(result.output.get("error") or "event_flow_failed")
+        elif result.flow_state.status == "completed" and not job.suspended_flows:
+            # A historical failure that the flow later recovered from must not
+            # leave status=completed + error=event_flow_failed.  Clear the stale
+            # error so the authoritative terminal state is self-consistent.
+            job.error = ""
+        if node_id=='execute' and result.output.get('requested_child_flow') and not job.suspended_flows:
+            from partner.runtime.domain_handoff import insert_video
+            insert_video(self,job,result.flow_state,result.output['requested_child_flow'])
         if result.flow_state.flow_type == "project_iteration" and node_id == "route":
             semantic = result.output.get("semantic_output") if isinstance(result.output.get("semantic_output"), dict) else {}
             child_name = {"active_learning": "active_learning",
@@ -477,6 +641,13 @@ class EventWorker:
                 })
                 job.flow_id = child.flow_id; job.flow_type = child.flow_type
                 job.ready_event_ids = list(child.ready_node_ids); job.status = "running"
+        cycle_child = result.output.get('cycle_child') or (
+            result.output.get('semantic_output') or {}).get('cycle_child')
+        if cycle_child:
+            from partner.runtime.cycle_children import start_child
+            output_for_child = dict(result.output)
+            output_for_child['cycle_child'] = cycle_child
+            start_child(self, job, result.flow_state, output_for_child)
         self._save_job(job)
         return True
 
@@ -486,7 +657,9 @@ class EventWorker:
                 if hasattr(signal, name):
                     signal.signal(getattr(signal, name), self.stop)
         while not self._stopping:
-            job = self.next_job()
+            # A slow filesystem must not block the asyncio control loop.
+            # Await the single scan: never overlap claim attempts on this worker.
+            job = await asyncio.to_thread(self.next_job)
             if not job:
                 await asyncio.sleep(poll_seconds)
                 continue
@@ -496,9 +669,40 @@ class EventWorker:
                 # re-running nodes (the previous one-checkpoint-per-claim
                 # design let three workers alternate on one job and replay
                 # execute/verify/send several times).
-                await self._run_job_to_terminal(job)
+                await self._run_with_lease(job)
             finally:
                 self._release_claim()
+
+    async def _run_with_lease(self, job):
+        if not getattr(self, '_db_lease_owner', None):
+            return await self._run_job_to_terminal(job)
+        stop = threading.Event()
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(self._run_job_to_terminal(job))
+        def heartbeat():
+            while not stop.wait(10):
+                try:
+                    valid = self._renew_lease()
+                except Exception:
+                    valid = False
+                if not valid:
+                    self._lease_lost = True
+                    loop.call_soon_threadsafe(task.cancel)
+                    return
+        thread = threading.Thread(target=heartbeat, daemon=True, name='partner-lease')
+        thread.start()
+        try:
+            await task
+        except asyncio.CancelledError:
+            self._lease_lost = True
+            self._stopping = True
+            raise
+        finally:
+            stop.set()
+            await asyncio.to_thread(thread.join, 35)
+            if thread.is_alive():
+                self._lease_lost = True
+                self._stopping = True
 
     async def _run_job_to_terminal(self, job: JobRecord) -> None:
         """Drive one claimed job through checkpoints until it reaches a
@@ -578,8 +782,10 @@ class EventWorker:
         # experiments remain indexed, but must not crowd or silently redefine it.
         primary_paths = set(evidence)
         prior_verified = []
-        for previous_path in self.jobs_dir.glob('*.json'):
-            previous_job = self._load_job(previous_path)
+        from partner.index.resource_catalog import related_jobs
+        from partner.index.worker_patch import _build_jobrecord
+        for previous_record in related_jobs(self.root,job.root_event_id):
+            previous_job = _build_jobrecord(previous_record)
             if (previous_job and previous_job.root_event_id == job.root_event_id
                     and previous_job.flow_type == 'project_iteration' and previous_job.flow_id):
                 try:
@@ -672,7 +878,17 @@ class EventWorker:
         report_job.flow_id = flow_state.flow_id
         report_job.flow_type = flow_state.flow_type
         report_job.ready_event_ids = list(flow_state.ready_node_ids)
-        self._save_job(report_job)
+        self._enqueue_followup(report_job)
+
+    def _enqueue_followup(self, job):
+        # New work has no lease; it must be claimed independently by a worker.
+        from partner.index.job_repository import init
+        repo=init(self.root)
+        if repo.get_record(job.job_id):raise RuntimeError('followup already exists')
+        repo.upsert_from_record(job.to_dict(),actor='enqueue_followup',
+            projection_path=self.jobs_dir/f'{job.job_id}.json')
+        for item in repo.outbox_pending():
+            if item['job_id']==job.job_id:repo.outbox_emit_legacy_json(item['seq'])
 
     def _maybe_continue_iteration(self, job: JobRecord) -> None:
         """Honour a completed project_iteration flow's ``continue_project``
@@ -707,17 +923,16 @@ class EventWorker:
         # 等那一轮真正执行完再由本函数重新评估，避免无限嵌套叙事。
         if flow.selected_route != "continue_project":
             return
-        count = 0
-        for path in self.jobs_dir.glob("*.json"):
-            other = self._load_job(path)
-            if other and other.root_event_id == job.root_event_id and other.flow_type == "project_iteration":
-                count += 1
+        from partner.index.resource_catalog import related_jobs
+        count = len(related_jobs(self.root,job.root_event_id))
         try:
             runtime = json.loads((self.root/'config/partner_config.json').read_text()).get('runtime') or {}
             max_rounds = max(1, min(50, int(runtime.get('project_iteration_max_rounds', 12))))
         except (OSError, ValueError, TypeError):
             max_rounds = 12
-        if count >= max_rounds:
+        from partner.runtime.request_budget import round_limit, expired
+        max_rounds = round_limit(job.intent_contract, max_rounds)
+        if count >= max_rounds or expired(job.intent_contract):
             # 达到本次请求预算后报告真实进度，不将预算耗尽视为目标达成。
             if job.report_policy != 'none':
                 self._maybe_start_report(job)
@@ -780,6 +995,7 @@ class EventWorker:
             attachments=job.attachments,
             root_event_id=job.root_event_id,
             intent_contract={"original_request":job.intent_contract.get("original_request") or job.request,
+                "execution_constraints":dict(job.intent_contract.get('execution_constraints') or {}),
                 "previous_artifact_hashes":list(set((job.intent_contract.get("previous_artifact_hashes") or []) +
                     [row.get("sha256", "") for row in (flow.node_outputs.get("verify", {}).get("semantic_output", {}).get("evidence") or [])]))},
         )
@@ -794,7 +1010,7 @@ class EventWorker:
         next_job.flow_id = flow_state.flow_id
         next_job.flow_type = flow_state.flow_type
         next_job.ready_event_ids = list(flow_state.ready_node_ids)
-        self._save_job(next_job)
+        self._enqueue_followup(next_job)
 
 
 def run_instance_event_worker(workspace: str, instance_id: str) -> None:

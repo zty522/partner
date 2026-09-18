@@ -37,6 +37,13 @@ def atomic_json(path: Path, data: dict[str, Any]) -> None:
             json.dump(data, handle, ensure_ascii=False, indent=2)
             handle.write("\n")
         os.replace(temp_path, path)
+        from partner.index.resource_catalog import ResourceCatalog
+        for ancestor in path.resolve().parents:
+            if ancestor.name=='governance' and ancestor.parent.name=='mind':
+                kind={'experiments':'experiment','cognition_shadow':'cognition'}.get(path.parent.name)
+                if kind:
+                    ResourceCatalog(ancestor.parent.parent.parent).register(path,kind,str(data.get('project_id') or (data.get('bundle') or {}).get('project_id') or ''))
+                break
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

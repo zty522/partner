@@ -63,7 +63,11 @@ def _resolve_api_json(provider: str = "") -> dict:
             data = json.load(f)
         apis = data.get("apis", {}) or {}
         requested = str(provider or "").strip().lower()
-        selected_name = requested if requested else DEFAULT_PROVIDER
+        # (2026-09-14) 默认 provider 优先读 config/api.json 顶层 default_provider 字段，
+        # 其次回退到 PARTNER_DEFAULT_PROVIDER env，最后才是模块常量 "minimax"。
+        # 这样 operator 只需改 config 就能切换默认 LLM，不用动 env 或代码。
+        cfg_default = str(data.get("default_provider") or "").strip().lower()
+        selected_name = requested if requested else (cfg_default or DEFAULT_PROVIDER)
         primary = apis.get(selected_name, {}) or {}
         if not (str(primary.get("api_key") or "").strip() and str(primary.get("base_url") or "").strip()):
             return {}
@@ -90,13 +94,20 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
     timeout 做第二道保险，超时后放弃（后台线程会泄漏，但对长驻进程可接受，
     远好过整个事件循环被单个请求卡死）。
     """
-    # read_timeout 设宽一点：minimax 长 prompt 经常 50-80s 才回，30s 太短；
-    # 连接超时 30s 已够。``timeout`` 由调用方决定，留作外层硬上限。
+    # (2026-09-14) read_timeout 设宽：minimax 长 prompt（autoevolution counter
+    # 节点塞 audit 12 aspects + cycle 真实证据 + sources 实际源码 ≈ 30k+ token）
+    # 经常 50-80s 才回，30s 太短直接 Read timed out。改为 read_timeout 至少 60s、
+    # 最多 180s；连接超时仍 15s（minimax 后端挂掉时不该等 60s 才建连）。
     def _do():
+        read_timeout = max(60, min(timeout, 180))
+        # Force brand-new TCP connection per request to avoid stale socket
+        # reuse after a previous hung call.
+        hdrs = dict(headers)
+        hdrs.setdefault("Connection", "close")
         with requests.Session() as session:
             session.trust_env = False
-            return session.post(url, headers=headers, json=payload,
-                                timeout=(min(15, timeout), timeout), proxies=proxies)
+            return session.post(url, headers=hdrs, json=payload,
+                                timeout=(min(15, timeout), read_timeout), proxies=proxies)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(_do)
@@ -206,9 +217,16 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
         "temperature": temperature,
         "stream": False,
     }
-    # 仅 deepseek-v4-pro 是 reasoning 模型（默认会先产一大段思考拖慢
-    # execute 又烧 token）。reasoning_effort=none 关掉思考，又快又省。
-    # minimax 是普通 chat 模型，不传这个字段。
+    # Keep extended reasoning for investigation and initial causal design.
+    # Code serialization and source-grounded contract checks use the output
+    # budget directly; independent review remains a separate model call.
+    serialization_purposes = {'report_visual_plan', 'report_claim_repair', 'autoevolution_tests', 'autoevolution_test_repair', 'autoevolution_test_repair_2',
+                              'autoevolution_test_review', 'autoevolution_test_confirm', 'autoevolution_test_confirm_2',
+                              'autoevolution_design_confirm',
+                              'autoevolution_candidate_1', 'autoevolution_candidate_2',
+                              'autoevolution_design_schema_repair'}
+    if selected_provider == 'minimax' and model.lower() == 'minimax-m3' and purpose in serialization_purposes:
+        payload['thinking'] = {'type':'disabled'}
     if selected_provider == "deepseek":
         payload["reasoning_effort"] = "none"
     
@@ -248,6 +266,7 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                 "total_tokens": int(usage.get("total_tokens") or 0),
                 "model": model, "provider": selected_provider,
                 "finish_reason": finish_reason,
+                "thinking_requested": payload.get('thinking',{}).get('type','default'),
             }
             logger.info(f"[DirectAPI] {purpose} OK in {elapsed:.1f}s, prompt={len(prompt)}chars response={len(resp_content)}chars")
             _log_api_call(**call_meta, model=model, base_url=api_base, purpose=purpose, status="ok",

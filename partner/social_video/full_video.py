@@ -28,11 +28,20 @@ def acquire(url, directory, browser, notify):
     media = directory / 'source.mp4'
     if not media.exists():
         notify('开始获取完整视频媒体；若站点需要浏览器会话，将使用独立 Edge 中实际可播放的媒体。')
-        result = subprocess.run([python_runtime(), '-m', 'yt_dlp', '--no-playlist', '--no-progress',
+        result = None
+        timeout_error = False
+        try:
+            result = subprocess.run([python_runtime(), '-m', 'yt_dlp', '--no-playlist', '--no-progress',
                                  '--socket-timeout', '25', '--retries', '1', '--merge-output-format', 'mp4',
                                  '-f', 'bv*+ba/b', '-o', str(media), url],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=300)
-        if result.returncode or not media.exists():
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            timeout_error = True
+        write_json(directory / 'download_attempt.json', {'url':url, 'method':'yt_dlp',
+            'timed_out':timeout_error, 'exit_code':result.returncode if result else None,
+            'media_exists':media.exists()})
+        if timeout_error or result.returncode or not media.exists():
+            notify('命令行下载未完成，开始从独立浏览器中实际可播放的来源获取媒体。')
             downloaded = browser('video_download', {'url': url, 'run_id': directory.parent.name})
             if downloaded.get('status') != 'downloaded':
                 raise RuntimeError('站点未提供可下载的完整视频：' + downloaded.get('status', 'unknown'))

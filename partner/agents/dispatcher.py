@@ -104,16 +104,29 @@ def _resolve_llm_env_var(
         if val:
             return val
 
-    # 2. Partner workspace config (only for primary LLM credential keys)
-    if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_BASE_URL",
+    # 2. Partner workspace config (only for primary LLM credential keys).
+    # 2026-09-14: expanded allowlist to include all provider-named keys so that
+    # the workspace config (config/agent_api_config.json) becomes the sole
+    # source of LLM credentials for agent subprocesses.
+    if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
+                    "QWEN_API_KEY", "ANTHROPIC_API_KEY", "XIAOMI_API_KEY",
+                    "OPENAI_BASE_URL", "MINIMAX_BASE_URL", "MINIMAX_CN_BASE_URL",
                     "HERMES_MODEL", "PARTNER_PROVIDER", "HERMES_PROVIDER"):
         try:
             from ..adapters.agent_config_sync import desired_hermes_model_config
             cfg = desired_hermes_model_config(workdir or os.getcwd())
+            # 2026-09-14: agent_api_config.json uses provider-named keys; map each
+            # env-style key name to the right field in the config block.
             key_map = {
                 "OPENAI_API_KEY": "api_key",
                 "DEEPSEEK_API_KEY": "api_key",
+                "MINIMAX_API_KEY": "api_key",
+                "MINIMAX_CN_API_KEY": "api_key",
+                "QWEN_API_KEY": "api_key",
+                "ANTHROPIC_API_KEY": "api_key",
+                "XIAOMI_API_KEY": "api_key",
                 "OPENAI_BASE_URL": "base_url",
+                "MINIMAX_BASE_URL": "base_url",
                 "HERMES_MODEL": "model",
                 "PARTNER_PROVIDER": "provider",
                 "HERMES_PROVIDER": "provider",
@@ -126,18 +139,11 @@ def _resolve_llm_env_var(
         except Exception:
             pass
 
-    # 3. Hermes credential system via bash -lic
-    if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
-        try:
-            _tmp_env = os.environ.copy()
-            _inject_hermes_api_key(_tmp_env)
-            for name in names:
-                val = _tmp_env.get(name, "").strip()
-                if val:
-                    return val
-        except Exception:
-            pass
-
+    # 3. (2026-09-14 removed) bash -lic + _inject_hermes_api_key fallback.
+    # All LLM credentials must come from workspace config files
+    # (config/agent_api_config.json, config/api.json) — never from shell env.
+    # _resolve_llm_env_var returns "" here, forcing callers to fall back to
+    # workspace config.
     return ""
 
 
@@ -351,29 +357,32 @@ class AgentDispatcher:
         _llm_env_provider = _resolve_llm_env_var(
             "PARTNER_PROVIDER", "HERMES_PROVIDER", task=task, workdir=cwd_for_resolve(task)
         )
-        # Derive defaults from API key pattern when env vars are not set.
-        # Supports: DeepSeek (sk-d*), OpenAI (sk-*), Anthropic (sk-ant-*), and custom.
+        # (2026-09-14 removed) auto-derivation of base_url / model / provider
+        # from API key prefix (sk-d = deepseek, sk-ant = anthropic, sk- = openai).
+        # Such heuristic picks a vendor based on the key's textual shape — it
+        # overrides the operator's explicit config and makes the agent bypass
+        # the workspace config (config/agent_api_config.json). When the
+        # operator's config says minimax and the shell accidentally exports
+        # a sk-d* DEEPSEEK key, the agent silently routes to deepseek and
+        # exhausts the deepseek quota. LLM endpoint selection must come
+        # exclusively from the workspace config; if any of base_url / model /
+        # provider is still missing, treat that as a config error and surface
+        # it rather than guessing from the key prefix.
         if _llm_env_api_key and not _llm_env_base_url:
-            if _llm_env_api_key.startswith("sk-d"):
-                _llm_env_base_url = "https://api.deepseek.com"
-            elif _llm_env_api_key.startswith("sk-ant"):
-                _llm_env_base_url = "https://api.anthropic.com"
-            elif _llm_env_api_key.startswith("sk-"):
-                _llm_env_base_url = "https://api.openai.com"
+            logger.error(
+                "agent_dispatch: LLM api_key is set but base_url is missing; "
+                "set it explicitly in config/agent_api_config.json"
+            )
         if _llm_env_api_key and not _llm_env_model:
-            if _llm_env_api_key.startswith("sk-d"):
-                _llm_env_model = "deepseek-v4-flash"
-            elif _llm_env_api_key.startswith("sk-ant"):
-                _llm_env_model = "claude-sonnet-4-20250514"
-            elif _llm_env_api_key.startswith("sk-"):
-                _llm_env_model = "gpt-4o"
+            logger.error(
+                "agent_dispatch: LLM api_key is set but model is missing; "
+                "set it explicitly in config/agent_api_config.json"
+            )
         if _llm_env_api_key and not _llm_env_provider:
-            if _llm_env_api_key.startswith("sk-d"):
-                _llm_env_provider = "deepseek"
-            elif _llm_env_api_key.startswith("sk-ant"):
-                _llm_env_provider = "anthropic"
-            elif _llm_env_api_key.startswith("sk-"):
-                _llm_env_provider = "openai"
+            logger.error(
+                "agent_dispatch: LLM api_key is set but provider is missing; "
+                "set it explicitly in config/agent_api_config.json"
+            )
         if _llm_env_api_key:
             all_vars["__llm_api_key__"] = _llm_env_api_key
         if _llm_env_base_url:

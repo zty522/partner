@@ -27,13 +27,30 @@ def semantic_update(kind: str):
         evidence = list(record.get("evidence_refs") or [])
         if kind in {"habit", "growth"} and not evidence:
             return {"ok": False, "status": "failed", "error": "evidence_refs_required"}
+        # E4: 经验双层. pretrained = 跨项目可迁移的通用规律; task_specific
+        # = 当前项目专属经验. 默认 task_specific.
+        allowed_layers = {"pretrained", "task_specific"}
+        layer = str(record.get("layer") or "task_specific")
+        if layer not in allowed_layers:
+            return {"ok": False, "status": "failed",
+                    "error": f"layer must be one of {sorted(allowed_layers)}"}
+        record["layer"] = layer
+        if layer == "pretrained" and kind not in {"habit", "growth", "lesson"}:
+            return {"ok": False, "status": "failed",
+                    "error": "pretrained layer only valid for habit/growth/lesson"}
         if kind in {"habit", "growth"}:
             from partner.event_fabric import EventLedger
             project = str(params.get('project_id') or getattr(ctx, 'project_id', '') or record.get('project_id') or '')
+            if layer == "task_specific":
+                if not project or (record.get("project_id") and record['project_id'] != project):
+                    return {"ok": False, "status": "failed", "error": "verified memory requires matching project scope"}
+                record['project_id'] = project
             if not project or (record.get('project_id') and record['project_id'] != project):
                 return {"ok": False, "status": "failed", "error": "verified memory requires matching project scope"}
             record['project_id'] = project
-            terminals = EventLedger(_workspace(ctx)).recent_summaries(limit=10000, include_audit=True)
+            ledger=EventLedger(_workspace(ctx))
+            evidence=[str(eid).removeprefix('summary:') for eid in evidence]
+            terminals=[{**ledger.get_event_history(eid), **row} for eid in evidence for row in ledger._projection().rows(ledger.summaries_path,entity=eid,limit=1)]
             verified = [row for row in terminals if row.get("event_id") in evidence
                         and row.get("status") == "completed"
                         and (row.get("business_delta") or row.get("evolution_delta"))
@@ -49,7 +66,7 @@ def semantic_update(kind: str):
                     return {"ok": False, "status": "failed", "error": "growth requires trusted matched improvement and regression evidence"}
                 linked = [row for row in terminals if row.get('event_id') in evidence
                           and row.get('project_id') == project and row.get('status') == 'completed'
-                          and row.get('event_type') == 'self_evolution.matched_compare'
+                          and ledger.get_event_history(row.get('event_id','')).get('event_type') in {'self_evolution.matched_compare','autoevolution.compare'}
                           and set(matched['evidence_refs']).issubset(row.get('evidence_refs') or [])]
                 if not linked:
                     return {"ok": False, "status": "failed", "error": "growth receipts require a matching comparison Event in this project"}

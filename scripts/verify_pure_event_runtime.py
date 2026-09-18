@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ENTRY = (
     "partner.__main__", "partner.runtime.instance_host", "partner.runtime.event_worker",
     "partner.application.service", "partner.event_fabric.catalog",
-    "shells.frontend.qq_bot.qq_official_bridge", "shells.frontend.tui",
-    "shells.frontend.desktop_gui.workspace.window",
+    "shells.frontend.qq_bot.qq_official_bridge",  # 2026-09-17: tui+desktop_gui retired
+
 )
 FORBIDDEN = (
     "partner.mind.harness", "partner.mind.executor", "partner.harness_core",

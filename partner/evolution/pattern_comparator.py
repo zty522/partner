@@ -550,15 +550,15 @@ class PatternComparator:
             # Map gap category to target file
             gap_category = gap.get("category", "")
             if gap_category == "布局":
-                target_path = "shells/frontend/desktop_gui/modern/widgets.py"
+                target_path = "partner/web/frontend_src/src/components/Widget.tsx"
             elif gap_category == "交互":
-                target_path = "shells/frontend/desktop_gui/modern/pages/chat.py"
+                target_path = "partner/web/frontend_src/src/pages/RunConsole.tsx"
             elif gap_category == "组件":
-                target_path = "shells/frontend/desktop_gui/modern/widgets.py"
+                target_path = "partner/web/frontend_src/src/components/Widget.tsx"
             elif gap_category == "样式":
-                target_path = "shells/frontend/desktop_gui/modern/styles.py"
+                target_path = "partner/web/frontend_src/src/styles.css"
             else:
-                target_path = "shells/frontend/desktop_gui/modern/widgets.py"
+                target_path = "partner/web/frontend_src/src/components/Widget.tsx"
 
             # Determine change type and risk level
             priority = gap.get("priority", "medium")

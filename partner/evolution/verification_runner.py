@@ -39,7 +39,9 @@ KEY_UI_COMPONENTS = {
 }
 # Project root
 PROJECT_ROOT = Path("/mnt/e/work/partner")
-GUI_DIR = PROJECT_ROOT / "shells/frontend/desktop_gui/modern"
+# 2026-09-17: GUI_DIR is now retired; the git diff below is a no-op.
+# 2026-09-17: GUI_DIR removed with the desktop_gui retirement.
+GUI_DIR = None
 
 
 @dataclass
@@ -259,7 +261,8 @@ def check_git_diff() -> CheckResult:
     """Check that actual git changes exist (proves code was really modified)."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--stat", "shells/frontend/desktop_gui/modern/"],
+            # 2026-09-17: GUI git diff removed with the retirement.
+[]
             capture_output=True, text=True, timeout=10,
             cwd=str(PROJECT_ROOT),
         )

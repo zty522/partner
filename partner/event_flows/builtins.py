@@ -4,6 +4,12 @@ from __future__ import annotations
 from partner.event_fabric.flows import EventFlowDefinition as Flow, FlowNode as Node
 
 
+INTENT_FLOW = Flow("intent", "1.0.0", (
+    Node("observe", "interaction.intent_observe"),
+    Node("counter_read", "interaction.intent_counter_read", ("observe",)),
+    Node("synthesize", "interaction.intent_synthesize", ("counter_read",)),
+), "Three-pass intent understanding; route, dispatch_target and warm_reply live in synthesize output.")
+
 DIRECT_ANSWER = Flow("direct_answer", "1.0.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
@@ -17,18 +23,18 @@ DIRECT_ANSWER = Flow("direct_answer", "1.0.0", (
 ), "Simple answer with three-pass understanding and verified delivery.")
 
 
-PROJECT_ITERATION = Flow("project_iteration", "2.2.0", (
+PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
     Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
     Node("recall", "memory.context_recall", ("understand_3",)),
-    Node("inspect", "project.state_inspect", ("recall",)),
-    Node("hypothesis", "project.hypothesis_propose", ("inspect",)),
-    Node("critic", "project.hypothesis_critic", ("hypothesis",)),
-    Node("select", "project.action_select", ("critic",)),
-    Node("execute", "project.action_execute", ("select",), continue_on_failure=True),
+    Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall",), optional=True),
+    Node("inspect", "project.state_inspect", ("pre_iteration_reflect", "recall")),
+    Node("plan", "project.plan_propose", ("inspect",)),
+    Node("execute", "project.action_execute", ("plan",), continue_on_failure=True),
     Node("verify", "project.outcome_verify", ("execute",)),
     Node("reflect", "project.outcome_reflect", ("verify",)),
+    Node("reflect_to_evolve", "evolution.reflect_to_evolve", ("reflect",), optional=True),
     Node("remember", "memory.lesson_extract", ("reflect",), optional=True),
     Node("route", "selector.assess_next", ("remember",)),
     Node("continuation", "project.continuation_propose", ("route",), when_route="continue_project", optional=True),
@@ -118,6 +124,46 @@ PDF_REPORT_REISSUE = Flow("pdf_report_reissue", "1.0.0", (
 ), "Recheck and render an existing report after a formatting repair, preserving prior files.")
 
 
+ASPECT_ITERATION_REFLECTION = Flow("aspect_iteration_reflection", "1.0.0", (
+    Node("observe", "evolution.aspect_observe", parameters={"aspect": "iteration"}),
+    Node("counter_read", "evolution.aspect_counter_read", ("observe",), parameters={"aspect": "iteration"}),
+    Node("synthesize", "evolution.aspect_synthesize", ("counter_read",), parameters={"aspect": "iteration"}),
+    Node("emit", "evolution.aspect_emit", ("synthesize",), parameters={"aspect": "iteration"}),
+), "Three-pass reflection over the iteration aspect (every round).")
+
+
+ASPECT_INTENT_REFLECTION = Flow("aspect_intent_reflection", "1.0.0", (
+    Node("observe", "evolution.aspect_observe", parameters={"aspect": "intent"}),
+    Node("counter_read", "evolution.aspect_counter_read", ("observe",), parameters={"aspect": "intent"}),
+    Node("synthesize", "evolution.aspect_synthesize", ("counter_read",), parameters={"aspect": "intent"}),
+    Node("emit", "evolution.aspect_emit", ("synthesize",), parameters={"aspect": "intent"}),
+), "Reflection over the intent-routing aspect.")
+
+
+ASPECT_MESSAGE_REFLECTION = Flow("aspect_message_reflection", "1.0.0", (
+    Node("observe", "evolution.aspect_observe", parameters={"aspect": "message"}),
+    Node("counter_read", "evolution.aspect_counter_read", ("observe",), parameters={"aspect": "message"}),
+    Node("synthesize", "evolution.aspect_synthesize", ("counter_read",), parameters={"aspect": "message"}),
+    Node("emit", "evolution.aspect_emit", ("synthesize",), parameters={"aspect": "message"}),
+), "Reflection over the user-message aspect.")
+
+
+ASPECT_PDF_REPORT_REFLECTION = Flow("aspect_pdf_report_reflection", "1.0.0", (
+    Node("observe", "evolution.aspect_observe", parameters={"aspect": "pdf_report"}),
+    Node("counter_read", "evolution.aspect_counter_read", ("observe",), parameters={"aspect": "pdf_report"}),
+    Node("synthesize", "evolution.aspect_synthesize", ("counter_read",), parameters={"aspect": "pdf_report"}),
+    Node("emit", "evolution.aspect_emit", ("synthesize",), parameters={"aspect": "pdf_report"}),
+), "Reflection over the PDF report aspect.")
+
+
+ASPECT_EVENT_FLOW_REFLECTION = Flow("aspect_event_flow_reflection", "1.0.0", (
+    Node("observe", "evolution.aspect_observe", parameters={"aspect": "event_flow"}),
+    Node("counter_read", "evolution.aspect_counter_read", ("observe",), parameters={"aspect": "event_flow"}),
+    Node("synthesize", "evolution.aspect_synthesize", ("counter_read",), parameters={"aspect": "event_flow"}),
+    Node("emit", "evolution.aspect_emit", ("synthesize",), parameters={"aspect": "event_flow"}),
+), "Reflection over the event-flow / shared-worker aspect.")
+
+
 NEW_PROJECT = Flow("new_project", "1.1.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
@@ -170,6 +216,10 @@ VIDEO_LEARNING = Flow("browser_video_learning", "1.1.0", (
     Node("delivery_verify", "delivery.verify", ("send",)),
 ), "Backend Edge video learning with aligned audio, frames and source evidence.")
 
+ACCEPTANCE_MINIMAL = Flow("acceptance_minimal_chain", "1.0.0", (
+    Node("accept_echo", "acceptance.echo"),
+), "Acceptance-only minimal task chain. Used to verify JobRepository claim/release path.")
+
 
 DEFINITIONS = [DIRECT_ANSWER, PROJECT_ITERATION, ACTIVE_LEARNING, SELF_EVOLUTION,
                MESSAGE_DELIVERY, PDF_REPORT, PDF_REPORT_REVISION, PDF_REPORT_REISSUE,
@@ -210,3 +260,4 @@ for _flow in DEFINITIONS:
             _flow=replace(_flow,version=f'{_major}.{int(_minor)+1}.0',nodes=tuple(_nodes))
     _updated.append(_flow)
 DEFINITIONS=_updated
+DEFINITIONS.append(ACCEPTANCE_MINIMAL)

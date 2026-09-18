@@ -113,10 +113,11 @@ import sys, os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ.pop("DISPLAY", None)
 sys.path.insert(0, "/mnt/e/work/partner")
-from PySide6.QtWidgets import QApplication
+# 2026-09-17: PySide6 desktop GUI has been retired.
+raise RuntimeError("standalone_screenshots depends on PySide6 desktop_gui which has been retired; see docs/operations/gui_tui_retirement_checklist.md")
 app = QApplication(sys.argv)
 try:
-    from shells.frontend.desktop_gui.workspace import PartnerWorkspaceWindow
+    pass  # raised above
     win = PartnerWorkspaceWindow(os.environ.get("PARTNER_WORKSPACE", "/mnt/e/work/partner_workspace"))
     win.resize(1280, 900)
     win.show()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import re
 import uuid
@@ -24,6 +25,7 @@ from partner.projects.session_context import SessionContext
 from partner.event_fabric import EventLedger, EventSummary, NextEventSelector
 from partner.event_fabric import EventFlowController, EventFlowStore, build_catalog
 from partner.event_flows import build_flow_registry
+from partner.runtime.request_budget import validate_constraints
 
 from .models import JobRecord, Submission
 
@@ -36,7 +38,7 @@ _PROJECT_MARKERS = {
     "molecular_generation": ("分子生成", "靶点", "对接", "targetdiff", "药物", "molecule"),
     "molecular_dynamics_study": ("分子动力学", "amber", "gromacs", "md 模拟", "md模拟"),
     "literature_github_learning": ("github", "论文", "文献", "源码", "外部学习", "主动学习"),
-    "hermes_partner_explore": ("partner 自进化", "自进化", "harness", "candidate", "partner框架"),
+    "partner_explore": ("partner 自进化", "自进化", "harness", "candidate", "partner框架"),
 }
 
 
@@ -49,74 +51,6 @@ def _root(value: str | os.PathLike) -> Path:
     if path.parent.name == "instances":
         return path.parent.parent
     return path
-
-
-def _route(text: str) -> str:
-    value = str(text or "").strip().lower()
-    if re.search(r"(^|\s)/(pause|resume|cancel|stop)\b", value) or any(x in value for x in ("暂停任务", "恢复任务", "取消任务")):
-        return "modify_work"
-    if any(x in value for x in ("同意 candidate", "批准 candidate", "拒绝 candidate", "批准修复", "同意修复")):
-        return "approval_response"
-    if any(x in value for x in ("现在在做什么", "进展如何", "项目状态", "任务状态", "有哪些任务",
-                                  "有哪些项目", "哪些项目", "项目正在运行", "查看进度")):
-        return "project_query"
-    conversational = ("你好", "在吗", "谢谢", "早上好", "晚上好", "告诉我你能做什么",
-                      "告诉我你现在可以", "介绍一下你自己")
-    if len(value) <= 80 and any(x in value for x in conversational):
-        return "chat_reply"
-    return "enqueue_work"
-
-
-def _project(text: str, persona_hint: str = "", explicit: str = "",
-            *, conversation_id: str = "",
-            feature_flag: str = "legacy",
-            workspace_root: "Path" = None) -> Union[str, "ProjectDecision"]:
-    """Resolve a request to a project_id (or ProjectDecision under "new").
-
-    ADR 0099: legacy flag returns a project_id string (existing 5-instance
-    × 5-project keyword matching — unchanged).  When ``feature_flag ==
-    "new"``, returns a :class:`ProjectDecision` so the caller can branch
-    on ``existing_project`` / ``new_project_kind`` / ``chat_reply``.
-    """
-    if feature_flag == "new":
-        return _project_via_classifier(
-            text, workspace_root=workspace_root,
-            persona_hint=persona_hint, explicit=explicit,
-            conversation_id=conversation_id,
-        )
-    # ----- legacy path (unchanged) -----
-    if explicit in PROJECT_TO_INSTANCE:
-        return explicit
-    value = str(text or "").lower()
-    scores = {
-        project_id: sum(1 for marker in markers if marker.lower() in value)
-        for project_id, markers in _PROJECT_MARKERS.items()
-    }
-    winner = max(scores, key=scores.get)
-    if scores[winner] > 0:
-        return winner
-    if persona_hint in PROJECTS:
-        return PROJECTS[persona_hint][0]
-    return PROJECTS["04"][0]
-    if feature_flag == "new":
-        return _project_via_classifier(
-            text, persona_hint=persona_hint, explicit=explicit,
-            conversation_id=conversation_id,
-        )
-    # ----- legacy path (unchanged) -----
-    if explicit in PROJECT_TO_INSTANCE:
-        return explicit
-    value = str(text or "").lower()
-    scores = {
-        project_id: sum(1 for marker in markers if marker.lower() in value)
-        for project_id, markers in _PROJECT_MARKERS.items()
-    }
-    winner = max(scores, key=scores.get)
-    if scores[winner] > 0:
-        return winner
-    if persona_hint in PROJECTS:
-        return PROJECTS[persona_hint][0]
-    return PROJECTS["04"][0]
 
 
 def _project_via_classifier(text: str, *,
@@ -302,6 +236,13 @@ class PartnerApplicationService:
         self.jobs_dir = self.state / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.fabric = EventLedger(self.root)
+        # Auto-install the JobRepository dual-write hook so every _save()
+        # mirrors into the authoritative SQLite jobs.db.
+        try:
+            from partner.application.service_db_patch import install_save_db_hook
+            install_save_db_hook()
+        except Exception:
+            pass
 
     def _application_config(self) -> dict[str, Any]:
         """Read ``application.*`` block from ``config/partner_config.json``.
@@ -340,9 +281,10 @@ class PartnerApplicationService:
     def _project_intent_context(self, project_id: str, persona_hint: str) -> dict[str, Any]:
         """Return bounded project memory so short user messages stay useful."""
         project = str(project_id or "").strip()
-        if project not in PROJECT_TO_INSTANCE and persona_hint in PROJECTS:
+        dynamic = {row.project_id:row for row in DynamicProjectRegistry(self.root).list_projects(include_archived=True)}
+        if not project and persona_hint in PROJECTS:
             project = PROJECTS[persona_hint][0]
-        if project not in PROJECT_TO_INSTANCE:
+        if project not in PROJECT_TO_INSTANCE and project not in dynamic:
             return {}
         directory = self.root / "share" / "projects" / project
 
@@ -352,10 +294,19 @@ class PartnerApplicationService:
             except OSError:
                 return ""
 
+        # Project ownership vs task execution identity are DISTINCT.  The
+        # project may have a default owner (suggestion), but the task is
+        # executed by the explicitly specified Partner (persona_hint); a
+        # default owner must never overwrite that.
+        default_owner = PROJECT_TO_INSTANCE.get(project) or dynamic[project].owner_instance
         context: dict[str, Any] = {
-            "instance_id": PROJECT_TO_INSTANCE[project],
+            "project_default_owner": default_owner,
+            "executing_partner": persona_hint or default_owner or "",
+            # Backward-compat alias: keep instance_id as the *default owner*
+            # hint; the authoritative execution identity is executing_partner.
+            "instance_id": default_owner,
             "project_id": project,
-            "project_title": PROJECT_TITLES[project],
+            "project_title": PROJECT_TITLES.get(project, project),
             "project_brief": _bounded_text("project_brief.md"),
             "project_state": _bounded_text("state.md"),
         }
@@ -409,11 +360,13 @@ class PartnerApplicationService:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _save(self, job: JobRecord) -> None:
+        from partner.index.job_repository import init
         job.updated_at = _now()
-        path = self.jobs_dir / f"{job.job_id}.json"
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        repo=init(self.root)
+        repo.upsert_from_record(job.to_dict(), actor='ApplicationService._save',
+            projection_path=self.jobs_dir/f'{job.job_id}.json')
+        for row in repo.outbox_pending():
+            if row['job_id']==job.job_id:repo.outbox_emit_legacy_json(row['seq'])
 
     def _append_event(self, event_type: str, job: JobRecord, **extra: Any) -> None:
         row = {"schema_version": 1, "event_type": event_type, "at": _now(),
@@ -425,17 +378,8 @@ class PartnerApplicationService:
             os.fsync(handle.fileno())
 
     def list_jobs(self, *, project_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for path in self.jobs_dir.glob("*.json"):
-            try:
-                row = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                continue
-            if project_id and row.get("project_id") != project_id:
-                continue
-            rows.append(row)
-        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
-        return rows[: max(1, limit)]
+        from partner.index.resource_catalog import job_records
+        return job_records(self.root,project_id=project_id,limit=max(1,limit))
 
     def control_job(self, job_id: str, action: str) -> dict[str, Any]:
         """Persist a checkpoint-safe pause/resume/cancel request.
@@ -450,7 +394,9 @@ class PartnerApplicationService:
         path = self.jobs_dir / f"{job_id}.json"
         with self._locked():
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
+                from partner.index.job_repository import init
+                raw = init(self.root).get_record(job_id)
+                if raw is None:raise ValueError('job not found')
                 job = JobRecord(**{key: value for key, value in raw.items()
                                    if key in JobRecord.__dataclass_fields__})
             except (OSError, TypeError, ValueError):
@@ -477,6 +423,65 @@ class PartnerApplicationService:
             self._save(job)
             self._append_event("job_control_requested", job, action=action)
         return {"ok": True, "job_id": job_id, "action": action, "status": job.status}
+
+
+    def submit_acceptance(self, *, request="", channel="local",
+                          sender_id="", sender_name="",
+                          persona_hint="02"):
+        """Test-only entry point: bypass synth_sem, route to acceptance_minimal_chain."""
+        from partner.event_fabric.flows import EventFlowController, EventFlowStore
+        from partner.event_flows.registry import build_flow_registry
+        from partner.event_fabric.catalog import build_catalog
+        from partner.index.job_repository import init as _init_jobs
+        from partner.application.models import Submission
+
+        catalog = build_catalog()
+        registry = build_flow_registry()
+        flow_def = registry.get("acceptance_minimal_chain")
+
+        now = _now()
+        job_id = "job_acc_" + uuid.uuid4().hex[:12]
+        job = JobRecord(
+            job_id=job_id,
+            project_id="acceptance_test",
+            title="Acceptance minimal chain",
+            request=request or "Run acceptance_minimal_chain once",
+            route="acceptance_minimal_chain",
+            flow_type="acceptance_minimal_chain",
+            channel=channel,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            persona_hint=persona_hint,
+            origin_instance=persona_hint,
+            assigned_instance=persona_hint,
+            intake_instance_id=persona_hint,
+            status="queued",
+            created_at=now, updated_at=now,
+            intent_contract={"mode": "acceptance"},
+        )
+        try:
+            _init_jobs(self.root).upsert_from_record(
+                job.to_dict(), actor="submit_acceptance")
+        except Exception as exc:
+            return Submission(False, "", "", persona_hint, "rejected",
+                              "acceptance_minimal_chain",
+                              "DB write failed: " + type(exc).__name__ + ": " + str(exc))
+        store = EventFlowStore(self.root)
+        controller = EventFlowController(store)
+        state = controller.start(
+            flow_def, catalog_version=catalog.version,
+            task_id=job_id, project_id="acceptance_test",
+            instance_id=persona_hint)
+        job.flow_id = state.flow_id
+        job.event_catalog_version = catalog.version
+        job.ready_event_ids = list(state.ready_node_ids)
+        _init_jobs(self.root).upsert_from_record(
+            job.to_dict(), actor="submit_acceptance.flow")
+        self._save(job)
+        return Submission(True, job_id, "acceptance_test", persona_hint,
+                          job.status, "acceptance_minimal_chain",
+                          "submitted to acceptance_minimal_chain", "")
+
 
     def projects(self) -> list[dict[str, Any]]:
         self.refresh_jobs()
@@ -515,6 +520,8 @@ class PartnerApplicationService:
                         flow = None
                     if flow is not None:
                         mapped = flow.status if flow.status in {"completed", "failed", "cancelled"} else "running"
+                        if raw.get('suspended_flows'):
+                            mapped = 'running'  # The owning worker must first resume the parent.
                         if mapped != raw.get("status"):
                             job = JobRecord(**{key: value for key, value in raw.items()
                                                if key in JobRecord.__dataclass_fields__})
@@ -830,6 +837,41 @@ class PartnerApplicationService:
                     return value
         return ""
 
+    def _enqueue_outbound_text(self, *, job_id: str, sender_id: str,
+                                content: str, persona_hint: str = "",
+                                project_id: str = "") -> None:
+        """Write a QQ outbound file so the instance notification_poller
+        delivers `content` to `sender_id` over QQ. Reuses the schema
+        delivery.py / qq_bridge already handle.
+        """
+        if not sender_id or not content:
+            return
+        try:
+            target_dir = Path(self.root) / "state/application/outbound" / (persona_hint or "")
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / f"{job_id}.json"
+            payload = {
+                "schema_version": 2,
+                "job_id": job_id,
+                "to_user": sender_id,
+                "content": content,
+                "image_artifacts": [],
+                "pdf_artifacts": [],
+                "text_delivered": False,
+                "delivery_state": "queued",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=False),
+                                encoding="utf-8")
+            os.replace(temporary, target)
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "[submit] outbound enqueue failed for %s: %s", job_id, exc)
+
+
+
+
     def submit(
         self,
         text: str,
@@ -841,273 +883,226 @@ class PartnerApplicationService:
         project_id: str = "",
         attachments: Sequence[str | os.PathLike | Mapping[str, object]] = (),
         report_policy: str = "milestone",
+        execution_constraints: Mapping[str, object] | None = None,
+        mode: str = "",
+        scope: str = "",
+        preallocated_job_id: str = "",
     ) -> Submission:
         clean = str(text or "").replace("\x00", "").strip()
         if not clean and not attachments:
             return Submission(False, "", "", "", "rejected", "enqueue_work", "消息为空")
-        route = _route(clean)
-        from partner.social_video.integration import intake as social_intake
+
+        # ---------------------------------------------------------------
+        # 1. Intent flow: observe -> counter_read -> synthesize (LLM-driven).
+        #    No regex / no hardcoded route / no hardcoded project_id.
+        # ---------------------------------------------------------------
+        from partner.events.interaction import (
+            intent_observe, intent_counter_read, intent_synthesize,
+            direct_answer as direct_answer_event,
+        )
+        from partner.projects.dynamic_project_registry import DynamicProjectRegistry
+        from partner.runtime.status_context import runtime_status
+
+        method_arm = str((execution_constraints or {}).get("method_arm")
+                          or (execution_constraints or {}).get("benchmark_method_arm")
+                          or "")
+        ablation_drop = str((execution_constraints or {}).get("ablation_drop") or "")
+        intent_params_base = {
+            "request": clean,
+            "attachments": list(attachments),
+            "project_id": project_id or persona_hint or "",
+            "available_projects": self._list_available_projects(persona_hint),
+            "mode": mode,
+            "scope": scope,
+            "method_arm": method_arm,
+            "ablation_drop": ablation_drop,
+        }
+
         try:
-            social_request = social_intake(self.root, clean, channel=channel, sender_id=sender_id,
-                                           instance=persona_hint, attachments=attachments)
-        except (ValueError, OSError, KeyError) as exc:
-            return Submission(False, "", "", "", "rejected", "enqueue_work", str(exc))
-        if social_request:
-            clean = social_request
-            project_id = "xiaohongshu_operations"
-            route = "enqueue_work"
-        job_id = f"job_{uuid.uuid4().hex[:16]}"
-        intent_result: dict[str, Any] = {}
-        intent_contract: dict[str, Any] = {}
-        # ADR 0099: read the feature flag once and propagate to every
-        # ``_project`` call below.  ``conversation_id`` is derived from
-        # the sender_id so a follow-up in the same QQ chat hits the
-        # session-context lookup (L2).
-        _app_flags = self._feature_flag_application()
-        _feature_flag = _app_flags["instance_project_binding"]
-        _conversation_id = f"{channel}:{persona_hint}:{sender_id}" if sender_id else ""
-        # ADR 0099: when the new flag is on, run the classifier once
-        # up front and remember the kind so flow_name routing below can
-        # dispatch to NEW_PROJECT when needed.  Legacy flag skips this.
-        _classification_kind = ""
-        _classification_hint = ""
-        if _feature_flag == "new":
+            ctx_for_llm = _intent_ctx(self.root, persona_hint, project_id, channel, sender_id)
+            observe_out = intent_observe(ctx_for_llm, dict(intent_params_base))
+            counter_out = intent_counter_read(ctx_for_llm, {
+                **intent_params_base,
+                "upstream": {"understand_1": observe_out},
+            })
+            synth_params = {
+                **intent_params_base,
+                "upstream": {"understand_1": observe_out, "understand_2": counter_out},
+            }
+            synth_out = intent_synthesize(ctx_for_llm, synth_params)
+        except Exception as exc:  # noqa: BLE001
+            return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
+                              f"意图审议失败：{type(exc).__name__}: {exc}")
+
+        synth_sem = (synth_out or {}).get("semantic_output") or {}
+        route = str(synth_sem.get("route") or "").strip()
+        dispatch_target = str(synth_sem.get("dispatch_target") or "").strip()
+        warm_reply = str(synth_sem.get("warm_reply") or "").strip()
+        payload = dict(synth_sem.get("payload") or {})
+        # Surface improvement mode from payload so downstream routing picks
+        # the dedicated partner dispatch target.
+        explicit_mode = str(payload.get("mode") or "").strip()
+        if explicit_mode in {"self_improvement", "learning_improvement"}:
+            dispatch_target = "partner_" + explicit_mode
+        # Improvement modes are explicit operator intents, not subject to the
+        # LLM's direct_answer heuristic.  Force the bounded project path so the
+        # dedicated improvement flow is always selected.
+        if mode in {"self_improvement", "learning_improvement"} and scope == "partner":
+            route = "project_iteration"
+
+        if route not in {"direct_answer", "project_iteration"}:
+            return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
+                              f"意图审议未给出有效 route：{route!r}")
+
+        # ---------------------------------------------------------------
+        # 2a. direct_answer: synchronously run direct_answer event, return text.
+        # ---------------------------------------------------------------
+        if route == "direct_answer":
             try:
-                from partner.application.project_classifier import (
-                    ProjectClassifier, Kind as _Kind,
-                )
-                from partner.projects.dynamic_project_registry import (
-                    DynamicProjectRegistry,
-                )
-                from partner.projects.session_context import SessionContext
-                from partner.workspace.workspace_layout import (
-                    workspace_root_path,
-                )
-                _ws = self.root
-                _reg = DynamicProjectRegistry(workspace_root=_ws)
-                _sess = SessionContext(workspace_root=_ws)
-                _clf = ProjectClassifier(
-                    workspace_root=_ws,
-                    session_context=_sess,
-                    registry=_reg,
-                    semantic_backend="none",
-                )
-                _decision = _clf.classify(
-                    request=clean,
-                    conversation_id=_conversation_id,
-                    explicit_project_id=project_id,
-                )
-                _classification_kind = _decision.kind.value
-                _classification_hint = _decision.project_hint or ""
-            except Exception:
-                # Classifier unavailable — leave kind empty; flow_name
-                # falls through to the default "project_iteration".
-                pass
-        # The accepting Bot is stable routing evidence. Resolve its project
-        # before enrichment so natural messages such as “继续上次实验” can use
-        # the real project brief and latest Receipt.
-        _project_raw = _project(
-            clean, persona_hint, project_id,
-            conversation_id=_conversation_id,
-            feature_flag=_feature_flag,
-            workspace_root=self.root,
-        )
-        # ADR 0099: under the "new" flag, _project returns a
-        # ProjectDecision rather than a project_id string.  Resolve
-        # decision into a project_id here so downstream legacy code
-        # (modify_work, project_query, etc.) keeps working unchanged.
-        contextual_project = _normalise_project_result(
-            _project_raw, workspace_root=self.root, instance_id=persona_hint,
-        )
-        if _feature_flag == 'new':
-            _classification_kind = getattr(getattr(_project_raw, 'kind', None), 'value', '')
-            if _classification_kind == 'chat_reply':
-                route = 'chat_reply'
-        if route == "modify_work":
-            lowered = clean.lower()
-            action = ("cancel" if ("cancel" in lowered or "取消" in clean) else
-                      "resume" if ("resume" in lowered or "恢复" in clean or "继续任务" in clean) else
-                      "pause")
-            candidates = [row for row in self.list_jobs(project_id=contextual_project, limit=50)
-                          if row.get("status") in {"queued", "dispatched", "running", "paused"}]
-            if not candidates:
-                return Submission(False, "", contextual_project,
-                                  PROJECT_TO_INSTANCE[contextual_project], "rejected", route,
-                                  "当前项目没有可控制的后台工作。")
-            target = candidates[0]
-            controlled = self.control_job(str(target["job_id"]), action)
-            wording = {"pause": "暂停", "resume": "继续", "cancel": "取消"}[action]
-            return Submission(bool(controlled.get("ok")), str(target["job_id"]), contextual_project,
-                              str(target.get("assigned_instance") or ""),
-                              str(controlled.get("status") or target.get("status") or ""), route,
-                              (f"已记录{wording}请求，将在安全检查点生效。" if controlled.get("ok")
-                               else "操作未生效：" + str(controlled.get("error") or "未知原因")))
-        if route == "enqueue_work":
-            try:
-                intent_result = self._enrich_intent(
-                    clean,
-                    job_id,
-                    project_id=contextual_project,
-                    persona_hint=persona_hint,
-                )
-                intent_contract = dict(intent_result.get("intent") or {})
-            except Exception as exc:
-                intent_result = {"ok": False, "status": "failed", "error": type(exc).__name__}
-        # Deterministic command recognition remains constitutional.  For an
-        # ordinary work request the model may refine the project hint, but it
-        # cannot turn an actionable request into chat or grant new authority.
-        model_mode = str(intent_contract.get("interaction_mode") or "")
-        if route == "enqueue_work" and model_mode in {"modify_work", "approval_response", "cancel_or_pause"}:
-            route = model_mode
-        project_signal = clean + "\n" + str(intent_contract.get("project_hint") or "")
-        # Explicit project selection and the accepting specialist are stable
-        # routing evidence.  A strong project name in the user's own words may
-        # still cross-route (for example asking bot 03 to run a molecular-
-        # generation experiment), but an LLM-invented project_hint may not
-        # override the explicit channel when the original request is neutral.
-        # Without this boundary, a malformed intent pass sent a 03 MD
-        # experiment to the 05 Partner-code lane.
-        if _feature_flag == "new":
-            _raw = _project_raw
-        elif project_id or persona_hint:
-            _raw = _project(
-                clean, persona_hint, project_id,
-                conversation_id=_conversation_id,
-                feature_flag=_feature_flag,
-                workspace_root=self.root,
-            )
-        else:
-            _raw = _project(
-                project_signal, persona_hint, project_id,
-                conversation_id=_conversation_id,
-                feature_flag=_feature_flag,
-                workspace_root=self.root,
-            )
-        selected_project, _classification_extra = _normalise_project_result_full(
-            _raw, workspace_root=self.root, instance_id=persona_hint,
-        )
-        # The selected project chooses its current specialist. A channel's bot
-        # identity is a stable fallback, not ownership of every topic.
-        # ADR 0100: assigned_instance is ADVISORY only — it records the
-        # QQ channel / instance the user originally chatted on.  Actual
-        # job execution is performed by an independent worker process
-        # (see partner/runtime/shared_worker.py, scheduled for Phase 6)
-        # which picks jobs off the queue without consulting this field.
-        # We just stamp the inbound persona_hint so downstream message
-        # push can route end-of-Flow notifications back to the right Bot.
+                ans_out = direct_answer_event(ctx_for_llm, {
+                    "request": clean,
+                    "project_id": dispatch_target or persona_hint or "",
+                    "intent_contract": synth_sem,
+                })
+                answer_text = str((ans_out or {}).get("answer") or warm_reply or
+                                  "已收到你的问题，但当前没有可回复的具体内容。").strip()
+                if channel == "qq" and sender_id:
+                    self._enqueue_outbound_text(
+                        job_id=f"da-{uuid.uuid4().hex[:16]}",
+                        sender_id=sender_id, content=answer_text,
+                        persona_hint=persona_hint or "",
+                        project_id=dispatch_target or persona_hint or "",
+                    )
+                return Submission(True, "", dispatch_target or persona_hint or "",
+                                  persona_hint, "completed", "direct_answer",
+                                  answer_text, "")
+            except Exception as exc:  # noqa: BLE001
+                fallback_text = warm_reply or f"已收到；详细回复生成失败：{exc}"
+                if channel == "qq" and sender_id:
+                    self._enqueue_outbound_text(
+                        job_id=f"da-{uuid.uuid4().hex[:16]}",
+                        sender_id=sender_id, content=fallback_text,
+                        persona_hint=persona_hint or "",
+                        project_id=persona_hint or "",
+                    )
+                return Submission(True, "", "", persona_hint, "completed", "direct_answer",
+                                  fallback_text, "")
+
+        # ---------------------------------------------------------------
+        # 2b. project_iteration: prepare run state, enqueue flow.
+        # ---------------------------------------------------------------
+        if not dispatch_target:
+            dispatch_target = project_id or persona_hint or "project_iteration"
+
+        # When dispatch points at social/video, materialise runs/<id>/owner.json
+        # so downstream stages can verify ownership via trusted_request.
+        if dispatch_target in {"browser_video_learning", "xhs_authoring"}:
+            from partner.social_video.integration import ensure_edge
+            import uuid as _uuid
+            run_id = (('xhs-' if dispatch_target == 'xhs_authoring' else 'video-')
+                      + _uuid.uuid4().hex[:12])
+            from partner.social_video.integration import data_root, digest as _digest, write_json as _write_json
+            base = data_root(self.root)
+            run_dir = base / 'runs' / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            owner = _digest({'channel': channel, 'sender': sender_id, 'instance': persona_hint})
+            params = {'run_id': run_id}
+            url = str(payload.get('url') or '').strip()
+            topic = str(payload.get('topic') or '').strip()
+            media = payload.get('media') or []
+            if dispatch_target == 'browser_video_learning':
+                if not url:
+                    return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
+                                      "video 派发目标需要 url 字段")
+                params['url'] = url
+            else:
+                params['topic'] = topic or clean
+                params['media'] = [str(m) for m in media] if isinstance(media, list) else []
+            _write_json(run_dir / 'owner.json',
+                        {'owner': owner, 'event': dispatch_target, 'params': params})
+            # Attach dispatch info so the flow worker threads run_id into stage params.
+            intent_params_base['run_id'] = run_id
+            intent_params_base['dispatch_event'] = dispatch_target
+
+        job_id = preallocated_job_id if preallocated_job_id else f"job_{uuid.uuid4().hex[:16]}"
         assigned = persona_hint or ""
-        # Phase 5.3 (migration_plan_0100): legacy keyword fallback is kept
-        # so the legacy flag still produces sensible values.  Under the
-        # new flag the value above is what the worker uses.
-        if _feature_flag != "new" or not assigned:
-            assigned = PROJECT_TO_INSTANCE.get(selected_project, assigned)
-            if not assigned and _feature_flag != "new":
-                # Legacy path: old behaviour — fall through to PROJECTS lookup
-                for cand_instance, (proj_id, _title) in PROJECTS.items():
-                    if proj_id == selected_project:
-                        assigned = cand_instance
-                        break
+        intent_contract = dict(synth_sem) if synth_sem else {}
+        intent_contract['original_request'] = clean
+        intent_contract['mode'] = mode
+        intent_contract['scope'] = scope
+        intent_contract['dispatch_target'] = dispatch_target
+        intent_contract['warm_reply'] = warm_reply
+        # Development rollout is scoped to explicitly configured instances.
+        # This only changes a new project request; it never schedules work itself.
+        cycle_policy = self._application_config().get('bounded_evolution_cycle') or {}
+        constraint_input = dict(execution_constraints or {})
+        if (persona_hint in cycle_policy.get('instances', [])
+                and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}):
+            defaults = {'evolution_cycle': True, 'max_rounds': 2,
+                        'evolution_apply': cycle_policy.get('apply') is True,
+                        'action_seconds': cycle_policy.get('action_seconds', 300)}
+            constraint_input = {**defaults, **constraint_input}
+        intent_contract['execution_constraints'] = (
+            dict(validate_constraints(constraint_input))
+            if constraint_input else {}
+        )
         if project_id:
             intent_contract['explicit_project_id'] = project_id
-        job = JobRecord(
-            job_id=job_id, project_id=selected_project,
-            title=(clean.splitlines()[0][:80] or
-                   PROJECT_TITLES.get(selected_project, selected_project) or
-                   clean[:40]), request=clean,
-            route=route, channel=channel, sender_id=sender_id,
-            persona_hint=persona_hint,
-            origin_instance=persona_hint if persona_hint in PROJECTS else "",
-            assigned_instance=assigned,
-            # ADR 0100: intake_instance_id records which QQ Bot (and
-            # therefore which instance) the user originally chatted
-            # with.  Worker pool uses this to route terminal-flow
-            # notifications back to the right Bot via the polling
-            # delivery loop.  Defaults to persona_hint (== sender's
-            # selected instance); empty only when no persona_hint.
-            intake_instance_id=persona_hint or "",
-            created_at=_now(), updated_at=_now(), report_policy=report_policy,
-            attachments=[{"path": str(item.get("path") if isinstance(item, Mapping) else item)} for item in attachments],
-            intent_contract_path=str(intent_result.get("contract_path") or ""),
-            intent_contract=intent_contract,
-            intent_model_calls=int(intent_result.get("_model_calls") or 0),
-        )
-        received = self.fabric.create(
-            "interaction.message_received", "interaction", correlation_id=job.job_id,
-            project_id=selected_project, job_id=job.job_id, instance_id=assigned,
-            channel=channel, payload={"sender_name": sender_name, "has_attachments": bool(attachments)},
-        )
-        job.root_event_id = received.event_id
-        self.fabric.complete(received, EventSummary(
-            event_id=received.event_id, status="completed", headline="收到用户请求",
-            outcome=clean[:240], notification_kind="routine",
-            next_event_candidates=[],
-        ))
-        intent_event = self.fabric.create(
-            "interaction.intent_enrichment", "interaction", root_event_id=received.event_id,
-            parent_event_id=received.event_id, correlation_id=job.job_id,
-            project_id=selected_project, job_id=job.job_id, instance_id=assigned,
-            channel=channel, payload={"strategy_id": "user_intent_enrichment_v3_three_pass"},
-        )
-        model_ok = False
-        self.fabric.complete(intent_event, EventSummary(
-            event_id=intent_event.event_id,
-            # Event completion and model quality are orthogonal. The Event
-            # completed even when it had to emit a conservative fallback.
-            status="completed",
-            headline="三遍意图理解已排入 Event Flow",
-            outcome=clean[:500],
-            claims=[{"name": "model_calls", "value": job.intent_model_calls},
-                    {"name": "model_interpretation_ok", "value": model_ok}],
-            evidence_refs=([job.intent_contract_path] if job.intent_contract_path else []),
-            notification_kind="routine",
-            next_event_candidates=[{
-                "event_type": "interaction.intent_routed", "series": "interaction",
-                "project_id": selected_project, "concurrency_key": f"intent:{job.job_id}",
-                "prerequisites": [f"summary:{intent_event.event_id}"],
-            }],
-        ))
-        intent_required_but_failed = False
-        routed = self.fabric.create(
-            "interaction.intent_routed", "interaction", root_event_id=received.event_id,
-            parent_event_id=intent_event.event_id, correlation_id=job.job_id,
-            project_id=selected_project, job_id=job.job_id, instance_id=assigned, channel=channel,
-            payload={"route": route},
-        )
-        self.fabric.complete(routed, EventSummary(
-            event_id=routed.event_id, status="completed", headline="请求已理解并路由",
-            outcome=f"{route} → {selected_project} → {assigned}",
-            claims=[{"name": "route", "value": route}, {"name": "assigned_instance", "value": assigned}],
-            notification_kind="routine",
-            next_event_candidates=[{
-                "event_type": "project.job_dispatch", "series": "project",
-                "project_id": selected_project, "concurrency_key": f"project:{selected_project}",
-                "prerequisites": [f"summary:{routed.event_id}"],
-            }],
-        ))
-        # Pin a durable Event Flow and catalog snapshot to this Job.  Existing
-        # inbox dispatch remains the executor during migration, but restarts no
-        # longer need to infer which semantic checkpoint owns the task.
-        # ADR 0099: under the new flag the classifier also chose a
-        # kind (existing / new / chat).  If it picked "new", route to
-        # the NEW_PROJECT flow which will materialise the project via
-        # ``interaction.project_init`` before the next event runs.
-        if social_request:
-            from partner.social_video.integration import load_request
-            flow_name = load_request(self.root, clean)["event"]
-        elif _feature_flag == "new" and _classification_kind == "new_project_kind":
-            flow_name = "new_project"
-        elif route == "chat_reply":
+
+        # Decide flow name based on dispatch_target.
+        # Improvement modes take precedence over project routing when explicitly set.
+        mode = intent_contract.get('mode') or ''
+        scope = intent_contract.get('scope') or ''
+        if mode == 'self_improvement' and scope == 'partner':
+            flow_name = 'self_improvement_cycle'
+            dispatch_target = 'partner_self_improvement'
+        elif mode == 'learning_improvement' and scope == 'partner':
+            flow_name = 'learning_improvement_cycle'
+            dispatch_target = 'partner_learning_improvement'
+        elif dispatch_target in {"browser_video_learning", "xhs_authoring"}:
+            flow_name = dispatch_target
+        elif dispatch_target == "direct_answer":
             flow_name = "direct_answer"
         else:
             flow_name = "project_iteration"
+
+        # Explicit, bounded two-round workflow; semantic project selection still
+        # belongs to the intent Events, not keyword routing.
+        if intent_contract['execution_constraints'].get('evolution_cycle') and not mode:
+            flow_name = 'project_cycle'
+
         try:
+            received = self.fabric.create(
+                "interaction.message_received", "interaction", correlation_id=job_id,
+                project_id=dispatch_target, job_id=job_id, instance_id=assigned,
+                channel=channel, payload={"sender_name": sender_name, "has_attachments": bool(attachments)},
+            )
+            job = JobRecord(
+                job_id=job_id, project_id=dispatch_target,
+                title=(clean.splitlines()[0][:80] or dispatch_target or clean[:40]),
+                request=clean, route=flow_name, channel=channel,
+                sender_id=sender_id, sender_name=sender_name, persona_hint=persona_hint,
+                origin_instance=persona_hint if persona_hint in PROJECTS else "",
+                assigned_instance=assigned,
+                intake_instance_id=persona_hint or "",
+                created_at=_now(), updated_at=_now(), report_policy=report_policy,
+                attachments=[{"path": str(item.get("path")) if isinstance(item, Mapping) else item}
+                             for item in attachments],
+                intent_contract_path="",
+                intent_contract=intent_contract,
+                intent_model_calls=sum(out.get('model_calls', 1) for out in (observe_out, counter_out, synth_out)),
+            )
+            job.root_event_id = received.event_id
+            self.fabric.complete(received, EventSummary(
+                event_id=received.event_id, status="completed",
+                headline="收到用户请求", outcome=clean[:240], notification_kind="routine",
+            ))
             event_catalog = build_catalog(workspace=self.root)
-            event_catalog.snapshot(
-                self.root / "state/event_catalog" / f"catalog_{event_catalog.version}.json")
+            event_catalog.snapshot(self.root / "state/event_catalog" / f"catalog_{event_catalog.version}.json")
             flow_definition = build_flow_registry().get(flow_name)
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
-                task_id=job.job_id, project_id=selected_project, instance_id=assigned,
+                task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
             )
             flow_state.root_event_id = received.event_id
             EventFlowStore(self.root).save(flow_state)
@@ -1115,67 +1110,131 @@ class PartnerApplicationService:
             job.flow_id = flow_state.flow_id
             job.flow_type = flow_state.flow_type
             job.ready_event_ids = list(flow_state.ready_node_ids)
-        except Exception as exc:
-            # Submission truth is preserved; the failed flow pin is explicit
-            # and prevents an invisible partial migration.
-            job.error = f"event_flow_initialization_failed:{type(exc).__name__}"
-        with self._locked():
-            if intent_required_but_failed:
-                job.status = "rejected"
-                job.error = "three_pass_intent_required_but_not_completed"
-            elif route == "project_query":
-                job.status = "completed"
-            self._save(job)
-            self._append_event("job_accepted", job, route=route, channel=channel)
-            if route != "project_query" and not intent_required_but_failed:
+            with self._locked():
+                self._save(job)
+                self._append_event("job_accepted", job, route=flow_name, channel=channel)
                 self._dispatch_locked(job)
-        if intent_required_but_failed:
-            msg = (
-                "本次任务没有入队：三遍意图理解未得到三份可解析的模型结果。"
-                "已保留失败 Event，未用保守模板冒充理解成功。"
-            )
-            return Submission(False, job.job_id, selected_project, assigned,
-                              job.status, route, msg, "")
-        if route == "project_query":
-            rows = self.projects()
-            active = [row for row in rows if row["status"] in {"queued", "dispatched", "running"}]
-            detail = "；".join(
-                f"{row['specialist']} {row['title']}：{row['status']}"
-                for row in (active or rows)
-            )
-            msg = f"项目状态（读取于当前持久账本）：{detail}。"
-            return Submission(True, job.job_id, selected_project, assigned,
-                              job.status, route, msg, "")
-        # Title can fall back to slug or first line if project not in
-        # PROJECT_TITLES (new flag with brand-new project that wasn't
-        # auto-registered).
-        _title = (PROJECT_TITLES.get(selected_project)
-                  or selected_project
-                  or clean.splitlines()[0][:80])
-        # ADR 0099: if the classifier just auto-created a new project,
-        # surface the "已自动创建新项目" message instead of the default
-        # "已加入后台项目队列" wording.
-        _classification_msg = ""
+            # Reply: warm_reply from synthesize, with fallback
+            reply = warm_reply or f"已派发到 {flow_name}。"
+            return Submission(True, job.job_id, dispatch_target, assigned,
+                              job.status, flow_name, reply, "")
+        except Exception as exc:  # noqa: BLE001
+            return Submission(False, "", "", persona_hint, "rejected", flow_name,
+                              f"派发失败：{type(exc).__name__}: {exc}", "")
+
+    def submit_native(
+        self,
+        text: str,
+        *,
+        instance_id: str,
+        project_id: str,
+        kind: str = "project",
+    ) -> Submission:
+        """Create a native continuation Job directly, skipping the LLM intent
+        flow.
+
+        Native continuation already knows its partner identity, project, and
+        branch; re-running intent_observe/counter_read/synthesize would only
+        re-burn LLM calls and could silently re-route the task.  This mirrors
+        submit()'s job+flow creation (interaction.message_received -> JobRecord
+        -> EventFlowController.start -> _save -> _dispatch_locked) but with the
+        flow_name and dispatch_target fixed from ``kind``.
+        """
+        flow_name = {
+            "learning": "self_improvement_cycle",
+            "external_learning": "learning_improvement_cycle",
+        }.get(kind, "project_iteration")
+        dispatch_target = project_id or "project_iteration"
+        assigned = instance_id
+        job_id = f"job_{uuid.uuid4().hex[:16]}"
+        # Native continuation must carry the instance_native marker so the
+        # terminal bridge / handle_terminal recognise it as autonomous (not an
+        # ordinary manual message).  The marker is a property of the native
+        # dispatch, not the caller's request text.
+        marker = f"\n\n[instance_native=true] [native_kind={kind}] [project_id={project_id}]"
+        text = (text or "").rstrip() + marker
+        intent_contract = {
+            "original_request": text,
+            "mode": ({"learning": "self_improvement",
+                      "external_learning": "learning_improvement"}
+                     .get(kind, "")),
+            "scope": "partner" if kind in {"learning", "external_learning"} else "",
+            "dispatch_target": dispatch_target,
+            "execution_constraints": {},
+            "explicit_project_id": project_id,
+        }
         try:
-            _raw2 = _project_raw
-            if _raw2 is not None and not isinstance(_raw2, str):
-                from partner.application.project_classifier import Kind as _KE
-                if _raw2.kind == _KE.NEW_PROJECT_KIND:
-                    _classification_extra_again = _resolve_classifier_decision(
-                        _raw2, workspace_root=self.root, instance_id=persona_hint,
-                    )
-                    _classification_msg = _classification_extra_again.get("message", "")
-                    # Override project_id with the materialised one if present
-                    if _classification_extra_again.get("project_id"):
-                        selected_project = _classification_extra_again["project_id"]
+            received = self.fabric.create(
+                "interaction.message_received", "interaction", correlation_id=job_id,
+                project_id=dispatch_target, job_id=job_id, instance_id=assigned,
+                channel="local",
+                payload={"sender_name": f"Partner{instance_id}项目内部续跑",
+                         "has_attachments": False},
+            )
+            job = JobRecord(
+                job_id=job_id, project_id=dispatch_target,
+                title=(text.splitlines()[0][:80] or dispatch_target),
+                request=text, route=flow_name, channel="local",
+                sender_id=f"partner_{instance_id}_self",
+                sender_name=f"Partner{instance_id}项目内部续跑",
+                persona_hint=instance_id,
+                origin_instance=instance_id if instance_id in PROJECTS else "",
+                assigned_instance=assigned,
+                intake_instance_id=instance_id,
+                created_at=_now(), updated_at=_now(), report_policy="milestone",
+                attachments=[], intent_contract_path="",
+                intent_contract=intent_contract, intent_model_calls=0,
+            )
+            job.root_event_id = received.event_id
+            self.fabric.complete(received, EventSummary(
+                event_id=received.event_id, status="completed",
+                headline="收到内部续跑请求", outcome=text[:240],
+                notification_kind="routine",
+            ))
+            event_catalog = build_catalog(workspace=self.root)
+            event_catalog.snapshot(self.root / "state/event_catalog" / f"catalog_{event_catalog.version}.json")
+            flow_definition = build_flow_registry().get(flow_name)
+            if flow_definition is None:
+                return Submission(False, "", "", instance_id, "rejected", flow_name,
+                                  f"未注册的续跑 flow：{flow_name}")
+            flow_state = EventFlowController(EventFlowStore(self.root)).start(
+                flow_definition, catalog_version=event_catalog.version,
+                task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
+            )
+            flow_state.root_event_id = received.event_id
+            EventFlowStore(self.root).save(flow_state)
+            job.event_catalog_version = event_catalog.version
+            job.flow_id = flow_state.flow_id
+            job.flow_type = flow_state.flow_type
+            job.ready_event_ids = list(flow_state.ready_node_ids)
+            with self._locked():
+                self._save(job)
+                self._append_event("job_accepted", job, route=flow_name, channel="local")
+                self._dispatch_locked(job)
+            return Submission(True, job.job_id, dispatch_target, assigned,
+                              job.status, flow_name, "内部续跑已派发", "")
+        except Exception as exc:  # noqa: BLE001
+            return Submission(False, "", "", instance_id, "rejected", flow_name,
+                              f"内部续跑派发失败：{type(exc).__name__}: {exc}", "")
+
+    def _list_available_projects(self, persona_hint: str = "") -> list[dict[str, str]]:
+        """Return concise summary of projects this instance could route to."""
+        from partner.projects.dynamic_project_registry import DynamicProjectRegistry
+        registry = DynamicProjectRegistry(workspace_root=self.root)
+        out: list[dict[str, str]] = []
+        for project_id in PROJECTS.values():
+            pid = project_id[0] if isinstance(project_id, tuple) else str(project_id)
+            out.append({"project_id": pid,
+                        "title": PROJECT_TITLES.get(pid, pid)})
+        try:
+            for row in registry.list_projects():
+                pid = getattr(row, "project_id", None)
+                if pid and not any(x["project_id"] == pid for x in out):
+                    out.append({"project_id": pid,
+                                "title": getattr(row, "summary", "") or pid})
         except Exception:
             pass
-        msg = _classification_msg or (
-            f"已加入后台项目队列：{_title}；"
-            f"任务 {job.job_id}，由 {assigned}专业角色承接。"
-            f"你可以继续对话，不必等待它结束。"
-        )
-        return Submission(True, job.job_id, selected_project, assigned, job.status, route, msg, job.message_id)
+        return out
 
     def _dispatch_locked(self, job: JobRecord) -> None:
         # One active action per project. Other projects may run concurrently;
@@ -1237,3 +1296,21 @@ class PartnerApplicationService:
                     dispatched.append(job.job_id)
                     active_projects.add(job.project_id)
         return dispatched
+
+
+def _intent_ctx(root, persona_hint, project_id, channel, sender_id):
+    """Context for intent events. Must carry a DirectAdapter for cognitive Events."""
+    from partner.adapters.adapter import DirectAdapter
+    class _Stub:
+        pass
+    ctx = _Stub()
+    ctx.workspace = str(root)
+    ctx.project_id = project_id or persona_hint or ""
+    ctx.instance_id = persona_hint or ""
+    ctx.job_id = ""
+    ctx.channel = channel or ""
+    ctx.sender_id = sender_id or ""
+    ctx.intake_instance_id = persona_hint or ""
+    ctx.adapter = DirectAdapter(workspace_path=str(root))
+    ctx.event_deadline = None
+    return ctx

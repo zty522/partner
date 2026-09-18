@@ -45,6 +45,8 @@ class Bridge:
                     result['path'] = local_path(result['path'])
                 if result.get('login_image'):
                     result['login_image'] = local_path(result['login_image'])
+                if result.get('screenshot'):
+                    result['screenshot'] = local_path(result['screenshot'])
                 for frame in result.get('frames', []):
                     frame['path'] = local_path(frame['path'])
                 return result
@@ -60,15 +62,20 @@ def final_text(raw):
     return value
 
 
-def model(workspace):
+def model(workspace, *, task_id='', project_id='', instance_id=''):
     from partner.adapters.adapter import create_adapter
     adapter = create_adapter('hermes', workspace)
+    adapter.task_id = task_id
+    adapter.project_id = project_id
+    adapter.instance_id = instance_id
     def call(kind, evidence):
         if kind == 'video_frame':
+            adapter.event_type = 'social.video_frames_describe'
             grid = ('这是2行3列的六帧图集，时间按从左到右、从上到下排列。逐帧引用图片上的秒数。'
                     if evidence.get('grid') == '2x3' else '')
             description = adapter.chat_with_images(
-                grid + '描述当前视频画面中的操作、图表和可见字幕。区分可见事实与推测；不要推断未听到的声音。',
+                grid + '描述当前视频画面中的操作、图表和可见字幕。区分可见事实与推测；不要推断未听到的声音。'
+                '小字无法辨认就明确说无法辨认，只描述布局；不凭常见界面猜按钮、节点名、产品标题或参数。不要用“某某平台”等占位名字冒充识别结果。每帧只需一两句有根据的观察，不必填满所有细节。',
                 [evidence['path']], purpose='social_video_frame')
             if not description:
                 raise RuntimeError('Vision model failed')
@@ -87,9 +94,11 @@ def model(workspace):
                        '不得把抽样说成完整观看，不得编造音轨内容；每个关键结论引用实际采样时间或字幕时间。\n')
         if kind == 'video_full_notes':
             prompt += ('综合笔记控制在2500到3500中文字，覆盖开头到结尾，最后写出局限。'
+                       '画面模型描述不是可靠OCR，可能在小字不清时编造节点名称、标题、参数。精确界面文字与操作细节须和口播/字幕交叉对应；只有视觉描述支持的细节标为待核实，不把“某某平台”等占位词当事实，不根据常见界面补全。'
                        '完整结束时必须在最后单独输出 <!-- REPORT_COMPLETE -->。\n')
         raw = chat(prompt + json.dumps(evidence, ensure_ascii=False), max_tokens=16000 if kind == 'video_full_notes' else 6000, timeout=180,
-                   workspace=workspace, purpose='social_video_candidate_' + kind,
+                   workspace=workspace, task_id=task_id, project_id=project_id, instance_id=instance_id,
+                   purpose='social_video_candidate_' + kind,
                    event_type='xhs_authoring' if kind == 'xhs_draft' else 'browser_video_learning')
         raw = final_text(raw)
         if kind == 'xhs_draft':

@@ -1,0 +1,41 @@
+# freeze_boundary.yaml
+# Machine-readable declaration of which layers self_evolution may modify.
+# Loaded by self_evolution.candidate_propose (and any future self-edit
+# event) before a patch enters the event stream.  Violating patches are
+# rejected with `boundary_violation` so a human can audit the rule.
+#
+# frozen_layers:  any path matching one of these globs is read-only
+# mutable_layers:  paths in this list may be edited freely
+# everything else: requires an explicit override (no implicit mutable)
+
+frozen_layers:
+  # A candidate cannot alter the evaluator which decides its own promotion.
+  - "partner/runtime/matched_execution.py"
+  - "partner/runtime/evolution_experiment.py"
+  # (2026-09-14) 精简为"元安全底线 + 文档"。自进化核心 runtime 文件
+  # （cycle_children.py / cycle.py / autonomous_evolution.py / evolution_experiment.py
+  # 等）不再冻结 —— 否则自进化无法修复自己的 spawn/cycle bug（I1 失败根因）。
+  # 只保留三类：改坏了自进化无法自我恢复的元文件。
+  - "partner/governance/freeze_boundary.yaml"
+  - "partner/event_fabric/catalog.py"
+  - "partner/events/_llm.py"
+  # 文档不是代码，自进化不改文档
+  - "docs/architecture/**"
+  - "AGENTS.md"
+  - "CLAUDE.md"
+  - "docs/catalog.yaml"
+  - "docs/handoff/change_protocol.md"
+  - "docs/handoff/verification_rules.md"
+
+mutable_layers:
+  - "partner/events/decision.py"
+  - "partner/events/project-health-check/**"
+  - "partner/events/literature-deep-dive/**"
+  - "partner/events/method-learning/**"
+  - "partner/events/synthesis-review/**"
+  - "partner/events/idea-exploration/**"
+  - "partner/governance/scheduler.py"
+  - "partner/governance/slot_arbiter.py"
+  - "partner/runtime/request_budget.py"
+
+require_review_for_unlisted: false

@@ -1,4 +1,11 @@
-"""Interaction orchestrator for user messages.
+"""
+
+MAINTENANCE_ONLY_INDEXING.
+
+Read access from production Event code goes through the indexed resource layer.  This module's os.walk calls are only invoked from maintenance hooks.
+See docs/operations/read_discipline_audit_20260917.md.
+
+Interaction orchestrator for user messages.
 
 Separates user-message handling from the autonomous mind loop:
 - LLM decides the user-facing reply
@@ -853,39 +860,44 @@ class InteractionOrchestrator:
         return sender_state if isinstance(sender_state, dict) else {}
 
     def _recent_deliverable_context(self, limit: int = 12, query: str = "") -> str:
-        """Return recent user-facing files so selector can attach follow-up requests.
+        """Return recent user-facing files via the code_repository index.
 
-        This is not intent routing; it is external context. The selector still
-        decides whether a file is relevant to the user message.
+        No filesystem walk.  Falls back to a bounded listdir if the
+        index file is missing (recovery / legacy state).
         """
-        exts = {".xlsx", ".xls", ".csv", ".pdf", ".docx", ".pptx", ".png", ".jpg", ".jpeg", ".webp", ".txt"}
+        exts = {".xlsx", ".xls", ".csv", ".pdf", ".docx", ".pptx",
+                ".png", ".jpg", ".jpeg", ".webp", ".txt"}
         skip_prefixes = (
-            "state/",
-            "logs/",
-            "system/hermes_home/",
-            "system/checks/",
+            "state/", "logs/",
+            "system/hermes_home/", "system/checks/",
         )
         rows: list[tuple[float, str]] = []
-        root = os.path.abspath(self.workspace)
-        for dirpath, dirnames, filenames in os.walk(root):
-            rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
-            if rel_dir == ".":
-                rel_dir = ""
-            if rel_dir.startswith(("system/hermes_home", "logs", "state/record", "state")):
-                dirnames[:] = []
-                continue
-            for name in filenames:
-                ext = os.path.splitext(name)[1].lower()
-                if ext not in exts:
-                    continue
-                path = os.path.join(dirpath, name)
-                try:
-                    rel = os.path.relpath(path, root).replace(os.sep, "/")
-                    if rel.startswith(skip_prefixes):
-                        continue
-                    rows.append((os.path.getmtime(path), rel))
-                except OSError:
-                    continue
+        try:
+            from partner.index.code_repository import init as _init_code
+            code_repo = _init_code(self.workspace)
+            candidates = code_repo.list_recent_deliverables(exts=exts,
+                                                              limit=max(limit * 4, 64),
+                                                              skip_prefixes=skip_prefixes)
+            for c in candidates:
+                rows.append((c["mtime"], c["rel_path"]))
+        except Exception:
+            # Bounded maintenance fallback: one-level listdir under
+            # the workspace root only.
+            try:
+                root = os.path.abspath(self.workspace)
+                with os.scandir(root) as it:
+                    for entry in it:
+                        if entry.is_file():
+                            ext = os.path.splitext(entry.name)[1].lower()
+                            if ext in exts:
+                                try:
+                                    rows.append((entry.stat().st_mtime,
+                                                  os.path.relpath(entry.path, root)
+                                                  .replace(os.sep, "/")))
+                                except OSError:
+                                    pass
+            except Exception:
+                pass
         if not rows:
             return "（无）"
         rows.sort(reverse=True)

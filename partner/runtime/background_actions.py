@@ -74,6 +74,55 @@ class BackgroundActions:
                     except ProcessLookupError: pass
             row.update(status=status, error=reason or 'background action '+status, finished_at=time.time())
             write_json(path, row)
+        # (2026-09-15) Issue I1: cancel()/timed_out path must persist partial_artifacts.json
+        # and result.json even when the subprocess never reached its own except branch.
+        # Before this change, framework.verify.business_delta=False and evidence_refs=[]
+        # because run() was killed by SIGKILL before it could write anything. The receipt
+        # is the durable completion signal — write it here so downstream verify can find
+        # what was actually produced before the kill.
+        work = Path(row.get('work') or '')
+        if work.is_dir():
+            try:
+                partial = sorted(
+                    (p for p in work.rglob('*') if p.is_file() and '.execution' not in p.parts),
+                    key=lambda p: (len(p.relative_to(work).parts), str(p)),
+                )
+                commands = sorted((work/'.execution').glob('command_*.json'))
+                partial_index = work/'.execution/partial_artifacts.json'
+                write_json(partial_index, {
+                    'observed_at': time.time(),
+                    'count': len(partial),
+                    'files': [str(p) for p in partial],
+                    'not_a_success_receipt': True,
+                    'source': f'cancel:{status}',
+                })
+                result_path = path.parent/'result.json'
+                if not result_path.exists():
+                    result = {
+                        'ok': False,
+                        'status': status,
+                        'business_delta': False,
+                        'error': reason or f'background action {status}',
+                        'files': [str(p) for p in partial[:30]],
+                        'evidence_refs': [str(partial_index)] + [str(p) for p in partial[:20]],
+                        'semantic_output': {
+                            'execution_status': status,
+                            'error': reason or f'background action {status}',
+                            'partial_artifacts': [str(p) for p in partial[:30]],
+                            'partial_artifact_count': len(partial),
+                            'partial_artifact_index': str(partial_index),
+                            'partial_artifact_preview_truncated': len(partial) > 30,
+                            'partial_results_are_not_success': True,
+                            'command_receipts': [str(p) for p in commands],
+                            'cancel_persisted': True,
+                        },
+                    }
+                    write_json(result_path, result)
+            except (OSError, ValueError, TypeError):
+                # Cancellation path must not break the kill/log flow; the partial
+                # index is a best-effort recovery. The task.json status is the
+                # authoritative signal for downstream verify.
+                pass
 
     def submit(self, key, ctx, params, *, seconds=900):
         task_id = 'action_' + hashlib.sha256(key.encode()).hexdigest()[:24]
@@ -136,12 +185,20 @@ def run(folder):
         partial = sorted((p for p in work.rglob('*') if p.is_file() and '.execution' not in p.parts),
                          key=lambda p: (len(p.relative_to(work).parts), str(p)))
         commands = sorted((work/'.execution').glob('command_*.json'))
+        partial_index=work/'.execution/partial_artifacts.json'
+        write_json(partial_index, {'observed_at':time.time(), 'count':len(partial),
+            'files':[str(p) for p in partial], 'not_a_success_receipt':True})
+        from partner.runtime.artifact_checks import check_file
+        partial_checks = [check_file(p) for p in partial]
         result = {'ok':False, 'status':'failed', 'business_delta':False,
                   'error':f'{type(exc).__name__}: {exc}',
                   'files':[str(p) for p in partial[:30]],
                   'evidence_refs':[str(work/'.execution/checkpoint.json')] + [str(p) for p in partial[:20]],
                   'semantic_output':{'execution_status':'failed', 'error':f'{type(exc).__name__}: {exc}',
                       'partial_artifacts':[str(p) for p in partial[:30]],
+                      'partial_artifact_count':len(partial), 'partial_artifact_index':str(partial_index),
+                      'partial_artifact_preview_truncated':len(partial)>30,
+                      'artifact_checks':partial_checks,
                       'command_receipts':[str(p) for p in commands],
                       'partial_results_are_not_success':True}}
     # Receipt is the durable completion signal. It is observed without LLM polling.

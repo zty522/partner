@@ -75,3 +75,29 @@ non-deprecated document with the highest authority and newest `updated_at` in `d
   and CampaignReport records. Manual tasks do not need these Campaign records.
 
 See `docs/handoff/change_protocol.md` and `docs/handoff/verification_rules.md` for the full workflow.
+
+
+## Production read discipline
+
+The runtime uses a SQLite-backed indexed resource layer for jobs,
+history, documents, code, memory, artifacts, and external sources
+(see `docs/architecture/indexed_resource_access.md`).  When a
+production Event needs history, knowledge, code, or docs:
+
+1. Prefer the indexed query (the `partner/index/*_repository.py`
+   APIs) over re-reading the underlying JSONL / project tree.
+2. Allow direct point reads of files when the caller already knows
+   the path and the file is small (catalogued YAML, a one-shot
+   source file, etc.).  Bounded, audited direct reads are not the
+   same as full-tree walks.
+3. Full-tree scans only happen in `index.bootstrap`,
+   `index.apply_changes`, `index.reconcile`, `index.health_report`,
+   `index.rebuild`, and other dedicated maintenance flows.  They
+   are not invoked from regular Events.
+4. Every read that goes outside the indexed layer is paired with a
+   `ReadPlan` and a `ReadReceipt` so that budget compliance is
+   auditable.
+
+This rule applies to user-facing flows as well as Hermes / Codex /
+automated tooling.  See the daily ledger for the rationale and
+limits.

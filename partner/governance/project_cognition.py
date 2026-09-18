@@ -116,6 +116,41 @@ def _trajectory_rows(root: Path, project_id: str, limit: int = 6) -> list[dict[s
     return selected[-max(1, limit):]
 
 
+def load_project_brief_guardrails(workspace: str | Path, project_id: str) -> str:
+    """Extract the project brief's falsified routes / next minimum action /
+    forbidden directions so the planner can treat them as hard constraints
+    instead of re-proposing already-falsified actions.
+
+    Returns a compact Chinese block ('' when the brief is absent or has no
+    guardrail sections), ready to inject into the planner prompt.
+    """
+    root = workspace_root(str(workspace))
+    brief = root / "share/projects" / project_id / "project_brief.md"
+    if not brief.is_file():
+        return ""
+    try:
+        text = brief.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    guardrail_titles = ("已证明不行的路线", "禁止跑偏方向", "下一步最小动作", "当前瓶颈")
+    sections: list[str] = []
+    current: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("## "):
+            title = line[3:].strip()
+            if any(k in title for k in guardrail_titles):
+                current = title
+                sections.append(f"【{title}】")
+            else:
+                current = None
+        elif current and line:
+            sections.append(line)
+    if not sections:
+        return ""
+    return "【项目简报硬约束（必须遵守，不要重提已证伪的路线）】\n" + "\n".join(sections)
+
+
 def build_project_cognition_context(
     workspace: str | Path,
     project_id: str,

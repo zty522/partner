@@ -18,7 +18,7 @@ PROJECT_SHORT_NAMES = {
     "molecular_generation": "分子方法研究",
     "molecular_dynamics_study": "分子动力学研究",
     "literature_github_learning": "文献与 GitHub 学习",
-    "hermes_partner_explore": "Partner 自进化",
+    "partner_explore": "Partner 自进化",
 }
 
 
@@ -282,7 +282,7 @@ def terminal_message(*, job: Mapping[str, Any], task: Mapping[str, Any],
         for path in files
     ):
         return _external_source_message(task=task, files=files, tasks=tasks)
-    if project_id == "hermes_partner_explore" and any(
+    if project_id == "partner_explore" and any(
         Path(str(path)).name.endswith("05_event_contract_inventory.json")
         for path in files
     ):

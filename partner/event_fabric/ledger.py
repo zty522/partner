@@ -134,7 +134,7 @@ class EventLedger:
 
     def transition(self, event: EventEnvelope | str, status: str, **detail: Any) -> None:
         event_id = event.event_id if isinstance(event, EventEnvelope) else str(event)
-        envelope = event.to_dict() if isinstance(event, EventEnvelope) else self.event_index().get(event_id, {})
+        envelope = event.to_dict() if isinstance(event, EventEnvelope) else self.get_event_history(event_id)
         with self._locked():
             self._append(self.events_path, {
                 "record_kind": "event_transition", "event_id": event_id,
@@ -150,7 +150,7 @@ class EventLedger:
 
     def complete(self, event: EventEnvelope | str, summary: EventSummary) -> None:
         event_id = event.event_id if isinstance(event, EventEnvelope) else str(event)
-        envelope = event.to_dict() if isinstance(event, EventEnvelope) else self.event_index().get(event_id, {})
+        envelope = event.to_dict() if isinstance(event, EventEnvelope) else self.get_event_history(event_id)
         if summary.event_id != event_id:
             raise ValueError("summary event_id must match Event")
         if summary.status not in TERMINAL_STATUSES:
@@ -184,17 +184,7 @@ class EventLedger:
 
     def work_item_history(self, work_item_id: str) -> list[dict[str, Any]]:
         """Read the canonical history for one unit of user or background work."""
-        rows: list[dict[str, Any]] = []
-        if not self.work_items_path.exists():
-            return rows
-        for line in self.work_items_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if str(row.get("work_item_id") or "") == str(work_item_id):
-                rows.append(row)
-        return rows
+        return list(reversed(self._projection().work_item_rows(self.work_items_path, work_item_id)))
 
     def record_selection(self, selection: EventSelection) -> None:
         if not selection.created_at:
@@ -202,49 +192,30 @@ class EventLedger:
         with self._locked():
             self._append(self.selections_path, {"record_kind": "event_selection", **selection.to_dict()})
 
-    def recent_summaries(
-        self, *, limit: int = 100, series: str = "", project_id: str = "",
-        include_audit: bool = False,
-    ) -> list[dict[str, Any]]:
-        event_index = self.event_index()
-        rows: list[dict[str, Any]] = []
-        if self.summaries_path.exists():
-            for line in self.summaries_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                try:
-                    row = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                envelope = event_index.get(str(row.get("event_id") or ""), {})
-                merged = {**envelope, **row}
-                if (not include_audit
-                        and (merged.get("payload") or {}).get("acceptance_run")):
-                    continue
-                if series and merged.get("series") != series:
-                    continue
-                if project_id and merged.get("project_id") != project_id:
-                    continue
-                rows.append(merged)
-        return rows[-max(1, limit):][::-1]
+    def _projection(self):
+        from partner.index.stream_projection import StreamProjection
+        return StreamProjection(self.root)
 
-    def has_summary(self, event_id: str) -> bool:
-        target = str(event_id or "").removeprefix("summary:")
-        return any(str(row.get("event_id") or "") == target
-                   for row in self.recent_summaries(limit=10000, include_audit=True))
+    def recent_summaries(self, *, limit=100, series='', project_id='', include_audit=False):
+        return self._projection().summaries(self.events_path,self.summaries_path,
+            limit=limit,series=series,project_id=project_id,include_audit=include_audit)
 
-    def event_index(self) -> dict[str, dict[str, Any]]:
-        result: dict[str, dict[str, Any]] = {}
-        if not self.events_path.exists():
-            return result
-        for line in self.events_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            event_id = str(row.get("event_id") or "")
-            if not event_id:
-                continue
-            if row.get("record_kind") == "event_created":
-                result[event_id] = row
-            else:
-                result.setdefault(event_id, {}).update({"status": row.get("status"), "updated_at": row.get("at")})
+    def has_summary(self, event_id):
+        return bool(self._projection().rows(self.summaries_path,entity=str(event_id).removeprefix('summary:'),limit=1))
+
+    def get_event_history(self,event_id):
+        return self._projection().event(self.events_path,str(event_id).removeprefix('summary:'))
+
+    def batch_get_events(self,event_ids):
+        return {eid:self.get_event_history(eid) for eid in event_ids}
+
+    def event_index(self):
+        # Compatibility maintenance API, without silently dropping older IDs.
+        from partner.index.sqlite_base import get_connection
+        projection=self._projection();projection.sync(self.events_path)
+        rows=get_connection(projection.db).execute('SELECT payload FROM records WHERE path=? ORDER BY offset', (str(self.events_path.resolve()),))
+        result={}
+        for row in rows:
+            value=json.loads(row[0]);eid=value.get('event_id')
+            if eid:result.setdefault(eid,{}).update(value)
         return result

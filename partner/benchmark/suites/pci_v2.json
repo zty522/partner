@@ -1,0 +1,117 @@
+{
+  "ablation_arms": [
+    {
+      "drop": "H1",
+      "fixture": "partner.benchmark.fixtures.software_data_pipeline",
+      "name": "h1-ablated"
+    },
+    {
+      "drop": "H2",
+      "fixture": "partner.benchmark.fixtures.scientific_analysis_planning",
+      "name": "h2-ablated"
+    },
+    {
+      "drop": "H3",
+      "fixture": "partner.benchmark.fixtures.data_pipeline_csv",
+      "name": "h3-ablated"
+    },
+    {
+      "drop": "H4",
+      "fixture": "partner.benchmark.fixtures.research_reporting",
+      "name": "h4-ablated"
+    }
+  ],
+  "baseline_arms": [
+    {
+      "fixture": "partner.benchmark.fixtures.data_pipeline_csv",
+      "name": "static-agent"
+    },
+    {
+      "fixture": "partner.benchmark.fixtures.data_pipeline_csv",
+      "name": "reflection-only"
+    },
+    {
+      "fixture": "partner.benchmark.fixtures.scientific_planning",
+      "name": "external-only"
+    },
+    {
+      "fixture": "partner.benchmark.fixtures.research_reporting",
+      "name": "joint"
+    },
+    {
+      "fixture": "partner.benchmark.fixtures.data_pipeline_csv",
+      "name": "no-change"
+    }
+  ],
+  "domains": [
+    "software_data_pipeline",
+    "scientific_analysis_planning",
+    "research_reporting"
+  ],
+  "family_complexity": {
+    "data_pipeline_csv": "csv-to-jsonl filtering",
+    "data_pipeline_csv_dependency": "broken-import recovery",
+    "data_pipeline_json": "schema-drift handling",
+    "data_pipeline_log": "sessionisation",
+    "research_contradiction": "contradiction detection",
+    "research_evidence": "evidence pack assembly",
+    "research_migration": "template migration",
+    "research_reporting": "shard merge + citation",
+    "scientific_design": "factorial design + power",
+    "scientific_drift": "distribution drift detection",
+    "scientific_planning": "paired bootstrap CI",
+    "scientific_replication": "cross-experiment replication"
+  },
+  "fixture_root": "partner/benchmark/fixtures",
+  "isolation": {
+    "default_workspace": "separate from production partner_workspace",
+    "production_promotion_blocked": true,
+    "qq_blocked_by_default": true
+  },
+  "notes": "v2 covers 12 fixture families (4 per domain). All synthetic; pending expert review.",
+  "protocol_id": "PCI-H1H4-v1",
+  "schema_version": "benchmark/v1",
+  "scoring": {
+    "missing_handling": "no_data",
+    "primary_metric": "hidden_task_quality_delta",
+    "secondary_metrics": [
+      "learning_curve_auc",
+      "regression_count",
+      "calibration_brier",
+      "human_intervention_count",
+      "cost_usd_total"
+    ],
+    "zero_denominator_handling": "explicit_no_data_row, not zero"
+  },
+  "split_definitions": {
+    "dev": [],
+    "held_out": [],
+    "note": "All 12 families are synthetic v1 placeholders. The first held-out split will be pinned when at least 3 families have non-synthetic data.",
+    "train": []
+  },
+  "suite_id": "pci_v2",
+  "task_families": [
+    "data_pipeline_csv",
+    "data_pipeline_json",
+    "data_pipeline_log",
+    "data_pipeline_csv_dependency",
+    "scientific_planning",
+    "scientific_design",
+    "scientific_drift",
+    "scientific_replication",
+    "research_reporting",
+    "research_evidence",
+    "research_contradiction",
+    "research_migration"
+  ],
+  "title": "Partner Continual Improvement Benchmark v2 — 12 fixture families",
+  "tracks": [
+    "experience_only",
+    "external_only",
+    "joint",
+    "no_change",
+    "static_baseline",
+    "reflection_only"
+  ],
+  "version": "2.0.0"
+}

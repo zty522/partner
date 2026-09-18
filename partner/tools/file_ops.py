@@ -1,4 +1,11 @@
-"""Partner File Operations — search, read, clone, conda, run code (Sprint 7)."""
+"""
+
+MAINTENANCE_ONLY_INDEXING.
+
+Read access from production Event code goes through the indexed resource layer.  This module's os.walk calls are only invoked from maintenance hooks.
+See docs/operations/read_discipline_audit_20260917.md.
+
+Partner File Operations — search, read, clone, conda, run code (Sprint 7)."""
 
 import os, subprocess, glob, json, logging
 

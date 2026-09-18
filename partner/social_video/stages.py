@@ -11,19 +11,21 @@ from .integration import data_root, ensure_edge, publication_authority
 
 
 def trusted_request(ctx, params):
-    match = re.search(r'\[social_request=([a-f0-9]{32})\]', str(params.get('request') or ''))
-    if not match: raise ValueError('trusted frontend request required')
-    request = json.loads((data_root(ctx.workspace) / 'intake' / (match[1] + '.json')).read_text())
+    """Verify run ownership for a stage. INTENT_FLOW writes run_id/url/topic/media/owner
+    into the job payload; we re-derive owner from ctx and check it matches the
+    run's owner.json. No regex / no intake/*.json file."""
+    run_id = str(params.get('run_id') or '')
+    if not run_id:
+        raise ValueError('trusted_request requires run_id in params (set by INTENT_FLOW)')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', run_id):
+        raise ValueError('invalid run ID')
     instance = str(getattr(ctx, 'intake_instance_id', '') or getattr(ctx, 'instance_id', ''))
-    owner = digest({'channel':ctx.channel, 'sender':ctx.sender_id, 'instance':instance})
-    if owner != request['owner']: raise ValueError('request owner mismatch')
-    run_id = request['params']['run_id']
-    if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', run_id): raise ValueError('invalid run ID')
+    owner = digest({'channel': ctx.channel, 'sender': ctx.sender_id, 'instance': instance})
     directory = data_root(ctx.workspace) / 'runs' / run_id
     metadata = json.loads((directory / 'owner.json').read_text())
-    if metadata['owner'] != owner or metadata['event'] != request['event']:
+    if metadata['owner'] != owner:
         raise ValueError('run ownership mismatch')
-    return request, directory
+    return {'event': metadata['event'], 'params': metadata['params']}, directory
 
 
 def execute_stage(ctx, params):
@@ -47,7 +49,8 @@ def execute_stage(ctx, params):
             # The shared page lease prevents interleaved prepare/publish and capture.
             return ensure_edge(ctx.workspace, 'video' if stage.startswith('video_') else 'xhs')(action, arguments)
         from .cli import model
-        llm = model(ctx.workspace)
+        llm = model(ctx.workspace, task_id=getattr(ctx,'job_id',''), project_id=getattr(ctx,'project_id',''),
+                    instance_id=getattr(ctx,'intake_instance_id','') or getattr(ctx,'instance_id',''))
         value, files = {}, []
         try:
             with locked(data_root(ctx.workspace) / 'runs/.browser_lease'):

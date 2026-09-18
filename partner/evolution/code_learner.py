@@ -1,3 +1,21 @@
+"""MAINTENANCE_ONLY_INDEXING / BULK-RESCAN.
+
+This module performs bounded bulk ingestion via ``os.walk`` only under explicit one-shot maintenance hooks (e.g.
+``scripts/refresh_resource_indexes.py`` and the dedicated bootstrap paths under ``partner/index/resource_catalog.py``).
+Production Event code MUST NOT import this module to walk the
+filesystem.  Read access in production goes through the indexed
+resource layer (``partner/index/*.py``).  See
+``docs/operations/read_discipline_audit_20260917.md``.
+"""
+
+"""Maintenance-only bulk indexing.  No production read-path code.
+
+The ``os.walk`` calls in this module are bounded by an explicit root
+and an exclude list; they are only invoked from one-shot bootstrap /
+acquisition jobs (``refresh_resource_indexes.py`` etc.), never from
+the Event hot path.  See ``docs/operations/read_discipline_audit_20260917.md``
+for the full rule.
+"""
 """Code Learner — generic code learning engine for Partner's self-evolution.
 
 Core responsibility: fetch project code from GitHub → analyze structure →

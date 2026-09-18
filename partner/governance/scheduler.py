@@ -152,7 +152,7 @@ ROLES = {
     "02": "molecular_generation",
     "03": "molecular_dynamics_study",
     "04": "literature_github_learning",
-    "05": "hermes_partner_explore",
+    "05": "partner_explore",
 }
 
 

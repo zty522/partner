@@ -39,7 +39,11 @@ def measured_claim_errors(text,outputs):
 
 def readability_errors(text):
     import re
-    body=re.split(r'(?m)^#{1,3}\s*(?:证据索引|来源|附录|参考)',text)[0]
+    # Writers also emit an explicit plain-text evidence appendix heading.
+    # Hashes beneath that heading are provenance, not an internal-field dump
+    # in the report body. Keep checking all preceding body text.
+    body=re.split(r'(?m)^(?:#{1,6}\s*(?:证据索引|证据附录|来源|附录|参考)[^\n]*|'
+                  r'(?:证据附录|证据索引)(?:[：:][^\n。！？]*)?)$',text)[0]
     body=re.sub(r'```.*?```','',body,flags=re.S)
     bad=re.findall(r'\b[a-f0-9]{24,}\b|experiment_[a-f0-9]{12,}|production_effective|manifest_sha256|exit_code',body)
     return ['正文仍有内部记录字段/长标识，请译成中文结果并将追溯编号留在证据附录：'+', '.join(sorted(set(bad)))] if bad else []

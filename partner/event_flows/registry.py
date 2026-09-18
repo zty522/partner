@@ -21,11 +21,40 @@ class EventFlowRegistry:
         node_ids = [node.node_id for node in definition.nodes]
         if len(node_ids) != len(set(node_ids)):
             raise ValueError(f"duplicate node in Event Flow: {definition.name}")
+        if not node_ids:
+            raise ValueError(f"empty Event Flow: {definition.name}")
         known = set(node_ids)
         for node in definition.nodes:
             missing = set(node.depends_on) - known
             if missing:
                 raise ValueError(f"unknown dependency in {definition.name}: {sorted(missing)}")
+        # Reject cycles and unreachable nodes so a flow can never be
+        # created with no legal start point (empty ready_node_ids).
+        roots = [n for n in node_ids if not any(d == n for node in definition.nodes for d in node.depends_on)]
+        # Actually roots = nodes with no dependents... compute as nodes
+        # with no incoming edges is wrong; roots = nodes with no depends_on.
+        roots = [n for n in node_ids if not dict((x.node_id, x.depends_on) for x in definition.nodes)[n]]
+        if not roots:
+            raise ValueError(f"cyclic or sourceless Event Flow: {definition.name} (no root node)")
+        # Topological reachability check.
+        deps = {node.node_id: list(node.depends_on) for node in definition.nodes}
+        seen = set()
+        visiting = set()
+        def visit(nid):
+            if nid in seen:
+                return
+            if nid in visiting:
+                raise ValueError(f"cycle detected in {definition.name} at {nid}")
+            visiting.add(nid)
+            for d in deps.get(nid, []):
+                visit(d)
+            visiting.discard(nid)
+            seen.add(nid)
+        for nid in node_ids:
+            visit(nid)
+        unreachable = set(node_ids) - seen
+        if unreachable:
+            raise ValueError(f"unreachable nodes in {definition.name}: {sorted(unreachable)}")
         self._flows[definition.name] = definition
         self._versions[(definition.name, definition.version)] = definition
 
@@ -47,6 +76,14 @@ class EventFlowRegistry:
 def build_flow_registry() -> EventFlowRegistry:
     from .builtins import DEFINITIONS, LEGACY_PRESENTATION_FLOWS
     registry = EventFlowRegistry(DEFINITIONS)
+    from .cycle import DEFINITIONS as cycle_definitions, HISTORICAL as cycle_historical
+    for definition in cycle_definitions:
+        registry.register(definition)
+    from .cycle import _improvement_flow_definitions
+    for definition in _improvement_flow_definitions(local_learning=False):
+        registry._versions[(definition.name,definition.version)] = definition
+    for definition in cycle_historical:
+        registry._versions[(definition.name, definition.version)] = definition
     # Preserve the previous production graph for already pinned requests.
     # New requests use 2.1; old requests retain fail-stop action semantics.
     from dataclasses import replace

@@ -64,14 +64,36 @@ def _safe_read(path: str, limit: int = 12000) -> str:
 
 
 def _workspace_files(task: TaskInstance) -> list[str]:
+    """List files under the task working_dir via the indexed file lookup.
+
+    No filesystem walk in production paths; bounded listdir fallback
+    only when the index file is missing.
+    """
     paths: list[str] = []
-    if not task.working_dir or not os.path.isdir(task.working_dir):
+    if not task.working_dir:
         return paths
-    for root, _dirs, names in os.walk(task.working_dir):
-        for name in names:
-            if name.startswith("."):
-                continue
-            paths.append(os.path.join(root, name))
+    try:
+        from partner.index.file_lookup import files_under as _lookup
+        workspace = task.workspace if hasattr(task, "workspace") else task.working_dir
+        out = _lookup(workspace=workspace,
+                       prefixes=None, exts=None, limit=512)
+        working_dir = task.working_dir.rstrip("/")
+        for entry in out:
+            abs_p = entry["abs_path"]
+            if abs_p.startswith(working_dir):
+                paths.append(abs_p)
+        return sorted(paths)
+    except Exception:
+        pass
+    if not os.path.isdir(task.working_dir):
+        return paths
+    try:
+        with os.scandir(task.working_dir) as it:
+            for entry in it:
+                if entry.is_file() and not entry.name.startswith("."):
+                    paths.append(entry.path)
+    except Exception:
+        pass
     return sorted(paths)
 
 

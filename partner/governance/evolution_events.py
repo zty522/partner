@@ -21,6 +21,14 @@ from .storage import atomic_json, workspace_root
 
 EVENT_TYPES = {
     "issue/recorded",
+    "boundary/violation",
+    "proximity/rejected",
+    "aspect/observe_completed",
+    "aspect/counter_read_completed",
+    "aspect/synthesize_decided",
+    "aspect/candidate_emitted",
+    "aspect/no_op",
+    "aspect/throttled",
     "candidate/proposed",
     "candidate/execution_requested",
     "candidate/execution_completed",

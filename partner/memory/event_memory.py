@@ -63,48 +63,48 @@ class EventMemory:
             "evolution_delta": bool(summary.get("evolution_delta")),
         })
 
-    @staticmethod
-    def _rows(path: Path, limit: int = 500) -> list[dict[str, Any]]:
-        if not path.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
-            try:
-                value = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(value, dict):
-                rows.append(value)
-        return rows
+    def link_usage_outcome(self, envelope, summary):
+        """An observed terminal is not proof that a recalled lesson caused improvement."""
+        from partner.index.stream_projection import StreamProjection
+        event_id=str(summary.get('event_id') or '')
+        if not event_id:return
+        rows=StreamProjection(self.root).rows(self.directory/'usage.jsonl',entity=event_id,limit=100)
+        for usage in rows:
+            _append(self.directory/'usage_outcomes.jsonl',{
+                'event_id':event_id,'flow_id':envelope.get('flow_id'),
+                'project_id':envelope.get('project_id'),'memory_ids':usage['memory_ids'],
+                'status':'outcome_observed','terminal_status':summary.get('status'),
+                'evidence_refs':summary.get('evidence_refs') or [],
+                'business_delta':bool(summary.get('business_delta')),
+                'causal_improvement_verified':False,'recorded_at':_now()})
 
-    def recall(self, *, project_id: str = "", query: str = "", limit: int = 8) -> dict[str, Any]:
-        words = {part.lower() for part in str(query).replace("/", " ").split() if len(part) > 1}
+    def _rows(self,path,limit=500):
+        from partner.index.stream_projection import StreamProjection
+        return list(reversed(StreamProjection(self.root).rows(path,limit=limit)))
 
-        def relevant(row: Mapping[str, Any]) -> bool:
-            if project_id and row.get("project_id") not in {"", project_id}:
-                return False
-            if not words:
-                return True
-            body = json.dumps(dict(row), ensure_ascii=False).lower()
-            return any(word in body for word in words)
+    def recall(self, *, project_id='', query='', limit=8):
+        from partner.index.stream_projection import StreamProjection
+        repo=StreamProjection(self.root)
+        def fetch(path,status=None):
+            return repo.memory(path,project_id=project_id,query=query,limit=limit,status=status)
+        return {'observations':fetch(self.observations), 'lessons':fetch(self.lessons),
+            'preferences':fetch(self.preferences),'active_habits':fetch(self.habits,'active'),
+            'candidate_habits':fetch(self.habits,'candidate'),'beliefs':fetch(self.beliefs),
+            'growth':fetch(self.growth)}
 
-        observations = [row for row in self._rows(self.observations) if relevant(row)][-limit:]
-        return {
-            "observations": observations,
-            "preferences": self._rows(self.preferences, 100)[-limit:],
-            "active_habits": [row for row in self._rows(self.habits, 200)
-                              if row.get("status") == "active" and relevant(row)][-limit:],
-            "beliefs": [row for row in self._rows(self.beliefs, 200)
-                        if not project_id or row.get("project_id") == project_id][-limit:],
-            "growth": [row for row in self._rows(self.growth, 100) if relevant(row)][-limit:],
-        }
+    def record_usage(self, *, event_id, flow_id, memory_ids, effect, status='referenced'):
+        if status not in ('referenced','applied','rejected'):
+            raise ValueError('invalid memory consumption status')
+        _append(self.directory/'usage.jsonl',{'event_id':event_id,'flow_id':flow_id,
+            'memory_ids':list(dict.fromkeys(memory_ids)), 'effect':effect,'status':status,'recorded_at':_now()})
 
     def append_semantic(self, kind: str, record: Mapping[str, Any]) -> str:
         paths = {"lesson": self.lessons, "user_preference": self.preferences,
                  "habit": self.habits, "belief": self.beliefs, "growth": self.growth}
         if kind not in paths:
             raise ValueError(f"unknown memory kind: {kind}")
-        row = {"schema_version": 1, "recorded_at": _now(), **dict(record)}
+        import uuid
+        row = {"schema_version": 1, "recorded_at": _now(), "record_id":uuid.uuid4().hex, **dict(record)}
         _append(paths[kind], row)
         return str(paths[kind])
 
@@ -115,3 +115,4 @@ class MemoryProjector:
 
     def project_terminal(self, envelope: Mapping[str, Any], summary: Mapping[str, Any]) -> None:
         self.memory.project_terminal(envelope, summary)
+        self.memory.link_usage_outcome(envelope, summary)

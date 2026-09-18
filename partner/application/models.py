@@ -16,6 +16,7 @@ class JobRecord:
     route: str = "enqueue_work"
     channel: str = "local"
     sender_id: str = ""
+    sender_name: str = ""
     persona_hint: str = ""
     origin_instance: str = ""
     assigned_instance: str = ""

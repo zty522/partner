@@ -73,8 +73,38 @@ def waiting_message(ctx,params):
     labels={'outline':'整理报告结构','visual_plan':'选择有依据的图表','visuals':'生成真实图件','visual_verify':'核验图件来源',
             'draft':'撰写图文报告','claims':'逐项核对报告结论','render':'排版报告','quality':'检查报告页面',
             'compose':'整理交付说明','message_critic':'核对交付说明','execute':'执行已安排的任务','verify':'核验任务结果'}
-    action=labels.get(stage,'处理已接收的任务')
-    return f'目前还在{action}，这一步尚未完成。已有结果会保留，完成核验后再交付。'
+    return None  # Active notices are composed from actual execution context.
+
+
+def with_waiting_context(ctx,params):
+    contract=params.get('intent_contract') or {}
+    target=contract.get('waiting_for_job')
+    if not target:return params
+    root=Path(ctx.workspace)
+    job=json.loads((root/'state/application/jobs'/f'{target}.json').read_text())
+    from partner.event_fabric import EventFlowStore
+    state=EventFlowStore(root).load(job['flow_id'])
+    outputs=dict(state.node_outputs)
+    live={'job_status':job['status'],'current_node':job.get('current_event_id'),
+          'result_verified':bool(outputs.get('verify',{}).get('business_delta')),
+          'recent_commands':[]}
+    if state.waiting_task_id:
+        path=root/'state/event_runtime/background'/state.waiting_task_id/'task.json'
+        if path.exists():
+            task=json.loads(path.read_text());live['background_status']=task.get('status')
+            work=Path(task.get('work',''))
+            for receipt in sorted((work/'.execution').glob('command_*.json'))[-3:]:
+                row=json.loads(receipt.read_text())
+                # Commands may contain credentials; retain operation and local
+                # source filenames only, not literal arguments or stdout.
+                import re
+                command=str(row.get('command') or '')
+                live['recent_commands'].append({'operation':command.split()[0] if command.split() else '',
+                    'source_names':list(dict.fromkeys(re.findall(r'[\w.-]+\.(?:py|pdbqt|pdb|csv|json|md|pdf)',command)))[:8],
+                    'exit_code':row.get('exit_code'),'timed_out':row.get('timed_out',False)})
+    outputs['live_status']={'ok':True,'summary':json.dumps(live,ensure_ascii=False)}
+    return {**params,'request':job['request'],'flow_outputs':outputs,
+            'intent_contract':{**contract,'original_request':job.get('intent_contract',{}).get('original_request') or job['request']}}
 
 
 def with_report_context(ctx,params):

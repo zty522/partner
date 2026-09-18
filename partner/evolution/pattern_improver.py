@@ -10,7 +10,7 @@ be auto-applied by the Implementation module.
 
 Output format:
     {
-        "target_file": "partner/desktop_gui/modern/Sidebar.py",
+        "target_file": "partner/web/frontend_src/src/components/Sidebar.tsx",
         "change_type": "modify" | "new_file" | "new_function" | "new_class",
         "description": "Add collapse/expand toggle to the sidebar",
         "code_diff": "+ def toggle_collapse(self): ...",
@@ -48,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 # ── Partner GUI file structure ────────────────────────────────────────────────
 
-PARTNER_GUI_DIR = Path("/mnt/e/work/partner/shells/frontend/desktop_gui/modern")
+# 2026-09-17: desktop_gui removed; PARTNER_GUI_DIR set to None.
+PARTNER_GUI_DIR = None
 
 KNOWN_PARTNER_FILES: dict[str, str] = {
     "main_window.py": "主窗口 — 包含 MainWindow、Sidebar、ContentArea",
@@ -257,73 +258,73 @@ class PatternImprover:
         """
         if category == "布局":
             if "侧边栏" in pattern_name or "sidebar" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/main_window.py", "modify"
+                return "partner/web/frontend_src/src/App.tsx", "modify"
             elif "导航" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/main_window.py", "modify"
+                return "partner/web/frontend_src/src/App.tsx", "modify"
             elif "网格" in pattern_name or "flex" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "分割" in pattern_name or "split" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             else:
-                return "shells/frontend/desktop_gui/modern/main_window.py", "modify"
+                return "partner/web/frontend_src/src/App.tsx", "modify"
 
         elif category == "交互":
             if "键盘" in pattern_name or "快捷键" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/pages/chat.py", "modify"
+                return "partner/web/frontend_src/src/pages/RunConsole.tsx", "modify"
             elif "拖拽" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/pages/chat.py", "modify"
+                return "partner/web/frontend_src/src/pages/RunConsole.tsx", "modify"
             elif "悬停" in pattern_name or "hover" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
             elif "动画" in pattern_name or "过渡" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
             elif "展开" in pattern_name or "折叠" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
             else:
-                return "shells/frontend/desktop_gui/modern/pages/chat.py", "modify"
+                return "partner/web/frontend_src/src/pages/RunConsole.tsx", "modify"
 
         elif category == "组件":
             if "Toast" in pattern_name or "Notification" in pattern_name or "通知" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Avatar" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Badge" in pattern_name or "标签" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Tooltip" in pattern_name or "提示" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Progress" in pattern_name or "Spinner" in pattern_name or "加载" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Search" in pattern_name or "搜索" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Dropdown" in pattern_name or "Select" in pattern_name or "选择" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "Markdown" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
             elif "ANSI" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_function"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_function"
             elif "暗色" in pattern_name or "主题" in pattern_name or "dark" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/styles.py", "new_file"
+                return "partner/web/frontend_src/src/styles.css", "new_file"
             else:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "new_class"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "new_class"
 
         elif category == "样式":
             if "主题" in pattern_name or "theme" in pattern_name.lower():
-                return "shells/frontend/desktop_gui/modern/styles.py", "new_file"
+                return "partner/web/frontend_src/src/styles.css", "new_file"
             elif "响应式" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/main_window.py", "modify"
+                return "partner/web/frontend_src/src/App.tsx", "modify"
             else:
-                return "shells/frontend/desktop_gui/modern/styles.py", "modify"
+                return "partner/web/frontend_src/src/styles.css", "modify"
 
         elif category == "架构":
             if "测试" in pattern_name:
-                return "shells/frontend/desktop_gui/tests/", "new_file"
+                return "partner/web/frontend_src/tests/", "new_file"
             elif "配置" in pattern_name or "设置" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/pages/settings.py", "modify"
+                return "partner/web/frontend_src/src/pages/Settings.tsx", "modify"
             elif "组件化" in pattern_name:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
             else:
-                return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+                return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
 
-        return "shells/frontend/desktop_gui/modern/widgets.py", "modify"
+        return "partner/web/frontend_src/src/components/Widget.tsx", "modify"
 
     # ── LLM Code Generation ────────────────────────────────────────────────
 
@@ -390,24 +391,38 @@ Partner 现有代码风格：
     # ── API Key Resolution ────────────────────────────────────────────────
 
     @classmethod
-    def _resolve_api_key(cls) -> str:
-        """Resolve DeepSeek API key from env vars or Hermes config."""
-        import os as _os
-        key = _os.environ.get("DEEPSEEK_API_KEY", "")
-        if key:
-            return key
+    def _resolve_llm_endpoint(cls) -> dict:
+        """Resolve the LLM endpoint (url, api_key, model, provider) from workspace config.
+
+        (2026-09-14) Previously this class hardcoded
+        ``https://api.deepseek.com/chat/completions`` + ``DEEPSEEK_API_KEY`` +
+        ``model=deepseek-chat`` in two call sites. That bypassed the operator's
+        workspace config (config/api.json -> minimax) and exhausted the deepseek
+        quota while minimax stayed idle. The sole source of truth is now
+        ``direct_api._resolve_api_json()``, which resolves minimax by default
+        (deepseek only when the operator explicitly selects it). Returns ``{}``
+        on any failure (callers treat it as "no endpoint available").
+        """
         try:
-            cfg_path = _os.path.expanduser("~/.hermes/config.yaml")
-            if _os.path.exists(cfg_path):
-                with open(cfg_path) as _f:
-                    for _line in _f:
-                        if "api_key" in _line.lower() and "deepseek" in _line.lower():
-                            key = _line.split(":", 1)[-1].strip().strip('"').strip("'")
-                            if key:
-                                return key
+            from ..adapters.direct_api import _resolve_api_json
+            cfg = _resolve_api_json()
+            if not (str(cfg.get("api_key") or "").strip() and str(cfg.get("base_url") or "").strip()):
+                return {}
+            provider = str(cfg.get("_provider") or "minimax").lower()
+            base_url = str(cfg["base_url"]).rstrip("/")
+            model = str(cfg.get("model") or "").strip()
+            if not model:
+                model = "MiniMax-M3" if provider == "minimax" else "deepseek-chat"
+            # chat() 内部固定拼 /v1/chat/completions；minimax 需要 /v1，deepseek 不需要。
+            url = base_url + "/v1/chat/completions" if provider == "minimax" else base_url + "/chat/completions"
+            return {"url": url, "api_key": str(cfg["api_key"]).strip(), "model": model, "provider": provider}
         except Exception:
-            pass
-        return _os.environ.get("OPENAI_API_KEY", "")
+            return {}
+
+    @classmethod
+    def _resolve_api_key(cls) -> str:
+        """Resolve the LLM API key from workspace config (minimax by default)."""
+        return cls._resolve_llm_endpoint().get("api_key", "")
 
     # ── Code Generation ────────────────────────────────────────────────────
 
@@ -428,9 +443,9 @@ Partner 现有代码风格：
         prompt = cls._build_code_prompt(pattern_name, category, change_type, target_file)
 
         try:
-            api_key = cls._resolve_api_key()
-            if not api_key:
-                logger.warning("[IMPROVER] No API key for code generation")
+            endpoint = cls._resolve_llm_endpoint()
+            if not endpoint.get("api_key") or not endpoint.get("url"):
+                logger.warning("[IMPROVER] No LLM endpoint for code generation")
                 return ""
 
             import urllib.request as _ur
@@ -438,19 +453,19 @@ Partner 现有代码风格：
             def _do_sync_llm_call(payload_bytes: bytes) -> str:
                 """Synchronous HTTP call — runs in executor thread."""
                 req = _ur.Request(
-                    "https://api.deepseek.com/chat/completions",
+                    endpoint["url"],
                     data=payload_bytes,
                     headers={
                         "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
+                        "Authorization": f"Bearer {endpoint['api_key']}",
                     },
                 )
-                resp = _ur.urlopen(req, timeout=30)
+                resp = _ur.urlopen(req, timeout=120)
                 resp_data = json.loads(resp.read())
                 return resp_data["choices"][0]["message"]["content"].strip()
 
             payload = json.dumps({
-                "model": "deepseek-chat",
+                "model": endpoint["model"],
                 "messages": [
                     {"role": "system", "content": "You are a Python code generator. Output ONLY Python code. No explanations. No markdown."},
                     {"role": "user", "content": prompt},
@@ -532,7 +547,7 @@ Partner 现有代码风格：
             pattern_name = gap.get("external_pattern", "")
             priority = gap.get("priority", "medium")
             change_type = "modify"
-            target_file = "shells/frontend/desktop_gui/modern/widgets.py"
+            target_file = "partner/web/frontend_src/src/components/Widget.tsx"
 
             # Determine target file using existing logic
             target_file, change_type = cls._determine_target(category, pattern_name)
@@ -608,9 +623,9 @@ Partner 代码风格：
 如果某个需求无法生成有意义的代码，code 设为空字符串。"""
 
         # ── Call LLM once via async to_thread() ──
-        api_key = cls._resolve_api_key()
-        if not api_key:
-            logger.warning("[IMPROVER] No API key for batch code generation")
+        endpoint = cls._resolve_llm_endpoint()
+        if not endpoint.get("api_key") or not endpoint.get("url"):
+            logger.warning("[IMPROVER] No LLM endpoint for batch code generation")
             return []
 
         import urllib.request as _ur
@@ -618,11 +633,11 @@ Partner 代码风格：
         def _do_batch_llm_call(payload_bytes: bytes) -> str:
             """Synchronous HTTP request — runs in executor thread."""
             req = _ur.Request(
-                "https://api.deepseek.com/chat/completions",
+                endpoint["url"],
                 data=payload_bytes,
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {endpoint['api_key']}",
                 },
             )
             resp = _ur.urlopen(req, timeout=120)
@@ -634,7 +649,7 @@ Partner 代码风格：
                 await progress_callback("⏳ 正在等待 LLM 生成代码（预计 30-60 秒）...")
 
             payload = json.dumps({
-                "model": "deepseek-chat",
+                "model": endpoint["model"],
                 "messages": [
                     {"role": "system", "content": "You are a Python code generator. Output ONLY valid JSON. No explanations."},
                     {"role": "user", "content": prompt},

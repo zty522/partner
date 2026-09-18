@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from partner.application import PartnerApplicationService
+from partner.application.orchestrator import (
+    orchestrate_submit, IdempotencyConflict,
+    _IdempotencyInProgress as OrchestratorInProgress,
+)
 from partner.event_fabric import EventLedger, EventSummary
 from partner.interfaces.messaging import split_outbound_text
 from partner.workspace.workspace_layout import append_history
@@ -164,20 +168,101 @@ class QQQfficialBridge:
                                  delivery_acknowledged=True)
         return True
 
+    def _normalise_attachments(self, msg: QQMessage) -> list[dict]:
+        """Extract attachment content refs from the production QQMessage
+        contract: attachments live in ``msg.extra["attachments"]``, never on
+        a top-level ``msg.attachments`` field."""
+        raw = (msg.extra or {}).get("attachments") if isinstance(msg.extra, dict) else None
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or item.get("type") or item.get("file_type") or "attachment")
+            name = str(item.get("name") or item.get("filename") or item.get("file_name") or "")
+            url = str(item.get("url") or item.get("file_url") or item.get("download_url") or "")
+            local_path = str(item.get("path") or "")
+            sha = str(item.get("sha256") or item.get("content_sha256") or "")
+            entry = {"kind": kind, "name": name}
+            if local_path:
+                entry["path"] = local_path
+                entry["download_state"] = "present"
+            elif url:
+                entry["url"] = url
+                entry["download_state"] = "pending"
+            else:
+                entry["download_state"] = "missing"
+            if sha:
+                entry["content_sha256"] = sha
+            out.append(entry)
+        return out
+
+    @staticmethod
+    def _attachment_signature(attachments: list[dict]) -> list[dict]:
+        """Stable content/version reference for idempotency."""
+        sig: list[dict] = []
+        for a in attachments:
+            s = {"kind": a.get("kind", ""), "name": a.get("name", "")}
+            if a.get("content_sha256"):
+                s["content_sha256"] = a["content_sha256"]
+            elif a.get("path"):
+                s["path"] = a["path"]
+            elif a.get("url"):
+                s["url"] = a["url"]
+            else:
+                s["download_state"] = "missing"
+            sig.append(s)
+        return sig
+
     def _handle_message(self, msg: QQMessage) -> None:
         text = str(msg.content or msg.raw_message or "").strip()
-        if not text or not self._remember(msg.msg_id): return
+        attachments = self._normalise_attachments(msg)
+        if not text and not attachments:
+            return
+        if not self._remember(msg.msg_id):
+            return
         self._stats["messages_received"] += 1
-        self._append_history("user", text, sender_id=msg.sender_id, sender_name=msg.sender_name,
-                             msg_id=msg.msg_id)
+        self._append_history("user", text or "(attachment-only)",
+                             sender_id=msg.sender_id, sender_name=msg.sender_name,
+                             msg_id=msg.msg_id, attachment_count=len(attachments))
         special = self._handle_special_command(text, msg)
         if special:
-            self._reply(msg, special); return
-        submission = PartnerApplicationService(self.root).submit(
-            text, channel="qq", sender_id=msg.sender_id, sender_name=msg.sender_name or "QQ用户",
-            persona_hint=self.instance_id,
-        )
-        self._reply(msg, submission.message if submission.accepted else "这条任务没有进入队列：" + submission.message)
+            if not self._reply(msg, special):
+                self._record_reply_failure(msg.msg_id, "special_reply")
+            return
+        try:
+            sub_result = orchestrate_submit(
+                workspace_root=self.root,
+                text=text,
+                channel="qq",
+                sender_id=msg.sender_id,
+                sender_name=msg.sender_name or "QQ用户",
+                persona_hint=self.instance_id,
+                request_id="qq:" + str(msg.msg_id or msg.sender_id),
+                attachments=attachments,
+                attachments_signature=self._attachment_signature(attachments),
+                subject_allowed_instances=[self.instance_id],
+                subject_id=msg.sender_id,
+            )
+        except IdempotencyConflict as exc:
+            if not self._reply(msg, "请求内容与上一次不同（idempotency_conflict）：" + str(exc)):
+                self._record_reply_failure(msg.msg_id, "idempotency_conflict")
+            return
+        except OrchestratorInProgress as exc:
+            if not self._reply(msg, "请求正在处理中，请稍候查看结果：" + str(exc)):
+                self._record_reply_failure(msg.msg_id, "in_progress")
+            return
+
+        if sub_result.job_id:
+            self._record_submission_receipt(msg.msg_id, sub_result.job_id,
+                                              sub_result.assigned_instance)
+            if not self._reply(msg, "已接收。" + sub_result.job_id[:20] +
+                                 "（assigned=" + sub_result.assigned_instance + "）"):
+                self._record_reply_failure(msg.msg_id, "ack_reply")
+        else:
+            if not self._reply(msg, sub_result.message or "已收到"):
+                self._record_reply_failure(msg.msg_id, "direct_answer_reply")
 
     def _handle_special_command(self, text: str, _msg: QQMessage) -> str | None:
         if text.strip().lower() in {"/help", "help", "帮助", "使用帮助"}:
@@ -188,6 +273,46 @@ class QQQfficialBridge:
             if not active: return "当前没有正在执行的后台工作。"
             return "当前后台工作：" + "；".join(f"{x.get('title')}（{x.get('status')}）" for x in active[:4])
         return None
+
+    def _record_submission_receipt(self, msg_id: str, job_id: str,
+                                     assigned_instance: str) -> None:
+        """Record the inbound request -> Job association as a *submission
+        receipt*, NOT a channel ACK.  A sent/delivered state may only be
+        produced by the channel returning send-success evidence (see
+        ``_record_delivery_ack``).  This file lives in ``inbound/``, is
+        named ``*.accepted``, and carries no ``delivered_at``."""
+        try:
+            target = (self.root / "state" / "application" / "inbound"
+                      / ("qq_" + str(msg_id) + ".accepted"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({
+                "schema_version": 2,
+                "kind": "submission_receipt",
+                "msg_id": msg_id,
+                "job_id": job_id,
+                "assigned_instance": assigned_instance,
+                "accepted_at": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            logger.exception("submission receipt write failed")
+
+    def _record_reply_failure(self, msg_id: str, stage: str) -> None:
+        """Persist an undelivered reply so recovery can retry later.
+        Never marks sent/delivered — only records that the send attempt
+        failed at the given stage."""
+        try:
+            target = (self.root / "state" / "application" / "inbound"
+                      / ("qq_" + str(msg_id) + ".reply_failed"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({
+                "schema_version": 2,
+                "kind": "reply_failure",
+                "msg_id": msg_id,
+                "stage": stage,
+                "failed_at": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            logger.exception("reply failure write failed")
 
     def _start_notification_poller(self) -> None:
         def poll() -> None:
@@ -240,8 +365,17 @@ class QQQfficialBridge:
             if identity in value.get('images_delivered',[]): continue
             image=Path(asset['path'])
             from partner.presentation.figures import digest
-            if not image.is_file() or (asset.get('sha256') and digest(image)!=asset['sha256']): return False
-            if not self.send_file_proactive(user,image.read_bytes(),file_type=1,file_name=image.name): return False
+            # Image is optional: degrade gracefully on missing/invalid/transport failures.
+            # Text and PDF still ship so the user always receives a usable result.
+            if not image.is_file():
+                value.setdefault('images_skipped',[]).append({'id':asset.get('id'),'reason':'file_missing','path':str(image),'at':time.time()})
+                write_json(path,value); continue
+            if asset.get('sha256') and digest(image)!=asset['sha256']:
+                value.setdefault('images_skipped',[]).append({'id':asset.get('id'),'reason':'sha_mismatch','expected':asset['sha256'],'actual':digest(image),'at':time.time()})
+                write_json(path,value); continue
+            if not self.send_file_proactive(user,image.read_bytes(),file_type=1,file_name=image.name):
+                value.setdefault('images_skipped',[]).append({'id':asset.get('id'),'reason':'transport_failed','at':time.time()})
+                write_json(path,value); continue
             value.setdefault('images_delivered',[]).append(identity)
             value.setdefault('component_acks',[]).append({'kind':'image','id':asset.get('id'),'sha256':identity,'at':time.time()})
             write_json(path,value)

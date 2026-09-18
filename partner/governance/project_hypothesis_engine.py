@@ -36,7 +36,7 @@ GRAMMARS: dict[str, list[dict[str, Any]]] = {
          "measures": ["repositories_acquired", "papers_acquired", "repository_files_read", "paper_pdf_pages_read"]},
         {"event": "continuous_project_step", "strategy": "04_adapter_contract", "key": "source_variant", "low": 1, "high": 8,
          "measures": ["concepts_mapped", "partner_contracts_present", "source_files_read"]}],
-    "hermes_partner_explore": [
+    "partner_explore": [
         {"event": "continuous_project_step", "strategy": "05_failure_path_regression", "key": "code_variant", "low": 1, "high": 8,
          "measures": ["sources_read", "focused_regression_passed", "gaps_identified"]},
         {"event": "continuous_project_step", "strategy": "05_candidate_gap_matrix", "key": "code_variant", "low": 1, "high": 8,
@@ -66,7 +66,7 @@ PROJECT_INSTANCES = {
     "molecular_generation": "02",
     "molecular_dynamics_study": "03",
     "literature_github_learning": "04",
-    "hermes_partner_explore": "05",
+    "partner_explore": "05",
 }
 
 

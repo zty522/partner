@@ -196,41 +196,37 @@ class OODAEngine:
             return []
 
     def _read_round_results(self, round_num: int) -> dict:
-        results = {"round": round_num, "files_found": [], "metrics": {}, "summary": ""}
-        rounds_dir = os.path.join(self.project_dir, "rounds")
-        for dname in os.listdir(rounds_dir) if os.path.isdir(rounds_dir) else []:
-            if dname.startswith(f"round_{round_num:03d}"):
-                round_dir = os.path.join(rounds_dir, dname)
-                for root, dirs, files in os.walk(round_dir):
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        results["files_found"].append(fpath)
-                        if fname.endswith(".smi"):
-                            try:
-                                with open(fpath) as f:
-                                    lines = [l.strip() for l in f if l.strip()]
-                                results["metrics"]["mol_count"] = len(lines)
-                            except Exception:
-                                pass
-                        if fname.endswith(".md") or fname.endswith(".txt"):
-                            try:
-                                with open(fpath) as f:
-                                    results["summary"] += f.read()[:500]
-                            except Exception:
-                                pass
-                break
-        return results
+        """Read a round's record through the round_index (no tree scan).
+
+        The round_index module reads ``rounds/.round_index.jsonl``;
+        when the index file is missing (recovery / legacy), it falls
+        back to a bounded listdir walk with a single-level depth.
+        """
+        try:
+            from partner.core.round_index import read_round as _idx_read
+            rec = _idx_read(project_dir=self.project_dir,
+                             round_num=round_num)
+            return {
+                "round": round_num,
+                "files_found": rec.get("files", []),
+                "metrics": rec.get("metrics", {}),
+                "summary": rec.get("summary", ""),
+                "label": rec.get("label", ""),
+                "source": rec.get("recovered_from") or "index",
+            }
+        except Exception:
+            return {"round": round_num, "files_found": [],
+                     "metrics": {}, "summary": "",
+                     "label": "", "source": "error"}
 
     def _get_all_round_results(self) -> dict:
-        all_r = {}
-        rounds_dir = os.path.join(self.project_dir, "rounds")
-        if os.path.isdir(rounds_dir):
-            for dname in os.listdir(rounds_dir):
-                m = re.match(r'round_(\d{3})_', dname)
-                if m:
-                    rn = int(m.group(1))
-                    all_r[rn] = self._read_round_results(rn)
-        return all_r
+        try:
+            from partner.core.round_index import list_rounds as _idx_list
+            records = _idx_list(project_dir=self.project_dir)
+            return {r["round"]: self._read_round_results(r["round"])
+                     for r in records if r.get("round") is not None}
+        except Exception:
+            return {}
 
     def _build_context(self) -> str:
         parts = []

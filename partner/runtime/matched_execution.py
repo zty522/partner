@@ -60,19 +60,33 @@ def isolate(workspace, candidate, repo=None):
     directory = root(workspace) / 'state/event_runtime/isolated' / ('experiment_' + uuid4().hex)
     directory.mkdir(parents=True)
     # Snapshot working source, including uncommitted fixes; never reset/copy credentials.
+    # (2026-09-16) Expand snapshot to cover docs/catalog fixtures and resources that
+    # some tests assume live next to the package. Keep ignoring secrets and large
+    # runtime artefacts.
+    ignore = shutil.ignore_patterns('__pycache__', '*.pyc', '.pytest_cache', 'workspace',
+                                    '.secrets', '*.token', '*.pem', '.env', 'credentials*')
     for kind in ('baseline', 'candidate'):
         copy = directory / kind
         copy.mkdir()
         for name in ('partner', 'tests', 'scripts', 'shells'):
             if (repo / name).is_dir():
-                shutil.copytree(repo / name, copy / name, ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.pytest_cache', 'workspace'))
+                shutil.copytree(repo / name, copy / name, ignore=ignore)
         for name in ('pyproject.toml', 'pytest.ini', 'setup.cfg', 'conftest.py'):
             if (repo / name).is_file(): shutil.copy2(repo / name, copy / name)
+        # Optional resources (docs, fixtures) — copy if they exist; absence is non-fatal.
+        for name in ('docs', 'fixtures', 'data', 'catalog.yaml'):
+            p_src = repo / name
+            if p_src.is_dir():
+                shutil.copytree(p_src, copy / name, ignore=ignore)
+            elif p_src.is_file():
+                shutil.copy2(p_src, copy / name)
     applied, reason = _apply_exact_unified_diff(directory / 'candidate', patch, targets)
     if not applied:
         raise ValueError('candidate patch not applied: ' + reason)
+    expectations = list(candidate.get('expectations') or [])
     manifest = {'experiment_id': directory.name, 'created_at': time.time(), 'tests': tests,
                 'regression_tests': regression, 'test_hashes': hashes, 'source_hashes': source_hashes,
+                'expectations': expectations,
                 'patch_sha256': hashlib.sha256(patch.encode()).hexdigest(), 'timeout': 120,
                 'production_effective': False}
     write_json(directory / 'manifest.json', manifest)
@@ -135,25 +149,95 @@ def verify_receipt(workspace, reference):
 
 
 def compare(workspace, before, after):
+    """Compare a baseline and candidate isolated run with per-dimension attribution.
+
+    The result separates six signals (round 2026-09-17):
+      a. target defect fixed   -> ``improved``
+      b. frozen expectations   -> computed by ``expectation_compare`` upstream
+      c. new regressions       -> ``breakdown.new_regressions`` (baseline pass -> candidate fail)
+      d. existing blockers     -> ``breakdown.existing_blockers`` (both fail; not candidate-caused)
+      e. execution validity    -> ``criteria_results.matched_tests``
+      f. release gate          -> ``decision`` (improved AND no new regression)
+
+    ``improved`` (target repaired) and ``regression_passed`` (no new regression)
+    are DISTINCT fields.  An existing blocker can block release without being
+    mislabelled as a candidate-introduced regression, and a candidate that
+    repairs the target defect but adds a regression is ``improved=True`` yet
+    ``regression_passed=False`` — never silently conflated.
+    """
     try:
         b, a = verify_receipt(workspace, before), verify_receipt(workspace, after)
         if b['kind'] != 'baseline' or a['kind'] != 'candidate' or b['experiment_id'] != a['experiment_id']:
             raise ValueError('unmatched isolated executions')
-        names = lambda r: {(c['class'],c['name']) for c in r['cases']}
+        names = lambda r: {(c['class'], c['name']) for c in r['cases']}
         valid = bool(names(b) and names(b) == names(a) and not b['timed_out'] and not a['timed_out']
                      and not any(c['error'] or c['skipped'] for c in b['cases'] + a['cases']))
         _, manifest = load_manifest(workspace, b['experiment_id'])
-        def selected(case, specification):
-            file, _, node = specification.partition('::')
-            module = file[:-3].replace('/', '.')
-            return (case['class'] == module or case['class'].endswith('.'+Path(file).stem)
-                    or case['class'] == Path(file).stem) and (not node or case['name'] == node.split('::')[-1])
-        reproduced = any(c['failed'] and any(selected(c,t) for t in manifest['tests']) for c in b['cases'])
-        regression_clean = all(not c['failed'] for c in b['cases'] if any(selected(c,t) for t in manifest['regression_tests']))
-        improved = bool(valid and b['exit_code'] == 1 and reproduced and regression_clean and a['exit_code'] == 0)
-        return {'decision':'promoted' if improved else 'rejected' if valid else 'inconclusive',
-                'improved':improved, 'regression_passed':improved,
-                'criteria_results':{'matched_tests':valid,'reproducer_repaired_and_regression_passed':improved},
-                'evidence_refs':[b['receipt_path'],a['receipt_path']]}
+
+        # Target vs non-regression split comes from frozen expectations' kind,
+        # NOT from manifest['tests'] (which mixes reproducers and invariants).
+        expectations = manifest.get('expectations') or []
+        if expectations:
+            target_test_names = {e.get('test_name') for e in expectations if e.get('kind') != 'non_regression'}
+        else:
+            # Legacy manifest without expectations: every reproducer test is a target.
+            target_test_names = {str(t).split('::')[-1] for t in manifest.get('tests', [])}
+
+        def cmap(r):
+            return {(c['class'], c['name']): c for c in r['cases']}
+        bm, am = cmap(b), cmap(a)
+        all_names = set(bm) | set(am)
+
+        def failed(m, n):
+            c = m.get(n)
+            return bool(c and c.get('failed'))
+
+        # Reproduced: the target defect must actually fail in baseline.
+        reproduced = any(failed(bm, n) for n in all_names if n[1] in target_test_names)
+
+        target_fixed, target_regressed, new_regressions, existing_blockers = [], [], [], []
+        for n in all_names:
+            b_fail = failed(bm, n)
+            a_fail = failed(am, n)
+            is_target = n[1] in target_test_names
+            if is_target:
+                if b_fail and not a_fail:
+                    target_fixed.append(n)
+                elif not b_fail and a_fail:
+                    target_regressed.append(n)
+            else:
+                # Non-regression invariant tests + regression_tests.
+                if not b_fail and a_fail:
+                    new_regressions.append(n)
+                elif b_fail and a_fail:
+                    existing_blockers.append(n)
+
+        improved = bool(valid and reproduced and target_fixed and not target_regressed)
+        regression_passed = not new_regressions
+        decision = ('promoted' if (improved and regression_passed)
+                    else 'rejected' if valid else 'inconclusive')
+
+        def fmt(ns):
+            return [f"{c}::{n}" for c, n in sorted(ns)]
+
+        return {
+            'decision': decision,
+            'improved': improved,
+            'regression_passed': regression_passed,
+            'criteria_results': {
+                'matched_tests': valid,
+                'target_defect_fixed': improved,
+                'no_new_regression': regression_passed,
+            },
+            'breakdown': {
+                'target_fixed': fmt(target_fixed),
+                'target_regressed': fmt(target_regressed),
+                'new_regressions': fmt(new_regressions),
+                'existing_blockers': fmt(existing_blockers),
+            },
+            'evidence_refs': [b['receipt_path'], a['receipt_path']],
+        }
     except (OSError, ValueError, KeyError, TypeError):
-        return {'decision':'inconclusive','improved':False,'regression_passed':False,'criteria_results':{},'evidence_refs':[]}
+        return {'decision': 'inconclusive', 'improved': False, 'regression_passed': False,
+                'criteria_results': {}, 'breakdown': {}, 'evidence_refs': []}
+

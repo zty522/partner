@@ -158,7 +158,8 @@ def select_context(
             continue
         path = (REPO_ROOT / str(item["path"])).resolve()
         try:
-            content = path.read_text(encoding="utf-8").strip()
+            with path.open(encoding='utf-8') as stream:
+                content = stream.read(max(1, document_budget-used)).strip()
         except OSError:
             if doc_id in MANDATORY_IDS:
                 raise ValueError(f"mandatory context missing: {path}")

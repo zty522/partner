@@ -21,7 +21,7 @@ PROJECT_IDS = (
     "molecular_generation",
     "molecular_dynamics_study",
     "literature_github_learning",
-    "hermes_partner_explore",
+    "partner_explore",
 )
 
 

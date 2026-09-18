@@ -300,6 +300,9 @@ class AgentAdapter(ABC):
                 block, flags=re.DOTALL)
             if envelope:
                 block = envelope.group(1)
+            command_envelope = re.fullmatch(r'\s*<command>(.*?)</command>\s*',block,flags=re.DOTALL)
+            if command_envelope:
+                block=command_envelope.group(1)
             commands.append(block.strip())
         for invoke in ([] if commands else re.findall(
                 r'<invoke name="exec_command">(.*?)</invoke>', raw, flags=re.DOTALL)):
@@ -1583,8 +1586,12 @@ class HermesAdapter(AgentAdapter):
                         append_api_call("qwen", model=model, base_url=base, purpose="vision",
                                         status="ok", elapsed_ms=elapsed_ms,
                                         prompt_chars=len(prompt), response_chars=len(content),
+                                        prompt_tokens=int((data.get('usage') or {}).get('prompt_tokens') or 0),
+                                        completion_tokens=int((data.get('usage') or {}).get('completion_tokens') or 0),
+                                        total_tokens=int((data.get('usage') or {}).get('total_tokens') or 0),
                                         workspace_root=_workspace_root_from_path(self.workspace),
-                                        instance=os.path.basename(self.workspace.rstrip("/")))
+                                        instance=getattr(self,'instance_id','') or os.path.basename(self.workspace.rstrip("/")),
+                                        task_id=getattr(self,'task_id',''), project_id=getattr(self,'project_id',''), event_type=getattr(self,'event_type','vision'))
                     except Exception:
                         pass
                 else:
@@ -1616,7 +1623,8 @@ class HermesAdapter(AgentAdapter):
                                     elapsed_ms=int((time.time() - started_at) * 1000),
                                     prompt_chars=len(prompt),
                                     workspace_root=_workspace_root_from_path(self.workspace),
-                                    instance=os.path.basename(self.workspace.rstrip("/")))
+                                    instance=getattr(self,'instance_id','') or os.path.basename(self.workspace.rstrip("/")),
+                                    task_id=getattr(self,'task_id',''), project_id=getattr(self,'project_id',''), event_type=getattr(self,'event_type','vision'))
                 except Exception:
                     pass
                 return []

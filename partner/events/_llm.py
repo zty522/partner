@@ -27,7 +27,7 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
                 if isinstance(adapter, DirectAdapter):
                     # A larger output budget also needs bounded generation time;
                     # retaining the 8k timeout made 16k truncation retries futile.
-                    options["timeout"] = min(180 if (retry_budget or 8192) > 8192 else 150 if purpose.startswith("report_") else 90, remaining)
+                    options["timeout"] = min(180 if (retry_budget or 8192) > 8192 else 150 if purpose.startswith(("report_", "autoevolution_")) else 90, remaining)
                 raw = adapter.chat_once(prompt, purpose=purpose, **options)
             elif callable(adapter):
                 raw = adapter(prompt, purpose=purpose)
@@ -78,13 +78,28 @@ def event_facts(params: dict, *, max_chars: int = 32000) -> str:
     """Prioritize actual terminals over recursively duplicated upstream prompts."""
     outputs = params.get('flow_outputs') or params.get('parent_flow_outputs') or {}
     facts = {'original_user_request':(params.get('intent_contract') or {}).get('original_request') or params.get('request'),
-             'project_id':params.get('project_id')}
+             'project_id':params.get('project_id'),
+             'execution_constraints':(params.get('intent_contract') or {}).get('execution_constraints') or {}}
+    recalled=(outputs.get('recall') or {}).get('semantic_output') or {}
+    facts['memory_context']={k:recalled.get(k,[]) for k in ('lessons','active_habits','preferences')}
+    if outputs.get('assess'):
+        facts['cycle_assessment'] = outputs['assess'].get('semantic_output') or {}
+    executed = (outputs.get('execute') or {}).get('semantic_output') or {}
+    answer_status = (outputs.get('answer',{}).get('semantic_output') or {}).get('runtime_status')
+    if answer_status:
+        facts['answer_runtime_receipts'] = answer_status
+    if executed.get('child_flow_id'):
+        facts['executed_child_flow'] = {'flow_id':executed['child_flow_id'],
+            'status':executed.get('child_status'), 'lineage':executed.get('child_lineage',{}),
+            'source':'runtime parent/child resume receipt, not a model proposed next step'}
     inspected = (outputs.get('inspect') or {}).get('semantic_output', {})
     documents = {}
     for item in inspected.get('local_input_context') or []:
         for doc in item.get('documents') or []:
             documents[str(doc.get('path') or len(documents))] = doc
     context = {
+        'operator_feedback':inspected.get('operator_feedback') or {},
+        'verified_artifact_index':inspected.get('verified_artifact_index') or {},
         'project_documents':json.dumps(list(documents.values()), ensure_ascii=False)[:6000],
         'continuation_request':str(params.get('request') or '')[:2500],
         'attachments':params.get('attachments') or [],
@@ -125,6 +140,8 @@ def event_facts(params: dict, *, max_chars: int = 32000) -> str:
         "信息缺失时先读取输入文件所在项目的文档、已有脚本和结果，再做可复现检查或检索；不能把向用户提问当作下一次执行动作。"
         "后台动作失败时先读取 recent_execution 中的 checkpoint 和已完成命令回执，复用其中的真实部分结果；整体失败不表示前面的每条命令都没执行。命令行入口缺失不等于库的 Python/API 接口不可用；对照实际 import/调用回执选择已可用的入口，不能反复安装已可用能力。区分未记录、未知和已被证伪；缺注释本身不能证明某结构或性质不存在。"
         "原始目标未完成时，选择一个可实际执行、能补齐关键证据的动作；不得以重复解析或写说明冒充新进展。\n"
+        "不同阶段的历史观察是不可变快照：打开视频时尚未转录与后续转录完成不是矛盾，不要修改旧playback记录。正式子Flow的终态和父子绑定可证明执行归属；域目录中的已核验产物可直接消费，不需要复制到work_dir或补写已完成标志才能算执行。下一步应利用内容推进，不能只对齐元数据。\n"
+        "执行能力边界：project.action_execute已是Event，它内部只能用真实库与底层工具，不能递归调用其他Event。浏览器Bridge的read_page用于读取网页，voice_transcribe不是浏览器接口。完整视频学习通过本轮真实页面来源加next_flow_request.json请求browser_video_learning子Flow，由runtime顺序执行下载、转录、画面理解和综合；选择动作时就要使用这个能力边界，不再虚构CLI或同名函数。\n"
         "没有既有 before/after 记录不代表不能开展对照实验：可从当前源码或失败测试冻结基线，再构造候选真实运行。"
         "不得把尚待执行的实验结果作为允许开始实验的循环前置条件。采集器没有返回某字段，不等于原始来源不存在相应内容。\n"
     )

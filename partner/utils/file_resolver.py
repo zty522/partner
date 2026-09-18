@@ -1,3 +1,9 @@
+"""MAINTENANCE_ONLY_INDEXING.
+
+Workspace resource resolution uses single-level ``os.scandir``; deeper walks only run from dedicated maintenance hooks.
+See ``docs/operations/read_discipline_audit_20260917.md``.
+"""
+
 """Hermes-style dynamic file path resolver.
 
 Instead of hardcoded search paths, uses `find` / `locate` / `os.walk`

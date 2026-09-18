@@ -40,7 +40,7 @@ SPECS = (
     {"project_id": "literature_github_learning", "short": "research",
      "recipe": "turn_source_rotation_v1",
      "hypothesis": "rotating grounded Harness source files by native turn reduces duplicate learning outcomes"},
-    {"project_id": "hermes_partner_explore", "short": "code_surface",
+    {"project_id": "partner_explore", "short": "code_surface",
      "recipe": "turn_code_surface_rotation_v1",
      "hypothesis": "rotating the inspected production-code surface by native turn reduces duplicate architecture outcomes"},
 )

@@ -148,7 +148,7 @@ def _llm_deliberate(root: Path, instance_id: str, project_id: str,
                 "partner/v2/external_learning_events.py",
                 "partner/governance/research_adoption.py",
             ],
-            "hermes_partner_explore": [
+            "partner_explore": [
                 "partner/governance/active_learning.py",
                 "partner/evolution/bounded_code_candidate.py",
             ],

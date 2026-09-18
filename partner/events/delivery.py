@@ -9,6 +9,15 @@ import os
 from partner.event_fabric.catalog import EventDefinition
 
 
+def _outbound_name(ctx, params):
+    identity = str(getattr(ctx, 'job_id', 'job'))
+    if ((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle'):
+        # A cycle sends text and PDF under one Job. Each Flow/Event needs its
+        # own receipt: a previous .sent file must never acknowledge new text.
+        identity += '.' + str(params.get('flow_id') or 'flow') + '.' + str(params.get('node_id') or 'send')
+    return identity + '.json'
+
+
 def channel_route(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     channel = str(params.get("channel") or getattr(_ctx, "channel", "") or "local")
     if channel not in {"qq", "gui", "tui", "local"}:
@@ -101,6 +110,8 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})
     if decision.get('notify') is False:
         return {'ok':True,'status':'completed','suppressed':True,'delivered':False,'summary':'通知决策要求仅保存本地记录'}
+    if ((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle') and not composed.get('ok'):
+        return {'ok':False,'status':'failed','error':'cycle message did not pass review; no transport request made'}
     if not text:
         return {"ok": False, "status": "failed", "error": "empty user message"}
     if dedup and not bool(dedup.get("should_send", True)):
@@ -115,7 +126,7 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {'ok':False,'status':'failed','error':'QQ recipient identity is missing; no transport request was made'}
     root = Path(str(getattr(ctx, "workspace", ""))).resolve()
     origin = str(params.get("origin_instance") or getattr(ctx, "instance_id", ""))
-    target = root / "state/application/outbound" / origin / f"{getattr(ctx, 'job_id', 'job')}.json"
+    target = root / "state/application/outbound" / origin / _outbound_name(ctx, params)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {"schema_version": 2, "job_id": getattr(ctx, "job_id", ""),
                "to_user": str(params.get("sender_id") or getattr(ctx, "sender_id", "")),
@@ -165,7 +176,7 @@ def send_pdf(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # 把 PDF 路径写到 outbound payload（QQ bridge 轮询时会一起发）
     root = Path(str(getattr(ctx, "workspace", ""))).resolve()
     origin = str(params.get("origin_instance") or getattr(ctx, "instance_id", ""))
-    target = root / "state/application/outbound" / origin / f"{getattr(ctx, 'job_id', 'job')}.json"
+    target = root / "state/application/outbound" / origin / _outbound_name(ctx, params)
     target.parent.mkdir(parents=True, exist_ok=True)
     text_msg = (lead_text + "【PDF 报告已生成】请查收附件。").strip()
     if (params.get('intent_contract') or {}).get('supersedes_report'):

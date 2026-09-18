@@ -15,33 +15,80 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
         value.get("semantic_output", value) for value in upstream.values()
         if isinstance(value, dict)
     ]
-    instructions = {
-        "observe": "忠实提取目标、明确约束、期望结果；不得扩张授权。",
-        "counter_read": "攻击已有理解：找遗漏、相反解释、不可证伪目标和过度授权。",
-        "synthesize": "综合原文和前两遍审议，形成最小、可证伪、可验证的最终契约。"
-                     "遇到歧义或信息缺口时，自主采用最合理的默认假设并在 reason 里说明；"
-                     "绝不把问题抛回给用户确认——你要自行理解、自行尝试、自行决定、自行解决。",
+
+    from partner.runtime.status_context import runtime_status
+    status_context = runtime_status(ctx, params)
+    role_prompts = {
+        "observe": (
+            "忠实提取目标、明确约束、期望结果；不得扩张授权。"
+            "必须区分用户明确要求与暂定方案：constraints 仅包含原文明示约束。"
+            "自行选用的算法、阈值、候选数量写入 assumptions 并标为待验证，不得冒充用户要求。"
+            "结构域范围、物种等事实没有文件或来源证据时保持 unknown，先安排证据检查，不得猜成事实。"
+            "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
+            "详细技术方案留给项目执行阶段，不要在此重复长篇论证。"
+            "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
+              "knowledge_gaps,route,project_hint,reason。"
+        ),
+        "counter_read": (
+            "攻击已有理解：找遗漏、相反解释、不可证伪目标和过度授权。"
+            "问候语、专业术语和已有项目归属都不能单独决定是否执行工具。"
+            "用户明确只问概念或不启动任务时不得扩张为实验；已有事实需查证的请求不能仅凭口头回答冒充完成。"
+            "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
+              "knowledge_gaps,route,project_hint,reason。"
+        ),
+        "synthesize": (
+            "综合原文和前两遍审议，形成最小、可证伪、可验证的最终契约。"
+            "route 只能为 direct_answer 或 project_iteration：用户仅问概念、解释差别且无需读取当前外部材料时选 direct_answer；"
+            "查询已有任务进展且下方已有运行器读取的真实记录时选 direct_answer，不为状态查询再开研究或取证迭代；缺失部分如实说尚不能确认。"
+            "需要新的外部文件读取、检索、计算、修改或推进任务时选 project_iteration。"
+            "派发目标 dispatch_target 必须从下列候选中选一个：\n"
+            "  - direct_answer：直接答，不入队\n"
+            "  - browser_video_learning：用户想学一条具体视频（payload.url 必填）\n"
+            "  - xhs_authoring：用户想在小红书发布内容（payload.topic 必填，payload.media 可选）\n"
+            "  - 已有 project_id：从下方当前 instance 项目列表中选一个\n"
+            "payload 仅在 dispatch_target=browser_video_learning / xhs_authoring 时填写。"
+            "warm_reply：1-2 句普通中文，告诉用户接下来要做什么；不要承诺未确定的结果；不要复读内部 ID、文件名、哈希。"
+            "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
+            "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
+              "knowledge_gaps,route,dispatch_target,warm_reply,payload,reason。"
+        ),
     }
-    raw, usage = call_model(ctx, purpose=f"intent_{role}", prompt=(
-        "你是 Partner 意图审议 Event。" + instructions[role]
-        + "必须区分用户明确要求与暂定方案：constraints 仅包含原文明示约束。"
-        "自行选用的算法、阈值、候选数量写入 assumptions 并标为待验证，不得冒充用户要求。"
-        "route 只能为 direct_answer 或 project_iteration：用户仅问概念、解释差别且无需读取当前外部材料时选 direct_answer；"
-        "需要实际读取文件、检索、计算、修改或推进任务时选 project_iteration。问候语、专业术语和已有项目归属都不能单独决定是否执行工具。"
-        "用户明确只问概念或不启动任务时不得扩张为实验；已有事实需查证的请求不能仅凭口头回答冒充完成。"
-        "结构域范围、物种等事实没有文件或来源证据时保持 unknown，先安排证据检查，不得猜成事实。"
-        "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
-        "详细技术方案留给项目执行阶段，不要在此重复长篇论证。"
-        "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
-          "knowledge_gaps,route,project_hint,reason。\n用户原文="
-        + json.dumps(request, ensure_ascii=False) + "\n用户随附的证据路径（内容须在执行中读取，不可仅凭文件名下结论）="
-        + json.dumps(params.get("attachments") or [], ensure_ascii=False)[:4000] + "\n已有审议="
-        + json.dumps(prior, ensure_ascii=False)[:16000]
-    ))
+    prompt = (
+        "你是 Partner 意图审议 Event。" + role_prompts[role]
+        + '\n类型契约：route 必须是字符串枚举 "direct_answer" 或 "project_iteration"，不是计划、数组或步骤。'
+        + "\n用户原文=" + json.dumps(request, ensure_ascii=False)
+        + "\n用户随附的证据路径（内容须在执行中读取，不可仅凭文件名下结论）="
+        + json.dumps(params.get("attachments") or [], ensure_ascii=False)[:4000]
+        + "\n当前 instance 已有 project（供 dispatch_target 选择）="
+        + json.dumps(params.get("available_projects") or [], ensure_ascii=False)[:4000]
+        + "\n已有审议=" + json.dumps(prior, ensure_ascii=False)[:16000]
+        + "\n运行器已读取的当前任务记录=" + json.dumps(status_context,ensure_ascii=False)[:14000]
+        + "\n基准/候选/消融方法臂=" + json.dumps(params.get("method_arm") or "", ensure_ascii=False)
+        + (("\n消融 drop=" + json.dumps((params.get("execution_constraints") or {}).get("ablation_drop") or "", ensure_ascii=False))
+           if (params.get("method_arm") or "").startswith("ablation") else "")
+        + "\n方法臂语义：candidate 用 GEPA 候选 + DGM 谱系 + ACE 记忆消费；"
+          "\nbaseline 走最简单可控路径；no_change 禁止任何代码改动；"
+          "\nreflection-only 允许 prompt 改写但不允许 skill/flow 改写；"
+          "\nexternal-only 强制外部学习优先；joint 三者并用且交叉验证。"
+    )
+    raw, usage = call_model(ctx, purpose=f"intent_{role}", prompt=prompt)
     value = json_object(raw)
+    calls = 1
+    if role == 'synthesize' and value.get('route') not in ('direct_answer', 'project_iteration'):
+        original_raw = raw
+        raw, retry_usage = call_model(ctx, purpose=f"intent_{role}", prompt=prompt
+            + '\n你上次输出违反 route 类型契约。请重新输出完整契约；仅修正结构，不扩张原始授权。'
+            + '\n错误输出=' + original_raw[:12000])
+        usage = {k: usage.get(k, 0) + retry_usage.get(k, 0)
+                 for k in set(usage) | set(retry_usage)
+                 if isinstance(usage.get(k, 0), (int, float)) and isinstance(retry_usage.get(k, 0), (int, float))}
+        value = json_object(raw)
+        calls += 1
+        if value.get('route') not in ('direct_answer', 'project_iteration'):
+            raise ValueError('intent synthesize route remains invalid after one schema repair')
     return {"ok": True, "status": "completed", "semantic_output": value,
             "summary": str(value.get("goal") or value.get("reason") or "意图审议完成"),
-            "token_usage": usage, "model_output": raw}
+            "token_usage": usage, "model_output": raw, "model_calls": calls}
 
 
 def intent_observe(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -57,18 +104,23 @@ def intent_synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def direct_answer(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    from partner.runtime.status_context import runtime_status
+    status_context = runtime_status(ctx, params)
     raw, usage = call_model(ctx, purpose="direct_answer", prompt=(
         "直接回答用户问题。先根据整句语义判断问题的主语、谓语和比较对象，不能因局部词语改答另一个专业问题。"
         "只回答原命题，不擅自换成更强命题：数值按某公式计算，不等于该数值随时间守恒；记录分段数量，不等于知道它按场景还是固定时长切分。"
         "未知的切分方式、采样规则、排名方向和参与原子范围必须保留未知，不自行补成事实。"
         "不为显得专业而增加未经核实的反例、算法身份或必要/充分条件；短问答先清楚回答，再给一句成立的理由。"
         "用两三句普通中文回答，不展开数学证明或额外举例。"
-        "不得声称使用了工具或获得了当前外部事实；表达自然、清楚、简洁。\n"
+        "回答任务进展时控制在180字以内，优先说具体内容、意义与尚未完成的环节，不报内部编号、文件名、哈希和处理日志；需要纠正上次答复就直接说明更正后的事实。"
+        "不得声称自己进行了新实验；可以依据下方运行器真实记录回答进展，计划不等于完成，未知不猜。表达自然、清楚、简洁。\n"
         "对话项目（仅供术语消歧，不代表已执行或已验证）：" + str(params.get('project_id') or '') + "\n用户原文："
         + str(params.get("request") or "")
+        + "\n运行器已读取的真实任务记录=" + json.dumps(status_context,ensure_ascii=False)[:16000]
     ))
     return {"ok": True, "status": "completed", "answer": raw,
-            "summary": raw[:500], "token_usage": usage}
+            "summary": raw[:500], "token_usage": usage,
+            "semantic_output":{"runtime_status":status_context}}
 
 
 def project_init(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
