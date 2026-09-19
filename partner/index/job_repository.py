@@ -685,20 +685,37 @@ class JobRepository:
             out.append(entry)
         return out
 
-    def list_by_status(self, statuses, *, limit=100):
+    def list_by_status(self, statuses, *, limit=100, job_id="", flow_id="",
+                       root_event_id=""):
+        """List jobs by status, with optional **SQL-level** scoping.
+
+        ``job_id`` / ``flow_id`` / ``root_event_id`` are applied inside the WHERE
+        clause, so a bounded run never reads the whole table (or scans the job JSON
+        directory) and then filters in Python.  The defaults reproduce the previous
+        query exactly.
+        """
         self._ensure_schema()
         statuses = list(statuses)
         if not statuses:
             return []
-        placeholders = ",".join("?" for _ in statuses)
+        placeholders = ", ".join("?" for _ in statuses)
+        clauses = [f"status IN ({placeholders})"]
+        params: list[Any] = list(statuses)
+        for column, value in (("job_id", job_id), ("flow_id", flow_id),
+                              ("root_event_id", root_event_id)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(str(value))
         rows = get_connection(self.db_path).execute(
-            f"""SELECT job_id, project_id, status, priority, assigned_instance,
-            next_run_at, created_at, updated_at, fencing_token, cancel_requested
-            FROM jobs WHERE status IN ({placeholders})
-            ORDER BY priority ASC, created_at ASC LIMIT ?""",
-            (*statuses, int(limit)),
+            "SELECT job_id, project_id, status, priority, assigned_instance, "
+            "flow_id, root_event_id, "
+            "next_run_at, created_at, updated_at, fencing_token, cancel_requested "
+            "FROM jobs WHERE " + " AND ".join(clauses) +
+            " ORDER BY priority ASC, created_at ASC LIMIT ?",
+            (*params, int(limit)),
         ).fetchall()
         return [dict(r) for r in rows]
+
 
     def outbox_enqueue(self, job_id, path, body):
         self._ensure_schema()

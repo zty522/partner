@@ -67,7 +67,17 @@ def _install(worker_module):
         except Exception:
             return
         statuses = ("queued", "dispatched", "running")
-        rows = repo.list_by_status(statuses, limit=200)
+        scope = getattr(self, "root_job_id", "")
+        if scope:
+            # Bounded diagnostic mode: filter in SQL by the root Job and its own
+            # flow, so the backlog is never read and never claimed.
+            rows = repo.list_by_status(statuses, limit=20, job_id=scope)
+            if not rows:
+                flow_id = str((repo.get_record(scope) or {}).get("flow_id") or "")
+                rows = (repo.list_by_status(statuses, limit=20, flow_id=flow_id)
+                        if flow_id else [])
+        else:
+            rows = repo.list_by_status(statuses, limit=200)
         for row in rows:
             # Sprint 37: never hand a cancel_requested row back to the worker.
             if row.get("cancel_requested"):

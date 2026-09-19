@@ -88,10 +88,14 @@ class EventWorker:
     """Execute one instance's queued Jobs, one durable Event at a time."""
 
     def __init__(self, workspace: str | os.PathLike, instance_id: str,
-                 shared_mode: bool = False):
+                 shared_mode: bool = False, root_job_id: str = ""):
         self.root = _root(workspace)
         self.instance_id = str(instance_id)
         self.shared_mode = bool(shared_mode)
+        #: Bounded diagnostic mode: this worker may only ever take that one root Job
+        #: (or a Job of the same Event Flow), so a single message can be consumed
+        #: without draining the global queue.
+        self.root_job_id = str(root_job_id or "")
         self.instance_workspace = self.root / "instances" / self.instance_id
         config = _agent_config(self.root, self.instance_workspace)
         self.adapter = create_adapter(
@@ -261,7 +265,37 @@ class EventWorker:
         except Exception as exc:
             logger.error("failed to isolate broken job %s: %s", job.job_id, exc)
 
+    def _next_scoped_job(self) -> JobRecord | None:
+        """Bounded mode: only the named root Job, or a Job of its own flow.
+
+        ``_queue_jobs`` filters in SQL when ``root_job_id`` is set; the flow check
+        below is defence in depth so that an unpatched directory-scan fallback still
+        cannot hand back an unrelated Job from the backlog.
+        """
+        if not self.root_job_id:
+            raise RuntimeError("_next_scoped_job requires root_job_id")
+        allowed_flow = ""
+        try:
+            from partner.index.job_repository import init as _init_jobs
+            record = _init_jobs(self.root).get_record(self.root_job_id) or {}
+            allowed_flow = str(record.get("flow_id") or "")
+        except Exception:
+            allowed_flow = ""
+        candidates = [job for job, _path in self._queue_jobs()
+                      if job and job.status in {"queued", "dispatched", "running"}
+                      and job.flow_id
+                      and (job.job_id == self.root_job_id
+                           or (allowed_flow and job.flow_id == allowed_flow))]
+        candidates.sort(key=lambda value: value.created_at)
+        for job in candidates:
+            if self._try_acquire_lock(job.job_id):
+                self._lock_held = job.job_id
+                return job
+        return None
+
     def next_job(self) -> JobRecord | None:
+        if self.root_job_id:
+            return self._next_scoped_job()
         # ADR 0100: shared workers pick ANY queued/dispatched/running job
         # from the global queue — they are not bound to one instance's
         # assigned_instance.  They also ignore the instance_scheduler gate

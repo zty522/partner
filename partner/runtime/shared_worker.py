@@ -20,6 +20,7 @@ gate), so N workers serve M instances with no cross-instance binding.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
@@ -31,17 +32,61 @@ def main() -> int:
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--slot-index", type=int, default=0)
     parser.add_argument("--poll-seconds", type=float, default=1.0)
+    # Bounded diagnostic mode.  Without these flags the process is the ordinary
+    # shared worker polling the global queue: default behaviour is untouched.
+    parser.add_argument("--root-job-id", default="",
+                        help="bounded mode: only this root Job and its own flow")
+    parser.add_argument("--instance-id", default="",
+                        help="bounded mode: instance identity to run as")
+    parser.add_argument("--once", action="store_true",
+                        help="bounded mode: one bounded pass, then exit")
+    parser.add_argument("--deadline-seconds", type=float, default=0.0,
+                        help="bounded mode: hard wall-clock limit (0 = none)")
     args = parser.parse_args()
 
     workspace = Path(args.workspace).expanduser().resolve()
+    if args.root_job_id or args.once:
+        if not args.root_job_id:
+            parser.error("--once requires --root-job-id: a bounded run must name its Job")
+        return asyncio.run(_run_bounded(workspace=workspace, root_job_id=args.root_job_id,
+                                        instance_id=args.instance_id or "02",
+                                        deadline_seconds=float(args.deadline_seconds)))
     worker = EventWorker(
         str(workspace),
         instance_id=f"shared-{int(args.slot_index)}",
         shared_mode=True,
     )
     # run_forever polls every poll_seconds and never returns on its own.
-    import asyncio
     asyncio.run(worker.run_forever(poll_seconds=float(args.poll_seconds)))
+    return 0
+
+
+async def _run_bounded(*, workspace: Path, root_job_id: str, instance_id: str,
+                       deadline_seconds: float) -> int:
+    """Run one bounded pass: the named root Job and its own flow, then exit."""
+    import time as _time
+    worker = EventWorker(str(workspace), instance_id=instance_id, shared_mode=False,
+                         root_job_id=root_job_id)
+    started = _time.time()
+    steps: list[str] = []
+    while True:
+        if worker._stopping:
+            steps.append("stopped_by_signal")
+            break
+        if deadline_seconds and (_time.time() - started) > deadline_seconds:
+            steps.append("deadline_reached")
+            break
+        job = await asyncio.to_thread(worker.next_job)
+        if not job:
+            steps.append("no_scoped_job_left")
+            break
+        steps.append(f"ran:{job.job_id}")
+        try:
+            await worker._run_with_lease(job)
+        finally:
+            worker._release_claim()
+    print(f"[bounded] root_job_id={root_job_id} instance={instance_id} steps={steps} "
+          f"seconds={round(_time.time() - started, 2)}", flush=True)
     return 0
 
 
