@@ -31,12 +31,13 @@ def builtin_definitions() -> list[EventDefinition]:
     from .improvement import DEFINITIONS as improvement
     from .local_learning import DEFINITIONS as local_learning
     from .acceptance import DEFINITIONS as acceptance
+    from .commitment import DEFINITIONS as commitment
     return [*interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
             *pre_iteration_reflect, *cycle, *autonomous_evolution,
             *emit_progress,
-            *improvement, *acceptance, *local_learning]
+            *improvement, *acceptance, *local_learning, *commitment]
 
 
 __all__ = ["builtin_definitions"]
