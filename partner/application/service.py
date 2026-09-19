@@ -1129,6 +1129,8 @@ class PartnerApplicationService:
         instance_id: str,
         project_id: str,
         kind: str = "project",
+        channel: str = "local",
+        sender_id: str = "",
     ) -> Submission:
         """Create a native continuation Job directly, skipping the LLM intent
         flow.
@@ -1167,15 +1169,15 @@ class PartnerApplicationService:
             received = self.fabric.create(
                 "interaction.message_received", "interaction", correlation_id=job_id,
                 project_id=dispatch_target, job_id=job_id, instance_id=assigned,
-                channel="local",
+                channel=channel or "local",
                 payload={"sender_name": f"Partner{instance_id}项目内部续跑",
                          "has_attachments": False},
             )
             job = JobRecord(
                 job_id=job_id, project_id=dispatch_target,
                 title=(text.splitlines()[0][:80] or dispatch_target),
-                request=text, route=flow_name, channel="local",
-                sender_id=f"partner_{instance_id}_self",
+                request=text, route=flow_name, channel=channel or "local",
+                sender_id=(sender_id or f"partner_{instance_id}_self"),
                 sender_name=f"Partner{instance_id}项目内部续跑",
                 persona_hint=instance_id,
                 origin_instance=instance_id if instance_id in PROJECTS else "",

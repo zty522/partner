@@ -63,41 +63,43 @@ def main() -> int:
 
 async def _run_bounded(*, workspace: Path, root_job_id: str, instance_id: str,
                        deadline_seconds: float) -> int:
-    """Run one bounded pass: the named root Job and its own flow, then exit."""
+    """Run the named root Job on production semantics, then exit.
+
+    The Job is driven by ``EventWorker.run_forever`` -- the exact loop a long-lived
+    worker uses, including one atomic lease per Job lifecycle and the poll that
+    honours the flow's own ``next_run_at``.  A watchdog stops that loop as soon as
+    the named Job reaches a terminal status or the deadline passes, so the run is
+    bounded without re-implementing (and mis-implementing) claim handling.
+    """
     import time as _time
     worker = EventWorker(str(workspace), instance_id=instance_id, shared_mode=False,
                          root_job_id=root_job_id)
     started = _time.time()
-    steps: list[str] = []
-    while True:
-        if worker._stopping:
-            steps.append("stopped_by_signal")
-            break
-        if deadline_seconds and (_time.time() - started) > deadline_seconds:
-            steps.append("deadline_reached")
-            break
-        job = await asyncio.to_thread(worker.next_job)
-        if not job:
-            steps.append("no_scoped_job_left")
-            break
-        steps.append(f"ran:{job.job_id}")
-        try:
-            await worker._run_with_lease(job)
-        finally:
-            worker._release_claim()
-        # stop as soon as the named Job reaches a terminal status: a bounded run must
-        # not keep re-entering a flow that has already finished
-        try:
-            from partner.index.job_repository import init as _init_jobs
-            record = _init_jobs(workspace).get_record(root_job_id) or {}
-            if str(record.get("status") or "") in {"completed", "failed", "cancelled",
-                                                   "blocked"}:
-                steps.append(f"root_job_terminal:{record.get('status')}")
-                break
-        except Exception:  # noqa: BLE001 - fall back to the deadline
-            pass
-    print(f"[bounded] root_job_id={root_job_id} instance={instance_id} steps={steps} "
-          f"seconds={round(_time.time() - started, 2)}", flush=True)
+    stop_reason: list[str] = []
+
+    async def watchdog() -> None:
+        from partner.index.job_repository import init as _init_jobs
+        repo = _init_jobs(workspace)
+        while not worker._stopping:
+            await asyncio.sleep(1.0)
+            if deadline_seconds and (_time.time() - started) > deadline_seconds:
+                stop_reason.append("deadline_reached")
+                worker.stop()
+                return
+            try:
+                record = repo.get_record(root_job_id) or {}
+            except Exception:  # noqa: BLE001 - a read failure must not kill the run
+                continue
+            status = str(record.get("status") or "")
+            if status in {"completed", "failed", "cancelled", "blocked"}:
+                stop_reason.append(f"root_job_terminal:{status}")
+                worker.stop()
+                return
+
+    await asyncio.gather(worker.run_forever(poll_seconds=1.0), watchdog())
+    print(f"[bounded] root_job_id={root_job_id} instance={instance_id} "
+          f"stop={stop_reason or ['loop_exited']} seconds={round(_time.time() - started, 2)}",
+          flush=True)
     return 0
 
 
