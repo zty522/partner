@@ -1,0 +1,12 @@
+<<<FIND
+"""ACE (Agentic Context Engineering) adapter wired to EventMemory (M2).
+
+This is **not** a wrapper around the upstream ACE package.
+>>>REPL
+"""ACE (Agentic Context Engineering) adapter wired to EventMemory (M2).
+
+Declared-patch note: this paragraph is the entire candidate change.  It is deliberately
+behaviour-neutral -- the module's behaviour, and therefore the measured metric, must stay
+exactly as it was.  The task exists so that a candidate can be measured against a frozen
+bar the task itself makes unattainable, which is what an honest loss looks like.
+This is **not** a wrapper around the upstream ACE package.

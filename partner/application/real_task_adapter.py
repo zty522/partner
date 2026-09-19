@@ -389,9 +389,14 @@ def real_task_spec(*, job_id: str, trace_token: str, task_id: str, project_root:
             "metric_specs": [{"metric": m} for m in
                              ("tests_passed", "tests_failed", "tests_errors", "patch_bytes")],
         },
+        # The bar is declared by the task, so a task can honestly be unattainable (the
+        # test target has exactly one test and it already passes: no additional passing
+        # test exists, and a frozen threshold above 1 can never be reached).
         "expected_effects": [
             {"metric": "tests_passed", "direction": "increase", "unit": "tests",
-             "kind": "delta_over_baseline", "min_delta": 1.0, "threshold": 0.0},
+             "kind": "delta_over_baseline",
+             "min_delta": float(task.get("expected_min_delta") or 1.0),
+             "threshold": float(task.get("expected_threshold") or 0.0)},
         ],
         "falsification_conditions": [
             {"code": "no_new_pass", "kind": "metric_violation",
@@ -408,6 +413,7 @@ def real_task_spec(*, job_id: str, trace_token: str, task_id: str, project_root:
         "max_candidates": 1,
         "code_version": "commitment-kernel",
         "data_version": f"task:{task_id}",
+        "expectation_note": str(task.get("expectation_note") or ""),
         "model_config_ref": "none",
         "max_risk": 1.0,
         "scope": "event_flow:real_task",

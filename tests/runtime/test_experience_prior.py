@@ -188,12 +188,105 @@ def test_supported_history_lowers_the_bar(tmp_path):
 
 
 def test_refuted_history_raises_the_bar(tmp_path):
+    """The kernel word for a refuted bet is ``falsified``; it must raise the bar."""
     adjusted, audit = ep.adjust_declared(
-        _declared(), _prior_with(tmp_path, settlement_class="refuted", improvement=False,
+        _declared(), _prior_with(tmp_path, settlement_class="falsified", improvement=False,
                                  supported_claim="none", blockers=()))
     assert adjusted["min_delta"] == 2.0
+    entry = audit["parameters"][0]
+    assert entry["rule"] == "refuted_history_raises_the_bar"
+    assert entry["evidence"]["falsified"] == 1
+    assert entry["evidence"]["total"] == 1
+    assert entry["evidence"]["refuted_ratio"] == 1.0
+    assert entry["evidence"]["refuted_ratio_threshold"] == ep.REFUTED_RATIO_THRESHOLD
+    assert entry["evidence"]["max_min_delta"] == ep.MAX_MIN_DELTA
+
+
+# --- the two directions, the priority rule and the bounds -------------------
+
+def _prior_of(tmp_path, classes):
+    rows = []
+    for index, cls in enumerate(classes):
+        store = _fabricate_settled(tmp_path, bet_id=f"bet_{index}", class_key=CLASS_KEY,
+                                   settlement_class=cls, improvement=cls == "supported",
+                                   supported_claim=("improvement_over_baseline"
+                                                    if cls == "supported" else "none"),
+                                   blockers=("isolated_sample_only",), minute=index)
+        rows.append(store)
+    scanned = ep.select_same_class(ep.scan_settled_bets(tmp_path / "ws"), CLASS_KEY)
+    assert len(scanned) == len(classes)
+    return ep.summarize_prior(scanned, class_key=CLASS_KEY)
+
+
+def test_the_class_vocabulary_is_the_kernel_vocabulary():
+    """Guard against drift: counting a class the kernel never emits means a rule that
+    silently never fires (that is exactly what 'refuted' vs 'falsified' did)."""
+    from partner.commitment.models import SETTLEMENT_CLASSES as KERNEL_CLASSES
+
+    assert set(ep.SETTLEMENT_CLASSES) == set(KERNEL_CLASSES)
+    assert "falsified" in ep.SETTLEMENT_CLASSES
+    assert "refuted" not in ep.SETTLEMENT_CLASSES
+    # the legacy word is still counted into the falsified bucket
+    prior = ep.summarize_prior([{"settlement_class": "refuted", "publish_blockers": []}],
+                               class_key=CLASS_KEY)
+    assert prior["counts"]["falsified"] == 1
+
+
+def test_all_supported_lowers_and_all_refuted_raises(tmp_path):
+    lowered, audit = ep.adjust_declared(_declared(), _prior_of(tmp_path, ["supported"] * 3))
+    assert lowered["min_delta"] == 0.25
+    assert audit["parameters"][0]["rule"] == "supported_history_lowers_the_bar"
+
+    tmp_raised = tmp_path / "raised"
+    tmp_raised.mkdir()
+    raised, audit2 = ep.adjust_declared(_declared(), _prior_of(tmp_raised, ["falsified"] * 3))
+    assert raised["min_delta"] == 4.0          # base * (1 + 3)
+    assert audit2["parameters"][0]["rule"] == "refuted_history_raises_the_bar"
+
+
+def test_mixed_history_follows_the_declared_priority(tmp_path):
+    """A refuted share below the threshold relaxes; at or above it tightens."""
+    below = tmp_path / "below"
+    below.mkdir()
+    lowered, audit = ep.adjust_declared(
+        _declared(),
+        _prior_of(below, ["falsified", "supported", "supported"]))   # ratio 1/3
+    assert lowered["min_delta"] == 0.25
+    assert audit["parameters"][0]["rule"] == "supported_history_lowers_the_bar"
+    assert audit["parameters"][0]["evidence"]["refuted_ratio"] == round(1 / 3, 6)
+
+    tie = tmp_path / "tie"
+    tie.mkdir()
+    raised, audit2 = ep.adjust_declared(_declared(), _prior_of(tie, ["falsified", "supported"]))
+    assert raised["min_delta"] == 2.0          # a tie counts as refuted: stricter rule wins
+    assert audit2["parameters"][0]["rule"] == "refuted_history_raises_the_bar"
+
+    above = tmp_path / "above"
+    above.mkdir()
+    raised2, _ = ep.adjust_declared(
+        _declared(), _prior_of(above, ["falsified", "falsified", "supported"]))  # ratio 2/3
+    assert raised2["min_delta"] == 3.0
+
+
+def test_raising_works_from_the_floor(tmp_path):
+    """The floor bounds the relaxing direction only: a class sitting on it can tighten."""
+    prior = _prior_of(tmp_path, ["falsified"])
+    adjusted, audit = ep.adjust_declared(
+        {"min_delta": ep.MIN_DELTA_FLOOR, "replicates": 1, "require_baseline_rerun": True}, prior)
+    assert adjusted["min_delta"] == 0.5
     assert audit["parameters"][0]["rule"] == "refuted_history_raises_the_bar"
-    assert audit["parameters"][0]["evidence"] == {"refuted": 1, "supported": 0}
+    assert "floor" in audit["parameters"][0]["evidence"]["floor_note"]
+
+
+def test_raising_is_bounded_and_never_lowers_an_already_high_base(tmp_path):
+    prior = _prior_of(tmp_path, ["falsified"] * 8)
+    capped, audit = ep.adjust_declared(
+        {"min_delta": 1.0, "replicates": 1, "require_baseline_rerun": True}, prior)
+    assert capped["min_delta"] == ep.MAX_MIN_DELTA          # base*(1+8)=9 -> capped at 8
+    assert audit["parameters"][0]["after"] == ep.MAX_MIN_DELTA
+    high, _ = ep.adjust_declared(
+        {"min_delta": 20.0, "replicates": 1, "require_baseline_rerun": True}, prior)
+    assert high["min_delta"] == 20.0                        # never pulled down by the cap
 
 
 def test_improvement_false_forces_a_real_baseline(tmp_path):

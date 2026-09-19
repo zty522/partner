@@ -1,0 +1,17 @@
+{
+  "task_id": "refuted_green_baseline_ace",
+  "title": "an honest loss: the declared bar is above what this task can physically deliver",
+  "bug_report": "bug_report.md",
+  "repo_root": "/mnt/e/work/partner",
+  "target_module": "partner/research/adapters/ace.py",
+  "test_target": [
+    "tests/test_adapter_contracts.py",
+    "-k",
+    "test_ace_append_to_memory_writes_real_file"
+  ],
+  "timeout_seconds": 180,
+  "patch_file": "patch.diff",
+  "expected_min_delta": 1.0,
+  "expected_threshold": 2.0,
+  "expectation_note": "the target selects exactly one test and it already passes in the baseline, so no additional passing test is physically available; the declared bar (>=2 passing tests) cannot be reached by any patch"
+}

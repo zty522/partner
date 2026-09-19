@@ -23,9 +23,12 @@ decision and must not fork a task class.  The key is frozen into the bet as
 Adjustment rules -- ordered, total, auditable
 ---------------------------------------------
 
-1. any ``refuted`` settlement in the class -> ``min_delta = base * (1 + refuted)``
-   (the class has burned evidence; raise the bar)
-2. else any ``supported`` -> ``min_delta = base / 2**supported`` floor ``MIN_DELTA_FLOOR``
+1. ``refuted_ratio >= REFUTED_RATIO_THRESHOLD`` (refuted == the kernel's ``falsified``;
+   ties count as refuted) -> ``min_delta = min(MAX_MIN_DELTA, base * (1 + refuted))``.
+   Raising is bounded by ``MAX_MIN_DELTA`` and is *not* blocked by ``MIN_DELTA_FLOOR``:
+   the floor only bounds the relaxing direction, so a class sitting on the floor can
+   still be tightened.
+2. else any ``supported`` -> ``min_delta = max(MIN_DELTA_FLOOR, base / 2**supported)``
    (the class has demonstrated real improvements; lower the bar)
 3. else (only inconclusive/blocked) -> ``min_delta`` unchanged
 4. any prior row with ``improvement_over_baseline=False`` -> ``require_baseline_rerun``
@@ -51,7 +54,22 @@ DATA_VERSION_PREFIX = "class:"
 MIN_DELTA_FLOOR = 0.25
 BLOCKER_SINGLE_EPISODE = "single_episode_only"
 
-SETTLEMENT_CLASSES = ("supported", "refuted", "inconclusive", "blocked")
+#: The kernel's authoritative settlement classes.  Source of truth:
+#: ``partner/commitment/models.py::SETTLEMENT_CLASSES`` -- the kernel calls a refuted
+#: bet **falsified**, and it never emits the word "refuted".  Counting a class the
+#: kernel does not emit is how a rule silently never fires, so this tuple is copied
+#: from the kernel rather than invented here.
+SETTLEMENT_CLASSES = ("supported", "falsified", "inconclusive", "invalid", "blocked")
+#: Older notes and transcripts call the same outcome "refuted".  Both words are counted
+#: into the ``falsified`` bucket so a settlement can never be invisible to the rule.
+REFUTED_ALIASES = ("falsified", "refuted")
+
+#: Share of same-class settlements that must be refuted before the bar goes up.
+#: A tie (exactly half) counts as refuted: the stricter rule wins ties.
+REFUTED_RATIO_THRESHOLD = 0.5
+#: Upper bound on ``min_delta`` so a long refuted history can never raise the bar
+#: without limit (the lower bound is :data:`MIN_DELTA_FLOOR`).
+MAX_MIN_DELTA = 8.0
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +197,12 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
     counts = {name: 0 for name in SETTLEMENT_CLASSES}
     for row in rows:
         cls = str(row.get("settlement_class") or "")
-        if cls in counts:
+        if cls in REFUTED_ALIASES:
+            counts["falsified"] += 1
+        elif cls in counts:
             counts[cls] += 1
+    total = len(rows)
+    refuted_ratio = (counts["falsified"] / total) if total else 0.0
     supporting = [{"bet_id": r.get("bet_id"), "run_id": r.get("run_id"),
                    "trace_token": r.get("trace_token"),
                    "settlement_class": r.get("settlement_class"),
@@ -201,6 +223,8 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         "counts": {
             "total": len(rows),
             **counts,
+            "refuted_ratio": round(refuted_ratio, 6),
+            "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
             "improvement_true": sum(1 for r in rows if r.get("improvement_over_baseline")),
             "improvement_false": sum(1 for r in rows if not r.get("improvement_over_baseline")),
             "single_episode_only": sum(1 for r in rows
@@ -217,6 +241,8 @@ def empty_prior(*, class_key: str, components: Mapping[str, str] | None = None,
     return {"prior_version": PRIOR_VERSION, "class_key": str(class_key),
             "class_definition": dict(components or {}), "empty": True, "row_count": 0,
             "counts": {"total": 0, **{name: 0 for name in SETTLEMENT_CLASSES},
+                       "refuted_ratio": 0.0,
+                       "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
                        "improvement_true": 0, "improvement_false": 0,
                        "single_episode_only": 0},
             "rows": [], "sources": [], "reason": reason}
@@ -245,16 +271,28 @@ def adjust_declared(declared: Mapping[str, Any], prior: Mapping[str, Any]) -> tu
                           "prior_row_count": 0, "parameters": [],
                           "reason": "prior_empty", "prior_version": PRIOR_VERSION}
     base = adjusted["min_delta"]
-    refuted = int(counts.get("refuted") or 0)
+    refuted = int(counts.get("falsified") or 0)
     supported = int(counts.get("supported") or 0)
-    if refuted > 0:
-        after = base * (1 + refuted)
-        adjusted["min_delta"] = after
-        parameters.append({
-            "name": "min_delta", "before": base, "after": after,
-            "rule": "refuted_history_raises_the_bar",
-            "evidence": {"refuted": refuted, "supported": supported},
-            "why": f"{refuted} refuted settlement(s) in this class"})
+    total = int(counts.get("total") or 0)
+    ratio = float(counts.get("refuted_ratio") or 0.0)
+    # -- priority: a refuted-dominated class outranks a supported one.  The bar goes up
+    # whenever refuted/total >= REFUTED_RATIO_THRESHOLD (ties included); the relaxing
+    # rule below only applies when the class is NOT refuted-dominated.
+    if total >= 1 and ratio >= REFUTED_RATIO_THRESHOLD:
+        after = min(MAX_MIN_DELTA, base * (1 + refuted))
+        if after > base:
+            adjusted["min_delta"] = after
+            parameters.append({
+                "name": "min_delta", "before": base, "after": after,
+                "rule": "refuted_history_raises_the_bar",
+                "evidence": {"falsified": refuted, "supported": supported, "total": total,
+                             "refuted_ratio": round(ratio, 6),
+                             "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
+                             "max_min_delta": MAX_MIN_DELTA,
+                             "floor_note": ("raising is bounded by MAX_MIN_DELTA; the floor "
+                                            "only bounds the relaxing direction")},
+                "why": (f"{refuted}/{total} settlement(s) refuted "
+                        f"(ratio {round(ratio, 4)} >= {REFUTED_RATIO_THRESHOLD})")})
     elif supported > 0 and base > 0:
         # only when there is a bar to lower: a declared 0.0 is already at the floor, and
         # "lowering" it to the floor would silently tighten the bet instead
@@ -264,8 +302,14 @@ def adjust_declared(declared: Mapping[str, Any], prior: Mapping[str, Any]) -> tu
             parameters.append({
                 "name": "min_delta", "before": base, "after": after,
                 "rule": "supported_history_lowers_the_bar",
-                "evidence": {"supported": supported, "floor": MIN_DELTA_FLOOR},
-                "why": f"{supported} supported settlement(s) in this class"})
+                # the refuted share is recorded here too: a reader must be able to see
+                # that this branch was taken *because* it stayed below the threshold
+                "evidence": {"supported": supported, "floor": MIN_DELTA_FLOOR,
+                             "falsified": refuted, "total": total,
+                             "refuted_ratio": round(ratio, 6),
+                             "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD},
+                "why": (f"{supported} supported settlement(s) and only {refuted}/{total} "
+                        f"refuted (ratio {round(ratio, 4)} < {REFUTED_RATIO_THRESHOLD})")})
     if int(counts.get("improvement_false") or 0) > 0 and not adjusted["require_baseline_rerun"]:
         adjusted["require_baseline_rerun"] = True
         parameters.append({
@@ -321,7 +365,8 @@ def clear_prior(store_root: str | os.PathLike) -> bool:
 
 
 __all__ = ["PRIOR_VERSION", "PRIOR_FILENAME", "CLASS_PREFIX", "DATA_VERSION_PREFIX",
-           "MIN_DELTA_FLOOR", "BLOCKER_SINGLE_EPISODE", "SETTLEMENT_CLASSES",
+           "MIN_DELTA_FLOOR", "MAX_MIN_DELTA", "REFUTED_RATIO_THRESHOLD", "REFUTED_ALIASES",
+           "BLOCKER_SINGLE_EPISODE", "SETTLEMENT_CLASSES",
            "metric_signature", "task_class_key", "class_key_from_bet", "class_components",
            "commitments_root", "scan_settled_bets", "select_same_class", "summarize_prior",
            "empty_prior", "adjust_declared", "prior_path", "write_prior", "read_prior",
