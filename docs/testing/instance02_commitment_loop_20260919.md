@@ -101,7 +101,8 @@ timeline 两行都不改状态）；重放不产生新结算；`freeze_only()` �
 
 - 三个承诺内核事实保持不变：未修改承诺语义/既有测试/证据结构（`freeze_only` 与恢复路径是加性改动，
   141 项原有测试全绿）。
-- 有界 worker 会**多次 check-point 同一个 flow**（本次 20 次、81.8s）：这是既有 flow 的
+- 有界 worker 会**多次 check-point 同一个 flow**（本次 worker 层 20 次重入 / 81.8s；该 Job 的
+  timeline 上共有 247 条 `claim` 行）：这是既有 flow 的
   checkpoint/等待语义，不是 20 个 bet——同一 bet 只有 1 份 settlement 与 1 份 experience。
   这是效率问题，不是正确性问题，但值得后续优化（例如 flow 内的等待节点不应触发整循环重入）。
 - 本轮消息被 02 自己的路由判为 `project_iteration`，因此该 flow 的其它节点（inspect/plan/execute/
