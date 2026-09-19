@@ -685,6 +685,30 @@ class JobRepository:
             out.append(entry)
         return out
 
+    def note(self, job_id, *, actor, kind, detail=None):
+        """Append one audit-trail row to ``job_history`` **without** touching status.
+
+        Non-lifecycle actors (the commitment kernel, for instance) need to record
+        that something happened to a Job.  ``from_status`` and ``to_status`` are the
+        current status on both sides, so a note can never be mistaken for a
+        lifecycle transition, and the row is visible in the Job timeline.
+        """
+        self._ensure_schema()
+        conn = get_connection(self.db_path)
+        row = conn.execute(
+            "SELECT status, fencing_token FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"note: unknown job {job_id}")
+        conn.execute(
+            """INSERT INTO job_history
+            (job_id, at, actor, kind, from_status, to_status, fencing_token, detail_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(job_id), time.time(), str(actor), str(kind), row["status"], row["status"],
+             int(row["fencing_token"] or 0),
+             json.dumps(dict(detail or {}), ensure_ascii=False)))
+        conn.commit()
+        return True
+
     def list_by_status(self, statuses, *, limit=100, job_id="", flow_id="",
                        root_event_id=""):
         """List jobs by status, with optional **SQL-level** scoping.

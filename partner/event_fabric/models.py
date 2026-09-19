@@ -14,7 +14,11 @@ EVENT_SERIES = {
     "interaction", "project", "active_learning", "self_evolution", "evolution",
     "planning", "memory", "presentation", "delivery", "runtime",
     "selector", "frontend", "visualization", "notification", "acceptance",
-    "improvement"
+    "improvement",
+    # The commitment kernel projects its own lifecycle into events; the series has
+    # to be registered here or EventLedger.create rejects it at flow startup
+    # (see partner/observe/precedents.py case_05_event_series_unknown).
+    "commitment",
 }
 TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 

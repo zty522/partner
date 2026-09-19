@@ -16,6 +16,8 @@ terminal state ends, and starting another one is a separate, explicit decision.
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -131,12 +133,153 @@ def commitment_bet_settlement(ctx, params):
     }
 
 
+#: A trace token is how an operator follows one message through the kernel.
+_TRACE_RE = re.compile(r"runtime_trace[A-Za-z0-9_\-]*")
+
+
+def _job_request(ctx) -> str:
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        record = _init_jobs(Path(ctx.workspace)).get_record(str(getattr(ctx, "job_id", ""))) or {}
+        return str(record.get("request") or "")
+    except Exception:  # noqa: BLE001 - a missing request is reported, never invented
+        return ""
+
+
+def _trace_token(ctx, params: Mapping[str, Any]) -> str:
+    direct = str(params.get("trace_token") or "").strip()
+    if direct:
+        return direct
+    for candidate in (params.get("message"), params.get("goal"), _job_request(ctx)):
+        found = _TRACE_RE.search(str(candidate or ""))
+        if found:
+            return found.group(0)
+    return ""
+
+
+def commitment_bet_record(ctx, params):
+    """Create and record one BetRecord for the triggering message.
+
+    Deliberately record-only: this Event freezes a bet, persists it, appends it to
+    the bet's own event chain and notes it on the Job timeline.  It executes **no
+    action**, calls no LLM and touches no project data, so the kernel stops at the
+    recorded-bet stage.  ``environment=isolated_sample`` keeps the record
+    non-publishable by construction.
+    """
+    from partner.commitment import models as M
+    from partner.commitment import state_machine as sm
+    from partner.commitment.freezer import FreezeRequest, Freezer
+    from partner.commitment.selector import GuardedGainSelector
+    from partner.commitment.state_machine import BetLifecycle
+    from partner.commitment.store import CommitmentStore
+
+    token = _trace_token(ctx, params)
+    job_id = str(getattr(ctx, "job_id", "") or "")
+    if not token:
+        return {"ok": False, "status": "failed",
+                "summary": "no trace token found in the triggering message",
+                "semantic_output": {"trace_token": "", "job_id": job_id},
+                "files": [], "evidence_refs": [], "token_usage": {}}
+
+    run_id = str(params.get("run_id") or f"event_flow_{job_id or 'unknown'}")
+    bet_id = str(params.get("bet_id") or f"bet_{job_id or 'unknown'}")
+    store = CommitmentStore(Path(ctx.workspace), run_id, bet_id)
+    message = _job_request(ctx) or token
+    candidate_id = "cand_record_only"
+    snapshot = {
+        "source": "02_event_flow", "trace_token": token, "message": message[:4000],
+        "job_id": job_id, "instance_id": str(getattr(ctx, "instance_id", "") or ""),
+        "project_id": str(getattr(ctx, "project_id", "") or ""),
+        "recorded_by": "commitment.bet_record",
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "candidate_space": [{"candidate_id": candidate_id,
+                             "description": "record-only placeholder action",
+                             "params": {"action": "noop"},
+                             "prior": {"expected_gain": 0.0, "risk": 0.0},
+                             "rationale": "this bet exists to record the message; nothing runs"}],
+    }
+    snapshot_hash = store.save_context_snapshot(snapshot)
+    candidate = M.Candidate(candidate_id=candidate_id,
+                            description="record-only placeholder action",
+                            params={"action": "noop"}, proposed_by="policy",
+                            rationale="record-only: no experiment is executed")
+    selection = GuardedGainSelector(max_risk=1.0).select(candidates=(candidate,),
+                                                        snapshot=snapshot)
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
+    frozen = Freezer().freeze(
+        FreezeRequest(
+            partner_id=str(params.get("partner_id")
+                           or f"partner-{getattr(ctx, 'instance_id', '') or 'unknown'}"),
+            project_id=str(getattr(ctx, "project_id", "") or "unassigned"),
+            run_id=run_id, question=f"record the message carrying {token}",
+            context_snapshot_ref="context/snapshot.json",
+            context_snapshot_hash=snapshot_hash,
+            candidates=(candidate,), selection=selection,
+            expected_effects=(M.ExpectedEffect(metric="record_only", direction="increase",
+                                               threshold=0.0, unit="unit",
+                                               kind="absolute_threshold"),),
+            falsification_conditions=(M.FalsificationCondition(
+                code="no_action_executed", kind="missing_evidence",
+                description="no action was executed, so nothing can be measured",
+                params={"metric": "record_only"}),),
+            evaluation_protocol=M.EvaluationProtocol(
+                evaluator_id="event-flow-record-only", evaluator_version="1.0.0",
+                metric_specs=({"metric": "record_only"},), replicates=1),
+            baseline_ref="none:record-only",
+            budget=M.Budget.create(wall_clock_seconds=60, model_calls=0, actions=1,
+                                   rounds=1, started_epoch=time.time()),
+            commitment_policy=M.CommitmentPolicy(
+                earliest_turn_round=1, max_turns=1, require_new_evidence_to_turn=True,
+                early_stop_conditions=("no_action_executed",)),
+            code_version=str(params.get("code_version") or "commitment-kernel"),
+            data_version=f"message:{token}", model_config_ref="none",
+            environment="isolated_sample", treatment=None),
+        bet_id=bet_id, now_iso=now_iso)
+    store.save_bet(frozen)
+    # the lifecycle state must agree with the frozen record: the Freezer produces a
+    # COMMITTED-ready bet, so recording it moves the lifecycle to the same state
+    store.save_lifecycle(BetLifecycle(bet_id=bet_id, state=frozen.status),
+                         reason="recorded by the 02 event flow; no execution")
+    store.append("bet_recorded",
+                 {"bet_id": bet_id, "trace_token": token, "job_id": job_id,
+                  "state": frozen.status, "freeze_hash": frozen.freeze_hash(),
+                  "recorded_by": "commitment.bet_record"},
+                 event_id=f"{bet_id}:bet_recorded")
+    store.write_manifest(extra={"trace_token": token, "bet_id": bet_id,
+                                "recorded_by": "commitment.bet_record"})
+    noted = False
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        _init_jobs(Path(ctx.workspace)).note(
+            job_id, actor="commitment.bet_record", kind="commitment_bet_recorded",
+            detail={"bet_id": bet_id, "trace_token": token, "state": frozen.status,
+                    "run_id": run_id, "store": str(store.root)})
+        noted = True
+    except Exception:  # noqa: BLE001 - the bet is the deliverable, the note is the trail
+        noted = False
+    return {
+        "ok": True, "status": frozen.status,
+        "summary": f"commitment bet {bet_id} recorded for {token} (no experiment executed)",
+        "semantic_output": {"bet_id": bet_id, "trace_token": token, "state": frozen.status,
+                            "run_id": run_id, "job_id": job_id, "noted_on_timeline": noted,
+                            "freeze_hash": frozen.freeze_hash(),
+                            "store": str(store.root)},
+        "files": [str(store.path("bet.json")), str(store.events_path)],
+        "evidence_refs": [], "token_usage": {},
+    }
+
+
 DEFINITIONS = [
     EventDefinition(
         "commitment.bet_run", "commitment",
         "Run one bounded commitment bet to a terminal state (idempotent on replay)",
         commitment_bet_run, execution_method="local", produces_artifact=True,
         timeout_seconds=900, concurrency_scope="project"),
+    EventDefinition(
+        "commitment.bet_record", "commitment",
+        "Record one BetRecord for the triggering message (record-only, no execution)",
+        commitment_bet_record, execution_method="local", produces_artifact=True,
+        timeout_seconds=120, concurrency_scope="project"),
     EventDefinition(
         "commitment.bet_state", "commitment",
         "Read-only lifecycle projection of one commitment bet",
@@ -148,4 +291,5 @@ DEFINITIONS = [
 ]
 
 __all__ = ["DEFINITIONS", "KERNEL_STATE_EVENTS", "map_kernel_state", "commitment_bet_run",
+           "commitment_bet_record",
            "commitment_bet_state", "commitment_bet_settlement"]
