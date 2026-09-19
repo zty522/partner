@@ -85,6 +85,17 @@ async def _run_bounded(*, workspace: Path, root_job_id: str, instance_id: str,
             await worker._run_with_lease(job)
         finally:
             worker._release_claim()
+        # stop as soon as the named Job reaches a terminal status: a bounded run must
+        # not keep re-entering a flow that has already finished
+        try:
+            from partner.index.job_repository import init as _init_jobs
+            record = _init_jobs(workspace).get_record(root_job_id) or {}
+            if str(record.get("status") or "") in {"completed", "failed", "cancelled",
+                                                   "blocked"}:
+                steps.append(f"root_job_terminal:{record.get('status')}")
+                break
+        except Exception:  # noqa: BLE001 - fall back to the deadline
+            pass
     print(f"[bounded] root_job_id={root_job_id} instance={instance_id} steps={steps} "
           f"seconds={round(_time.time() - started, 2)}", flush=True)
     return 0

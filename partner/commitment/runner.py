@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 from . import state_machine as sm
 from .evaluator import MeasurementResult
 from .freezer import FreezeRequest, Freezer
+from .selector import SelectionResult
 from .models import (
     BetRecord, Budget, Candidate, CommitmentPolicy, ContractError, EvaluationProtocol,
     ExpectedEffect, ExperienceRecord, ExecutionReceipt, FalsificationCondition,
@@ -169,9 +170,14 @@ class BetRunner:
 
     # -- internals -----------------------------------------------------------
 
-    def _walk(self, lifecycle, ledger: BudgetLedger) -> RunnerResult:
-        paths: dict[str, str] = {}
+    def _freeze_bet(self, lifecycle, ledger, paths: dict[str, str]):
+        """Steps 1-4 of the walk: snapshot, propose, select, freeze, persist.
 
+        Extracted so ``freeze_only`` and ``_walk`` share one code path.  That is what
+        makes recording a bet and then running it idempotent: the second pass freezes
+        byte-identical semantics, so ``store.save_bet`` sees the same revision with no
+        changed field and simply accepts it instead of raising a frozen-field edit.
+        """
         # 1. freeze the context snapshot the bet is judged against
         snapshot = dict(self.snapshot_reader.read_frozen_state())
         snapshot_hash = self.store.save_context_snapshot(snapshot)
@@ -232,6 +238,90 @@ class BetRunner:
         sm.advance(lifecycle, sm.TransitionRequest(target=sm.COMMITTED, now=self.clock.now(),
                                                    reason="expectations frozen"))
         self.store.save_lifecycle(lifecycle, reason="committed")
+        # ``selection`` is returned too: the walk needs the chosen candidate, and the
+        # freeze step itself may stop the bet (budget, proposer, selection refusal),
+        # in which case it returns a RunnerResult instead of a tuple.
+        return record, selection
+
+    def freeze_only(self) -> RunnerResult:
+        """Freeze and record the bet, then stop.  No action is executed.
+
+        This is the "record a bet" step of a flow: it exists so an Event can create a
+        BetRecord (with its expectation, protocol, budget and treatment frozen) while
+        execution, measurement and settlement stay in a separate, later Event.
+        """
+        report = self.store.verify_chain()
+        if not report.ok:
+            lifecycle = sm.BetLifecycle(bet_id=self.store.bet_id)
+            sm.advance(lifecycle, sm.TransitionRequest(
+                target=sm.INVALID, now=self.clock.now(),
+                reason=f"chain_integrity_failure:{report.reason}"))
+            self.store.save_lifecycle(lifecycle, reason="chain_integrity_failure")
+            return RunnerResult(self.store.bet_id, lifecycle.state,
+                                f"chain integrity failure: {report.reason}",
+                                replayed=False, notes=("fail_closed",))
+        lifecycle = self.store.load_lifecycle()
+        if sm.is_terminal(lifecycle.state):
+            return self._replay_result(lifecycle)
+        if lifecycle.state != sm.DRAFT:
+            # already frozen (or further along): recording is a no-op, and the record
+            # must not be touched again
+            return RunnerResult(
+                self.store.bet_id, lifecycle.state,
+                f"bet already frozen at {lifecycle.state}; nothing recorded",
+                replayed=True, paths={"bet": str(self.store.path("bet.json"))})
+        ledger = BudgetLedger(self.config.budget, lifecycle.usage, clock=self.clock)
+        paths: dict[str, str] = {}
+        frozen = self._freeze_bet(lifecycle, ledger, paths)
+        if isinstance(frozen, RunnerResult):
+            return frozen
+        record, _selection = frozen
+        return RunnerResult(self.store.bet_id, lifecycle.state,
+                            f"bet {record.bet_id} frozen at revision {record.revision}",
+                            replayed=False, paths=paths)
+
+    def _walk(self, lifecycle, ledger: BudgetLedger) -> RunnerResult:
+        paths: dict[str, str] = {}
+
+        if lifecycle.state in (sm.COMMITTED, sm.EXECUTING, sm.MEASURED, sm.SETTLED):
+            # An earlier Event already froze this bet.  Re-freezing would try to move
+            # COMMITTED -> PROPOSED, which the state machine refuses, so continue from
+            # the persisted record instead: this is what lets a recorded bet be run to
+            # settlement by a later, separate Event.
+            # Persisted usage is never refunded by a restart: the ledger gate that the
+            # fresh path applies at its first spending step is applied here too, so a
+            # bet whose budget was already spent stops instead of being resumed.  The
+            # proposer is still never called on this path.
+            for request in ({"model_calls": 1}, {"actions": 1}):
+                decision = ledger.may_spend(**request)
+                if not decision.allowed:
+                    return self._stop(lifecycle, sm.BUDGET_EXHAUSTED, decision.reason, paths)
+            try:
+                record = self.store.load_bet()
+            except (StoreIntegrityError, OSError, ValueError) as exc:
+                return self._stop(lifecycle, sm.INVALID,
+                                  f"resume failed: {type(exc).__name__}: {exc}", paths)
+            chosen = next((c for c in record.candidates
+                           if c.candidate_id == record.selected_action), None)
+            if chosen is None:
+                return self._stop(lifecycle, sm.INVALID,
+                                  f"frozen bet selects {record.selected_action!r}, which is "
+                                  "not one of its candidates", paths)
+            selection = SelectionResult(
+                selected=chosen,
+                rejected=tuple(record.rejected_alternatives),
+                reason=record.selection_reason,
+                scores=(), rule="resumed_from_frozen_record")
+            paths["bet"] = str(self.store.path("bet.json"))
+            paths["context_snapshot"] = str(self.store.path("context", "snapshot.json"))
+        else:
+            frozen = self._freeze_bet(lifecycle, ledger, paths)
+            if isinstance(frozen, RunnerResult):
+                return frozen
+            record, selection = frozen
+        # the freeze step owned this local before it was extracted; the walk keeps
+        # using it afterwards
+        bet_id = self.store.bet_id
 
         # 5. claim the single execution owner for this revision (invariant 1)
         if not self._claim(f"execution_claim:r{record.revision}"):

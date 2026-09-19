@@ -24,6 +24,7 @@ from typing import Any, Mapping
 from partner.event_fabric.catalog import EventDefinition
 
 from partner.commitment import state_machine as sm
+from partner.commitment.state_machine import is_terminal
 from partner.application.commitment_adapter import build_runner
 
 #: Kernel lifecycle states projected onto Event names.  Used by callers (and by
@@ -157,115 +158,149 @@ def _trace_token(ctx, params: Mapping[str, Any]) -> str:
     return ""
 
 
-def commitment_bet_record(ctx, params):
-    """Create and record one BetRecord for the triggering message.
+def _prepare_bounded(ctx, params):
+    """Resolve the bounded bet this Event acts on: spec, store, snapshot, runner.
 
-    Deliberately record-only: this Event freezes a bet, persists it, appends it to
-    the bet's own event chain and notes it on the Job timeline.  It executes **no
-    action**, calls no LLM and touches no project data, so the kernel stops at the
-    recorded-bet stage.  ``environment=isolated_sample`` keeps the record
-    non-publishable by construction.
+    Both commitment Events derive the same spec from the same frozen inputs, so the
+    bet the second Event runs is byte-identical to the one the first Event recorded.
     """
-    from partner.commitment import models as M
-    from partner.commitment import state_machine as sm
-    from partner.commitment.freezer import FreezeRequest, Freezer
-    from partner.commitment.selector import GuardedGainSelector
-    from partner.commitment.state_machine import BetLifecycle
+    from partner.application.commitment_bounded_adapter import (
+        bounded_spec, build_bounded_runner, write_bounded_snapshot,
+    )
     from partner.commitment.store import CommitmentStore
-
     token = _trace_token(ctx, params)
     job_id = str(getattr(ctx, "job_id", "") or "")
     if not token:
-        return {"ok": False, "status": "failed",
-                "summary": "no trace token found in the triggering message",
-                "semantic_output": {"trace_token": "", "job_id": job_id},
-                "files": [], "evidence_refs": [], "token_usage": {}}
-
-    run_id = str(params.get("run_id") or f"event_flow_{job_id or 'unknown'}")
-    bet_id = str(params.get("bet_id") or f"bet_{job_id or 'unknown'}")
-    store = CommitmentStore(Path(ctx.workspace), run_id, bet_id)
+        return None, {"ok": False, "status": "failed",
+                      "summary": "no trace token found in the triggering message",
+                      "semantic_output": {"trace_token": "", "job_id": job_id},
+                      "files": [], "evidence_refs": [], "token_usage": {}}
     message = _job_request(ctx) or token
-    candidate_id = "cand_record_only"
-    snapshot = {
-        "source": "02_event_flow", "trace_token": token, "message": message[:4000],
-        "job_id": job_id, "instance_id": str(getattr(ctx, "instance_id", "") or ""),
-        "project_id": str(getattr(ctx, "project_id", "") or ""),
-        "recorded_by": "commitment.bet_record",
-        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "candidate_space": [{"candidate_id": candidate_id,
-                             "description": "record-only placeholder action",
-                             "params": {"action": "noop"},
-                             "prior": {"expected_gain": 0.0, "risk": 0.0},
-                             "rationale": "this bet exists to record the message; nothing runs"}],
-    }
-    snapshot_hash = store.save_context_snapshot(snapshot)
-    candidate = M.Candidate(candidate_id=candidate_id,
-                            description="record-only placeholder action",
-                            params={"action": "noop"}, proposed_by="policy",
-                            rationale="record-only: no experiment is executed")
-    selection = GuardedGainSelector(max_risk=1.0).select(candidates=(candidate,),
-                                                        snapshot=snapshot)
-    now_iso = time.strftime("%Y-%m-%dT%H:%M:%S")
-    frozen = Freezer().freeze(
-        FreezeRequest(
-            partner_id=str(params.get("partner_id")
-                           or f"partner-{getattr(ctx, 'instance_id', '') or 'unknown'}"),
-            project_id=str(getattr(ctx, "project_id", "") or "unassigned"),
-            run_id=run_id, question=f"record the message carrying {token}",
-            context_snapshot_ref="context/snapshot.json",
-            context_snapshot_hash=snapshot_hash,
-            candidates=(candidate,), selection=selection,
-            expected_effects=(M.ExpectedEffect(metric="record_only", direction="increase",
-                                               threshold=0.0, unit="unit",
-                                               kind="absolute_threshold"),),
-            falsification_conditions=(M.FalsificationCondition(
-                code="no_action_executed", kind="missing_evidence",
-                description="no action was executed, so nothing can be measured",
-                params={"metric": "record_only"}),),
-            evaluation_protocol=M.EvaluationProtocol(
-                evaluator_id="event-flow-record-only", evaluator_version="1.0.0",
-                metric_specs=({"metric": "record_only"},), replicates=1),
-            baseline_ref="none:record-only",
-            budget=M.Budget.create(wall_clock_seconds=60, model_calls=0, actions=1,
-                                   rounds=1, started_epoch=time.time()),
-            commitment_policy=M.CommitmentPolicy(
-                earliest_turn_round=1, max_turns=1, require_new_evidence_to_turn=True,
-                early_stop_conditions=("no_action_executed",)),
-            code_version=str(params.get("code_version") or "commitment-kernel"),
-            data_version=f"message:{token}", model_config_ref="none",
-            environment="isolated_sample", treatment=None),
-        bet_id=bet_id, now_iso=now_iso)
-    store.save_bet(frozen)
-    # the lifecycle state must agree with the frozen record: the Freezer produces a
-    # COMMITTED-ready bet, so recording it moves the lifecycle to the same state
-    store.save_lifecycle(BetLifecycle(bet_id=bet_id, state=frozen.status),
-                         reason="recorded by the 02 event flow; no execution")
-    store.append("bet_recorded",
-                 {"bet_id": bet_id, "trace_token": token, "job_id": job_id,
-                  "state": frozen.status, "freeze_hash": frozen.freeze_hash(),
-                  "recorded_by": "commitment.bet_record"},
-                 event_id=f"{bet_id}:bet_recorded")
-    store.write_manifest(extra={"trace_token": token, "bet_id": bet_id,
-                                "recorded_by": "commitment.bet_record"})
+    spec = bounded_spec(job_id=job_id, trace_token=token, message=message,
+                        instance_id=str(getattr(ctx, "instance_id", "") or ""),
+                        project_id=str(getattr(ctx, "project_id", "") or "unassigned"))
+    store = CommitmentStore(Path(ctx.workspace), str(spec["run_id"]), str(spec["bet_id"]))
+    snapshot_path = write_bounded_snapshot(
+        store=store, spec=spec, job_id=job_id, trace_token=token, message=message,
+        instance_id=str(getattr(ctx, "instance_id", "") or ""))
+    runner = build_bounded_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
+    return {"token": token, "job_id": job_id, "spec": spec, "store": store,
+            "runner": runner, "message": message}, None
+
+
+def commitment_bet_record(ctx, params):
+    """Record one BetRecord for the triggering message.  Executes nothing.
+
+    The bet is frozen with its expectation, failure conditions, protocol, budget and
+    treatment; execution, measurement and settlement happen in the later
+    ``commitment.bet_execute`` Event.  Recording is idempotent: a replay re-freezes
+    identical semantics, which the store accepts without touching the record.
+    """
+    prepared, failure = _prepare_bounded(ctx, params)
+    if failure is not None:
+        return failure
+    token, job_id = prepared["token"], prepared["job_id"]
+    spec, store = prepared["spec"], prepared["store"]
+    result = prepared["runner"].freeze_only()
+    # "recorded" means COMMITTED (the bet exists and is frozen) or already terminal on
+    # a replay; anything else means the freeze stopped the bet and nothing was recorded
+    if result.state != sm.COMMITTED and not is_terminal(result.state):
+        return {"ok": False, "status": result.state,
+                "summary": f"bet was not recorded: {result.reason}",
+                "semantic_output": {"trace_token": token, "job_id": job_id,
+                                    "state": result.state, "reason": result.reason},
+                "files": [], "evidence_refs": [], "token_usage": {}}
+    record = store.load_bet()
+    if not store.has_event(f"{record.bet_id}:bet_recorded"):
+        store.append("bet_recorded",
+                     {"bet_id": record.bet_id, "trace_token": token, "job_id": job_id,
+                      "state": record.status, "freeze_hash": record.freeze_hash(),
+                      "recorded_by": "commitment.bet_record"},
+                     event_id=f"{record.bet_id}:bet_recorded")
+    store.write_manifest(extra={"trace_token": token, "bet_id": record.bet_id,
+                               "recorded_by": "commitment.bet_record"})
     noted = False
     try:
         from partner.index.job_repository import init as _init_jobs
-        _init_jobs(Path(ctx.workspace)).note(
-            job_id, actor="commitment.bet_record", kind="commitment_bet_recorded",
-            detail={"bet_id": bet_id, "trace_token": token, "state": frozen.status,
-                    "run_id": run_id, "store": str(store.root)})
+        if not any(row.get("kind") == "commitment_bet_recorded"
+                   for row in _init_jobs(Path(ctx.workspace)).history(job_id)):
+            _init_jobs(Path(ctx.workspace)).note(
+                job_id, actor="commitment.bet_record", kind="commitment_bet_recorded",
+                detail={"bet_id": record.bet_id, "trace_token": token,
+                        "state": record.status, "run_id": spec["run_id"],
+                        "store": str(store.root)})
         noted = True
     except Exception:  # noqa: BLE001 - the bet is the deliverable, the note is the trail
         noted = False
     return {
-        "ok": True, "status": frozen.status,
-        "summary": f"commitment bet {bet_id} recorded for {token} (no experiment executed)",
-        "semantic_output": {"bet_id": bet_id, "trace_token": token, "state": frozen.status,
-                            "run_id": run_id, "job_id": job_id, "noted_on_timeline": noted,
-                            "freeze_hash": frozen.freeze_hash(),
-                            "store": str(store.root)},
+        "ok": True, "status": result.state,
+        "summary": f"commitment bet {record.bet_id} recorded for {token} (not yet executed)",
+        "semantic_output": {"bet_id": record.bet_id, "trace_token": token,
+                            "state": result.state, "run_id": spec["run_id"],
+                            "job_id": job_id, "noted_on_timeline": noted,
+                            "freeze_hash": record.freeze_hash(), "store": str(store.root),
+                            "next_event": map_kernel_state(result.state)},
         "files": [str(store.path("bet.json")), str(store.events_path)],
         "evidence_refs": [], "token_usage": {},
+    }
+
+
+def commitment_bet_execute(ctx, params):
+    """Run the recorded bet to a terminal state: act, measure, compare, settle.
+
+    The action is bounded and deterministic (text statistics under one declared
+    transform), the baseline is executed and measured through the same instrument,
+    and the verdict comes from the kernel's machine rules -- never from this Event.
+    """
+    prepared, failure = _prepare_bounded(ctx, params)
+    if failure is not None:
+        return failure
+    token, job_id = prepared["token"], prepared["job_id"]
+    spec, store, runner = prepared["spec"], prepared["store"], prepared["runner"]
+    result = runner.run()
+    settlement = result.settlement
+    experience = result.experience
+    noted = False
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        _init_jobs(Path(ctx.workspace)).note(
+            job_id, actor="commitment.bet_execute", kind="commitment_bet_settled",
+            detail={"bet_id": store.bet_id, "trace_token": token, "state": result.state,
+                    "settlement_class": None if settlement is None else settlement.settlement_class,
+                    "settlement_id": None if settlement is None else settlement.settlement_id,
+                    "experience_id": None if experience is None else experience.experience_id,
+                    "run_id": spec["run_id"], "store": str(store.root)})
+        noted = True
+    except Exception:  # noqa: BLE001
+        noted = False
+    return {
+        "ok": is_terminal(result.state), "status": result.state,
+        "summary": f"commitment bet {store.bet_id} -> {result.state}: {result.reason}",
+        "semantic_output": {
+            "bet_id": store.bet_id, "trace_token": token, "state": result.state,
+            "reason": result.reason, "run_id": spec["run_id"], "job_id": job_id,
+            "settlement_id": None if settlement is None else settlement.settlement_id,
+            "settlement_class": None if settlement is None else settlement.settlement_class,
+            "expectations_met": None if settlement is None else settlement.expectations_met,
+            "improvement_over_baseline": (None if settlement is None
+                                          else settlement.improvement_over_baseline),
+            "publish_eligible": None if settlement is None else settlement.publish_eligible,
+            "publish_blockers": [] if settlement is None else list(settlement.publish_blockers),
+            "experience_id": None if experience is None else experience.experience_id,
+            "noted_on_timeline": noted,
+            "receipt_id": None if result.receipt is None else result.receipt.receipt_id,
+            "measurement_id": (None if result.measurement is None
+                               or not result.measurement.measurements
+                               else result.measurement.measurements[0].measurement_id),
+            "baseline_id": None if result.baseline_evidence is None
+                           else result.baseline_evidence.baseline_id,
+            "replayed": result.replayed,
+            "artifacts": dict(result.paths),
+            "store": str(store.root),
+        },
+        "files": [path for path in result.paths.values() if isinstance(path, str)],
+        "evidence_refs": ([] if settlement is None else [settlement.settlement_id]),
+        "token_usage": {},
     }
 
 
@@ -281,6 +316,11 @@ DEFINITIONS = [
         commitment_bet_record, execution_method="local", produces_artifact=True,
         timeout_seconds=120, concurrency_scope="project"),
     EventDefinition(
+        "commitment.bet_execute", "commitment",
+        "Run a recorded commitment bet to a terminal state (bounded action, machine settlement)",
+        commitment_bet_execute, execution_method="local", produces_artifact=True,
+        timeout_seconds=300, concurrency_scope="project"),
+    EventDefinition(
         "commitment.bet_state", "commitment",
         "Read-only lifecycle projection of one commitment bet",
         commitment_bet_state, execution_method="local", timeout_seconds=60),
@@ -291,5 +331,5 @@ DEFINITIONS = [
 ]
 
 __all__ = ["DEFINITIONS", "KERNEL_STATE_EVENTS", "map_kernel_state", "commitment_bet_run",
-           "commitment_bet_record",
+           "commitment_bet_record", "commitment_bet_execute",
            "commitment_bet_state", "commitment_bet_settlement"]

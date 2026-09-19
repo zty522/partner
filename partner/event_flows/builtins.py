@@ -26,7 +26,7 @@ DIRECT_ANSWER_V1 = Flow("direct_answer", "1.0.0", (
 # 1.1.0 adds one node: once the message is understood, the commitment kernel
 # records a BetRecord for it.  It is record-only -- no action, no LLM, no project
 # work -- so the flow still answers the message exactly as before.
-DIRECT_ANSWER = Flow("direct_answer", "1.1.0", (
+DIRECT_ANSWER_V1_1 = Flow("direct_answer", "1.1.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
     Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
@@ -39,11 +39,34 @@ DIRECT_ANSWER = Flow("direct_answer", "1.1.0", (
     Node("verify", "delivery.verify", ("send",)),
 ), "Answer plus a recorded commitment BetRecord for the triggering message.")
 
+# 1.2.0 adds the execution half: the recorded bet is run to a terminal state with a
+# bounded, deterministic action, an independently measured baseline and a machine
+# settlement.  Still no project work and no LLM.
+DIRECT_ANSWER = Flow("direct_answer", "1.2.0", (
+    Node("understand_1", "interaction.intent_observe"),
+    Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
+    Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
+    Node("commitment", "commitment.bet_record", ("understand_3",)),
+    Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
+    Node("answer", "interaction.direct_answer", ("understand_3",)),
+    Node("compose", "presentation.message_compose", ("answer",)),
+    Node("critic", "presentation.message_critic", ("compose",)),
+    Node("deduplicate", "presentation.message_deduplicate", ("critic",)),
+    Node("send", "delivery.send_text", ("deduplicate",)),
+    Node("verify", "delivery.verify", ("send",)),
+), "Answer plus a recorded and machine-settled commitment bet for the message.")
+
 
 PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
     Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
+    # The router picks between direct_answer and project_iteration by intent, so the
+    # commitment nodes live in both: the kernel must be reachable whichever flow the
+    # instance's own routing chooses.  Both nodes are bounded, deterministic and
+    # isolated -- they perform no project work and call no LLM.
+    Node("commitment", "commitment.bet_record", ("understand_3",)),
+    Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
     Node("recall", "memory.context_recall", ("understand_3",)),
     Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall",), optional=True),
     Node("inspect", "project.state_inspect", ("pre_iteration_reflect", "recall")),
@@ -245,7 +268,17 @@ DEFINITIONS = [DIRECT_ANSWER, PROJECT_ITERATION, ACTIVE_LEARNING, SELF_EVOLUTION
 # Snapshot existing graph definitions before installing the illustrated delivery
 # graph. Pinned historical requests continue to resolve their original topology.
 from dataclasses import replace
-LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (DIRECT_ANSWER_V1,)
+LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (
+    DIRECT_ANSWER_V1, DIRECT_ANSWER_V1_1,
+    # The project_iteration entry above is captured *after* the commitment nodes were
+    # added, so register the true pre-integration topology as well -- a request pinned
+    # to 2.5.0 must resolve to the graph that was actually shipped under that version.
+    # It is listed last so it wins for the same (name, version) key.
+    replace(next(_f for _f in DEFINITIONS if _f.name == "project_iteration"),
+            nodes=tuple(_n for _n in next(_f for _f in DEFINITIONS
+                                          if _f.name == "project_iteration").nodes
+                        if _n.node_id not in {"commitment", "commitment_execute"})),
+)
 _updated=[]
 for _flow in DEFINITIONS:
     if _flow.name.startswith('pdf_report'):

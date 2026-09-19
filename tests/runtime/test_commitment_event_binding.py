@@ -110,3 +110,134 @@ def test_the_record_only_bet_can_never_be_published(tmp_path):
     bet = json.loads((workspace / "state" / "commitments" / f"event_flow_{job_id}" /
                       f"bet_{job_id}" / "bet.json").read_text(encoding="utf-8"))
     assert bet["environment"] in ("isolated_sample", "synthetic_fixture", "shadow")
+
+
+# ---------------------------------------------------------------------------
+# the execution half: COMMITTED -> SETTLED inside the flow
+# ---------------------------------------------------------------------------
+
+def _bounded_context(tmp_path, job_id, token):
+    workspace = _workspace_with_job(tmp_path, job_id,
+                                    f"please record and settle\n\ntrace token: {token}")
+    return SimpleNamespace(workspace=str(workspace), job_id=job_id, instance_id="02",
+                           project_id="molecular_generation")
+
+
+def test_both_message_flows_reach_the_commitment_nodes():
+    """The router picks direct_answer or project_iteration by intent, so the kernel
+    has to be reachable from both, and older topologies must stay resolvable."""
+    registry = build_flow_registry()
+    for name, version in (("direct_answer", "1.2.0"), ("project_iteration", "2.6.0")):
+        flow = registry.get(name)
+        assert flow.version == version, (name, flow.version)
+        node_ids = [n.node_id for n in flow.nodes]
+        assert "commitment" in node_ids and "commitment_execute" in node_ids, name
+        execute = next(n for n in flow.nodes if n.node_id == "commitment_execute")
+        assert execute.event_type == "commitment.bet_execute"
+        assert execute.depends_on == ("commitment",)
+    # the previously shipped topologies keep resolving
+    assert len(registry.get("direct_answer", version="1.0.0").nodes) == 9
+    # 1.1.0 recorded the bet but had no execution half
+    v11 = [n.node_id for n in registry.get("direct_answer", version="1.1.0").nodes]
+    assert "commitment" in v11 and "commitment_execute" not in v11
+    assert "commitment" not in [n.node_id for n in
+                                registry.get("project_iteration", version="2.5.0").nodes]
+
+
+def test_the_handlers_take_one_bet_from_recorded_to_settled(tmp_path):
+    from partner.events.commitment import commitment_bet_execute, commitment_bet_record
+
+    job_id = "job_settle_test"
+    token = "runtime_trace_commit_02_settle"
+    ctx = _bounded_context(tmp_path, job_id, token)
+
+    recorded = commitment_bet_record(ctx, {})
+    assert recorded["ok"] is True and recorded["status"] == "COMMITTED"
+    store = Path(str(ctx.workspace)) / "state" / "commitments" / f"event_flow_{job_id}" / \
+        f"bet_{job_id}"
+    assert (store / "bet.json").is_file()
+
+    settled = commitment_bet_execute(ctx, {})
+    out = settled["semantic_output"]
+    assert settled["ok"] is True, settled
+    assert out["state"] == "CLOSED"
+    assert out["settlement_class"] in ("supported", "falsified", "inconclusive")
+    assert out["experience_id"], "a valid settlement must mint an experience"
+    assert out["receipt_id"] and out["measurement_id"] and out["baseline_id"]
+    assert out["replayed"] is False
+    lifecycle = json.loads((store / "state.json").read_text(encoding="utf-8"))
+    assert lifecycle["settled"] is True and lifecycle["experience_emitted"] is True
+    # exactly one settlement and one experience, however often the flow re-enters
+    assert len(list((store / "settlement").glob("*.json"))) == 1
+    assert len(list((store / "experience").glob("*.json"))) == 1
+    assert out["trace_token"] == token
+    # the record-only environment keeps the result unpublishable
+    assert out["publish_eligible"] is False
+    assert any("isolated_sample" in blocker for blocker in out["publish_blockers"])
+    # both halves are on the timeline, and neither faked a status change
+    history = init_jobs(Path(str(ctx.workspace))).history(job_id)
+    kinds = [row["kind"] for row in history]
+    assert "commitment_bet_recorded" in kinds and "commitment_bet_settled" in kinds
+    for row in history:
+        if row["kind"].startswith("commitment_bet_"):
+            assert row["from_status"] == row["to_status"] == "running"
+
+
+def test_a_replay_settles_nothing_new(tmp_path):
+    from partner.events.commitment import commitment_bet_execute, commitment_bet_record
+
+    ctx = _bounded_context(tmp_path, "job_replay", "runtime_trace_commit_02_replay")
+    commitment_bet_record(ctx, {})
+    first = commitment_bet_execute(ctx, {})
+    second = commitment_bet_execute(ctx, {})
+    assert second["semantic_output"]["replayed"] is True
+    assert second["semantic_output"]["settlement_id"] == \
+        first["semantic_output"]["settlement_id"]
+    store = Path(str(ctx.workspace)) / "state" / "commitments" / "event_flow_job_replay" / \
+        "bet_job_replay"
+    assert len(list((store / "settlement").glob("*.json"))) == 1
+
+
+def test_running_a_frozen_bet_continues_it_instead_of_re_freezing(tmp_path):
+    """freeze_only() then run() must be a continuation, not a frozen-field edit."""
+    from partner.application.commitment_bounded_adapter import (
+        bounded_spec, build_bounded_runner, write_bounded_snapshot,
+    )
+    from partner.commitment.store import CommitmentStore
+
+    job_id, token = "job_freeze_then_run", "runtime_trace_commit_02_two_step"
+    message = "please record and settle\n\ntrace token: " + token
+    spec = bounded_spec(job_id=job_id, trace_token=token, message=message)
+    store = CommitmentStore(Path(str(tmp_path)), spec["run_id"], spec["bet_id"])
+    snapshot = write_bounded_snapshot(store=store, spec=spec, job_id=job_id,
+                                      trace_token=token, message=message)
+    frozen = build_bounded_runner(tmp_path, spec, snapshot_path=snapshot).freeze_only()
+    assert frozen.state == "COMMITTED"
+    frozen_hash = store.load_bet().freeze_hash()
+
+    from partner.commitment.ports import FrozenClock
+    runner = build_bounded_runner(tmp_path, spec, snapshot_path=snapshot)
+    result = runner.run()
+    assert result.state in ("CLOSED",) or result.state in (
+        "INVALID", "BLOCKED", "BUDGET_EXHAUSTED", "CANCELLED"), result.state
+    assert result.state == "CLOSED", f"{result.state}: {result.reason}"
+    # the freeze was replayed, never edited
+    assert store.load_bet().freeze_hash() == frozen_hash
+    assert store.load_bet().revision == 1
+    assert result.settlement is not None and result.experience is not None
+
+
+def test_the_bounded_action_is_deterministic_and_comparable(tmp_path):
+    from partner.application.commitment_bounded_adapter import (
+        CONTROL_TRANSFORM, CANDIDATE_TRANSFORM, text_statistics,
+    )
+
+    text = "Alpha beta ALPHA Gamma gamma delta"
+    control = text_statistics(text, transform=CONTROL_TRANSFORM)
+    candidate = text_statistics(text, transform=CANDIDATE_TRANSFORM)
+    assert control == text_statistics(text, transform=CONTROL_TRANSFORM)
+    assert candidate == text_statistics(text, transform=CANDIDATE_TRANSFORM)
+    # case folding can only reduce the number of distinct tokens
+    assert candidate["unique_words"] <= control["unique_words"]
+    assert candidate["text_len"] == control["text_len"]
+    assert candidate["text_sha256"] != control["text_sha256"]
