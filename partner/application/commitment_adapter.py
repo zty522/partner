@@ -304,6 +304,18 @@ class MolecularIdentityBaselineProvider:
 # declarative runner assembly
 # ---------------------------------------------------------------------------
 
+def _declared(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalise an externally declared spec object into the internal contract.
+
+    The spec is a *declaration format* written by a caller; it should not have to
+    know the kernel's internal schema version.  The adapter stamps it, and never
+    invents any other field.
+    """
+    body = dict(payload)
+    body.setdefault("schema_version", M.SCHEMA_VERSION)
+    return body
+
+
 def runner_config_from_spec(spec: Mapping[str, Any], *, clock) -> RunnerConfig:
     """Build a RunnerConfig from a declarative bet spec.
 
@@ -329,19 +341,20 @@ def runner_config_from_spec(spec: Mapping[str, Any], *, clock) -> RunnerConfig:
         partner_id=str(spec["partner_id"]), project_id=str(spec["project_id"]),
         run_id=str(spec["run_id"]), question=str(spec["question"]),
         baseline_ref=str(spec["baseline_ref"]),
-        expected_effects=tuple(M.ExpectedEffect.from_dict(dict(e)) for e in spec["expected_effects"]),
-        falsification_conditions=tuple(M.FalsificationCondition.from_dict(dict(f))
-                                      for f in spec["falsification_conditions"]),
-        evaluation_protocol=M.EvaluationProtocol.from_dict(dict(spec["evaluation_protocol"])),
+        expected_effects=tuple(M.ExpectedEffect.from_dict(_declared(e))
+                               for e in spec["expected_effects"]),
+        falsification_conditions=tuple(M.FalsificationCondition.from_dict(_declared(f))
+                                       for f in spec["falsification_conditions"]),
+        evaluation_protocol=M.EvaluationProtocol.from_dict(_declared(spec["evaluation_protocol"])),
         budget=budget,
-        commitment_policy=M.CommitmentPolicy.from_dict(dict(spec["commitment_policy"])),
+        commitment_policy=M.CommitmentPolicy.from_dict(_declared(spec["commitment_policy"])),
         max_candidates=int(spec["max_candidates"]), code_version=str(spec["code_version"]),
         data_version=str(spec["data_version"]), model_config_ref=str(spec["model_config_ref"]),
         context_snapshot_ref=str(spec["context_snapshot_ref"]),
         scope=str(spec.get("scope") or ""),
         publish_gate_reasons=tuple(spec.get("publish_gate_reasons") or ()),
         environment=str(spec.get("environment") or "isolated_sample"),
-        treatment_spec=(M.TreatmentSpec.from_dict(dict(spec["treatment"]))
+        treatment_spec=(M.TreatmentSpec.from_dict(_declared(spec["treatment"]))
                         if spec.get("treatment") else None),
         harness_version=str(spec.get("harness_version") or ""),
         environment_fingerprint=str(spec.get("environment_fingerprint") or ""),

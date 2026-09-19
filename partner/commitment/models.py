@@ -1392,9 +1392,18 @@ class SettlementDecision:
             raise ContractError(
                 "SettlementDecision: 'falsified' means the expectation was not met; it cannot also "
                 "report expectations_met")
-        if self.settlement_class == "falsified" and self.improvement_observed:
-            raise ContractError(
-                "SettlementDecision: 'falsified' cannot also report improvement_observed")
+        # NOTE: ``falsified`` *may* carry improvement_over_baseline=True.  The two
+        # statements are about different things now: the relative delta can have
+        # moved in the declared direction while a guardrail expectation failed, in
+        # which case the direction is falsified even though the metric improved.
+        # Forbidding the combination would force the kernel to hide a real result.
+        if self.settlement_class == "falsified" and not self.schema_legacy:
+            if not (self.expectations_met or self.improvement_over_baseline
+                    or self.pre_existing_failures or self.new_regressions
+                    or self.comparison.matched):
+                raise ContractError(
+                    "SettlementDecision: 'falsified' requires a machine-checkable ground "
+                    "(an unmet expectation, a regression, or a matched comparison)")
         if self.schema_legacy and self.publish_eligible:
             raise ContractError(
                 "SettlementDecision: a legacy (pre-correction) record can never be publishable; "

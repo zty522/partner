@@ -267,7 +267,12 @@ def settle(request: SettlementRequest) -> SettlementDecision:
         blockers = []
     else:
         settlement_class = "falsified"
-        rules.append("at least one expectation was not met under a matched comparison")
+        unmet = [o.metric for o in outcomes if not o.met]
+        rules.append(f"at least one expectation was not met under a matched comparison: {unmet}")
+        if improvement:
+            rules.append(
+                "improvement_over_baseline=True while falsified: the relative delta moved in the "
+                f"declared direction, but {unmet} failed, so the direction is still refuted")
         blockers = []
 
     claim = _claim(outcomes, expectations_met, improvement)
