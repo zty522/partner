@@ -1,0 +1,17 @@
+{
+  "task_id": "cross_class_transfer_probe",
+  "title": "cross-class prior transfer probe: a new class whose only history is a related class",
+  "bug_report": "bug_report.md",
+  "repo_root": "/mnt/e/work/partner",
+  "target_module": "partner/research/adapters/gepa.py",
+  "test_target": [
+    "tests/test_adapter_contracts.py",
+    "-k",
+    "gepa or dgm"
+  ],
+  "timeout_seconds": 180,
+  "patch_file": "patch.diff",
+  "expected_min_delta": 4.0,
+  "expected_threshold": 1.0,
+  "expectation_note": "the declared bar asks for four more passing tests than the baseline.  The candidate delivers three, so without a prior the run honestly cannot claim an improvement; the cross-class prior is what lowers the bar."
+}

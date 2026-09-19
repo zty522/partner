@@ -257,6 +257,38 @@ def _apply_prior_to_spec(spec: Mapping[str, Any], *, class_key: str, prior: Mapp
             "declared_values": {k: declared[k] for k in ("min_delta", "replicates")}}
 
 
+def _related_history(rows, class_key: str, own_components: Mapping[str, Any]) -> dict[str, Any]:
+    """Every related class' settlements, with its similarity weight -- additive only.
+
+    A related source must be a class whose components the rebuild *proved* (see
+    ``bet_class_components``); a row whose class cannot be reproduced is not borrowed.  The
+    direct class is never a related source of itself.
+    """
+    from partner.application.experience_prior import related_class_keys, similarity_reasons
+    known: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = str(row.get("class_key") or "")
+        if not key or key == str(class_key):
+            continue
+        components = dict(row.get("class_components") or {})
+        if not components or not all(components.values()):
+            continue
+        known.setdefault(key, {"components": components,
+                               "verified": bool(row.get("class_components_verified"))})
+        grouped.setdefault(key, []).append(dict(row))
+    out: dict[str, Any] = {}
+    for related_key, weight in related_class_keys(class_key, known, components=own_components):
+        out[related_key] = {
+            "weight": float(weight),
+            "components": dict(known[related_key]["components"]),
+            "reasons": similarity_reasons(dict(own_components),
+                                          known[related_key]["components"]),
+            "rows": grouped.get(related_key, []),
+        }
+    return out
+
+
 def _resolve_declared(ctx, params):
     """The declared bet: spec with declared values, store, and the declared class key.
 
@@ -349,7 +381,12 @@ def commitment_prior_recall(ctx, params):
                 "files": [], "evidence_refs": [], "token_usage": {}}
     rows = scan_settled_bets(Path(ctx.workspace), exclude_bet_id=str(spec["bet_id"]))
     same_class = select_same_class(rows, class_key)
-    prior = summarize_prior(same_class, class_key=class_key, components=bundle["components"])
+    # Related classes are *searched* always and *used* only when the direct class is thin;
+    # ``summarize_prior`` decides that from the direct evidence total, so the rule lives in
+    # one place.  Nothing here can override the direct rows: they keep weight 1.0.
+    related = _related_history(rows, class_key, bundle["components"])
+    prior = summarize_prior(same_class, class_key=class_key, components=bundle["components"],
+                            related=related)
     path = write_prior(store.root, prior)
     noted = False
     try:
@@ -360,6 +397,8 @@ def commitment_prior_recall(ctx, params):
                     "prior_empty": prior["empty"], "counts": prior["counts"],
                     "prior_bet_ids": [r.get("bet_id") for r in prior["rows"]],
                     "local_prior_suppressed": len(rows) - len(same_class),
+                    "related": prior.get("related"), "weighted": prior.get("weighted"),
+                    "applied_from": prior.get("applied_from"),
                     "prior_path": str(path), "trace_token": bundle["token"]})
         noted = True
     except Exception:  # noqa: BLE001 -- the prior is the deliverable, the note is the trail
@@ -373,6 +412,9 @@ def commitment_prior_recall(ctx, params):
                                 "prior_counts": prior["counts"],
                                 "prior_bet_ids": [r.get("bet_id") for r in prior["rows"]],
                                 "prior_sources": prior["sources"],
+                                "related": dict(prior.get("related") or {}),
+                                "weighted": dict(prior.get("weighted") or {}),
+                                "applied_from": str(prior.get("applied_from") or "direct"),
                                 "scanned_settled_bets": len(rows),
                                 "abstention": dict(prior.get("abstention") or {}),
                                 "prior_path": str(path), "noted_on_timeline": noted,

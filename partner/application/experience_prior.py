@@ -81,6 +81,15 @@ ABSTAIN_REFUTED_RATIO = 0.75
 #: The rule's name, recorded in the frozen prior and in the settlement.
 ABSTAIN_RULE = "abstention_rule_refuted_history_without_success"
 
+#: -- related classes (cross-class prior transfer) ---------------------------
+#: How much a related class's evidence is worth, by *how* it is related.  Highest
+#: matching component wins; the weights never add up.
+RELATED_WEIGHT_SAME_ACTION = 0.6     # same kind of task, different project/metric
+RELATED_WEIGHT_SAME_METRIC = 0.5     # same measurement shape, different task/project
+RELATED_WEIGHT_SAME_PROJECT = 0.4    # same project, different task/metric
+#: The direct class' own weight, for the record: direct evidence is never discounted.
+DIRECT_WEIGHT = 1.0
+
 
 # ---------------------------------------------------------------------------
 # the class key: one pure function, no LLM
@@ -101,6 +110,122 @@ def task_class_key(*, project_id: str, action_id: str, metric_signature: str) ->
     """
     body = "|".join(str(x or "") for x in (project_id, action_id, metric_signature))
     return CLASS_PREFIX + hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def bet_class_components(bet: Mapping[str, Any],
+                         snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Rebuild a settled bet's class components from what is on disk.
+
+    An earlier round stored the class key but not its components, so a related-class search
+    has to reconstruct them: ``project_id`` from the bet, the metric signature from the
+    frozen expectations, and the action id from the snapshot (a real-task snapshot names
+    its ``task_id``; a bounded-action snapshot carries its ``candidate_space``).  When the
+    rebuild does not reproduce the stored key the row is marked unverified -- a row whose
+    class cannot be proven must not silently become another class' evidence.
+    """
+    bet = dict(bet or {})
+    snapshot = dict(snapshot or {})
+    project_id = str(bet.get("project_id") or "")
+    task_id = str(snapshot.get("task_id") or "")
+    if task_id:
+        action_id = f"real_task:{task_id}"
+    elif snapshot.get("candidate_space"):
+        action_id = "bounded_metric"
+    else:
+        action_id = str(snapshot.get("action_id") or "")
+    signature = metric_signature(bet.get("expected_effects") or ())
+    components = class_components(project_id=project_id, action_id=action_id,
+                                 metric_signature=signature)
+    stored = class_key_from_bet(bet)
+    rebuilt = task_class_key(**components) if action_id else ""
+    return {**components, "stored_class_key": stored, "rebuilt_class_key": rebuilt,
+            "verified": bool(stored) and rebuilt == stored}
+
+
+def similarity_weight(own: Mapping[str, Any], other: Mapping[str, Any]) -> float:
+    """How similar two classes are, by the declared components only.  Pure, no LLM.
+
+    Same action id -> RELATED_WEIGHT_SAME_ACTION, same metric signature ->
+    RELATED_WEIGHT_SAME_METRIC, same project -> RELATED_WEIGHT_SAME_PROJECT.  Two matching
+    components take the highest of them (they never add), three matching components mean
+    the same class (1.0) and are therefore not a *related* source at all.
+    """
+    if not own or not other:
+        return 0.0
+    matches: list[float] = []
+    if own.get("action_id") and own.get("action_id") == other.get("action_id"):
+        matches.append(RELATED_WEIGHT_SAME_ACTION)
+    if (own.get("metric_signature")
+            and own.get("metric_signature") == other.get("metric_signature")):
+        matches.append(RELATED_WEIGHT_SAME_METRIC)
+    if own.get("project_id") and own.get("project_id") == other.get("project_id"):
+        matches.append(RELATED_WEIGHT_SAME_PROJECT)
+    if len(matches) == 3:
+        return 1.0
+    return max(matches) if matches else 0.0
+
+
+def similarity_reasons(own: Mapping[str, Any], other: Mapping[str, Any]) -> list[str]:
+    reasons = []
+    if own.get("action_id") and own.get("action_id") == other.get("action_id"):
+        reasons.append("same_action_id")
+    if own.get("metric_signature") and own.get("metric_signature") == other.get("metric_signature"):
+        reasons.append("same_metric_signature")
+    if own.get("project_id") and own.get("project_id") == other.get("project_id"):
+        reasons.append("same_project_id")
+    return reasons
+
+
+def _known_class_components(all_known: Any) -> dict[str, dict[str, Any]]:
+    """Normalise the caller's view of known classes into ``{class_key: components}``.
+
+    Accepts ``{key: components}`` or ``{key: {"components": ..., "verified": bool}}`` (or a
+    sequence of either shape).  A bare key carries no components -- and a key is a hash, so
+    its similarity cannot be judged: those entries are dropped instead of guessed.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    items = all_known.items() if isinstance(all_known, Mapping) else \
+        ((str(k), v) for k, v in (all_known or ()))
+    for key, value in items:
+        key = str(key)
+        if isinstance(value, Mapping) and isinstance(value.get("components"), Mapping):
+            components = dict(value["components"])
+            verified = bool(value.get("verified", True))
+        elif isinstance(value, Mapping):
+            components, verified = dict(value), True
+        else:
+            continue
+        if not components:
+            continue
+        out[key] = {**components, "verified": verified}
+    return out
+
+
+def related_class_keys(class_key: str, all_known_class_keys: Any, *,
+                       components: Mapping[str, Any] | None = None
+                       ) -> list[tuple[str, float]]:
+    """The related classes of ``class_key``, with their similarity weights.
+
+    Returns ``[(related_key, weight), ...]`` sorted by weight (descending) and then by key,
+    so the list is stable and auditable.  The direct class itself is never included: three
+    matching components mean "same class", which is not a related source.  An empty result
+    is a normal answer.
+    """
+    known = _known_class_components(all_known_class_keys)
+    own = dict(components or {})
+    if not own:
+        own = {k: v for k, v in (known.get(str(class_key)) or {}).items() if k != "verified"}
+    if not own:
+        return []
+    pairs: list[tuple[str, float]] = []
+    for candidate, info in known.items():
+        if candidate == str(class_key) or not info.get("verified", True):
+            continue
+        weight = similarity_weight(own, info)
+        if 0.0 < weight < DIRECT_WEIGHT:
+            pairs.append((candidate, weight))
+    pairs.sort(key=lambda pair: (-pair[1], pair[0]))
+    return pairs
 
 
 def class_key_from_bet(bet: Mapping[str, Any]) -> str:
@@ -174,6 +299,7 @@ def scan_settled_bets(workspace: str | os.PathLike, *,
                 if names:
                     experience = _read_json(experience_dir / names[-1])
             snapshot = _read_json(bet_path / "context" / "snapshot.json") or {}
+            rebuilt = bet_class_components(bet, snapshot)
             rows.append({
                 "bet_id": str(bet.get("bet_id") or bet_dir),
                 "run_id": str(bet.get("run_id") or run_dir),
@@ -203,6 +329,13 @@ def scan_settled_bets(workspace: str | os.PathLike, *,
                 "experience_id": str((experience or {}).get("experience_id") or ""),
                 "settlement_ref": str(settlement_dir / sorted(os.listdir(settlement_dir))[-1]),
                 "store_dir": str(bet_path),
+                # Rebuilt from disk so a *related* class can be judged by its declared
+                # components.  ``verified`` is True only when the rebuild reproduces the
+                # stored class key: an unverifiable row is never borrowed as other-class
+                # evidence.
+                "class_components": {k: rebuilt[k] for k in
+                                     ("project_id", "action_id", "metric_signature")},
+                "class_components_verified": bool(rebuilt["verified"]),
             })
     rows.sort(key=lambda r: (r["created_at"], r["bet_id"]))
     return rows
@@ -215,9 +348,7 @@ def select_same_class(rows: Sequence[Mapping[str, Any]], class_key: str) -> list
     return [dict(r) for r in rows if str(r.get("class_key")) == class_key]
 
 
-def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
-                    components: Mapping[str, str] | None = None) -> dict[str, Any]:
-    """The prior: the same-class rows plus machine-counted statistics."""
+def _class_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     counts = {name: 0 for name in SETTLEMENT_CLASSES}
     for row in rows:
         cls = str(row.get("settlement_class") or "")
@@ -226,11 +357,57 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         elif cls in counts:
             counts[cls] += 1
     total = len(rows)
-    # The ratio is over *evidence-bearing* settlements: an abstention is not evidence about
-    # the task, so it must neither soften nor sharpen the measured failure rate.  (The two
-    # rules -- raising the bar and declining to wager -- therefore read the same ratio.)
     evidence_total = max(total - counts["abstained"], 0)
-    refuted_ratio = (counts["falsified"] / evidence_total) if evidence_total else 0.0
+    counts.update({"total": total, "evidence_total": evidence_total,
+                   "refuted_ratio": round((counts["falsified"] / evidence_total)
+                                          if evidence_total else 0.0, 6),
+                   "improvement_true": sum(1 for r in rows if r.get("improvement_over_baseline")),
+                   "improvement_false": sum(1 for r in rows if not r.get("improvement_over_baseline")),
+                   "single_episode_only": sum(1 for r in rows
+                                              if BLOCKER_SINGLE_EPISODE
+                                              in (r.get("publish_blockers") or []))})
+    return counts
+
+
+def _related_pairs(related: Mapping[str, Any]) -> list[list[Any]]:
+    """``[[class_key, weight], ...]`` for the audit, in the summary's stable order."""
+    return [[str(c.get("class_key")), float(c.get("weight") or 0.0)]
+            for c in (related.get("classes") or [])]
+
+
+def effective_counts(prior: Mapping[str, Any]) -> dict[str, Any]:
+    """The counts the rules must apply.
+
+    Direct-only when the same class carried enough evidence; when related classes were
+    consulted, the *weighted* view -- direct rows at weight 1.0 plus every related row at
+    its similarity weight.  The two views are both kept in the prior, so an auditor can
+    always see what the direct history said on its own.
+    """
+    counts = dict((prior or {}).get("counts") or {})
+    related = dict((prior or {}).get("related") or {})
+    if related.get("used"):
+        merged = dict(counts)
+        for key, value in dict((prior or {}).get("weighted") or {}).items():
+            merged[key] = value
+        return merged
+    return counts
+
+
+def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
+                    components: Mapping[str, str] | None = None,
+                    related: Mapping[str, Mapping[str, Any]] | None = None,
+                    ) -> dict[str, Any]:
+    """The prior: the same-class rows, every related class' rows, and machine-counted
+    statistics in both views (direct and weight-adjusted).
+
+    Related evidence is only ever *added*: the direct rows keep weight 1.0 and are never
+    replaced, rescaled or dropped.  The related path opens only when the direct class does
+    not carry enough evidence of its own (:data:`ABSTAIN_MIN_EVIDENCE`).
+    """
+    counts = _class_counts(rows)
+    total = counts["total"]
+    evidence_total = counts["evidence_total"]
+    refuted_ratio = counts["refuted_ratio"]
     supporting = [{"bet_id": r.get("bet_id"), "run_id": r.get("run_id"),
                    "trace_token": r.get("trace_token"),
                    "settlement_class": r.get("settlement_class"),
@@ -248,19 +425,81 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         "class_definition": dict(components or {}),
         "empty": not rows,
         "row_count": len(rows),
-        "counts": {
-            "total": len(rows),
-            "evidence_total": evidence_total,
-            **counts,
-            "refuted_ratio": round(refuted_ratio, 6),
-            "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
-            "improvement_true": sum(1 for r in rows if r.get("improvement_over_baseline")),
-            "improvement_false": sum(1 for r in rows if not r.get("improvement_over_baseline")),
-            "single_episode_only": sum(1 for r in rows
-                                       if BLOCKER_SINGLE_EPISODE in (r.get("publish_blockers") or [])),
-        },
+        "counts": {**counts, "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD},
         "rows": supporting,
         "sources": [str(r.get("settlement_ref") or "") for r in rows],
+    }
+    # -- related classes: additive only, and only when the direct class is thin -------
+    related_map = dict(related or {})
+    related_classes: list[dict[str, Any]] = []
+    contributing: list[dict[str, Any]] = [
+        {**row, "_weight": DIRECT_WEIGHT, "_source": "direct"} for row in rows]
+    weighted: dict[str, float] = {name: float(counts[name]) for name in SETTLEMENT_CLASSES}
+    for name in ("total", "evidence_total", "improvement_true", "improvement_false",
+                 "single_episode_only"):
+        weighted[name] = float(counts[name])
+    for key in sorted(related_map):
+        info = dict(related_map[key] or {})
+        weight = float(info.get("weight") or 0.0)
+        if weight <= 0.0 or weight >= DIRECT_WEIGHT:
+            continue
+        class_rows = [dict(row) for row in (info.get("rows") or [])]
+        class_counts = _class_counts(class_rows)
+        for name in SETTLEMENT_CLASSES:
+            weighted[name] += weight * float(class_counts[name])
+        for name in ("total", "evidence_total", "improvement_true", "improvement_false",
+                     "single_episode_only"):
+            weighted[name] += weight * float(class_counts[name])
+        contributing.extend({**row, "_weight": weight, "_source": f"related:{key}"}
+                            for row in class_rows)
+        related_classes.append({
+            "class_key": str(key), "weight": weight,
+            "reasons": [str(r) for r in (info.get("reasons") or [])],
+            "components": dict(info.get("components") or {}),
+            "row_count": int(class_counts["total"]), "counts": class_counts,
+            "bet_ids": [str(r.get("bet_id") or "") for r in class_rows]})
+    weighted["evidence_total"] = max(weighted["evidence_total"], 0.0)
+    weighted["refuted_ratio"] = round(
+        (weighted["falsified"] / weighted["evidence_total"])
+        if weighted["evidence_total"] else 0.0, 6)
+    triggered = evidence_total < ABSTAIN_MIN_EVIDENCE
+    used = bool(triggered and related_classes)
+    # The tail the abstention rule reads must belong to the view that was *applied*: with
+    # direct-only evidence, a related class' latest settlement has no business deciding
+    # whether this class may decline to wager.
+    tail_rows = ([{**row, "_weight": DIRECT_WEIGHT, "_source": "direct"} for row in rows]
+                 if not used else contributing)
+    ordered = sorted(tail_rows, key=lambda row: (str(row.get("settled_at") or ""),
+                                                 float(row.get("settled_epoch") or 0.0)))
+    latest = dict(ordered[-1]) if ordered else {}
+    summary["related"] = {
+        "triggered": triggered, "used": used,
+        "reason": ("related_class_history_used" if used else
+                   ("no_related_class_history" if triggered else "direct_evidence_sufficient")),
+        "direct_evidence_total": int(evidence_total),
+        "direct_weight": DIRECT_WEIGHT,
+        "min_direct_evidence": ABSTAIN_MIN_EVIDENCE,
+        "classes": related_classes,
+        "sorted_by": "weight_desc_then_class_key",
+        "weights": {"same_action_id": RELATED_WEIGHT_SAME_ACTION,
+                    "same_metric_signature": RELATED_WEIGHT_SAME_METRIC,
+                    "same_project_id": RELATED_WEIGHT_SAME_PROJECT},
+    }
+    summary["weighted"] = weighted
+    summary["applied_from"] = "weighted" if used else "direct"
+    # ``empty`` means "no evidence was available from anywhere".  A class with an empty
+    # *direct* history but borrowed related evidence is not empty: the weighted view below
+    # carries real settlements.  ``row_count`` still counts the direct rows only, and
+    # ``related.classes`` reports what was borrowed.
+    summary["empty"] = bool(not rows and not related_classes)
+    summary["related_row_count"] = sum(len(c.get("bet_ids") or []) for c in related_classes)
+    summary["tail"] = {
+        "tail_from": "weighted" if used else "direct",
+        "settlement_class": str(latest.get("settlement_class") or ""),
+        "bet_id": str(latest.get("bet_id") or ""),
+        "class_key": str(latest.get("class_key") or class_key),
+        "source": str(latest.get("_source") or ""),
+        "weight": float(latest.get("_weight") or 0.0),
     }
     # The abstention decision is part of the prior, not a separate later step: it is frozen
     # into ``prior.json`` (and from there into the bet's context snapshot) with the counts
@@ -284,17 +523,25 @@ def decide_abstention(prior: Mapping[str, Any]) -> dict[str, Any]:
     Abstentions are excluded from the ratio's denominator on purpose: declining to wager is
     not evidence about the task, so it must neither raise nor lower the failure rate.
     """
-    counts = dict(prior.get("counts") or {})
+    counts = effective_counts(prior)
     rows = [dict(row) for row in (prior.get("rows") or [])]
-    abstained = int(counts.get("abstained") or 0)
-    total = int(counts.get("total") or 0)
-    evidence_total = max(total - abstained, 0)
-    refuted = int(counts.get("falsified") or 0)
-    supported = int(counts.get("supported") or 0)
+    abstained = float(counts.get("abstained") or 0.0)
+    total = float(counts.get("total") or 0.0)
+    evidence_total = float(counts.get("evidence_total") if counts.get("evidence_total") is not None
+                           else max(total - abstained, 0.0))
+    refuted = float(counts.get("falsified") or 0.0)
+    supported = float(counts.get("supported") or 0.0)
     ratio = (refuted / evidence_total) if evidence_total else 0.0
-    ordered = sorted(rows, key=lambda row: (str(row.get("settled_at") or ""),
-                                            float(row.get("settled_epoch") or 0.0)))
-    latest = dict(ordered[-1]) if ordered else {}
+    # The tail is the most recent *contributing* settlement: the direct rows, plus the
+    # related rows when they were borrowed.  ``summarize_prior`` records it; a caller who
+    # built the prior by hand falls back to the direct rows.
+    tail = dict(prior.get("tail") or {})
+    if tail:
+        latest = tail
+    else:
+        ordered = sorted(rows, key=lambda row: (str(row.get("settled_at") or ""),
+                                                float(row.get("settled_epoch") or 0.0)))
+        latest = dict(ordered[-1]) if ordered else {}
     latest_class = str(latest.get("settlement_class") or "")
     blocked_by: list[str] = []
     if not str(prior.get("class_key") or ""):
@@ -366,23 +613,47 @@ def adjust_declared(declared: Mapping[str, Any], prior: Mapping[str, Any]) -> tu
     adjusted = {"min_delta": float(declared.get("min_delta") or 0.0),
                 "replicates": int(declared.get("replicates") or 1),
                 "require_baseline_rerun": bool(declared.get("require_baseline_rerun"))}
-    counts = dict((prior or {}).get("counts") or {})
+    counts = effective_counts(prior or {})
+    direct_counts = dict((prior or {}).get("counts") or {})
+    related = dict((prior or {}).get("related") or {})
+    weighted = dict((prior or {}).get("weighted") or {})
+    applied_from = str((prior or {}).get("applied_from") or "direct")
     class_key = str((prior or {}).get("class_key") or "")
     rows = list((prior or {}).get("rows") or [])
     parameters: list[dict[str, Any]] = []
-    if (prior or {}).get("empty") or int(counts.get("total") or 0) < 1:
+    # "Nothing to adjust from" is judged on the *effective* evidence: an empty direct class
+    # whose evidence was borrowed from related classes is not empty, and returning early
+    # here would silently discard exactly the evidence the related path exists to bring in.
+    available = (float(counts.get("evidence_total") or 0.0)
+                 + float(counts.get("abstained") or 0.0))
+    if available <= 0.0:
         return adjusted, {"prior_adjusted": False, "prior_class_key": class_key,
                           "prior_row_count": 0, "parameters": [],
-                          "reason": "prior_empty", "prior_version": PRIOR_VERSION}
+                          "reason": "prior_empty", "prior_version": PRIOR_VERSION,
+                          "applied_from": applied_from,
+                          "used_direct_only": applied_from == "direct",
+                          "direct_class_evidence": direct_counts,
+                          "related_class_keys": ([] if applied_from == "direct" else
+                                                 _related_pairs(related)),
+                          "related_class_keys_considered": _related_pairs(related),
+                          "weighted_evidence": dict(weighted),
+                          "applied_evidence": dict(counts),
+                          "adjustment_rule": "none",
+                          "tail": dict((prior or {}).get("tail") or {})}
     base = adjusted["min_delta"]
-    refuted = int(counts.get("falsified") or 0)
-    supported = int(counts.get("supported") or 0)
-    total = int(counts.get("total") or 0)
+    # ``float`` on purpose: with related classes the counts are weighted shares, and
+    # truncating them to int would quietly drop borrowed evidence.
+    refuted = float(counts.get("falsified") or 0.0)
+    supported = float(counts.get("supported") or 0.0)
+    total = float(counts.get("total") or 0.0)
     ratio = float(counts.get("refuted_ratio") or 0.0)
     # -- priority: a refuted-dominated class outranks a supported one.  The bar goes up
     # whenever refuted/total >= REFUTED_RATIO_THRESHOLD (ties included); the relaxing
     # rule below only applies when the class is NOT refuted-dominated.
-    if total >= 1 and ratio >= REFUTED_RATIO_THRESHOLD:
+    # "any evidence at all", not ">= 1 settlement": under the weighted view a borrowed row
+    # contributes a fraction (one related row at weight 0.5 is 0.5 of a settlement), and a
+    # guard of ``total >= 1`` would silently discard exactly that evidence.
+    if total > 0.0 and ratio >= REFUTED_RATIO_THRESHOLD:
         after = min(MAX_MIN_DELTA, base * (1 + refuted))
         if after > base:
             adjusted["min_delta"] = after
@@ -415,25 +686,45 @@ def adjust_declared(declared: Mapping[str, Any], prior: Mapping[str, Any]) -> tu
                              "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD},
                 "why": (f"{supported} supported settlement(s) and only {refuted}/{total} "
                         f"refuted (ratio {round(ratio, 4)} < {REFUTED_RATIO_THRESHOLD})")})
-    if int(counts.get("improvement_false") or 0) > 0 and not adjusted["require_baseline_rerun"]:
+    if float(counts.get("improvement_false") or 0) > 0 and not adjusted["require_baseline_rerun"]:
         adjusted["require_baseline_rerun"] = True
         parameters.append({
             "name": "require_baseline_rerun", "before": bool(declared.get("require_baseline_rerun")),
             "after": True, "rule": "improvement_false_forces_a_real_baseline",
-            "evidence": {"improvement_false": int(counts.get("improvement_false") or 0)},
+            "evidence": {"improvement_false": float(counts.get("improvement_false") or 0.0)},
             "why": "a same-class settlement did not beat its baseline"})
-    if int(counts.get("single_episode_only") or 0) > 0 and adjusted["replicates"] < 2:
+    if float(counts.get("single_episode_only") or 0) > 0 and adjusted["replicates"] < 2:
         adjusted["replicates"] = 2
         parameters.append({
             "name": "replicates", "before": int(declared.get("replicates") or 1), "after": 2,
             "rule": "single_episode_blocker_adds_one_executed_repetition",
-            "evidence": {"single_episode_only": int(counts.get("single_episode_only") or 0)},
+            "evidence": {"single_episode_only": float(counts.get("single_episode_only") or 0.0)},
             "why": "a same-class settlement was blocked as single_episode_only"})
     audit = {"prior_adjusted": bool(parameters), "prior_class_key": class_key,
              "prior_row_count": int(counts.get("total") or 0), "parameters": parameters,
              "reason": "prior_applied" if parameters else "prior_present_no_rule_triggered",
              "prior_version": PRIOR_VERSION,
-             "prior_bet_ids": [r.get("bet_id") for r in rows]}
+             "prior_bet_ids": [r.get("bet_id") for r in rows],
+             # -- what was applied, and where every number came from -------------------
+             "applied_from": applied_from,
+             "used_direct_only": applied_from == "direct",
+             "direct_class_evidence": direct_counts,
+             # ``related_class_keys`` names only the classes whose evidence was *applied*
+             # (empty when the direct class was sufficient); the full list that was
+             # considered is kept next to it for the audit.
+             "related_class_keys": ([] if applied_from == "direct" else
+                                    _related_pairs(related)),
+             "related_class_keys_considered": _related_pairs(related),
+             "related_class_reasons": {str(c.get("class_key")): list(c.get("reasons") or [])
+                                       for c in (related.get("classes") or [])},
+             "related_evidence": {"triggered": bool(related.get("triggered")),
+                                  "used": bool(related.get("used")),
+                                  "reason": str(related.get("reason") or ""),
+                                  "classes": list(related.get("classes") or [])},
+             "weighted_evidence": dict(weighted),
+             "applied_evidence": dict(counts),
+             "adjustment_rule": (parameters[0]["rule"] if parameters else "none"),
+             "tail": dict((prior or {}).get("tail") or {})}
     return adjusted, audit
 
 
