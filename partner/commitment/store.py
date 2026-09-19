@@ -85,6 +85,39 @@ class ChainReport:
                 "broken_at": self.broken_at, "reason": self.reason}
 
 
+#: Run-level acceptance metadata.  A run is not a settlement: the machine verdict
+#: inside a settlement keeps exactly its original meaning, while these flags describe
+#: what the run *was* (who executed it, whether the repeats were genuinely
+#: independent, whether anything was really advanced).
+RUN_KINDS = ("infrastructure_canary", "instance_canary", "production_canary")
+
+
+def run_metadata(*, run_kind: str, instance_executed: bool, project_advancement: bool,
+                 replicates_independent: bool, executed_by: str, owner_instance: str = "",
+                 notes: str = "", written_at: str = "") -> dict[str, Any]:
+    """Build a run-level metadata block.
+
+    ``production_canary_acceptance`` is **derived, never asserted**: it holds only
+    when the instance itself executed the run, the repeats were genuinely
+    independent, the run really advanced the project, and the kind says so.
+    """
+    if run_kind not in RUN_KINDS:
+        raise ContractError(f"run_metadata: run_kind={run_kind!r} not in {RUN_KINDS}")
+    return {
+        "run_kind": run_kind,
+        "instance_executed": bool(instance_executed),
+        "project_advancement": bool(project_advancement),
+        "replicates_independent": bool(replicates_independent),
+        "production_canary_acceptance": bool(
+            instance_executed and replicates_independent and project_advancement
+            and run_kind == "production_canary"),
+        "executed_by": str(executed_by),
+        "owner_instance": str(owner_instance),
+        "notes": str(notes),
+        "written_at": written_at or time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
 class CommitmentStore:
     """One bet's durable record."""
 
@@ -381,6 +414,37 @@ class CommitmentStore:
         return BaselineEvidence.from_dict(_read_json(path))
 
     # -- manifest ------------------------------------------------------------
+
+    # -- run-level metadata (never touches a settlement) ---------------------
+    def write_run_metadata(self, metadata: Mapping[str, Any]) -> Path:
+        """Record what this run was, without rewriting anything already decided.
+
+        Stored as ``run_metadata.json`` and surfaced through the manifest.  The
+        settlement, the state machine and the event chain are untouched, so a
+        historical machine verdict keeps its original meaning.
+        """
+        required = ("run_kind", "instance_executed", "project_advancement",
+                    "replicates_independent", "production_canary_acceptance")
+        missing = [f for f in required if f not in metadata]
+        if missing:
+            raise ContractError(f"write_run_metadata: missing field(s) {missing}")
+        if metadata["run_kind"] not in RUN_KINDS:
+            raise ContractError(f"write_run_metadata: unknown run_kind {metadata['run_kind']!r}")
+        for flag in required[1:]:
+            if not isinstance(metadata[flag], bool):
+                raise ContractError(f"write_run_metadata: {flag} must be a bool")
+        expected = bool(metadata["instance_executed"] and metadata["replicates_independent"]
+                        and metadata["project_advancement"]
+                        and metadata["run_kind"] == "production_canary")
+        if bool(metadata["production_canary_acceptance"]) is not expected:
+            raise ContractError(
+                "write_run_metadata: production_canary_acceptance is derived, not asserted")
+        path = self.root / "run_metadata.json"
+        path.write_text(json.dumps(dict(metadata), ensure_ascii=False, indent=2, sort_keys=True),
+                        encoding="utf-8")
+        self.write_manifest(extra={"run_metadata": dict(metadata),
+                                   "run_metadata_ref": path.name})
+        return path
 
     def write_manifest(self, *, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         report = self.verify_chain(record_issue=False)

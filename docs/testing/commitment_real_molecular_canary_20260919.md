@@ -1,4 +1,29 @@
-# 真实 02 分子生成项目 commitment canary 验收（2026-09-19）
+# 分子生成 commitment canary 验收（2026-09-19）
+
+> ## 定位更正（2026-09-19 第二轮，用户指出后修正）
+>
+> **本次运行是 `infrastructure_canary`，不是 production canary 验收。**
+>
+> | 标志 | 值 | 依据 |
+> |---|---|---|
+> | `run_kind` | `infrastructure_canary` | 由 Hermes 直接运行内核脚本，非 02 实例执行 |
+> | `instance_executed` | `false` | 02 未消费消息、未执行 Event 流、未回复 |
+> | `project_advancement` | `false` | 问题上偏离项目当前主线（QED/SA 选择 vs TargetDiff pK） |
+> | `replicates_independent` | `false` | `scaffold_cap` 不使用 seed，两次 repeat 输入/索引/输出完全相同 |
+> | `production_canary_acceptance` | `false` | 由上面三项派生，不可声称 |
+>
+> 元数据位置：`benchmark_runs/_canary_ws_run2/state/commitments/molecular_canary_02/bet_molecular_canary_02/run_metadata.json`
+> （同一份副本在报告目录 `run_metadata.json`），并已写入该 bet 的 manifest。
+> **旧 settlement 的机器裁决（falsified / publish_eligible=false）保持原样，未改写。**
+> 其负结果保留，不删除、不覆盖。
+>
+> 三点具体更正：
+> 1. 实验由 Hermes 直接运行 `scripts/run_commitment_molecular_canary.py`，**不是** 02 实例完成；
+> 2. 选择的 `scaffold_cap + QED/SA` 已偏离当前主线（项目简报明确"重复 QED/SA 头部排序不会增加
+>    目标活性证据"，主线是 TargetDiff pK 预测、外部实验 pK 测试集与靶点级新特征）；
+> 3. `scaffold_cap` 不使用 seed，两个 declared seed 产生完全相同结果，**不能**作为两个独立重复。
+>
+> 下方 §1—§14 保留为当时的技术记录；凡与本节冲突处，以本节为准。
 
 ## 1. 本轮两件事
 
@@ -102,7 +127,7 @@ publish_blockers      = ['falsification_violation:sa_ceiling_broken',
 
 ## 9. 是否真正推进了项目
 
-**结论：本次不推进项目主线，但产生了一个有效的负结果。**
+**结论：`project_advancement=false` —— 本次没有推进项目任何主线，只产生了一个有效的局部负结果。**
 `scaffold_cap` 能把平均 QED 提高 0.084（远超冻结 δ=0.02），代价是平均 SA 从 1.33 升到 2.69
 （超冻结上限 1.60）、选择数从 20 降到 15、去重率从 0.5 降到 0.33。因此它不能作为主线依据。
 本报告全部数字为**计算代理指标**，不是活性、药效、湿实验可合成性或临床价值。

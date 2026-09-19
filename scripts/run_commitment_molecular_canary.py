@@ -32,6 +32,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
@@ -330,6 +331,41 @@ def render_pdf(markdown_text: str, pdf_path: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # reporting
 # ---------------------------------------------------------------------------
+
+def _replicate_invariants(result: Any) -> dict[str, Any]:
+    """Machine check: were the declared repeats actually independent?
+
+    Two repeats count as independent only when the effective selection differs --
+    either a different sampled index set or a different output.  A declared seed
+    that the algorithm never reads produces identical inputs, identical indices and
+    identical outputs, which is one execution wearing two labels.
+    """
+    receipt = getattr(result, "receipt", None)
+    if receipt is None or not receipt.artifacts:
+        return {"replicates_declared": 0, "replicates_independent": False,
+                "reason": "no artifact to inspect"}
+    try:
+        payload = json.loads(Path(receipt.artifacts[0]).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"replicates_declared": 0, "replicates_independent": False,
+                "reason": f"artifact unreadable: {exc}"}
+    repeats = list(payload.get("repeats") or ())
+    fingerprints = []
+    for repeat in repeats:
+        selected = list(repeat.get("selected") or ())
+        index_hash = hashlib.sha256(json.dumps(
+            [str(r.get("smiles")) for r in selected], sort_keys=True).encode()).hexdigest()
+        fingerprints.append({"seed": repeat.get("seed"), "index_hash": index_hash,
+                             "selected": len(selected)})
+    distinct = len({f["index_hash"] for f in fingerprints})
+    independent = len(fingerprints) >= 2 and distinct >= 2
+    reason = ("" if independent else
+              "every repeat produced the same effective selection, so the declared seeds "
+              "did not create independent repeats")
+    return {"replicates_declared": len(fingerprints), "fingerprints": fingerprints,
+            "distinct_selections": distinct, "replicates_independent": independent,
+            "reason": reason}
+
 
 def per_repeat_table(artifact: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Raw per-seed numbers read back from the candidate artifact (display only)."""
@@ -679,6 +715,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             artifact_path = None
             if result.receipt is not None and result.receipt.artifacts:
                 artifact_path = Path(result.receipt.artifacts[0])
+            rep_invariants = _replicate_invariants(result)
+            report["replicate_invariants"] = rep_invariants
             artifact: dict[str, Any] = {}
             if artifact_path is not None and artifact_path.exists():
                 artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -705,6 +743,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                                     proposer_label=proposer_label,
                                     llm_report=report.get("llm_report") or {},
                                     started=started, finished=time.time())
+            # run-level positioning: this script is a kernel-level canary, not an
+            # instance-executed production acceptance
+            from partner.commitment.store import run_metadata as _run_metadata
+            meta = _run_metadata(
+                run_kind="infrastructure_canary", instance_executed=False,
+                project_advancement=False,
+                replicates_independent=bool(rep_invariants.get("replicates_independent", False)),
+                executed_by="hermes:run_commitment_molecular_canary.py", owner_instance="02",
+                notes="kernel-invoked canary; not executed by an instance runtime")
+            store.write_run_metadata(meta)
+            report["run_metadata"] = meta
+
             md_path = out_dir / "molecular_canary_report.md"
             md_path.write_text(markdown, encoding="utf-8")
             report["report_md"] = str(md_path)
