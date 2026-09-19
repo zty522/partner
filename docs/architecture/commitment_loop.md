@@ -179,3 +179,15 @@ harness 版本、处理变量、产物哈希**与测量前后不变证明**，�
 `SCHEMA_VERSION = "commitment/2"`，`LEGACY_SCHEMA_VERSIONS = ("commitment/1",)`。
 旧记录**只读可读**（`from_dict` 填充安全默认、`schema_legacy=True` 跳过新增跨字段门），
 **新代码不写 v1、不回写历史、不伪造旧基线缺失的证据字段**。
+
+### 6. legacy（commitment/1）记录的发布资格归零
+
+v1 记录没有可信 `environment`。**不得**由任何声明反推环境：统一进入 `legacy_unknown`
+（属 `NON_PUBLISHABLE_ENVIRONMENTS`）。`schema_legacy=True` 是不可绕过的发布/晋升阻塞
+（`legacy_schema_untrusted`）；旧 `publish_eligible` 仅以 `legacy_publish_claim` 保留供审计；
+v1 的 `ComparisonProof` 标记 `legacy_untrusted`、`matched` 恒为 False；`build_experience`
+拒绝 legacy 结算，`ExperienceRecord.assert_promotable()` 是所有晋升路径的唯一闸门。
+读取历史不改字节、不改哈希链。
+
+> 初版曾把"按旧 `publish_eligible` 反推 production"当作安全默认值——那是错的，它让旧隔离实验
+> 的自我声明变成了当前生产权威。见 ADR 0105 的同日修订。

@@ -405,7 +405,10 @@ def test_legacy_v1_records_stay_readable_and_are_never_rewritten():
                 "budget_identical": True, "code_version_identical": True,
                 "baseline_value": 5.0, "candidate_value": 13.0, "delta": 8.0, "matched": True}
     proof = M.ComparisonProof.from_dict(v1_proof)
-    assert proof.matched is True
+    # corrected expectation: a pre-correction proof has no baseline evidence
+    # reference and no treatment contract, so it is never a matched comparison
+    assert proof.matched is False
+    assert proof.legacy_untrusted is True
     assert proof.budget_comparable is True
     assert proof.harness_version_identical is True
     # a v2 write of that legacy record is v2, and the legacy payload is untouched
@@ -428,8 +431,12 @@ def test_legacy_v1_records_stay_readable_and_are_never_rewritten():
         "created_at": "2026-09-18"}
     decision = M.SettlementDecision.from_dict(legacy_decision)
     assert decision.schema_legacy is True
-    assert decision.publish_eligible is True, "history is not retro-actively downgraded"
-    assert decision.environment in M.EXECUTION_ENVIRONMENTS
+    # corrected expectation: a legacy record keeps its claim for audit but has no
+    # current publication authority, and is never reinterpreted as production
+    assert decision.publish_eligible is False
+    assert decision.legacy_publish_claim is True
+    assert decision.environment == "legacy_unknown"
+    assert "legacy_schema_untrusted" in decision.publish_blockers
 
 
 def test_a_v2_settlement_written_by_this_code_carries_the_new_fields(workspace):

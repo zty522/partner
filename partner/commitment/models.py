@@ -48,8 +48,13 @@ EXECUTION_STATUSES = ("completed", "failed", "blocked", "cancelled", "timeout")
 #: this field, and the field is frozen into the bet, so neither an LLM nor a
 #: candidate can upgrade it after seeing the result.
 EXECUTION_ENVIRONMENTS = ("synthetic_fixture", "isolated_sample", "shadow",
-                          "production_canary", "production")
-NON_PUBLISHABLE_ENVIRONMENTS = ("synthetic_fixture", "isolated_sample", "shadow")
+                          "production_canary", "production", "legacy_unknown")
+#: ``legacy_unknown`` exists because a pre-correction record carries no environment
+#: field at all.  Absence of proof is not proof of production, so a legacy record
+#: can never be treated as publishable -- and must never be *inferred* into
+#: ``production`` from its own (untrustworthy) publish claim.
+NON_PUBLISHABLE_ENVIRONMENTS = ("synthetic_fixture", "isolated_sample", "shadow",
+                                "legacy_unknown")
 
 #: What meeting an expectation would actually mean.
 EXPECTATION_KINDS = ("absolute_threshold", "delta_over_baseline", "non_inferiority", "guardrail")
@@ -73,6 +78,10 @@ BLOCKER_SHADOW = "shadow_only"
 BLOCKER_SINGLE_EPISODE = "single_episode_only"
 BLOCKER_BASELINE_INCOMPATIBLE = "baseline_evidence_incompatible"
 BLOCKER_TREATMENT_UNDECLARED = "treatment_contract_missing"
+#: A pre-correction (commitment/1) record has no trusted environment, no baseline
+#: evidence and no control/treatment proof.  It stays readable for audit and is
+#: permanently ineligible for publication or promotion.
+BLOCKER_LEGACY_SCHEMA_UNTRUSTED = "legacy_schema_untrusted"
 
 
 class ContractError(ValueError):
@@ -718,7 +727,10 @@ class BetRecord:
             code_version=str(_require(payload, "code_version", "BetRecord")),
             data_version=str(_require(payload, "data_version", "BetRecord")),
             model_config_ref=str(_require(payload, "model_config_ref", "BetRecord")),
-            environment=str(payload.get("environment") or "synthetic_fixture"),
+            # A v1 payload has no trusted environment.  It is never inferred from
+            # context or from a publish claim; it becomes ``legacy_unknown``.
+            environment=str(payload.get("environment") or (
+                "legacy_unknown" if is_legacy_payload(payload) else "synthetic_fixture")),
             treatment=(None if payload.get("treatment") is None
                        else TreatmentContract.from_dict(dict(payload["treatment"]))),
             status=str(payload.get("status") or "DRAFT"),
@@ -1184,6 +1196,10 @@ class ComparisonProof:
     baseline_evidence_ref: str = ""
     baseline_provenance: str = ""
     detail: str = ""
+    #: Set on records read from a pre-correction schema: they carry no baseline
+    #: evidence reference and no treatment contract, so they cannot be trusted as
+    #: a matched comparison.  Read-only history, never a current proof.
+    legacy_untrusted: bool = False
 
     @property
     def controls_identical(self) -> bool:
@@ -1204,6 +1220,8 @@ class ComparisonProof:
 
     @property
     def matched(self) -> bool:
+        if self.legacy_untrusted:
+            return False
         return (self.controls_identical and self.treatment_as_frozen
                 and self.baseline_value is not None and self.candidate_value is not None)
 
@@ -1243,15 +1261,18 @@ class ComparisonProof:
             return None if raw is None else float(raw)
 
         if legacy:
-            # v1 named two of the controls differently.  Map them read-only; the
-            # v1 record keeps its own on-disk shape and is never rewritten.
+            # v1 named two of the controls differently.  Map them read-only; the v1
+            # record keeps its own on-disk shape and is never rewritten.  The result
+            # is marked untrusted: a legacy proof has no baseline evidence reference
+            # and no treatment contract, so ``matched`` must never come out True.
             budget_comparable = bool(payload.get("budget_comparable",
                                                  payload.get("budget_identical")))
             harness_identical = bool(payload.get("harness_version_identical",
                                                  payload.get("code_version_identical")))
             matched_v1 = bool(payload.get("matched"))
             treatment_ok = bool(payload.get("treatment_as_frozen", matched_v1))
-            return cls(inputs_identical=bool(payload.get("inputs_identical")),
+            return cls(legacy_untrusted=True,
+                       inputs_identical=bool(payload.get("inputs_identical")),
                        evaluator_identical=bool(payload.get("evaluator_identical")),
                        protocol_identical=bool(payload.get("protocol_identical")),
                        budget_comparable=budget_comparable,
@@ -1319,7 +1340,11 @@ class SettlementDecision:
     llm_explanation: str = ""
     llm_explanation_authoritative: bool = False
     created_at: str = ""
+    #: True when this record was read from a pre-correction schema.
     schema_legacy: bool = False
+    #: The publish claim the *old* record carried.  Kept for audit only: it is
+    #: history, never current publication eligibility.
+    legacy_publish_claim: bool = False
 
     def __post_init__(self) -> None:
         _check_non_empty(self.settlement_id, "SettlementDecision", "settlement_id")
@@ -1370,6 +1395,13 @@ class SettlementDecision:
         if self.settlement_class == "falsified" and self.improvement_observed:
             raise ContractError(
                 "SettlementDecision: 'falsified' cannot also report improvement_observed")
+        if self.schema_legacy and self.publish_eligible:
+            raise ContractError(
+                "SettlementDecision: a legacy (pre-correction) record can never be publishable; "
+                "it carries no trusted environment and no baseline evidence")
+        if self.legacy_publish_claim and not self.schema_legacy:
+            raise ContractError(
+                "SettlementDecision: legacy_publish_claim is only meaningful on a legacy record")
         if self.settlement_class in ("invalid", "blocked") and self.publish_eligible:
             raise ContractError(
                 f"SettlementDecision: settlement_class={self.settlement_class} cannot be publishable")
@@ -1412,8 +1444,20 @@ class SettlementDecision:
                 supported_claim = "none"
         environment = payload.get("environment")
         if environment is None:
-            # v1 had no environment field.  Never invent a publishable one.
-            environment = "production" if bool(payload.get("publish_eligible")) else "synthetic_fixture"
+            # A v1 record has no environment field.  It is NEVER inferred to be
+            # production from its own publish claim -- doing so was the security
+            # bug this change removes.  Legacy records land in an explicit,
+            # non-publishable, clearly-labelled environment instead.
+            environment = "legacy_unknown" if legacy else "synthetic_fixture"
+        legacy_claim = bool(payload.get("publish_eligible"))
+        if legacy:
+            # The old claim is preserved for audit and stripped of any current
+            # authority, and the blocker names the reason.
+            blockers = tuple(dict.fromkeys(
+                (*tuple(payload.get("publish_blockers") or ()),
+                 BLOCKER_LEGACY_SCHEMA_UNTRUSTED)))
+        else:
+            blockers = tuple(payload.get("publish_blockers") or ())
         return cls(
             settlement_id=str(_require(payload, "settlement_id", "SettlementDecision")),
             bet_id=str(_require(payload, "bet_id", "SettlementDecision")),
@@ -1428,14 +1472,15 @@ class SettlementDecision:
             supported_claim=str(supported_claim),
             environment=str(environment),
             improvement_observed=bool(payload.get("improvement_observed")),
-            publish_eligible=bool(payload.get("publish_eligible")),
-            publish_blockers=tuple(payload.get("publish_blockers") or ()),
+            publish_eligible=(False if legacy else legacy_claim),
+            publish_blockers=blockers,
             next_state=str(payload.get("next_state") or "CLOSED"),
             machine_rules=tuple(payload.get("machine_rules") or ()),
             llm_explanation=str(payload.get("llm_explanation") or ""),
             llm_explanation_authoritative=bool(payload.get("llm_explanation_authoritative", False)),
             created_at=str(payload.get("created_at") or ""),
-            schema_legacy=legacy)
+            schema_legacy=legacy,
+            legacy_publish_claim=(legacy_claim if legacy else False))
 
 
 # ---------------------------------------------------------------------------
@@ -1485,6 +1530,25 @@ class ExperienceRecord:
                 "ExperienceRecord: authoritative must stay False; authority requires cross-episode "
                 "verification outside this kernel")
 
+    def assert_promotable(self) -> None:
+        """The single gate every promotion consumer must call.
+
+        Promotion (habit, growth, production policy, code promotion) is a
+        different act from settling a bet.  This raises unless the experience is
+        a settled, trusted, supported episode -- so a legacy or merely
+        ``inconclusive`` record cannot be promoted by accident.
+        """
+        if self.authoritative:
+            raise ContractError("ExperienceRecord: not promotable while non-authoritative")
+        if self.settlement_class != "supported":
+            raise ContractError(
+                f"ExperienceRecord: settlement_class={self.settlement_class!r} is not promotable; "
+                "only a supported settlement can start a promotion review")
+        if self.level != "experience":
+            raise ContractError(
+                "ExperienceRecord: promotion requires a separate review; this record is one "
+                "experience, not a habit or a growth claim")
+
     def to_dict(self) -> dict[str, Any]:
         payload = _payload(self)
         payload["state_action_outcome_chain"] = list(self.state_action_outcome_chain)
@@ -1517,7 +1581,8 @@ __all__ = [
     "CLAIM_BY_KIND", "CLAIMS", "BASELINE_PROVENANCE",
     "BLOCKER_NOT_PUBLISHABLE_ENVIRONMENT", "BLOCKER_ISOLATED_SAMPLE", "BLOCKER_SYNTHETIC",
     "BLOCKER_SHADOW", "BLOCKER_SINGLE_EPISODE", "BLOCKER_BASELINE_INCOMPATIBLE",
-    "BLOCKER_TREATMENT_UNDECLARED", "TreatmentContract", "TreatmentSpec", "BaselineEvidence",
+    "BLOCKER_TREATMENT_UNDECLARED", "BLOCKER_LEGACY_SCHEMA_UNTRUSTED",
+    "TreatmentContract", "TreatmentSpec", "BaselineEvidence",
     "DIRECTIONS", "CANDIDATE_SOURCES", "SETTLEMENT_CLASSES",
     "EXECUTION_STATUSES", "SEMANTIC_FIELDS", "ContractError", "Budget", "BudgetUsage",
     "CommitmentPolicy", "ExpectedEffect", "FalsificationCondition", "EvaluationProtocol",

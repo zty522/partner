@@ -459,7 +459,17 @@ def evaluate_falsification_conditions(bet: BetRecord,
 
 def build_experience(*, settlement: SettlementDecision, bet: BetRecord,
                      receipt: ExecutionReceipt) -> ExperienceRecord:
-    """Experiences come only from valid settlements, never from blocked or invalid ones."""
+    """Experiences come only from valid settlements, never from blocked or invalid ones.
+
+    A pre-correction settlement is refused outright: it carries no trusted
+    environment and no baseline evidence, so nothing derived from it may become
+    experience, habit, growth or production policy.
+    """
+    if getattr(settlement, "schema_legacy", False):
+        raise ContractError(
+            "build_experience: refusing to mint an experience from a legacy "
+            f"(pre-correction) settlement {settlement.settlement_id}; legacy publish claims are "
+            "history, not evidence")
     if settlement.settlement_class in ("invalid", "blocked"):
         raise ContractError(
             f"build_experience: settlement_class={settlement.settlement_class} cannot mint an "

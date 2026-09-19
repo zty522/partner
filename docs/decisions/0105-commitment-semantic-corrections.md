@@ -48,7 +48,7 @@ runner 不再从快照读 `baseline_metrics` 合成 matched：baseline 由
 `allows_code_change`）声明，且实际变化的文件集合必须与声明完全一致，多一个文件即 unmatched。
 
 **五、schema 迁移策略。** `commitment/1 → commitment/2`。旧产物**只读兼容**：`from_dict` 接受 v1
-并填充安全默认值（环境缺失时按 `publish_eligible` 反推为 production/synthetic_fixture，
+并填充安全默认值（环境缺失时**不得**由任何声明反推，统一进入 `legacy_unknown`，见下方修订，
 `improvement_over_baseline` 回落到旧的 `improvement_observed`，ComparisonProof 的
 `budget_identical`/`code_version_identical` 映射到新字段），`schema_legacy=True` 的旧记录跳过
 新增的跨字段门。**新代码不写 v1、不回写历史、不伪造旧基线缺失的证据字段**。
@@ -67,3 +67,49 @@ runner 不再从快照读 `baseline_metrics` 合成 matched：baseline 由
 - 分子隔离切片在观察到真实改善（QED 0.494351 → 0.527759）的同时
   `publish_eligible=False`，阻塞理由 `isolated_sample_only` + `single_episode_only`；
 - 生产接入仍需 ADR 0104 的三项前置条件，本 ADR 不构成授权。
+
+---
+
+## 修订（2026-09-19，同日第二轮）：legacy 记录的发布资格必须归零
+
+### 被修正的错误
+
+ADR 0105 初版在"schema 迁移策略"里写了一句**错误且危险**的话：v1 记录缺 environment 时
+"按 `publish_eligible` 反推为 production/synthetic_fixture"。实现出来的代码是：
+
+```python
+environment = "production" if bool(payload.get("publish_eligible")) else "synthetic_fixture"
+```
+
+这等于把旧记录**自己声明**的发布资格升级成**当前的环境权威**。而恰恰是旧隔离实验最可能带着
+`publish_eligible=true`（这正是修复一要解决的问题），于是修复一修好之后，历史记录又被读回成
+`production`——安全修复在迁移路径上被绕过。**"缺少证据"从不等于"生产可用"，更不等于
+"按它自己说的算"。**
+
+### 修订后的语义（数据合同层，不是展示层）
+
+1. v1 缺少可信 `environment` 时统一进入 `legacy_unknown`（新增枚举值，正式进入
+   `EXECUTION_ENVIRONMENTS` 与 `NON_PUBLISHABLE_ENVIRONMENTS`），**永不**推断为
+   `production` / `production_canary`；
+2. `schema_legacy=True` 是不可绕过的发布/晋升阻塞条件，blocker 代号
+   `legacy_schema_untrusted`；
+3. 旧记录原始的 `publish_eligible` 只作为历史声明保留在 `legacy_publish_claim`，
+   不构成当前发布资格；构造层面另有硬门：`schema_legacy` 且 `publish_eligible=True`
+   直接 `ContractError`；
+4. v1 的 `ComparisonProof` 标记 `legacy_untrusted=True`，`matched` 恒为 False
+   （它没有 baseline 证据引用，也没有 treatment contract），因此旧记录不可能"matched"；
+5. `build_experience` 拒绝 legacy 结算；`ExperienceRecord.assert_promotable()` 成为
+   所有晋升消费者（habit / growth / 生产策略 / 代码晋升）必须调用的唯一闸门；
+6. 旧记录只读可解析：不改写旧 JSON、不伪造缺失证据、不破坏 append-only 哈希链，
+   原始历史含义仍可审计（`legacy_publish_claim`）。测试
+   `test_reading_legacy_history_changes_no_bytes_and_no_chain` 断言读取前后文件
+   sha256 与链头不变。
+
+### 修正了被保留下来的错误预期
+
+`test_legacy_v1_records_stay_readable_and_are_never_rewritten` 原先断言
+"旧 `publish_eligible=true` 不降级"。该预期本身错误，已改为断言
+`publish_eligible is False` + `legacy_publish_claim is True` + `environment == "legacy_unknown"`
++ blocker 存在。新增 `tests/commitment/test_legacy_publish_safety.py`（10 项）覆盖
+v1 带/不带发布声明、不得映射为 production、缺失 baseline 证据不得 matched、
+legacy 不得被经验/晋升消费、v2 生产路径不受影响、新对象不再序列化 v1、历史字节与哈希不变。
