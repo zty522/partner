@@ -336,6 +336,9 @@ def scan_settled_bets(workspace: str | os.PathLike, *,
                 "class_components": {k: rebuilt[k] for k in
                                      ("project_id", "action_id", "metric_signature")},
                 "class_components_verified": bool(rebuilt["verified"]),
+                # An exploration bet marks itself; the window rule counts these.
+                "exploration": bool(snapshot.get("exploration")),
+                "variant_id": str(snapshot.get("variant_id") or ""),
             })
     rows.sort(key=lambda r: (r["created_at"], r["bet_id"]))
     return rows
@@ -396,6 +399,7 @@ def effective_counts(prior: Mapping[str, Any]) -> dict[str, Any]:
 def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
                     components: Mapping[str, str] | None = None,
                     related: Mapping[str, Mapping[str, Any]] | None = None,
+                    suppress_abstention: str = "",
                     ) -> dict[str, Any]:
     """The prior: the same-class rows, every related class' rows, and machine-counted
     statistics in both views (direct and weight-adjusted).
@@ -504,11 +508,12 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
     # The abstention decision is part of the prior, not a separate later step: it is frozen
     # into ``prior.json`` (and from there into the bet's context snapshot) with the counts
     # and the reason it was taken or refused.
-    summary["abstention"] = decide_abstention(summary)
+    summary["abstention"] = decide_abstention(summary, suppress_reason=suppress_abstention)
     return summary
 
 
-def decide_abstention(prior: Mapping[str, Any]) -> dict[str, Any]:
+def decide_abstention(prior: Mapping[str, Any], *,
+                      suppress_reason: str = "") -> dict[str, Any]:
     """Decide whether this class should not be wagered on again -- pure, auditable.
 
     All four conditions must hold (thresholds are module constants, never inline):
@@ -525,6 +530,20 @@ def decide_abstention(prior: Mapping[str, Any]) -> dict[str, Any]:
     """
     counts = effective_counts(prior)
     rows = [dict(row) for row in (prior.get("rows") or [])]
+    if str(suppress_reason or ""):
+        # One caller may refuse to let this bet abstain: an *exploration* bet exists to
+        # produce new evidence for a class that has none, so declining to wager on it would
+        # defeat the only way out of the dead end.  The refusal is recorded, not hidden --
+        # the class statistics that would have triggered the abstention are still reported.
+        return {"abstain": False, "rule": "", "blocked_by": [str(suppress_reason)],
+                "reason": f"abstention suppressed for this bet: {suppress_reason}",
+                "suppressed_for": str(suppress_reason),
+                "evidence": {"suppressed_for": str(suppress_reason),
+                             "evidence_total": counts.get("evidence_total"),
+                             "falsified": counts.get("falsified"),
+                             "supported": counts.get("supported"),
+                             "refuted_ratio": counts.get("refuted_ratio"),
+                             "would_have_abstained": True}}
     abstained = float(counts.get("abstained") or 0.0)
     total = float(counts.get("total") or 0.0)
     evidence_total = float(counts.get("evidence_total") if counts.get("evidence_total") is not None

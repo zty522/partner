@@ -361,9 +361,51 @@ class RealTaskBaselineProvider:
             harness_version=self.harness_version, store=store)
 
 
+def declared_variants(task: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The action variants this task declares, in declared order.
+
+    A variant is a *real* patch file of the same task: the class key is unchanged (same
+    project, same task id, same metric shape) while the concrete action differs.  Nothing
+    here invents anything -- an undeclared task has exactly one variant, its patch file.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in (task.get("candidate_space") or ()):
+        if not isinstance(entry, Mapping):
+            continue
+        patch_file = str(entry.get("patch_file") or "").strip()
+        variant_id = str(entry.get("variant_id") or "").strip()
+        if not patch_file or not variant_id:
+            continue
+        out.append({"variant_id": variant_id, "patch_file": patch_file,
+                    "selected_action": f"patch_{Path(patch_file).stem}",
+                    "note": str(entry.get("note") or "")})
+    if not out:
+        default = str(task.get("patch_file") or "patch.diff")
+        out.append({"variant_id": Path(default).stem, "patch_file": default,
+                    "selected_action": f"patch_{Path(default).stem}",
+                    "note": "the task's single declared patch"})
+    return out
+
+
+def real_task_budget(*, declared: Mapping[str, Any] | None = None,
+                     exploration: bool = False) -> dict[str, Any]:
+    """The bet's budget.  An exploration gets its own, smaller one (see
+    :mod:`partner.commitment.exploration`); the declaring bet's budget is never touched."""
+    base = {"wall_clock_seconds": 600, "model_calls": 1, "actions": 4, "rounds": 1}
+    base.update({k: v for k, v in dict(declared or {}).items() if k in base})
+    if not exploration:
+        return base
+    from partner.commitment.exploration import exploration_budget
+    derived = exploration_budget(base)
+    return {"wall_clock_seconds": derived["wall_clock_seconds"],
+            "model_calls": derived["model_calls"], "actions": derived["actions"],
+            "rounds": derived["rounds"]}
+
+
 def real_task_spec(*, job_id: str, trace_token: str, task_id: str, project_root: str,
                    patch_file: str, task: Mapping[str, Any], instance_id: str = "02",
-                   project_id: str = "unassigned") -> dict[str, Any]:
+                   project_id: str = "unassigned", exploration: bool = False,
+                   variant: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "partner_id": f"partner-{instance_id or 'unknown'}",
         "project_id": project_id or "unassigned",
@@ -406,7 +448,12 @@ def real_task_spec(*, job_id: str, trace_token: str, task_id: str, project_root:
              "description": "the test runner produced no usable counts",
              "params": {"metric": "tests_passed"}},
         ],
-        "budget": {"wall_clock_seconds": 600, "model_calls": 1, "actions": 4, "rounds": 1},
+        "budget": real_task_budget(exploration=exploration),
+        # Declared, never inferred: this bet is an exploration (one untried variant of a
+        # class that abstained), and this is the variant it carries.
+        "exploration": bool(exploration),
+        "variant": dict(variant or {}),
+        "declared_variants": declared_variants(task),
         "commitment_policy": {"earliest_turn_round": 2, "max_turns": 1,
                               "require_new_evidence_to_turn": True,
                               "early_stop_conditions": ["settled", "budget_exhausted", "blocked"]},
@@ -434,7 +481,11 @@ def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
                             patch_file: str, instance_id: str = "",
                             prior: Mapping[str, Any] | None = None,
                             prior_audit: Mapping[str, Any] | None = None,
-                            abstention: Mapping[str, Any] | None = None) -> Path:
+                            abstention: Mapping[str, Any] | None = None,
+                            exploration: bool = False,
+                            variant: Mapping[str, Any] | None = None,
+                            variants: Sequence[Mapping[str, Any]] | None = None,
+                            exploration_audit: Mapping[str, Any] | None = None) -> Path:
     path = store.path("context", "snapshot.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     patch_path = Path(project_root).joinpath(*TASKS_DIRNAME, str(task["task_id"]), patch_file)
@@ -456,15 +507,26 @@ def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
         "prior_adjusted_parameter": dict(prior_audit or {}),
         "abstention": dict(abstention or {}),
         "task_class_key": (prior or {}).get("class_key") or "",
+        # An exploration bet says so on its own record: what it is, which untried variant it
+        # carries, and the smaller budget that bounds it.
+        "exploration": bool(exploration),
+        "exploration_audit": dict(exploration_audit or {}),
+        "variant_id": str((variant or {}).get("variant_id") or ""),
+        "declared_variants": [dict(v) for v in (variants or declared_variants(task))],
         "candidate_space": [{
-            "candidate_id": f"patch_{Path(patch_file).stem}",
-            "description": f"apply the declared patch {patch_file}",
-            "params": {"task_id": str(task["task_id"]), "patch_file": patch_file,
+            "candidate_id": f"patch_{Path(variant['patch_file']).stem}"
+            if variant else f"patch_{Path(patch_file).stem}",
+            "description": (f"apply the declared patch "
+                            f"{(variant or {}).get('patch_file') or patch_file}"),
+            "params": {"task_id": str(task["task_id"]),
+                       "patch_file": ((variant or {}).get("patch_file") or patch_file),
+                       "variant_id": str((variant or {}).get("variant_id") or ""),
                        "project_root": str(project_root), "arm": "candidate",
                        "replicates": int((spec.get("evaluation_protocol") or {})
                                          .get("replicates") or 1)},
             "prior": {"expected_gain": 0.0, "risk": 0.0},
-            "rationale": "the single declared treatment difference of this bet",
+            "rationale": ("the single declared treatment difference of this bet"
+                          + (" (an exploration of an untried variant)" if exploration else "")),
         }],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

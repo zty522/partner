@@ -1,0 +1,22 @@
+<<<FIND
+__all__ = ["GepaCandidate", "GepaOptimizer", "GepaError", "GepaBudgetExceeded"]
+>>>REPL
+
+
+def propose(*, parent=None, change_summary: str, diff_fingerprint: str,
+            notes: str = "") -> GepaCandidate:
+    """Register a candidate with provenance.  An empty change is refused."""
+    if not str(change_summary or "").strip():
+        raise ValueError("change_summary must be non-empty")
+    if not str(diff_fingerprint or "").strip():
+        raise ValueError("diff_fingerprint must be non-empty")
+    if isinstance(parent, GepaCandidate):
+        parent_id = parent.candidate_id
+    else:
+        parent_id = str(parent) if parent else None
+    return GepaCandidate(candidate_id="gepa_" + uuid.uuid4().hex[:12], parent_id=parent_id,
+                         change_summary=str(change_summary),
+                         diff_fingerprint=str(diff_fingerprint), notes=str(notes or ""))
+
+
+__all__ = ["GepaCandidate", "GepaOptimizer", "GepaError", "GepaBudgetExceeded", "propose"]

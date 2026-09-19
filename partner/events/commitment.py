@@ -195,6 +195,81 @@ def _prior_disabled(message: str, params: Mapping[str, Any]) -> bool:
     return bool(_PRIOR_OFF_RE.search(str(message or "")))
 
 
+#: Exploration switches, declared in the message.  ``explore=off`` is the counterfactual
+#: switch (an abstention must not trigger an exploration); ``explore=on`` marks a bet as an
+#: *exploration* of its own class -- which is exactly why an exploration bet must not itself
+#: abstain (declining to wager is what it exists to escape).  Declared, never inferred.
+_EXPLORE_OFF_RE = re.compile(r"explore\s*[:=]\s*(off|disabled|none|false)", re.IGNORECASE)
+_EXPLORE_ON_RE = re.compile(r"explore\s*[:=]\s*(on|true|yes)", re.IGNORECASE)
+_EXPLORE_PARENT_RE = re.compile(r"explore_parent\s*[:=]\s*([A-Za-z0-9_\-]+)")
+_EXPLORE_REASON_RE = re.compile(r"explore_reason\s*[:=]\s*([A-Za-z0-9_\-]+)")
+_EXPLORE_CLASS_RE = re.compile(r"explore_class\s*[:=]\s*([A-Za-z0-9_\-]+)")
+_EXPLORE_TRIED_RE = re.compile(r"explore_tried\s*[:=]\s*([A-Za-z0-9_,\-]*)")
+
+
+def _explore_disabled(message: str, params: Mapping[str, Any]) -> bool:
+    if bool(params.get("explore_disabled")):
+        return True
+    return bool(_EXPLORE_OFF_RE.search(str(message or "")))
+
+
+def _exploration_declared(message: str, params: Mapping[str, Any]) -> bool:
+    if bool(params.get("exploration")):
+        return True
+    return bool(_EXPLORE_ON_RE.search(str(message or "")))
+
+
+def _select_variant(variants: Sequence[Mapping[str, Any]], declared_patch: str,
+                    params: Mapping[str, Any]) -> dict[str, Any]:
+    """The declared action variant this bet carries.
+
+    The message names it the same way it names any patch (``patch=<file>``); an
+    undeclared/unmatched name falls back to the task's first declared variant.  A variant
+    is never invented: everything here comes from the task's declared candidate space.
+    """
+    wanted_id = str(params.get("variant_id") or "").strip()
+    wanted_patch = str(params.get("patch_file") or declared_patch or "").strip()
+    for variant in variants or ():
+        if wanted_id and str(variant.get("variant_id")) == wanted_id:
+            return dict(variant)
+    for variant in variants or ():
+        if wanted_patch and str(variant.get("patch_file")) == wanted_patch:
+            return dict(variant)
+    return dict(variants[0]) if variants else {}
+
+
+def _exploration_audit(message: str, params: Mapping[str, Any], *,
+                       variant: Mapping[str, Any], budget: Mapping[str, Any]) -> dict[str, Any]:
+    """The provenance an exploration bet freezes about itself.
+
+    Rebuilt from the frozen message, so the record node and the execute node derive the
+    identical audit (the snapshot digest is frozen into the bet).
+    """
+    from partner.commitment.exploration import (EXPLORE_ABSTENTION_SUPPRESSED,
+                                                EXPLORE_MAX_PER_WINDOW,
+                                                EXPLORE_WINDOW_SECONDS, EXPLORATION_VERSION)
+
+    def found(pattern, key):
+        value = str(params.get(key) or "").strip()
+        if value:
+            return value
+        match = pattern.search(str(message or ""))
+        return str(match.group(1)) if match else ""
+
+    tried = found(_EXPLORE_TRIED_RE, "explore_tried")
+    budget_detail = dict(budget or {})
+    return {"schema_version": EXPLORATION_VERSION,
+            "explore_class": found(_EXPLORE_CLASS_RE, "explore_class"),
+            "parent_bet_id": found(_EXPLORE_PARENT_RE, "explore_parent"),
+            "trigger_reason": found(_EXPLORE_REASON_RE, "explore_reason"),
+            "tried_actions": [a for a in tried.split(",") if a],
+            "variant": dict(variant or {}),
+            "budget": budget_detail,
+            "window": {"max_per_window": int(EXPLORE_MAX_PER_WINDOW),
+                       "window_seconds": int(EXPLORE_WINDOW_SECONDS)},
+            "abstention_suppressed_for_exploration": EXPLORE_ABSTENTION_SUPPRESSED}
+
+
 def _class_key_for_spec(spec: Mapping[str, Any]) -> str:
     """The task class of a declared spec.  Pure: three declared strings, no LLM."""
     from partner.application.experience_prior import metric_signature, task_class_key
@@ -321,17 +396,25 @@ def _resolve_declared(ctx, params):
                           "semantic_output": {"trace_token": token, "job_id": job_id,
                                               "task_id": declared["task_id"]},
                           "files": [], "evidence_refs": [], "token_usage": {}}
+        from partner.application.real_task_adapter import declared_variants
+        variants = declared_variants(task)
+        variant = _select_variant(variants, declared["patch_file"], params)
+        exploration = _exploration_declared(message, params)
         spec = real_task_spec(job_id=job_id, trace_token=token, task_id=declared["task_id"],
-                              project_root=str(task_root), patch_file=declared["patch_file"],
-                              task=task, instance_id=instance_id, project_id=project_id)
+                              project_root=str(task_root),
+                              patch_file=str(variant.get("patch_file") or "patch.diff"),
+                              task=task, instance_id=instance_id, project_id=project_id,
+                              exploration=exploration, variant=variant)
         action = "real_task"
         action_id = f"real_task:{declared['task_id']}"
-        task_id, patch_file = declared["task_id"], declared["patch_file"]
+        task_id = declared["task_id"]
+        patch_file = str(variant.get("patch_file") or "patch.diff")
     else:
         spec = bounded_spec(job_id=job_id, trace_token=token, message=message,
                             instance_id=instance_id, project_id=project_id)
         action, action_id = "bounded_metric", "bounded_metric"
         task, task_root, task_id, patch_file = None, None, "", ""
+        variants, variant, exploration = [], {}, _exploration_declared(message, params)
     spec = {**spec, "action_id": action_id}
     class_key = _class_key_for_spec(spec)
     spec = {**spec, "data_version": f"class:{class_key}", "class_key": class_key}
@@ -344,7 +427,9 @@ def _resolve_declared(ctx, params):
                                            metric_signature=metric_signature(spec["expected_effects"])),
             "task": task, "task_root": task_root, "task_id": task_id,
             "patch_file": patch_file, "instance_id": instance_id,
-            "project_id": project_id, "prior_disabled": _prior_disabled(message, params)}, None
+            "project_id": project_id, "prior_disabled": _prior_disabled(message, params),
+            "variants": variants, "variant": variant, "exploration": exploration,
+            "explore_disabled": _explore_disabled(message, params)}, None
 
 
 def commitment_prior_recall(ctx, params):
@@ -385,8 +470,14 @@ def commitment_prior_recall(ctx, params):
     # ``summarize_prior`` decides that from the direct evidence total, so the rule lives in
     # one place.  Nothing here can override the direct rows: they keep weight 1.0.
     related = _related_history(rows, class_key, bundle["components"])
+    # An exploration bet may not abstain: it exists because the class has only failure
+    # evidence, and declining to wager is the dead end it was created to escape.  The
+    # suppression is declared and recorded (``prior["abstention"]["suppressed_for"]``).
+    from partner.commitment.exploration import EXPLORE_ABSTENTION_SUPPRESSED
     prior = summarize_prior(same_class, class_key=class_key, components=bundle["components"],
-                            related=related)
+                            related=related,
+                            suppress_abstention=(EXPLORE_ABSTENTION_SUPPRESSED
+                                                 if bundle.get("exploration") else ""))
     path = write_prior(store.root, prior)
     noted = False
     try:
@@ -649,12 +740,23 @@ def _prepare_bounded(ctx, params):
             task=bundle["task"], project_root=str(bundle["task_root"]),
             patch_file=bundle["patch_file"], instance_id=instance_id,
             prior=spec.get("prior"), prior_audit=spec.get("prior_adjusted_parameter"),
-            abstention=spec.get("abstention"))
+            abstention=spec.get("abstention"),
+            exploration=bool(bundle.get("exploration")), variant=bundle.get("variant"),
+            variants=bundle.get("variants"),
+            exploration_audit=(_exploration_audit(message, params, variant=bundle.get("variant") or {},
+                                                  budget=spec.get("budget") or {})
+                               if bundle.get("exploration") else {}))
         runner = build_real_task_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
         return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
                 "runner": runner, "message": message, "action": "real_task",
                 "task_id": bundle["task_id"], "patch_file": bundle["patch_file"],
                 "class_key": bundle["class_key"],
+                # the declared action variants and the exploration switches travel with the
+                # bet: the execute node needs them to decide what (if anything) to explore
+                "variants": list(bundle.get("variants") or []),
+                "variant": dict(bundle.get("variant") or {}),
+                "exploration": bool(bundle.get("exploration")),
+                "explore_disabled": bool(bundle.get("explore_disabled")),
                 "prior_adjusted_parameter": spec.get("prior_adjusted_parameter")}, None
     snapshot_path = write_bounded_snapshot(
         store=bundle["store"], spec=spec, job_id=job_id, trace_token=token, message=message,
@@ -664,7 +766,135 @@ def _prepare_bounded(ctx, params):
     return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
             "runner": runner, "message": message, "action": "bounded_metric",
             "class_key": bundle["class_key"],
+            "variants": list(bundle.get("variants") or []),
+            "variant": dict(bundle.get("variant") or {}),
+            "exploration": bool(bundle.get("exploration")),
+            "explore_disabled": bool(bundle.get("explore_disabled")),
             "prior_adjusted_parameter": spec.get("prior_adjusted_parameter")}, None
+
+
+def _timeline_note(ctx, kind: str, detail: Mapping[str, Any], *,
+                   actor: str = "commitment.bet_execute") -> bool:
+    """Append one entry to the job's event log.  The bet is the deliverable; a failed note
+    must never take the run down with it."""
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        _init_jobs(Path(ctx.workspace)).note(str(getattr(ctx, "job_id", "") or ""),
+                                             actor=actor, kind=str(kind), detail=dict(detail))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pending_explorations(workspace: Path, class_key: str) -> int:
+    """Explorations of this class that are submitted but not settled yet (read-only).
+
+    Identified by ``sender_id``: the delivery layer only supports a fixed set of channels,
+    so the exploration rides one of them and carries its identity in the sender.
+    """
+    from partner.commitment.exploration import EXPLORE_SENDER_PREFIX
+    from partner.index.job_repository import init as _init_jobs
+    db_path = Path(_init_jobs(workspace).db_path)
+    if not db_path.exists():
+        return 0
+    from partner.index.sqlite_base import get_connection
+    rows = get_connection(db_path).execute(
+        "SELECT COUNT(*) FROM jobs WHERE sender_id = ? "
+        "AND status NOT IN ('completed', 'failed', 'cancelled')",
+        (f"{EXPLORE_SENDER_PREFIX}{class_key}",)).fetchone()
+    return int(rows[0] if rows else 0)
+
+
+def _exploration_request(*, class_key: str, task_id: str, variant: Mapping[str, Any],
+                         token: str, parent_bet_id: str, reason: str,
+                         tried: Sequence[str]) -> str:
+    """The exploration job's request.
+
+    It declares the same real task (so the class key is unchanged), the untried variant as
+    the patch to carry, and its own provenance: the abstention it answers, the actions the
+    class already tried, and its own trace token.  ``explore=on`` keeps the exploration bet
+    itself from abstaining.
+    """
+    tried_text = ",".join(str(a) for a in tried if str(a))
+    return (
+        f"\u3010\u63a2\u7d22\u3011\u540c\u7c7b {class_key} \u5f03\u6743\u540e\u7684\u6709\u754c\u63a2\u7d22\uff1a"
+        f"\u8bd5\u4e00\u4e2a\u672a\u5c1d\u8bd5\u7684\u52a8\u4f5c\u53d8\u4f53\u3002"
+        f"real_task:{task_id} \u4e14 patch={variant.get('patch_file')}\n\n"
+        "\u8fd9\u662f\u540c\u4e00\u7c7b\u4efb\u52a1\uff08\u540c\u4e00 task_id\uff09\u7684\u4e00\u4e2a"
+        "\u672a\u5c1d\u8bd5\u52a8\u4f5c\u53d8\u4f53\uff0c\u7528\u771f\u5b9e\u6d4b\u8bd5\u8fd0\u884c\u5668"
+        "\u88c1\u5b9a\uff0c\u4e0d\u8981\u62df\u5b9a\u3002\n\n"
+        f"explore=on\nexplore_class={class_key}\nexplore_parent={parent_bet_id}\n"
+        f"explore_reason={reason}\nexplore_tried={tried_text}\n"
+        f"trace token: {token}\n")
+
+
+def _submit_exploration(ctx, text: str, class_key: str) -> str:
+    """Submit the exploration job through the Application Service (never a hand-written
+    Job JSON, never a second message system)."""
+    from partner.application.service import PartnerApplicationService
+    from partner.commitment.exploration import EXPLORE_CHANNEL, EXPLORE_SENDER_PREFIX
+    service = PartnerApplicationService(str(ctx.workspace))
+    handle = service.submit_native(
+        text, instance_id=str(getattr(ctx, "instance_id", "") or "02"),
+        project_id=str(getattr(ctx, "project_id", "") or "unassigned"), kind="project",
+        channel=EXPLORE_CHANNEL, sender_id=f"{EXPLORE_SENDER_PREFIX}{class_key}")
+    return str(getattr(handle, "job_id", "") or "")
+
+
+def _maybe_explore(ctx, *, prepared: Mapping[str, Any], bet_id: str,
+                   class_key: str) -> dict[str, Any]:
+    """After an abstention: try exactly one untried action variant of the same class.
+
+    The conditions are the kernel's (:mod:`partner.commitment.exploration`): the class must
+    have exploration allowance left inside the window, no exploration of it may be pending,
+    a fraction of the declared budget must be enough for one bounded action, and an untried
+    variant must exist.  Refusals are recorded, not swallowed.
+    """
+    from partner.application.experience_prior import scan_settled_bets
+    from partner.commitment import exploration as ex
+    workspace = Path(ctx.workspace)
+    now = time.time()
+    rows = [row for row in scan_settled_bets(workspace, exclude_bet_id=str(bet_id))
+            if str(row.get("bet_id") or "") != str(bet_id)]
+    window = ex.exploration_window(rows, class_key=str(class_key), now=now)
+    pending = _pending_explorations(workspace, str(class_key))
+    tried = ex.tried_actions(rows, class_key=str(class_key))
+    variant = ex.choose_variant(list(prepared.get("variants") or []), tried)
+    declared_budget = dict((prepared.get("spec") or {}).get("budget") or {})
+    decision = ex.should_explore(enabled=not bool(prepared.get("explore_disabled")),
+                                budget=declared_budget,
+                                explored_in_window=window["explored_in_window"],
+                                pending=pending, variant=variant)
+    detail = {"class_key": str(class_key), "bet_id": str(bet_id),
+              "reason": decision["reason"], "tried_actions": tried,
+              "declared_variants": [str(v.get("variant_id") or "")
+                                    for v in (prepared.get("variants") or [])],
+              "explored_in_window": window["explored_in_window"],
+              "window_seconds": window["window_seconds"],
+              "max_per_window": window["max_per_window"], "pending": pending,
+              "declared_budget": declared_budget,
+              "exploration_budget": decision["detail"].get("budget"),
+              "variant_id": str((variant or {}).get("variant_id") or ""),
+              "patch_file": str((variant or {}).get("patch_file") or "")}
+    if not decision["explore"]:
+        noted = _timeline_note(ctx, "commitment.explore_skipped", detail)
+        return {"explored": False, "reason": decision["reason"], "noted": noted,
+                "detail": detail}
+    token = ex.explore_trace_token(str(class_key), epoch=now)
+    text = _exploration_request(class_key=str(class_key),
+                                task_id=str(prepared.get("task_id") or ""),
+                                variant=variant, token=token, parent_bet_id=str(bet_id),
+                                reason=str(decision["reason"]), tried=tried)
+    try:
+        explore_job_id = _submit_exploration(ctx, text, str(class_key))
+    except Exception as exc:  # noqa: BLE001 - an abstention that cannot explore still stands
+        detail = {**detail, "submit_error": f"{type(exc).__name__}: {exc}"}
+        noted = _timeline_note(ctx, "commitment.explore_skipped", detail)
+        return {"explored": False, "reason": "submit_failed", "noted": noted, "detail": detail}
+    detail = {**detail, "explore_job_id": explore_job_id, "trace_token": token}
+    noted = _timeline_note(ctx, "commitment.explore_triggered", detail)
+    return {"explored": True, "reason": decision["reason"], "noted": noted,
+            "explore_job_id": explore_job_id, "trace_token": token, "detail": detail}
 
 
 def commitment_bet_record(ctx, params):
@@ -802,6 +1032,14 @@ def commitment_bet_execute(ctx, params):
                                                settlement.machine_rules
                                                if str(rule).startswith("abstain_evidence[")),
                                               "")}
+        # An abstention is not a dead end: exactly one untried action variant of the same
+        # class is tried, under its own smaller budget, so that later decisions have new
+        # evidence to read.  The submission goes through the Application Service and the
+        # decision is written to the event log either way.
+        exploration = _maybe_explore(ctx, prepared=prepared, bet_id=store.bet_id,
+                                     class_key=prepared["class_key"])
+        payload["exploration"] = exploration
+        payload["semantic_output"]["exploration"] = exploration
     return payload
 
 
