@@ -16,6 +16,7 @@ Two properties are enforced here rather than trusted:
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
@@ -39,6 +40,10 @@ from .selector import GuardedGainSelector, SelectionRefused, SelectionResult
 from .settlement import (
     SettlementRequest, build_experience, budget_hash, make_treatment_contract, protocol_hash,
     settle,
+)
+from .abstention import (
+    ABSTAIN_ACTION, abstention_record, build_abstention_experience, build_abstention_receipt,
+    not_measured, record_hash, settle_abstained,
 )
 from .models import BaselineEvidence, TreatmentSpec, canonical_json
 from .store import CommitmentStore, StoreIntegrityError
@@ -81,6 +86,12 @@ class RunnerConfig:
     #: revision and declares it in the treatment contract, so a differing code
     #: version is legal *only* as the declared treatment.
     candidate_code_version: str = ""
+    #: When set, this bet is an **abstention**: the harness declines to wager.  The bet is
+    #: still frozen (its decision is ``abstain``), but no proposer is asked, no patch is
+    #: proposed, no arm runs and no metric is read.  The string is the reason; the evidence
+    #: is the same-class prior that triggered the decision.
+    abstention_reason: str = ""
+    abstention_evidence: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -183,26 +194,45 @@ class BetRunner:
         snapshot_hash = self.store.save_context_snapshot(snapshot)
         paths["context_snapshot"] = str(self.store.path("context", "snapshot.json"))
 
-        # 2. propose
-        decision = ledger.may_spend(model_calls=1)
-        if not decision.allowed:
-            return self._stop(lifecycle, sm.BUDGET_EXHAUSTED, decision.reason, paths)
-        proposal = self.proposer.propose(question=self.config.question, snapshot=snapshot,
-                                         max_candidates=self.config.max_candidates)
-        ledger.charge(model_calls=int(proposal.model_calls))
-        if not proposal.candidates:
-            reason = proposal.failure or "proposer returned no candidates"
-            return self._stop(lifecycle, sm.BLOCKED,
-                              f"no candidate direction available: {reason}", paths)
-        sm.advance(lifecycle, sm.TransitionRequest(
-            target=sm.PROPOSED, now=self.clock.now(),
-            reason=f"proposed {len(proposal.candidates)} candidate(s) by {proposal.proposed_by}"))
+        # 2. propose -- normally the proposer; an abstention declares its own single
+        #    candidate instead.  Declining to wager is a policy decision: it must not spend
+        #    a model call, and no LLM may be asked whether to abstain.
+        if self.config.abstention_reason:
+            abstain_reason = str(self.config.abstention_reason)
+            candidates = (Candidate(
+                candidate_id=ABSTAIN_ACTION,
+                description=f"abstain: {abstain_reason}",
+                params={"reason": abstain_reason,
+                        "evidence": dict(self.config.abstention_evidence)},
+                rationale=abstain_reason, proposed_by="policy"),)
+            selection = SelectionResult(
+                selected=candidates[0], rejected=(), scores=(),
+                reason=f"abstained: {abstain_reason}",
+                rule="abstention_rule_declined_to_wager")
+            sm.advance(lifecycle, sm.TransitionRequest(
+                target=sm.PROPOSED, now=self.clock.now(),
+                reason="abstention declared: no proposer and no candidate search"))
+        else:
+            decision = ledger.may_spend(model_calls=1)
+            if not decision.allowed:
+                return self._stop(lifecycle, sm.BUDGET_EXHAUSTED, decision.reason, paths)
+            proposal = self.proposer.propose(question=self.config.question, snapshot=snapshot,
+                                             max_candidates=self.config.max_candidates)
+            ledger.charge(model_calls=int(proposal.model_calls))
+            if not proposal.candidates:
+                reason = proposal.failure or "proposer returned no candidates"
+                return self._stop(lifecycle, sm.BLOCKED,
+                                  f"no candidate direction available: {reason}", paths)
+            candidates = tuple(proposal.candidates)
+            sm.advance(lifecycle, sm.TransitionRequest(
+                target=sm.PROPOSED, now=self.clock.now(),
+                reason=f"proposed {len(candidates)} candidate(s) by {proposal.proposed_by}"))
 
-        # 3. select exactly one
-        try:
-            selection = self.selector.select(candidates=proposal.candidates, snapshot=snapshot)
-        except SelectionRefused as exc:
-            return self._stop(lifecycle, sm.BLOCKED, f"selection refused: {exc}", paths)
+            # 3. select exactly one
+            try:
+                selection = self.selector.select(candidates=candidates, snapshot=snapshot)
+            except SelectionRefused as exc:
+                return self._stop(lifecycle, sm.BLOCKED, f"selection refused: {exc}", paths)
 
         # 4. freeze expectations, failure conditions, protocol and budget
         bet_id = self.store.bet_id
@@ -223,7 +253,7 @@ class BetRunner:
                 run_id=self.config.run_id, question=self.config.question,
                 context_snapshot_ref=self.config.context_snapshot_ref,
                 context_snapshot_hash=snapshot_hash,
-                candidates=proposal.candidates, selection=selection,
+                candidates=candidates, selection=selection,
                 expected_effects=self.config.expected_effects,
                 falsification_conditions=self.config.falsification_conditions,
                 evaluation_protocol=self.config.evaluation_protocol,
@@ -279,6 +309,109 @@ class BetRunner:
         return RunnerResult(self.store.bet_id, lifecycle.state,
                             f"bet {record.bet_id} frozen at revision {record.revision}",
                             replayed=False, paths=paths)
+
+    def abstain(self) -> RunnerResult:
+        """Freeze an abstention bet and settle it as ABSTAINED without running anything.
+
+        The bet is a real frozen record (its expectations, protocol and the same-class prior
+        evidence that triggered the decision are hashed into it), and the settlement is a
+        real terminal state produced by a real transition chain:
+        ``DRAFT -> COMMITTED -> EXECUTING -> MEASURED -> SETTLED -> CLOSED``.
+
+        What deliberately does not happen: no proposer call, no patch, no baseline arm, no
+        candidate arm, no metric read.  The one artifact written is the abstention record,
+        and the receipt declares ``model_calls=0`` / ``actions=0``.
+        """
+        if not self.config.abstention_reason:
+            raise ContractError(
+                "abstain: no abstention reason was declared -- refusing to abstain on nothing")
+        report = self.store.verify_chain()
+        if not report.ok:
+            lifecycle = sm.BetLifecycle(bet_id=self.store.bet_id)
+            sm.advance(lifecycle, sm.TransitionRequest(
+                target=sm.INVALID, now=self.clock.now(),
+                reason=f"chain_integrity_failure:{report.reason}"))
+            self.store.save_lifecycle(lifecycle, reason="chain_integrity_failure")
+            return RunnerResult(self.store.bet_id, lifecycle.state,
+                                f"chain integrity failure: {report.reason}", replayed=False,
+                                notes=("fail_closed",))
+        lifecycle = self.store.load_lifecycle()
+        if sm.is_terminal(lifecycle.state):
+            return self._replay_result(lifecycle)
+        ledger = BudgetLedger(self.config.budget, lifecycle.usage, clock=self.clock)
+        paths: dict[str, str] = {}
+        if lifecycle.state == sm.DRAFT:
+            frozen = self._freeze_bet(lifecycle, ledger, paths)
+            if isinstance(frozen, RunnerResult):
+                return frozen
+            record, _selection = frozen
+        else:
+            record = self.store.load_bet()
+        bet_id = record.bet_id
+        reason = str(self.config.abstention_reason)
+        evidence = dict(self.config.abstention_evidence)
+
+        # the single artifact this bet produces: the decision itself
+        payload = abstention_record(bet=record, reason=reason, evidence=evidence)
+        artifact_path = self.store.path("abstention", "abstention.json")
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(canonical_json(payload), encoding="utf-8")
+        paths["abstention"] = str(artifact_path)
+        if not self._claim(f"abstention_claim:{bet_id}:r{record.revision}"):
+            return self._stop(lifecycle, sm.BLOCKED,
+                              "another owner already recorded this abstention", paths)
+        started = self.clock.now()
+        receipt = build_abstention_receipt(
+            bet=record, reason=reason, artifact_path=artifact_path,
+            artifact_hash=record_hash(payload), started_epoch=started,
+            finished_epoch=self.clock.now())
+        sm.advance(lifecycle, sm.TransitionRequest(
+            target=sm.EXECUTING, now=self.clock.now(), receipt=receipt,
+            reason="abstained: nothing is executed"))
+        self.store.save_lifecycle(lifecycle, reason="abstaining")
+        primary, measured = not_measured(bet=record, receipt=receipt, reason=reason)
+        self.store.save_measurement(primary)
+        paths["measurement_dir"] = str(self.store.path("measurements"))
+        sm.advance(lifecycle, sm.TransitionRequest(
+            target=sm.MEASURED, now=self.clock.now(), receipt=receipt, measurement=primary,
+            reason=f"not measured: {reason}"))
+        self.store.save_lifecycle(lifecycle, reason="not_measured")
+        terminal, terminal_reason = post_settlement_decision(
+            settlement_class="abstained", lifecycle=lifecycle, budget=self.config.budget,
+            usage=ledger.usage, max_rounds=int(self.config.budget.rounds), clock=self.clock)
+        settlement = settle_abstained(bet=record, reason=reason, evidence=evidence,
+                                      next_state=terminal,
+                                      now_iso=time.strftime("%Y-%m-%dT%H:%M:%S"))
+        self.store.save_settlement(settlement)
+        paths["settlement"] = str(self.store.artifact_path("settlement", settlement.settlement_id))
+        sm.advance(lifecycle, sm.TransitionRequest(
+            target=sm.SETTLED, now=self.clock.now(), receipt=receipt, measurement=primary,
+            settlement=settlement, reason=f"settled:{settlement.settlement_class}"))
+        self.store.save_lifecycle(lifecycle, reason="settled")
+        experience = None
+        if not lifecycle.experience_emitted:
+            experience = build_abstention_experience(
+                settlement=settlement, bet=record, receipt=receipt,
+                evidence_refs=(f"snapshot:{record.context_snapshot_hash}",
+                               f"prior:{json.dumps(evidence, sort_keys=True, default=str)}"))
+            self.store.save_experience(experience)
+            paths["experience"] = str(self.store.artifact_path("experience",
+                                                               experience.experience_id))
+            lifecycle.experience_emitted = True
+            lifecycle.usage.rounds = int(lifecycle.usage.rounds) + 1
+        sm.advance(lifecycle, sm.TransitionRequest(
+            target=terminal, now=self.clock.now(),
+            reason=f"{terminal_reason}; next_round=none"))
+        self.store.save_lifecycle(lifecycle, reason=terminal)
+        manifest = self.store.write_manifest(
+            extra={"settlement_class": settlement.settlement_class,
+                   "publish_eligible": settlement.publish_eligible})
+        paths["manifest"] = str(self.store.path("manifest.json"))
+        return RunnerResult(bet_id, lifecycle.state, terminal_reason, settlement=settlement,
+                            experience=experience, receipt=receipt, measurement=measured,
+                            paths=paths, budget=ledger.snapshot(),
+                            notes=("abstained", "model_calls=0", "arms_run=0",
+                                   f"manifest_chain_ok={manifest['chain']['ok']}"))
 
     def _walk(self, lifecycle, ledger: BudgetLedger) -> RunnerResult:
         paths: dict[str, str] = {}

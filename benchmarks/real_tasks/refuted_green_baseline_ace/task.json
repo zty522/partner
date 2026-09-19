@@ -1,17 +1,37 @@
 {
   "task_id": "refuted_green_baseline_ace",
-  "title": "an honest loss: the declared bar is above what this task can physically deliver",
+  "title": "second attempt at the same class: a real failing target and its real fix",
   "bug_report": "bug_report.md",
   "repo_root": "/mnt/e/work/partner",
-  "target_module": "partner/research/adapters/ace.py",
+  "target_module": "partner/research/adapters/gepa.py",
   "test_target": [
     "tests/test_adapter_contracts.py",
     "-k",
-    "test_ace_append_to_memory_writes_real_file"
+    "gepa"
   ],
   "timeout_seconds": 180,
   "patch_file": "patch.diff",
   "expected_min_delta": 1.0,
-  "expected_threshold": 2.0,
-  "expectation_note": "the target selects exactly one test and it already passes in the baseline, so no additional passing test is physically available; the declared bar (>=2 passing tests) cannot be reached by any patch"
+  "expected_threshold": 1.0,
+  "expectation_note": "attempt 2 of the same task class: the target contains a genuinely failing test and the declared patch really fixes it",
+  "attempt_history": [
+    {
+      "attempt": 1,
+      "test_target": "tests/test_adapter_contracts.py -k test_ace_append_to_memory_writes_real_file",
+      "expected_threshold": 2.0,
+      "patch_file": "patch_abstention_attempt.diff",
+      "outcome": "falsified: the bar was physically unattainable (one test, already green)",
+      "settled_as": "falsified"
+    },
+    {
+      "attempt": 2,
+      "test_target": "tests/test_adapter_contracts.py -k gepa",
+      "expected_threshold": 1.0,
+      "patch_file": "patch.diff",
+      "outcome": "supported: expectations met by real measurement (the three gepa contract tests now pass in the candidate arm)"
+    },
+    {
+      "note": "the same class also holds three real falsified settlements from the previous round (attempt 1 of this task) plus this round's counterfactual runs; that history is what the abstention rule read"
+    }
+  ]
 }

@@ -41,7 +41,10 @@ READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, *LEGACY_SCHEMA_VERSIONS)
 
 DIRECTIONS = ("increase", "decrease", "equal")
 CANDIDATE_SOURCES = ("llm", "policy", "human")
-SETTLEMENT_CLASSES = ("supported", "falsified", "inconclusive", "invalid", "blocked")
+#: The terminal verdicts a settlement can carry.  ``abstained`` is a first-class
+#: terminal state, not a flavour of ``blocked`` or ``inconclusive``: the bet was
+#: deliberately not run, so there is nothing measured and nothing to explain away.
+SETTLEMENT_CLASSES = ("supported", "falsified", "inconclusive", "invalid", "blocked", "abstained")
 EXECUTION_STATUSES = ("completed", "failed", "blocked", "cancelled", "timeout")
 
 #: Where the evidence was produced.  Publication eligibility is a function of
@@ -76,6 +79,12 @@ BLOCKER_ISOLATED_SAMPLE = "isolated_sample_only"
 BLOCKER_SYNTHETIC = "synthetic_fixture_only"
 BLOCKER_SHADOW = "shadow_only"
 BLOCKER_SINGLE_EPISODE = "single_episode_only"
+#: Levels an experience may carry.  Both are single episodes; neither is a habit.
+LEVEL_ABSTENTION = "abstention"
+EXPERIENCE_LEVELS = ("experience", LEVEL_ABSTENTION)
+
+#: An abstention is unpublishable by construction: no action ran, so no evidence exists.
+BLOCKER_ABSTAINED = "abstained"
 BLOCKER_BASELINE_INCOMPATIBLE = "baseline_evidence_incompatible"
 BLOCKER_TREATMENT_UNDECLARED = "treatment_contract_missing"
 #: A pre-correction (commitment/1) record has no trusted environment, no baseline
@@ -1397,6 +1406,24 @@ class SettlementDecision:
         # moved in the declared direction while a guardrail expectation failed, in
         # which case the direction is falsified even though the metric improved.
         # Forbidding the combination would force the kernel to hide a real result.
+        if self.settlement_class == "abstained" and not self.schema_legacy:
+            # An abstention is not a measurement outcome.  It must not smuggle in any of
+            # the fields a measured settlement carries, or a reader could mistake "we did
+            # not run" for "we ran and this is what happened".
+            if self.expectation_outcomes:
+                raise ContractError(
+                    "SettlementDecision: 'abstained' carries no expectation outcomes; nothing was "
+                    "measured, so there is nothing to report about the expectations")
+            if self.expectations_met or self.improvement_over_baseline or self.baseline_already_satisfied:
+                raise ContractError(
+                    "SettlementDecision: 'abstained' must not report expectations_met, "
+                    "improvement_over_baseline or baseline_already_satisfied; the bet deliberately "
+                    "did not run")
+            if self.supported_claim != "none":
+                raise ContractError(
+                    "SettlementDecision: 'abstained' claims nothing; supported_claim must be 'none'")
+            if self.publish_eligible:
+                raise ContractError("SettlementDecision: 'abstained' can never be publishable")
         if self.settlement_class == "falsified" and not self.schema_legacy:
             if not (self.expectations_met or self.improvement_over_baseline
                     or self.pre_existing_failures or self.new_regressions
@@ -1515,6 +1542,9 @@ class ExperienceRecord:
     scope: str
     confidence: float
     evidence_refs: tuple[str, ...]
+    #: ``experience`` = a bet was run and settled.  ``abstention`` = a bet was deliberately
+    #: not run (the harness declined to wager).  Still exactly one episode either way, and
+    #: still never a habit or a growth claim.
     level: str = "experience"
     authoritative: bool = False
 
@@ -1522,10 +1552,10 @@ class ExperienceRecord:
         for name in ("experience_id", "bet_id", "run_id", "settlement_ref", "scope"):
             _check_non_empty(getattr(self, name), "ExperienceRecord", name)
         _check_choice(self.settlement_class, SETTLEMENT_CLASSES, "ExperienceRecord", "settlement_class")
-        if self.level != "experience":
+        if self.level not in EXPERIENCE_LEVELS:
             raise ContractError(
-                "ExperienceRecord: level must be 'experience'; a single settled bet is one "
-                "experience and can never be recorded as habit or growth")
+                "ExperienceRecord: level must be 'experience' or 'abstention'; a single settled "
+                "bet is one experience and can never be recorded as habit or growth")
         if not tuple(self.state_action_outcome_chain):
             raise ContractError(
                 "ExperienceRecord: state_action_outcome_chain must not be empty; an experience "
@@ -1588,11 +1618,12 @@ __all__ = [
     "schema_version_of", "is_legacy_payload",
     "EXECUTION_ENVIRONMENTS", "NON_PUBLISHABLE_ENVIRONMENTS", "EXPECTATION_KINDS",
     "CLAIM_BY_KIND", "CLAIMS", "BASELINE_PROVENANCE",
-    "BLOCKER_NOT_PUBLISHABLE_ENVIRONMENT", "BLOCKER_ISOLATED_SAMPLE", "BLOCKER_SYNTHETIC",
+    "BLOCKER_ABSTAINED", "BLOCKER_NOT_PUBLISHABLE_ENVIRONMENT", "BLOCKER_ISOLATED_SAMPLE", "BLOCKER_SYNTHETIC",
     "BLOCKER_SHADOW", "BLOCKER_SINGLE_EPISODE", "BLOCKER_BASELINE_INCOMPATIBLE",
     "BLOCKER_TREATMENT_UNDECLARED", "BLOCKER_LEGACY_SCHEMA_UNTRUSTED",
     "TreatmentContract", "TreatmentSpec", "BaselineEvidence",
     "DIRECTIONS", "CANDIDATE_SOURCES", "SETTLEMENT_CLASSES",
+    "EXPERIENCE_LEVELS", "LEVEL_ABSTENTION",
     "EXECUTION_STATUSES", "SEMANTIC_FIELDS", "ContractError", "Budget", "BudgetUsage",
     "CommitmentPolicy", "ExpectedEffect", "FalsificationCondition", "EvaluationProtocol",
     "Candidate", "RejectedAlternative", "BetRecord", "ExecutionReceipt", "OutcomeMeasurement",

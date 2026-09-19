@@ -59,7 +59,8 @@ BLOCKER_SINGLE_EPISODE = "single_episode_only"
 #: bet **falsified**, and it never emits the word "refuted".  Counting a class the
 #: kernel does not emit is how a rule silently never fires, so this tuple is copied
 #: from the kernel rather than invented here.
-SETTLEMENT_CLASSES = ("supported", "falsified", "inconclusive", "invalid", "blocked")
+SETTLEMENT_CLASSES = ("supported", "falsified", "inconclusive", "invalid", "blocked",
+                      "abstained")
 #: Older notes and transcripts call the same outcome "refuted".  Both words are counted
 #: into the ``falsified`` bucket so a settlement can never be invisible to the rule.
 REFUTED_ALIASES = ("falsified", "refuted")
@@ -70,6 +71,15 @@ REFUTED_RATIO_THRESHOLD = 0.5
 #: Upper bound on ``min_delta`` so a long refuted history can never raise the bar
 #: without limit (the lower bound is :data:`MIN_DELTA_FLOOR`).
 MAX_MIN_DELTA = 8.0
+
+#: -- abstention --------------------------------------------------------------
+#: How many *evidence-bearing* same-class settlements must exist before declining to wager
+#: is even allowed (one bad run is not a trend).
+ABSTAIN_MIN_EVIDENCE = 2
+#: Share of those that must be refuted (the kernel word: ``falsified``).
+ABSTAIN_REFUTED_RATIO = 0.75
+#: The rule's name, recorded in the frozen prior and in the settlement.
+ABSTAIN_RULE = "abstention_rule_refuted_history_without_success"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +127,13 @@ def _read_json(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 -- a partial write is skipped, never guessed at
         return None
+
+
+def _mtime_epoch(path) -> float:
+    try:
+        return float(os.path.getmtime(path))
+    except OSError:
+        return 0.0
 
 
 def scan_settled_bets(workspace: str | os.PathLike, *,
@@ -175,7 +192,14 @@ def scan_settled_bets(workspace: str | os.PathLike, *,
                 "supported_claim": str(settlement.get("supported_claim") or ""),
                 "publish_eligible": bool(settlement.get("publish_eligible")),
                 "publish_blockers": [str(b) for b in (settlement.get("publish_blockers") or [])],
-                "settled_at": str(settlement.get("settled_at") or ""),
+                # The kernel settlement carries ``created_at`` (there is no ``settled_at``
+                # field); the lifecycle keeps ``updated_at``; the settlement file's mtime is
+                # the last-resort monotone fallback.  ``settled_epoch`` is what makes an
+                # ordering possible even when every timestamp field is empty.
+                "settled_at": str(settlement.get("settled_at")
+                                  or settlement.get("created_at")
+                                  or state.get("updated_at") or ""),
+                "settled_epoch": _mtime_epoch(settlement_dir / names[-1]),
                 "experience_id": str((experience or {}).get("experience_id") or ""),
                 "settlement_ref": str(settlement_dir / sorted(os.listdir(settlement_dir))[-1]),
                 "store_dir": str(bet_path),
@@ -202,7 +226,11 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         elif cls in counts:
             counts[cls] += 1
     total = len(rows)
-    refuted_ratio = (counts["falsified"] / total) if total else 0.0
+    # The ratio is over *evidence-bearing* settlements: an abstention is not evidence about
+    # the task, so it must neither soften nor sharpen the measured failure rate.  (The two
+    # rules -- raising the bar and declining to wager -- therefore read the same ratio.)
+    evidence_total = max(total - counts["abstained"], 0)
+    refuted_ratio = (counts["falsified"] / evidence_total) if evidence_total else 0.0
     supporting = [{"bet_id": r.get("bet_id"), "run_id": r.get("run_id"),
                    "trace_token": r.get("trace_token"),
                    "settlement_class": r.get("settlement_class"),
@@ -214,7 +242,7 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
                    "trace_token_of_settlement": r.get("settlement_id"),
                    "publish_blockers": r.get("publish_blockers")}
                   for r in rows]
-    return {
+    summary = {
         "prior_version": PRIOR_VERSION,
         "class_key": str(class_key),
         "class_definition": dict(components or {}),
@@ -222,6 +250,7 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         "row_count": len(rows),
         "counts": {
             "total": len(rows),
+            "evidence_total": evidence_total,
             **counts,
             "refuted_ratio": round(refuted_ratio, 6),
             "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
@@ -233,6 +262,75 @@ def summarize_prior(rows: Sequence[Mapping[str, Any]], *, class_key: str,
         "rows": supporting,
         "sources": [str(r.get("settlement_ref") or "") for r in rows],
     }
+    # The abstention decision is part of the prior, not a separate later step: it is frozen
+    # into ``prior.json`` (and from there into the bet's context snapshot) with the counts
+    # and the reason it was taken or refused.
+    summary["abstention"] = decide_abstention(summary)
+    return summary
+
+
+def decide_abstention(prior: Mapping[str, Any]) -> dict[str, Any]:
+    """Decide whether this class should not be wagered on again -- pure, auditable.
+
+    All four conditions must hold (thresholds are module constants, never inline):
+
+    1. at least :data:`ABSTAIN_MIN_EVIDENCE` *evidence-bearing* settlements exist
+    2. ``falsified / evidence_total >= ABSTAIN_REFUTED_RATIO``
+    3. no supported settlement exists anywhere in the class (no success evidence at all)
+    4. the most recent settlement in the class is ``falsified`` -- which is also what stops
+       an abstention from firing twice in a row: an abstention at the tail means the class
+       already declined and no new evidence has arrived since.
+
+    Abstentions are excluded from the ratio's denominator on purpose: declining to wager is
+    not evidence about the task, so it must neither raise nor lower the failure rate.
+    """
+    counts = dict(prior.get("counts") or {})
+    rows = [dict(row) for row in (prior.get("rows") or [])]
+    abstained = int(counts.get("abstained") or 0)
+    total = int(counts.get("total") or 0)
+    evidence_total = max(total - abstained, 0)
+    refuted = int(counts.get("falsified") or 0)
+    supported = int(counts.get("supported") or 0)
+    ratio = (refuted / evidence_total) if evidence_total else 0.0
+    ordered = sorted(rows, key=lambda row: (str(row.get("settled_at") or ""),
+                                            float(row.get("settled_epoch") or 0.0)))
+    latest = dict(ordered[-1]) if ordered else {}
+    latest_class = str(latest.get("settlement_class") or "")
+    blocked_by: list[str] = []
+    if not str(prior.get("class_key") or ""):
+        blocked_by.append("prior_has_no_class_key")
+    if evidence_total < ABSTAIN_MIN_EVIDENCE:
+        blocked_by.append(f"evidence_total {evidence_total} < {ABSTAIN_MIN_EVIDENCE}")
+    if ratio < ABSTAIN_REFUTED_RATIO:
+        blocked_by.append(f"refuted_ratio {round(ratio, 4)} < {ABSTAIN_REFUTED_RATIO}")
+    if supported > 0:
+        blocked_by.append(f"supported {supported} > 0 (success evidence exists)")
+    if latest_class != "falsified":
+        blocked_by.append(
+            f"latest settlement is {latest_class or 'none'}, not falsified"
+            + (" (an abstention is already the tail: no new evidence since)"
+               if latest_class == "abstained" else ""))
+    evidence = {
+        "class_key": str(prior.get("class_key") or ""),
+        "total": total, "evidence_total": evidence_total, "falsified": refuted,
+        "supported": supported, "abstained": abstained,
+        "refuted_ratio": round(ratio, 6), "refuted_ratio_threshold": ABSTAIN_REFUTED_RATIO,
+        "min_evidence": ABSTAIN_MIN_EVIDENCE,
+        "latest_settlement_class": latest_class,
+        "latest_bet_id": str(latest.get("bet_id") or ""),
+        "refuted_bet_ids": [str(r.get("bet_id") or "") for r in rows
+                            if str(r.get("settlement_class") or "") in REFUTED_ALIASES],
+    }
+    triggered = not blocked_by
+    if triggered:
+        reason = (f"same-class history is {refuted}/{evidence_total} refuted "
+                  f"(ratio {round(ratio, 4)} >= {ABSTAIN_REFUTED_RATIO}) with no supported "
+                  f"settlement, and the latest settlement ({evidence['latest_bet_id']}) is "
+                  "falsified: the harness declines to wager again without new evidence")
+    else:
+        reason = "abstention conditions not met: " + "; ".join(blocked_by)
+    return {"abstain": triggered, "reason": reason, "blocked_by": blocked_by,
+            "rule": ABSTAIN_RULE, "evidence": evidence}
 
 
 def empty_prior(*, class_key: str, components: Mapping[str, str] | None = None,
@@ -245,7 +343,13 @@ def empty_prior(*, class_key: str, components: Mapping[str, str] | None = None,
                        "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
                        "improvement_true": 0, "improvement_false": 0,
                        "single_episode_only": 0},
-            "rows": [], "sources": [], "reason": reason}
+            "rows": [], "sources": [], "reason": reason,
+            # An empty prior refuses the abstention explicitly: declining to wager needs
+            # same-class evidence, and there is none.
+            "abstention": {"abstain": False, "blocked_by": ["prior_empty"], "rule": "",
+                           "reason": f"prior is empty ({reason}): nothing to abstain on",
+                           "evidence": {"prior_empty_reason": str(reason),
+                                        "class_key": str(class_key)}}}
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +390,7 @@ def adjust_declared(declared: Mapping[str, Any], prior: Mapping[str, Any]) -> tu
                 "name": "min_delta", "before": base, "after": after,
                 "rule": "refuted_history_raises_the_bar",
                 "evidence": {"falsified": refuted, "supported": supported, "total": total,
+                             "evidence_total": int(counts.get("evidence_total") or 0),
                              "refuted_ratio": round(ratio, 6),
                              "refuted_ratio_threshold": REFUTED_RATIO_THRESHOLD,
                              "max_min_delta": MAX_MIN_DELTA,
@@ -366,6 +471,7 @@ def clear_prior(store_root: str | os.PathLike) -> bool:
 
 __all__ = ["PRIOR_VERSION", "PRIOR_FILENAME", "CLASS_PREFIX", "DATA_VERSION_PREFIX",
            "MIN_DELTA_FLOOR", "MAX_MIN_DELTA", "REFUTED_RATIO_THRESHOLD", "REFUTED_ALIASES",
+           "ABSTAIN_MIN_EVIDENCE", "ABSTAIN_REFUTED_RATIO", "ABSTAIN_RULE", "decide_abstention",
            "BLOCKER_SINGLE_EPISODE", "SETTLEMENT_CLASSES",
            "metric_signature", "task_class_key", "class_key_from_bet", "class_components",
            "commitments_root", "scan_settled_bets", "select_same_class", "summarize_prior",

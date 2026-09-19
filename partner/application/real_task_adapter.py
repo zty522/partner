@@ -433,7 +433,8 @@ def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
                             trace_token: str, task: Mapping[str, Any], project_root: str,
                             patch_file: str, instance_id: str = "",
                             prior: Mapping[str, Any] | None = None,
-                            prior_audit: Mapping[str, Any] | None = None) -> Path:
+                            prior_audit: Mapping[str, Any] | None = None,
+                            abstention: Mapping[str, Any] | None = None) -> Path:
     path = store.path("context", "snapshot.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     patch_path = Path(project_root).joinpath(*TASKS_DIRNAME, str(task["task_id"]), patch_file)
@@ -453,6 +454,7 @@ def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
         # context_snapshot_hash, so this audit is bound to the frozen record.
         "prior": dict(prior or {}),
         "prior_adjusted_parameter": dict(prior_audit or {}),
+        "abstention": dict(abstention or {}),
         "task_class_key": (prior or {}).get("class_key") or "",
         "candidate_space": [{
             "candidate_id": f"patch_{Path(patch_file).stem}",

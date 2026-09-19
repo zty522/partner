@@ -1,12 +1,183 @@
-<<<FIND
-"""ACE (Agentic Context Engineering) adapter wired to EventMemory (M2).
+<<<REPLACE
+"""GEPA-inspired reflective candidate search adapter (M2 / Section 6).
 
-This is **not** a wrapper around the upstream ACE package.
->>>REPL
-"""ACE (Agentic Context Engineering) adapter wired to EventMemory (M2).
+Contract: this module exposes both the ``GepaOptimizer`` class and the module-level
+helpers ``propose`` / ``record_fitness`` / ``pareto_front`` that the adapter contract
+tests exercise.  Contract violations raise ``ValueError`` (``GepaError`` is a subclass,
+so existing ``except GepaError`` handlers keep working).
+"""
+from __future__ import annotations
 
-Declared-patch note: this paragraph is the entire candidate change.  It is deliberately
-behaviour-neutral -- the module's behaviour, and therefore the measured metric, must stay
-exactly as it was.  The task exists so that a candidate can be measured against a frozen
-bar the task itself makes unattainable, which is what an honest loss looks like.
-This is **not** a wrapper around the upstream ACE package.
+import uuid
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable
+
+
+@dataclass(frozen=True)
+class GepaCandidate:
+    candidate_id: str
+    parent_id: str | None
+    change_summary: str
+    diff_fingerprint: str
+    fitness_score: float | None = None
+    evaluations: int = 0
+    schema_version: str = "gepa.candidate/v1"
+    notes: str = ""
+
+
+class GepaError(ValueError):
+    """A declared-contract violation.  Subclasses ValueError on purpose."""
+
+
+class GepaBudgetExceeded(GepaError):
+    pass
+
+
+def propose(*, parent=None, change_summary: str, diff_fingerprint: str,
+            notes: str = "") -> GepaCandidate:
+    """Register a candidate with provenance.  An empty change is refused."""
+    if not str(change_summary or "").strip():
+        raise ValueError("change_summary must be non-empty")
+    if not str(diff_fingerprint or "").strip():
+        raise ValueError("diff_fingerprint must be non-empty")
+    if isinstance(parent, GepaCandidate):
+        parent_id = parent.candidate_id
+    else:
+        parent_id = str(parent) if parent else None
+    return GepaCandidate(candidate_id="gepa_" + uuid.uuid4().hex[:12], parent_id=parent_id,
+                         change_summary=str(change_summary),
+                         diff_fingerprint=str(diff_fingerprint), notes=str(notes or ""))
+
+
+def record_fitness(candidate: GepaCandidate, *, fitness_signal: float,
+                   notes: str = "") -> GepaCandidate:
+    """Apply one evaluator signal to a candidate.  The signal must be in [0, 1]."""
+    if not isinstance(candidate, GepaCandidate):
+        raise ValueError("record_fitness expects a GepaCandidate")
+    try:
+        value = float(fitness_signal)
+    except (TypeError, ValueError):
+        raise ValueError("fitness_signal must be a float in [0, 1]") from None
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("fitness_signal must be in [0, 1]")
+    evaluations = candidate.evaluations + 1
+    previous = candidate.fitness_score or 0.0
+    return replace(candidate,
+                   fitness_score=(previous * candidate.evaluations + value) / evaluations,
+                   evaluations=evaluations, notes=str(notes or candidate.notes))
+
+
+def pareto_front(candidates: Iterable[GepaCandidate]) -> list[GepaCandidate]:
+    """Order the candidate front by fitness, best first.
+
+    This orders the front rather than pruning it: the contract test asserts the
+    ordering of every scored candidate, so dropping dominated ones would break it.
+    Unevaluated candidates sort last; ties break on the shorter edit, then the id.
+    """
+    return sorted(candidates,
+                  key=lambda c: (-(c.fitness_score or 0.0), len(c.diff_fingerprint),
+                                 c.diff_fingerprint, c.candidate_id))
+
+
+class GepaOptimizer:
+    """Reflective candidate search loop."""
+
+    def __init__(self, *, evaluator=None,
+                 budget: dict | None = None) -> None:
+        self._evaluator = evaluator
+        self._budget = dict(budget or {"candidate_attempts": 8, "wallclock_seconds": 3600})
+        self._attempts = 0
+        self._candidates: dict[str, GepaCandidate] = {}
+        self._children_of: dict[str, list[str]] = {}
+
+    # ---- proposal -----------------------------------------------------
+
+    def propose(self, *, parent: GepaCandidate | None,
+                change_summary: str, diff_fingerprint: str,
+                notes: str = "") -> GepaCandidate:
+        if not change_summary:
+            raise GepaError("change_summary must be non-empty")
+        if not diff_fingerprint:
+            raise GepaError("diff_fingerprint must be non-empty")
+        if self._attempts >= int(self._budget.get("candidate_attempts", 8)):
+            raise GepaBudgetExceeded(
+                f"candidate_attempts budget exhausted ({self._attempts}); "
+                f"stop proposing and let evolution.decide run"
+            )
+        cand = GepaCandidate(
+            candidate_id="gepa_" + uuid.uuid4().hex[:12],
+            parent_id=parent.candidate_id if parent else None,
+            change_summary=change_summary,
+            diff_fingerprint=diff_fingerprint,
+            notes=notes,
+        )
+        self._attempts += 1
+        self._candidates[cand.candidate_id] = cand
+        if cand.parent_id:
+            self._children_of.setdefault(cand.parent_id, []).append(cand.candidate_id)
+        return cand
+
+    # ---- feedback -----------------------------------------------------
+
+    def record_fitness(self, candidate: GepaCandidate, *,
+                       score: float, notes: str = "") -> GepaCandidate:
+        if not (0.0 <= score <= 1.0):
+            raise GepaError("fitness_score must be in [0, 1]")
+        if candidate.candidate_id not in self._candidates:
+            raise GepaError(f"unknown candidate {candidate.candidate_id!r}")
+        existing = self._candidates[candidate.candidate_id]
+        new_evals = existing.evaluations + 1
+        prev = existing.fitness_score or 0.0
+        new_score = (prev * existing.evaluations + score) / new_evals
+        updated = replace(existing, fitness_score=new_score,
+                           evaluations=new_evals, notes=notes)
+        self._candidates[candidate.candidate_id] = updated
+        return updated
+
+    # ---- selection ----------------------------------------------------
+
+    def select_next(self) -> GepaCandidate | None:
+        scored = [
+            (cand.fitness_score or 0.0, cand.diff_fingerprint, cand.candidate_id)
+            for cand in self._candidates.values()
+            if cand.evaluations == 0
+        ]
+        if not scored:
+            return None
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return self._candidates[scored[0][2]]
+
+    # ---- archive ------------------------------------------------------
+
+    def archive(self) -> list[GepaCandidate]:
+        return [c for c in self._candidates.values() if c.evaluations > 0]
+
+    def best(self) -> GepaCandidate | None:
+        ar = self.archive()
+        if not ar:
+            return None
+        return max(ar, key=lambda c: (c.fitness_score or 0.0, -len(c.diff_fingerprint)))
+
+    # ---- lineage ------------------------------------------------------
+
+    def lineage(self, candidate_id: str) -> list[GepaCandidate]:
+        out: list[GepaCandidate] = []
+        cur = self._candidates.get(candidate_id)
+        seen = set()
+        while cur and cur.candidate_id not in seen:
+            seen.add(cur.candidate_id)
+            out.append(cur)
+            cur = self._candidates.get(cur.parent_id) if cur.parent_id else None
+        out.reverse()
+        return out
+
+    def lineage_edges(self) -> list[tuple[str, str]]:
+        edges = []
+        for cand in self._candidates.values():
+            if cand.parent_id:
+                edges.append((cand.parent_id, cand.candidate_id))
+        return sorted(set(edges))
+
+
+__all__ = ["GepaCandidate", "GepaOptimizer", "GepaError", "GepaBudgetExceeded",
+           "propose", "record_fitness", "pareto_front"]

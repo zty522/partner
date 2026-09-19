@@ -360,6 +360,9 @@ def runner_config_from_spec(spec: Mapping[str, Any], *, clock) -> RunnerConfig:
         environment_fingerprint=str(spec.get("environment_fingerprint") or ""),
         changed_paths=tuple(spec.get("changed_paths") or ()),
         candidate_code_version=str(spec.get("candidate_code_version") or ""),
+        abstention_reason=str((spec.get("abstention") or {}).get("reason") or "")
+                          if (spec.get("abstention") or {}).get("abstain") else "",
+        abstention_evidence=dict((spec.get("abstention") or {}).get("evidence") or {}),
     )
 
 

@@ -307,7 +307,8 @@ def write_bounded_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
                            job_id: str, trace_token: str, message: str,
                            instance_id: str = "",
                            prior: Mapping[str, Any] | None = None,
-                           prior_audit: Mapping[str, Any] | None = None) -> Path:
+                           prior_audit: Mapping[str, Any] | None = None,
+                           abstention: Mapping[str, Any] | None = None) -> Path:
     path = store.path("context", "snapshot.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -326,6 +327,7 @@ def write_bounded_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
         # variable it moved (the snapshot digest is frozen into the bet)
         "prior": dict(prior or {}),
         "prior_adjusted_parameter": dict(prior_audit or {}),
+        "abstention": dict(abstention or {}),
         "task_class_key": (prior or {}).get("class_key") or "",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

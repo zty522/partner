@@ -283,6 +283,10 @@ def advance(lifecycle: BetLifecycle, request: TransitionRequest) -> BetLifecycle
         if settlement.bet_id != lifecycle.bet_id:
             raise InvariantViolation(
                 f"{lifecycle.bet_id}: settlement belongs to {settlement.bet_id}")
+        if settlement.settlement_class == "abstained" and measurement.is_valid:
+            raise InvariantViolation(
+                f"{lifecycle.bet_id}: settlement_class=abstained declares that no action ran, but it "
+                "carries a valid measurement; an abstention must be settled unmeasured")
         if settlement.settlement_class in ("supported", "falsified") and not measurement.is_valid:
             raise InvariantViolation(
                 f"{lifecycle.bet_id}: settlement_class={settlement.settlement_class} needs a valid "

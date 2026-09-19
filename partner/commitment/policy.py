@@ -101,6 +101,10 @@ def post_settlement_decision(*, settlement_class: str, lifecycle: BetLifecycle,
         return CLOSED, "direction supported; stop and keep the verified direction"
     if settlement_class in ("invalid", "blocked"):
         return CLOSED, f"settlement_class={settlement_class}; no further round is meaningful"
+    if settlement_class == "abstained":
+        # Not a negative result and not an inconclusive one: the bet never ran, so no
+        # further round can follow from it without new evidence.
+        return CLOSED, "abstention recorded; no action was executed and no round is created"
     if settlement_class == "falsified":
         if int(usage.rounds) >= int(max_rounds):
             return CLOSED, "round budget exhausted after falsification"

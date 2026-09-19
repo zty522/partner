@@ -251,6 +251,9 @@ def _apply_prior_to_spec(spec: Mapping[str, Any], *, class_key: str, prior: Mapp
     return {**dict(spec), "expected_effects": effects, "evaluation_protocol": protocol,
             "data_version": f"class:{class_key}", "class_key": class_key,
             "prior": dict(prior), "prior_adjusted_parameter": frozen_audit,
+            # The abstention decision the prior reached (or refused).  Frozen into the spec
+            # and the context snapshot so the bet records *why* it did or did not wager.
+            "abstention": dict(prior.get("abstention") or {}),
             "declared_values": {k: declared[k] for k in ("min_delta", "replicates")}}
 
 
@@ -322,8 +325,8 @@ def commitment_prior_recall(ctx, params):
     explicitly empty -- no value is filled in.
     """
     from partner.application.experience_prior import (
-        clear_prior, empty_prior, scan_settled_bets, select_same_class, summarize_prior,
-        write_prior,
+        clear_prior, decide_abstention, empty_prior, scan_settled_bets, select_same_class,
+        summarize_prior, write_prior,
     )
     bundle, failure = _resolve_declared(ctx, params)
     if failure is not None:
@@ -332,11 +335,15 @@ def commitment_prior_recall(ctx, params):
     class_key = bundle["class_key"]
     if bundle["prior_disabled"]:
         cleared = clear_prior(store.root)
+        # prior=off never abstains: the decision needs a prior, and there is none.
+        refused = {"abstain": False, "reason": "prior disabled: no prior was read",
+                   "blocked_by": ["prior_disabled"], "rule": "", "evidence": {}}
         return {"ok": True, "status": "completed",
                 "summary": f"prior disabled for {class_key}: declared values stand",
                 "semantic_output": {"prior_class_key": class_key, "prior_row_count": 0,
                                     "prior_empty": True, "prior_disabled": True,
-                                    "prior_cleared": cleared, "trace_token": bundle["token"],
+                                    "prior_cleared": cleared, "abstention": refused,
+                                    "trace_token": bundle["token"],
                                     "job_id": job_id, "action": bundle["action"],
                                     "next_event": "commitment.bet_record"},
                 "files": [], "evidence_refs": [], "token_usage": {}}
@@ -367,6 +374,7 @@ def commitment_prior_recall(ctx, params):
                                 "prior_bet_ids": [r.get("bet_id") for r in prior["rows"]],
                                 "prior_sources": prior["sources"],
                                 "scanned_settled_bets": len(rows),
+                                "abstention": dict(prior.get("abstention") or {}),
                                 "prior_path": str(path), "noted_on_timeline": noted,
                                 "trace_token": bundle["token"], "job_id": job_id,
                                 "action": bundle["action"],
@@ -386,6 +394,15 @@ _NEGATIVE_IMPROVEMENT_TOKENS = ("未取得改善", "没有取得改善", "没有
 
 
 def draft_contradicts(draft: str, settlement: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    if str(settlement.get("settlement_class") or "") == "abstained":
+        # An abstention claims nothing, so a draft that claims progress contradicts it.
+        # A draft that reports a blockage does not: nothing ran, so "no progress" agrees.
+        hits = [token for token in _POSITIVE_DRAFT_TOKENS if token in draft]
+        return (bool(hits), hits)
+    return _draft_contradicts_classified(draft, settlement)
+
+
+def _draft_contradicts_classified(draft: str, settlement: Mapping[str, Any]) -> tuple[bool, list[str]]:
     """Pure, declared-token check: does the draft's prose contradict the settlement?"""
     text = str(draft or "")
     settlement_class = str(settlement.get("settlement_class") or "")
@@ -401,8 +418,31 @@ def draft_contradicts(draft: str, settlement: Mapping[str, Any]) -> tuple[bool, 
     return (bool(hits), hits)
 
 
+def _abstention_reason(settlement: Mapping[str, Any]) -> tuple[str, list[str]]:
+    """The reason and the evidence lines of an abstention, read from its machine rules."""
+    rules = [str(rule) for rule in (settlement.get("machine_rules") or [])]
+    reason = next((rule.split("=", 1)[1] for rule in rules
+                   if rule.startswith("abstain_reason=")), "")
+    evidence = [rule for rule in rules if rule.startswith("abstain_evidence[")]
+    return reason, evidence
+
+
 def _settlement_block(settlement: Mapping[str, Any]) -> str:
     """The settlement as the reply's factual header -- every field spelled out."""
+    if str(settlement.get("settlement_class") or "") == "abstained":
+        reason, evidence = _abstention_reason(settlement)
+        blockers = ", ".join(str(b) for b in (settlement.get("publish_blockers") or [])) or "none"
+        lines = [
+            f"[commitment] settlement_class=abstained publish_eligible={settlement.get('publish_eligible')} "
+            f"publish_blockers={blockers}",
+            f"bet={settlement.get('bet_id')} settlement={settlement.get('settlement_id')}",
+            "本次选择不下注，原因如下：" + (reason or "（未记录原因）"),
+        ]
+        lines.extend(f"不下注证据：{line}" for line in evidence)
+        lines.append(
+            "（本次未执行任何动作：未生成补丁、未调用 LLM、未测量；"
+            "expectations_met / improvement_over_baseline 一律不作声明）")
+        return "\n".join(lines)
     blockers = ", ".join(str(b) for b in (settlement.get("publish_blockers") or [])) or "none"
     return ("[commitment] settlement_class={cls} improvement_over_baseline={imp} "
             "supported_claim={claim} publish_eligible={pub} publish_blockers={blockers}\n"
@@ -548,7 +588,11 @@ def _prepare_bounded(ctx, params):
     # leak into this bet, and an absent one is explicitly empty: declared values stand.
     prior = read_prior(bundle["store"].root)
     if str(prior.get("class_key") or "") != bundle["class_key"]:
-        prior = empty_prior(class_key=bundle["class_key"], reason="prior_class_mismatch")
+        # prior=off is not a mismatch: the recall Event deleted the file on purpose, and the
+        # audit trail must say so rather than blaming a class difference.
+        prior = empty_prior(class_key=bundle["class_key"],
+                            reason=("prior_disabled" if bundle.get("prior_disabled")
+                                    else "prior_class_mismatch"))
     adjusted, audit = adjust_declared(_declared_values(spec), prior)
     spec = _apply_prior_to_spec(spec, class_key=bundle["class_key"], prior=prior,
                                 audit=audit, adjusted=adjusted, action=bundle["action"])
@@ -562,7 +606,8 @@ def _prepare_bounded(ctx, params):
             store=bundle["store"], spec=spec, job_id=job_id, trace_token=token,
             task=bundle["task"], project_root=str(bundle["task_root"]),
             patch_file=bundle["patch_file"], instance_id=instance_id,
-            prior=spec.get("prior"), prior_audit=spec.get("prior_adjusted_parameter"))
+            prior=spec.get("prior"), prior_audit=spec.get("prior_adjusted_parameter"),
+            abstention=spec.get("abstention"))
         runner = build_real_task_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
         return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
                 "runner": runner, "message": message, "action": "real_task",
@@ -572,7 +617,7 @@ def _prepare_bounded(ctx, params):
     snapshot_path = write_bounded_snapshot(
         store=bundle["store"], spec=spec, job_id=job_id, trace_token=token, message=message,
         instance_id=instance_id, prior=spec.get("prior"),
-        prior_audit=spec.get("prior_adjusted_parameter"))
+        prior_audit=spec.get("prior_adjusted_parameter"), abstention=spec.get("abstention"))
     runner = build_bounded_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
     return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
             "runner": runner, "message": message, "action": "bounded_metric",
@@ -649,7 +694,13 @@ def commitment_bet_execute(ctx, params):
         return failure
     token, job_id = prepared["token"], prepared["job_id"]
     spec, store, runner = prepared["spec"], prepared["store"], prepared["runner"]
-    result = runner.run()
+    abstention = dict(spec.get("abstention") or {})
+    if abstention.get("abstain"):
+        # The harness declines to wager: freeze, record the decision, settle ABSTAINED.
+        # Nothing is executed -- no proposer, no patch, no arm, no metric.
+        result = runner.abstain()
+    else:
+        result = runner.run()
     settlement = result.settlement
     experience = result.experience
     noted = False
@@ -665,7 +716,8 @@ def commitment_bet_execute(ctx, params):
         noted = True
     except Exception:  # noqa: BLE001
         noted = False
-    return {
+    abstained = settlement is not None and settlement.settlement_class == "abstained"
+    payload = {
         "ok": is_terminal(result.state), "status": result.state,
         "summary": f"commitment bet {store.bet_id} -> {result.state}: {result.reason}",
         "semantic_output": {
@@ -694,6 +746,21 @@ def commitment_bet_execute(ctx, params):
         "evidence_refs": ([] if settlement is None else [settlement.settlement_id]),
         "token_usage": {},
     }
+    if abstained:
+        # An abstention is a decision the user is entitled to see: the harness declined to
+        # wager on this class.  Without these two flags the notification gate would treat
+        # the run as "nothing to report" and the whole message path (compose .. send) would
+        # be skipped, so the reply line would never exist.  ``requires_human`` is the honest
+        # flag: nothing machine-derivable moves this class forward -- only new evidence.
+        reason, evidence = _abstention_reason(settlement.to_dict())
+        payload["requires_human"] = True
+        payload["notification_kind"] = "abstention"
+        payload["abstention"] = {"reason": reason, "evidence": evidence,
+                                 "rule": next((str(rule).split("=", 1)[1] for rule in
+                                               settlement.machine_rules
+                                               if str(rule).startswith("abstain_evidence[")),
+                                              "")}
+    return payload
 
 
 DEFINITIONS = [
