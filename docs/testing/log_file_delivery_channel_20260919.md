@@ -53,7 +53,7 @@ PYTHONPATH=. python3 scripts/read_replies.py --workspace /mnt/e/work/partner_wor
 ## 测试
 
 ```
-tests/runtime/     32 passed（本轮新增：log 渠道追加+回执可核验、多次追加不丢行、channel_route 接受 log、
+tests/runtime/     31 passed（本轮新增：log 渠道追加+回执可核验、多次追加不丢行、channel_route 接受 log、
                               任意 trace token 形状被识别且不误吞英文、evolution_pipeline 导入回归）
 tests/commitment/ 141 passed
 git diff --check  clean
