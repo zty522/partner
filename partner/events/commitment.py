@@ -163,6 +163,26 @@ def _trace_token(ctx, params: Mapping[str, Any]) -> str:
     return ""
 
 
+#: A message may declare a real repository task instead of the built-in metric action:
+#:   real_task:<task_id>   patch:<file>   (patch defaults to patch.diff)
+_REAL_TASK_RE = re.compile(r"real_task[:=\s]+([A-Za-z0-9_\-]+)")
+_PATCH_RE = re.compile(r"patch[:=\s]+([A-Za-z0-9_.\-]+)")
+
+
+def _declared_real_task(message: str, params: Mapping[str, Any]) -> dict[str, str]:
+    task_id = str(params.get("task_id") or "").strip()
+    if not task_id:
+        found = _REAL_TASK_RE.search(message or "")
+        task_id = found.group(1) if found else ""
+    if not task_id:
+        return {}
+    patch_file = str(params.get("patch_file") or "").strip()
+    if not patch_file:
+        found = _PATCH_RE.search(message or "")
+        patch_file = found.group(1) if found else "patch.diff"
+    return {"task_id": task_id, "patch_file": patch_file}
+
+
 def _prepare_bounded(ctx, params):
     """Resolve the bounded bet this Event acts on: spec, store, snapshot, runner.
 
@@ -181,16 +201,46 @@ def _prepare_bounded(ctx, params):
                       "semantic_output": {"trace_token": "", "job_id": job_id},
                       "files": [], "evidence_refs": [], "token_usage": {}}
     message = _job_request(ctx) or token
+    instance_id = str(getattr(ctx, "instance_id", "") or "")
+    project_id = str(getattr(ctx, "project_id", "") or "unassigned")
+    declared = _declared_real_task(message, params)
+    if declared:
+        # A real repository task: the input and the patch are on disk, and the project's
+        # own test runner decides the outcome.
+        from partner.application.real_task_adapter import (
+            RealTaskError, build_real_task_runner, load_task, real_task_spec,
+            write_real_task_snapshot,
+        )
+        task_root = Path(__file__).resolve().parents[2]
+        try:
+            task = load_task(task_root, declared["task_id"])
+        except RealTaskError as exc:
+            return None, {"ok": False, "status": "failed",
+                          "summary": f"declared real task is unavailable: {exc}",
+                          "semantic_output": {"trace_token": token, "job_id": job_id,
+                                              "task_id": declared["task_id"]},
+                          "files": [], "evidence_refs": [], "token_usage": {}}
+        spec = real_task_spec(job_id=job_id, trace_token=token, task_id=declared["task_id"],
+                              project_root=str(task_root), patch_file=declared["patch_file"],
+                              task=task, instance_id=instance_id, project_id=project_id)
+        store = CommitmentStore(Path(ctx.workspace), str(spec["run_id"]), str(spec["bet_id"]))
+        snapshot_path = write_real_task_snapshot(
+            store=store, spec=spec, job_id=job_id, trace_token=token, task=task,
+            project_root=str(task_root), patch_file=declared["patch_file"],
+            instance_id=instance_id)
+        runner = build_real_task_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
+        return {"token": token, "job_id": job_id, "spec": spec, "store": store,
+                "runner": runner, "message": message, "action": "real_task",
+                "task_id": declared["task_id"], "patch_file": declared["patch_file"]}, None
     spec = bounded_spec(job_id=job_id, trace_token=token, message=message,
-                        instance_id=str(getattr(ctx, "instance_id", "") or ""),
-                        project_id=str(getattr(ctx, "project_id", "") or "unassigned"))
+                        instance_id=instance_id, project_id=project_id)
     store = CommitmentStore(Path(ctx.workspace), str(spec["run_id"]), str(spec["bet_id"]))
     snapshot_path = write_bounded_snapshot(
         store=store, spec=spec, job_id=job_id, trace_token=token, message=message,
-        instance_id=str(getattr(ctx, "instance_id", "") or ""))
+        instance_id=instance_id)
     runner = build_bounded_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
     return {"token": token, "job_id": job_id, "spec": spec, "store": store,
-            "runner": runner, "message": message}, None
+            "runner": runner, "message": message, "action": "bounded_metric"}, None
 
 
 def commitment_bet_record(ctx, params):

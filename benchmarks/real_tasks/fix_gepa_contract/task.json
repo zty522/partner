@@ -1,0 +1,14 @@
+{
+  "task_id": "fix_gepa_contract",
+  "title": "gepa adapter contract: module-level propose/record_fitness/pareto_front are missing",
+  "bug_report": "bug_report.md",
+  "repo_root": "/mnt/e/work/partner",
+  "target_module": "partner/research/adapters/gepa.py",
+  "test_target": [
+    "tests/test_adapter_contracts.py",
+    "-k",
+    "gepa"
+  ],
+  "timeout_seconds": 180,
+  "patch_file": "patch.diff"
+}
