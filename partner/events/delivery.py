@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from partner.event_fabric.catalog import EventDefinition
@@ -20,7 +21,7 @@ def _outbound_name(ctx, params):
 
 def channel_route(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     channel = str(params.get("channel") or getattr(_ctx, "channel", "") or "local")
-    if channel not in {"qq", "gui", "tui", "local"}:
+    if channel not in {"qq", "gui", "tui", "local", "log", "file"}:
         return {"ok": False, "status": "failed", "error": "unsupported delivery channel"}
     return {"ok": True, "status": "completed", "semantic_output": {"channel": channel},
             "summary": f"交付路由：{channel}"}
@@ -121,6 +122,34 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if channel in {"gui", "tui", "local"}:
         return {"ok": True, "status": "completed", "delivered": True,
                 "receipt": {"channel": channel, "projection": "event_ledger"},
+                "message": text, "delivery_kind": "text"}
+    if channel in {"log", "file"}:
+        # A log-file channel: delivery IS the durable append.  The receipt carries the
+        # exact byte offset the line starts at and the line's digest, so the claim is
+        # checkable against the file instead of being taken on trust.
+        root = Path(str(getattr(ctx, "workspace", ""))).resolve()
+        origin = str(params.get("origin_instance") or getattr(ctx, "instance_id", "") or "shared")
+        log_path = root / "state" / "outbound" / "replies.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({
+            "ts": datetime.now(timezone.utc).astimezone().isoformat(),
+            "channel": channel, "instance": origin,
+            "job_id": str(getattr(ctx, "job_id", "")),
+            "project_id": str(getattr(ctx, "project_id", "")),
+            "flow_id": str(params.get("flow_id") or ""),
+            "node_id": str(params.get("node_id") or ""),
+            "content": text,
+        }, ensure_ascii=False)
+        encoded = (line + "\n").encode("utf-8")
+        offset = log_path.stat().st_size if log_path.exists() else 0
+        with log_path.open("ab") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        return {"ok": True, "status": "completed", "delivered": True,
+                "receipt": {"channel": channel, "path": str(log_path), "offset": offset,
+                            "bytes": len(encoded),
+                            "sha256": hashlib.sha256(encoded).hexdigest()},
                 "message": text, "delivery_kind": "text"}
     if not str(params.get('sender_id') or getattr(ctx,'sender_id','')).strip():
         return {'ok':False,'status':'failed','error':'QQ recipient identity is missing; no transport request was made'}

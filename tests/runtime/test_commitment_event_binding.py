@@ -241,3 +241,29 @@ def test_the_bounded_action_is_deterministic_and_comparable(tmp_path):
     assert candidate["unique_words"] <= control["unique_words"]
     assert candidate["text_len"] == control["text_len"]
     assert candidate["text_sha256"] != control["text_sha256"]
+
+
+# ---------------------------------------------------------------------------
+# the operator's token shape must not be dictated by the implementation
+# ---------------------------------------------------------------------------
+
+def test_any_trace_token_shape_is_recognised():
+    from partner.events.commitment import _TRACE_RE
+
+    for token in ("runtime_trace_commit_02_1789813427", "log_trace_02_1789814040",
+                  "trace_abc123", "canary_trace_x-1"):
+        match = _TRACE_RE.search(f"please act on\n\ntrace token: {token}")
+        assert match is not None and match.group(0) == token, token
+    # prose that merely contains the word "trace" is not a token
+    for prose in ("no token here", "distributional trace", "trace",
+                  "let me trace the call"):
+        assert _TRACE_RE.search(prose) is None, prose
+
+
+def test_the_evolution_pipeline_imports_the_flow_registry_from_its_own_module():
+    """Regression: importing build_flow_registry from partner.event_fabric raises
+    ImportError inside the node and fails the flow with event_flow_failed."""
+    import partner.events.evolution_pipeline  # noqa: F401 -- import is the assertion
+    from partner.event_flows.registry import build_flow_registry
+
+    assert build_flow_registry().get("self_evolution") is not None

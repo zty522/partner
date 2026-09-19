@@ -153,7 +153,10 @@ def reflect_to_evolve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     if decision == "candidate" and candidates and workspace:
         try:
-            from partner.event_fabric import EventFlowController, EventFlowStore, build_flow_registry
+            from partner.event_fabric import EventFlowController, EventFlowStore
+            # build_flow_registry lives in partner.event_flows.registry; importing it
+            # from partner.event_fabric raises ImportError and fails the node.
+            from partner.event_flows.registry import build_flow_registry
             from partner.event_fabric.catalog import build_catalog
             catalog = build_catalog(workspace=workspace)
             catalog.snapshot(Path(workspace) / "state/event_catalog" / f"catalog_{catalog.version}.json")

@@ -5,6 +5,7 @@ the receipt logic can be exercised deterministically.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -159,3 +160,44 @@ def test_the_relay_does_not_send_on_a_dry_run(tmp_path, relay):
                              origin="02", relay_instance="03", dry_run=True)
     assert receipt["status"] == "dry_run" and receipt["api_message_id"] == ""
     assert json.loads(payload_path.read_text(encoding="utf-8"))["delivery_state"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# the log-file channel
+# ---------------------------------------------------------------------------
+
+def test_the_log_channel_appends_and_reports_a_checkable_receipt(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.channel = "log"
+    result = send_text(ctx, {"message": "hello from the flow"})
+    assert result["ok"] is True and result["delivered"] is True
+    receipt = result["receipt"]
+    assert receipt["channel"] == "log"
+    log_path = Path(receipt["path"])
+    raw = log_path.read_bytes()
+    assert result["receipt"]["offset"] == 0
+    assert result["receipt"]["bytes"] == len(raw)
+    assert result["receipt"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    row = json.loads(raw.decode("utf-8").strip())
+    assert row["content"] == "hello from the flow"
+    assert row["job_id"] == "job_out_1" and row["instance"] == "02"
+    assert row["channel"] == "log"
+    # no queue payload is written: this channel delivers, it does not defer
+    assert not (tmp_path / "state" / "application" / "outbound" / "02").exists()
+
+
+def test_the_log_channel_appends_without_losing_earlier_lines(tmp_path):
+    ctx = _ctx(tmp_path)
+    ctx.channel = "log"
+    first = send_text(ctx, {"message": "one"})
+    second = send_text(ctx, {"message": "two"})
+    lines = Path(first["receipt"]["path"]).read_text(encoding="utf-8").strip().splitlines()
+    assert [json.loads(line)["content"] for line in lines] == ["one", "two"]
+    assert second["receipt"]["offset"] == first["receipt"]["bytes"]
+
+
+def test_channel_route_accepts_the_log_channel():
+    from partner.events.delivery import channel_route
+
+    assert channel_route(_ctx(Path("/tmp")), {"channel": "log"})["ok"] is True
+    assert channel_route(_ctx(Path("/tmp")), {"channel": "nonsense"})["ok"] is False

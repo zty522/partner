@@ -135,7 +135,12 @@ def commitment_bet_settlement(ctx, params):
 
 
 #: A trace token is how an operator follows one message through the kernel.
-_TRACE_RE = re.compile(r"runtime_trace[A-Za-z0-9_\-]*")
+# A trace token is whatever the operator wrote; do not dictate the prefix.  Match any
+# single identifier-shaped word containing "trace" (runtime_trace_02_x, log_trace_02_x,
+# trace_token=abc, canary_trace...), and only that word.
+_TRACE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9_-]+[Tt]race[A-Za-z0-9_-]*"
+    r"|[Tt]race[_-][A-Za-z0-9_-]+)")
 
 
 def _job_request(ctx) -> str:
