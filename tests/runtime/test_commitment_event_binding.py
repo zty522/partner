@@ -41,7 +41,12 @@ def test_direct_answer_runs_the_commitment_node_and_keeps_the_old_topology():
     assert "commitment" in node_ids
     commitment = next(n for n in current.nodes if n.node_id == "commitment")
     assert commitment.event_type == "commitment.bet_record"
-    assert commitment.depends_on == ("understand_3",)
+    # the recall node must run *before* the bet is frozen, so the record node depends on
+    # it: an unordered sibling could leave the prior unwritten when the bet freezes
+    assert commitment.depends_on == ("experience_prior",)
+    prior_node = next(n for n in current.nodes if n.node_id == "experience_prior")
+    assert prior_node.event_type == "commitment.prior_recall"
+    assert prior_node.depends_on == ("understand_3",)
     # the previous topology stays resolvable for requests pinned to 1.0.0
     legacy = registry.get("direct_answer", version="1.0.0")
     assert len(legacy.nodes) == 9

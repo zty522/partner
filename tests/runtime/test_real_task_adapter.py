@@ -127,3 +127,20 @@ def test_the_executor_reports_a_patch_that_does_not_apply(tmp_path):
     receipt = executor.execute(bet=bet, candidate=candidate, workspace=str(tmp_path / "ws"))
     assert receipt.status == "failed" and receipt.exit_code == 2
     assert "does not match the module" in receipt.failure_reason or "RealTaskError" in receipt.failure_reason
+
+
+def test_siblings_inside_the_target_directory_are_linked_too(tmp_path):
+    """Regression: the shadow must not hide the other modules of the target's package.
+
+    An earlier version linked only the ancestors of the target path, so ``pkg/`` kept
+    exactly one file.  A test that imported any sibling module then failed with
+    ModuleNotFoundError -- a failure that had nothing to do with the candidate.
+    """
+    task_root, proj = _project(tmp_path)
+    sibling = proj / "pkg" / "sibling.py"
+    sibling.write_text("VALUE = 42\n", encoding="utf-8")
+    task = load_task(task_root, "demo")
+    shadow = stage_shadow_repo(str(proj), tmp_path / "sb", "pkg/mod.py", MODULE_V2)
+    assert (shadow / "pkg" / "sibling.py").is_symlink()
+    assert (shadow / "pkg" / "__init__.py").is_symlink()
+    assert not (shadow / "pkg" / "mod.py").is_symlink()

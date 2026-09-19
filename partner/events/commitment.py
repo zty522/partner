@@ -183,15 +183,84 @@ def _declared_real_task(message: str, params: Mapping[str, Any]) -> dict[str, st
     return {"task_id": task_id, "patch_file": patch_file}
 
 
-def _prepare_bounded(ctx, params):
-    """Resolve the bounded bet this Event acts on: spec, store, snapshot, runner.
+#: The counterfactual switch for the recall Event: ``prior=off`` in the message (or a
+#: ``prior_disabled`` parameter) makes the recall node write no prior at all, so the
+#: record Event falls back to the declared values.  Declared, not inferred.
+_PRIOR_OFF_RE = re.compile(r"prior\s*[:=]\s*(off|disabled|empty|none)", re.IGNORECASE)
 
-    Both commitment Events derive the same spec from the same frozen inputs, so the
-    bet the second Event runs is byte-identical to the one the first Event recorded.
+
+def _prior_disabled(message: str, params: Mapping[str, Any]) -> bool:
+    if bool(params.get("prior_disabled")):
+        return True
+    return bool(_PRIOR_OFF_RE.search(str(message or "")))
+
+
+def _class_key_for_spec(spec: Mapping[str, Any]) -> str:
+    """The task class of a declared spec.  Pure: three declared strings, no LLM."""
+    from partner.application.experience_prior import metric_signature, task_class_key
+    return task_class_key(project_id=str(spec.get("project_id") or ""),
+                          action_id=str(spec.get("action_id") or ""),
+                          metric_signature=metric_signature(spec.get("expected_effects") or ()))
+
+
+def _declared_values(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """The decision variables as DECLARED, before any prior is applied."""
+    effects = list(spec.get("expected_effects") or [])
+    primary = next((e for e in effects if str(e.get("kind")) == "delta_over_baseline"),
+                   effects[0] if effects else {})
+    protocol = dict(spec.get("evaluation_protocol") or {})
+    return {"min_delta": float(primary.get("min_delta") or 0.0),
+            "replicates": int(protocol.get("replicates") or 1),
+            "primary_metric": str(primary.get("metric") or ""),
+            "require_baseline_rerun": True}
+
+
+def _apply_prior_to_spec(spec: Mapping[str, Any], *, class_key: str, prior: Mapping[str, Any],
+                         audit: Mapping[str, Any], adjusted: Mapping[str, Any],
+                         action: str) -> dict[str, Any]:
+    """Freeze the prior's effect into the spec.
+
+    Only declared *values* move -- ``min_delta`` and the protocol's ``replicates`` -- so
+    the kernel keeps parsing exactly the same shape.  The adjustment record itself lives
+    at the spec's top level and inside the context snapshot, whose digest the bet freezes
+    as ``context_snapshot_hash``: the before/after values are therefore bound to the
+    frozen record without inventing a kernel field.
     """
-    from partner.application.commitment_bounded_adapter import (
-        bounded_spec, build_bounded_runner, write_bounded_snapshot,
-    )
+    declared = _declared_values(spec)
+    effects: list[dict[str, Any]] = []
+    for effect in (spec.get("expected_effects") or []):
+        row = dict(effect)
+        if "min_delta" in row:
+            row["min_delta"] = float(adjusted["min_delta"])
+        effects.append(row)
+    protocol = dict(spec.get("evaluation_protocol") or {})
+    replicates = int(adjusted["replicates"])
+    note = ""
+    if action != "real_task" and replicates > 1:
+        # The bounded metric action executes one arm run; declaring otherwise would
+        # assert a repetition that never happened.
+        replicates = 1
+        note = "bounded_metric executes a single arm run; repetition rule not applied"
+    protocol["replicates"] = replicates
+    frozen_audit = dict(audit)
+    if note:
+        frozen_audit["replicates_note"] = note
+    frozen_audit["declared"] = {k: declared[k] for k in ("min_delta", "replicates")}
+    frozen_audit["applied"] = {"min_delta": float(adjusted["min_delta"]),
+                              "replicates": replicates}
+    return {**dict(spec), "expected_effects": effects, "evaluation_protocol": protocol,
+            "data_version": f"class:{class_key}", "class_key": class_key,
+            "prior": dict(prior), "prior_adjusted_parameter": frozen_audit,
+            "declared_values": {k: declared[k] for k in ("min_delta", "replicates")}}
+
+
+def _resolve_declared(ctx, params):
+    """The declared bet: spec with declared values, store, and the declared class key.
+
+    Shared by the recall Event and the record Event so both derive byte-identical
+    declared inputs (and therefore the same class key) from the same frozen message.
+    """
+    from partner.application.commitment_bounded_adapter import bounded_spec
     from partner.commitment.store import CommitmentStore
     token = _trace_token(ctx, params)
     job_id = str(getattr(ctx, "job_id", "") or "")
@@ -205,11 +274,8 @@ def _prepare_bounded(ctx, params):
     project_id = str(getattr(ctx, "project_id", "") or "unassigned")
     declared = _declared_real_task(message, params)
     if declared:
-        # A real repository task: the input and the patch are on disk, and the project's
-        # own test runner decides the outcome.
         from partner.application.real_task_adapter import (
-            RealTaskError, build_real_task_runner, load_task, real_task_spec,
-            write_real_task_snapshot,
+            RealTaskError, load_task, real_task_spec,
         )
         task_root = Path(__file__).resolve().parents[2]
         try:
@@ -223,24 +289,295 @@ def _prepare_bounded(ctx, params):
         spec = real_task_spec(job_id=job_id, trace_token=token, task_id=declared["task_id"],
                               project_root=str(task_root), patch_file=declared["patch_file"],
                               task=task, instance_id=instance_id, project_id=project_id)
-        store = CommitmentStore(Path(ctx.workspace), str(spec["run_id"]), str(spec["bet_id"]))
-        snapshot_path = write_real_task_snapshot(
-            store=store, spec=spec, job_id=job_id, trace_token=token, task=task,
-            project_root=str(task_root), patch_file=declared["patch_file"],
-            instance_id=instance_id)
-        runner = build_real_task_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
-        return {"token": token, "job_id": job_id, "spec": spec, "store": store,
-                "runner": runner, "message": message, "action": "real_task",
-                "task_id": declared["task_id"], "patch_file": declared["patch_file"]}, None
-    spec = bounded_spec(job_id=job_id, trace_token=token, message=message,
-                        instance_id=instance_id, project_id=project_id)
+        action = "real_task"
+        action_id = f"real_task:{declared['task_id']}"
+        task_id, patch_file = declared["task_id"], declared["patch_file"]
+    else:
+        spec = bounded_spec(job_id=job_id, trace_token=token, message=message,
+                            instance_id=instance_id, project_id=project_id)
+        action, action_id = "bounded_metric", "bounded_metric"
+        task, task_root, task_id, patch_file = None, None, "", ""
+    spec = {**spec, "action_id": action_id}
+    class_key = _class_key_for_spec(spec)
+    spec = {**spec, "data_version": f"class:{class_key}", "class_key": class_key}
     store = CommitmentStore(Path(ctx.workspace), str(spec["run_id"]), str(spec["bet_id"]))
+    from partner.application.experience_prior import class_components, metric_signature
+    return {"token": token, "job_id": job_id, "message": message, "spec": spec, "store": store,
+            "action": action, "action_id": action_id, "class_key": class_key,
+            "components": class_components(project_id=str(spec.get("project_id") or ""),
+                                           action_id=action_id,
+                                           metric_signature=metric_signature(spec["expected_effects"])),
+            "task": task, "task_root": task_root, "task_id": task_id,
+            "patch_file": patch_file, "instance_id": instance_id,
+            "project_id": project_id, "prior_disabled": _prior_disabled(message, params)}, None
+
+
+def commitment_prior_recall(ctx, params):
+    """Read same-class past settlements and freeze them into a prior for this bet.
+
+    Strictly read-only over history: this Event never rewrites a settlement, an
+    ExperienceRecord or an earlier bet.  Its one output is ``context/prior.json`` inside
+    the store of the bet it was called for, plus a summary that lands in the flow's node
+    outputs and therefore in the ledger.  When there is no same-class history the prior is
+    explicitly empty -- no value is filled in.
+    """
+    from partner.application.experience_prior import (
+        clear_prior, empty_prior, scan_settled_bets, select_same_class, summarize_prior,
+        write_prior,
+    )
+    bundle, failure = _resolve_declared(ctx, params)
+    if failure is not None:
+        return failure
+    job_id, spec, store = bundle["job_id"], bundle["spec"], bundle["store"]
+    class_key = bundle["class_key"]
+    if bundle["prior_disabled"]:
+        cleared = clear_prior(store.root)
+        return {"ok": True, "status": "completed",
+                "summary": f"prior disabled for {class_key}: declared values stand",
+                "semantic_output": {"prior_class_key": class_key, "prior_row_count": 0,
+                                    "prior_empty": True, "prior_disabled": True,
+                                    "prior_cleared": cleared, "trace_token": bundle["token"],
+                                    "job_id": job_id, "action": bundle["action"],
+                                    "next_event": "commitment.bet_record"},
+                "files": [], "evidence_refs": [], "token_usage": {}}
+    rows = scan_settled_bets(Path(ctx.workspace), exclude_bet_id=str(spec["bet_id"]))
+    same_class = select_same_class(rows, class_key)
+    prior = summarize_prior(same_class, class_key=class_key, components=bundle["components"])
+    path = write_prior(store.root, prior)
+    noted = False
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        _init_jobs(Path(ctx.workspace)).note(
+            job_id, actor="commitment.prior_recall", kind="commitment_prior_recalled",
+            detail={"class_key": class_key, "prior_row_count": prior["row_count"],
+                    "prior_empty": prior["empty"], "counts": prior["counts"],
+                    "prior_bet_ids": [r.get("bet_id") for r in prior["rows"]],
+                    "local_prior_suppressed": len(rows) - len(same_class),
+                    "prior_path": str(path), "trace_token": bundle["token"]})
+        noted = True
+    except Exception:  # noqa: BLE001 -- the prior is the deliverable, the note is the trail
+        noted = False
+    return {"ok": True, "status": "completed",
+            "summary": (f"prior for {class_key}: {prior['row_count']} same-class "
+                        f"settlement(s) of {len(rows)} settled bet(s)"),
+            "semantic_output": {"prior_class_key": class_key,
+                                "prior_row_count": prior["row_count"],
+                                "prior_empty": prior["empty"], "prior_disabled": False,
+                                "prior_counts": prior["counts"],
+                                "prior_bet_ids": [r.get("bet_id") for r in prior["rows"]],
+                                "prior_sources": prior["sources"],
+                                "scanned_settled_bets": len(rows),
+                                "prior_path": str(path), "noted_on_timeline": noted,
+                                "trace_token": bundle["token"], "job_id": job_id,
+                                "action": bundle["action"],
+                                "next_event": "commitment.bet_record"},
+            "files": [str(path)], "evidence_refs": [], "token_usage": {}}
+
+
+#: Declared draft tokens.  The contradiction check is a literal substring test, not an
+#: LLM judgement: the draft either makes a claim the settlement refutes, or it does not.
+_NEGATIVE_DRAFT_TOKENS = ("未取得进展", "执行失败", "没有留下终态回执", "无法判断", "未完成",
+                          "被证伪", "未通过", "失败")
+_POSITIVE_DRAFT_TOKENS = ("已取得进展", "已通过", "已完成", "成功", "优于基线", "达成")
+#: With a supported verdict that *did* beat its baseline, a draft claiming there was no
+#: improvement contradicts it just as loudly as one claiming outright failure.
+_NEGATIVE_IMPROVEMENT_TOKENS = ("未取得改善", "没有取得改善", "没有改善", "未见改善", "无改善",
+                                "未优于基线", "没有提升", "未见提升")
+
+
+def draft_contradicts(draft: str, settlement: Mapping[str, Any]) -> tuple[bool, list[str]]:
+    """Pure, declared-token check: does the draft's prose contradict the settlement?"""
+    text = str(draft or "")
+    settlement_class = str(settlement.get("settlement_class") or "")
+    hits: list[str] = []
+    if settlement_class == "supported":
+        hits += [t for t in _NEGATIVE_DRAFT_TOKENS if t in text]
+        if settlement.get("improvement_over_baseline"):
+            hits += [t for t in _NEGATIVE_IMPROVEMENT_TOKENS if t in text]
+        else:
+            hits += [t for t in ("优于基线", "改善", "提升") if t in text]
+    elif settlement_class == "refuted":
+        hits += [t for t in _POSITIVE_DRAFT_TOKENS if t in text]
+    return (bool(hits), hits)
+
+
+def _settlement_block(settlement: Mapping[str, Any]) -> str:
+    """The settlement as the reply's factual header -- every field spelled out."""
+    blockers = ", ".join(str(b) for b in (settlement.get("publish_blockers") or [])) or "none"
+    return ("[commitment] settlement_class={cls} improvement_over_baseline={imp} "
+            "supported_claim={claim} publish_eligible={pub} publish_blockers={blockers}\n"
+            "bet={bet} settlement={sid} expectations_met={met}").format(
+        cls=settlement.get("settlement_class"), imp=settlement.get("improvement_over_baseline"),
+        claim=settlement.get("supported_claim"), pub=settlement.get("publish_eligible"),
+        blockers=blockers, bet=settlement.get("bet_id"), sid=settlement.get("settlement_id"),
+        met=settlement.get("expectations_met"))
+
+
+def _reconcile_draft(params: Mapping[str, Any]) -> str:
+    outputs = params.get("flow_outputs") if isinstance(params.get("flow_outputs"), dict) else {}
+    for key in ("deduplicate", "message_critic", "critic", "compose"):
+        value = outputs.get(key)
+        if isinstance(value, dict):
+            text = str(value.get("message") or value.get("model_output") or "").strip()
+            if text:
+                return text
+    return str(params.get("message") or params.get("text") or "").strip()
+
+
+def commitment_reply_reconcile(ctx, params):
+    """Make the commitment settlement the source of truth for the outgoing reply.
+
+    The draft prose and the machine verdict are produced by different parts of the flow,
+    and they can disagree (that happened for real: a ``supported`` settlement went out
+    with a reply that said the task made no progress).  This Event runs before the send
+    step: when the flow carries a settlement, the reply body is rebuilt from it, a
+    contradicting draft is dropped and the contradiction is recorded on the timeline.
+    """
+    from partner.application.experience_prior import _read_json as _read
+    job_id = str(getattr(ctx, "job_id", "") or "")
+    store_root = (Path(str(getattr(ctx, "workspace", ""))) / "state" / "commitments"
+                  / f"event_flow_{job_id}" / f"bet_{job_id}")
+    state = _read(store_root / "state.json") or {}
+    settlement = None
+    settlement_dir = store_root / "settlement"
+    if settlement_dir.is_dir():
+        names = sorted(_p.name for _p in settlement_dir.iterdir() if _p.is_file())
+        if names:
+            settlement = _read(settlement_dir / names[-1]) or None
+    if not isinstance(settlement, dict) or not settlement:
+        return {"ok": True, "status": "completed",
+                "summary": "no commitment settlement in this flow; the draft stands",
+                "semantic_output": {"settlement_present": False, "job_id": job_id,
+                                    "store": str(store_root)},
+                "files": [], "evidence_refs": [], "token_usage": {}}
+    draft = _reconcile_draft(params)
+    contradiction, hits = draft_contradicts(draft, settlement)
+    body = _settlement_block(settlement)
+    if contradiction:
+        # the contradiction and the tokens that triggered it are recorded in the event
+        # log and in reply_reconciliation.json -- the reply itself carries the verdict,
+        # not a repetition of what the draft got wrong
+        body += "\n\n（回复草稿与本裁决矛盾，已按裁决改写；草稿表述被丢弃，矛盾已记入日志。）"
+    elif draft:
+        # The draft is the flow's own prose, not the verdict's: label it so a reader never
+        # mistakes an unvetted narrative for something the settlement endorses.
+        body += "\n\n【流内草稿·未经裁决背书】\n" + draft
+    mentions = any(str(settlement.get(field)) in draft
+                    for field in ("settlement_class", "supported_claim")) or \
+        str(settlement.get("settlement_class")) in draft
+    artifact_error = ""
+    try:
+        (store_root / "context").mkdir(parents=True, exist_ok=True)
+        (store_root / "reply_reconciliation.json").write_text(json.dumps({
+            "job_id": job_id, "settlement_id": settlement.get("settlement_id"),
+            "settlement_class": settlement.get("settlement_class"),
+            "improvement_over_baseline": settlement.get("improvement_over_baseline"),
+            "supported_claim": settlement.get("supported_claim"),
+            "publish_eligible": settlement.get("publish_eligible"),
+            "publish_blockers": settlement.get("publish_blockers"),
+            "contradiction": contradiction, "contradiction_tokens": hits,
+            "draft_digest": __import__("hashlib").sha256(draft.encode("utf-8")).hexdigest(),
+            "draft_mentions_verdict": mentions,
+            "body_digest": __import__("hashlib").sha256(body.encode("utf-8")).hexdigest(),
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 -- the reply body is the deliverable, but a
+        # failed audit write must be visible instead of silently dropped
+        artifact_error = f"{type(exc).__name__}: {exc}"
+    noted = False
+    try:
+        from partner.index.job_repository import init as _init_jobs
+        if contradiction:
+            _init_jobs(Path(str(getattr(ctx, "workspace", "")))).note(
+                job_id, actor="commitment.reply_reconcile",
+                kind="commitment_reply_contradiction",
+                detail={"settlement_id": settlement.get("settlement_id"),
+                        "settlement_class": settlement.get("settlement_class"),
+                        "tokens": hits, "draft_digest": __import__("hashlib").sha256(
+                            draft.encode("utf-8")).hexdigest()})
+            noted = True
+    except Exception:  # noqa: BLE001
+        noted = False
+    return {"ok": True, "status": "completed",
+            # ``settlement_message`` at the top level as well: the delivery Event reads
+            # node outputs by node id, and the message-compose Event already sets the
+            # convention of exposing the outgoing text directly.
+            "settlement_message": body,
+            "draft_mentions_verdict": mentions,
+            "summary": (f"reply rebuilt from settlement {settlement.get('settlement_id')}"
+                        + ("; draft contradicted it" if contradiction else "")),
+            "semantic_output": {"settlement_present": True,
+                                "settlement_message": body,
+                                "settlement_id": settlement.get("settlement_id"),
+                                "settlement_class": settlement.get("settlement_class"),
+                                "improvement_over_baseline": settlement.get(
+                                    "improvement_over_baseline"),
+                                "supported_claim": settlement.get("supported_claim"),
+                                "publish_eligible": settlement.get("publish_eligible"),
+                                "publish_blockers": settlement.get("publish_blockers"),
+                                "contradiction": contradiction,
+                                "contradiction_tokens": hits,
+                                "contradiction_noted_on_timeline": noted,
+                                "draft_replaced": contradiction, "job_id": job_id,
+                                "draft_mentions_verdict": mentions,
+                                "artifact_error": artifact_error},
+            "files": ([str(store_root / "reply_reconciliation.json")]
+                      if not artifact_error else []),
+            "evidence_refs": [str(settlement.get("settlement_id") or "")], "token_usage": {}}
+
+
+def _prepare_bounded(ctx, params):
+    """Resolve the bounded bet this Event acts on: spec, store, snapshot, runner.
+
+    Both commitment Events derive the same spec from the same frozen inputs, so the
+    bet the second Event runs is byte-identical to the one the first Event recorded.
+    """
+    from partner.application.commitment_bounded_adapter import (
+        build_bounded_runner, write_bounded_snapshot,
+    )
+    from partner.application.experience_prior import (
+        adjust_declared, empty_prior, read_prior,
+    )
+    bundle, failure = _resolve_declared(ctx, params)
+    if failure is not None:
+        return None, failure
+    token, job_id = bundle["token"], bundle["job_id"]
+    message = bundle["message"]
+    instance_id = bundle["instance_id"]
+    spec = bundle["spec"]
+    # The prior the recall Event left, if any.  A prior for a different class must never
+    # leak into this bet, and an absent one is explicitly empty: declared values stand.
+    prior = read_prior(bundle["store"].root)
+    if str(prior.get("class_key") or "") != bundle["class_key"]:
+        prior = empty_prior(class_key=bundle["class_key"], reason="prior_class_mismatch")
+    adjusted, audit = adjust_declared(_declared_values(spec), prior)
+    spec = _apply_prior_to_spec(spec, class_key=bundle["class_key"], prior=prior,
+                                audit=audit, adjusted=adjusted, action=bundle["action"])
+    bundle = {**bundle, "spec": spec}
+    if bundle["action"] == "real_task":
+        # A real repository task: the input and the patch are on disk, and the project's
+        # own test runner decides the outcome.
+        from partner.application.real_task_adapter import (build_real_task_runner,
+                                                           write_real_task_snapshot)
+        snapshot_path = write_real_task_snapshot(
+            store=bundle["store"], spec=spec, job_id=job_id, trace_token=token,
+            task=bundle["task"], project_root=str(bundle["task_root"]),
+            patch_file=bundle["patch_file"], instance_id=instance_id,
+            prior=spec.get("prior"), prior_audit=spec.get("prior_adjusted_parameter"))
+        runner = build_real_task_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
+        return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
+                "runner": runner, "message": message, "action": "real_task",
+                "task_id": bundle["task_id"], "patch_file": bundle["patch_file"],
+                "class_key": bundle["class_key"],
+                "prior_adjusted_parameter": spec.get("prior_adjusted_parameter")}, None
     snapshot_path = write_bounded_snapshot(
-        store=store, spec=spec, job_id=job_id, trace_token=token, message=message,
-        instance_id=instance_id)
+        store=bundle["store"], spec=spec, job_id=job_id, trace_token=token, message=message,
+        instance_id=instance_id, prior=spec.get("prior"),
+        prior_audit=spec.get("prior_adjusted_parameter"))
     runner = build_bounded_runner(Path(ctx.workspace), spec, snapshot_path=snapshot_path)
-    return {"token": token, "job_id": job_id, "spec": spec, "store": store,
-            "runner": runner, "message": message, "action": "bounded_metric"}, None
+    return {"token": token, "job_id": job_id, "spec": spec, "store": bundle["store"],
+            "runner": runner, "message": message, "action": "bounded_metric",
+            "class_key": bundle["class_key"],
+            "prior_adjusted_parameter": spec.get("prior_adjusted_parameter")}, None
 
 
 def commitment_bet_record(ctx, params):
@@ -361,6 +698,16 @@ def commitment_bet_execute(ctx, params):
 
 DEFINITIONS = [
     EventDefinition(
+        "commitment.prior_recall", "commitment",
+        "Read same-class past settlements into a prior for this bet (read-only over history)",
+        commitment_prior_recall, execution_method="local", produces_artifact=True,
+        timeout_seconds=120, concurrency_scope="project"),
+    EventDefinition(
+        "commitment.reply_reconcile", "commitment",
+        "Make the commitment settlement the source of truth for the outgoing reply",
+        commitment_reply_reconcile, execution_method="local", produces_artifact=True,
+        timeout_seconds=120, concurrency_scope="project"),
+    EventDefinition(
         "commitment.bet_run", "commitment",
         "Run one bounded commitment bet to a terminal state (idempotent on replay)",
         commitment_bet_run, execution_method="local", produces_artifact=True,
@@ -387,4 +734,5 @@ DEFINITIONS = [
 
 __all__ = ["DEFINITIONS", "KERNEL_STATE_EVENTS", "map_kernel_state", "commitment_bet_run",
            "commitment_bet_record", "commitment_bet_execute",
-           "commitment_bet_state", "commitment_bet_settlement"]
+           "commitment_bet_state", "commitment_bet_settlement",
+           "commitment_prior_recall", "commitment_reply_reconcile", "draft_contradicts"]

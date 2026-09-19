@@ -1,0 +1,14 @@
+{
+  "task_id": "fix_dgm_lineage_contract",
+  "title": "dgm adapter contract: lineage_edges() signature does not match the contract",
+  "bug_report": "bug_report.md",
+  "repo_root": "/mnt/e/work/partner",
+  "target_module": "partner/research/adapters/dgm.py",
+  "test_target": [
+    "tests/test_adapter_contracts.py",
+    "-k",
+    "lineage"
+  ],
+  "timeout_seconds": 180,
+  "patch_file": "patch.diff"
+}

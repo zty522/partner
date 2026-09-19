@@ -1,0 +1,33 @@
+<<<FIND
+def lineage_edges(workspace: "Path", run_id: str) -> list[tuple[str, str]]:
+    """Return [(parent_id, child_id), ...] edges from the persisted archive."""
+    nodes = _read_archive(workspace, run_id)
+    out = []
+    for n in nodes:
+        if n.get("parent_id"):
+            out.append((n["parent_id"], n["node_id"]))
+    return sorted(out)
+>>>REPL
+def lineage_edges(workspace_or_nodes, run_id: str = "", *,
+                  nodes: list | None = None) -> list[tuple[str, str]]:
+    """Return deduplicated, sorted ``[(parent_id, child_id), ...]`` lineage edges.
+
+    Both call shapes exist in this project and both must work:
+
+    * ``lineage_edges(workspace, run_id)`` reads the persisted per-run archive;
+    * ``lineage_edges([node, ...])`` works on explicit in-memory nodes, which is what the
+      adapter contract exercises (``DGMLineageNode`` instances and raw dicts alike).
+    """
+    if nodes is None and isinstance(workspace_or_nodes, (list, tuple)):
+        nodes = list(workspace_or_nodes)
+    elif nodes is None:
+        nodes = _read_archive(workspace_or_nodes, run_id)
+    out = []
+    for n in (nodes or []):
+        if isinstance(n, dict):
+            parent_id, node_id = n.get("parent_id"), n.get("node_id")
+        else:
+            parent_id, node_id = getattr(n, "parent_id", None), getattr(n, "node_id", None)
+        if parent_id and node_id:
+            out.append((str(parent_id), str(node_id)))
+    return sorted(set(out))

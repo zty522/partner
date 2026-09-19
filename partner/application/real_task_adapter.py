@@ -124,6 +124,11 @@ def stage_shadow_repo(repo_root: str | os.PathLike, sandbox: Path, target_rel: s
     candidate arm would silently measure the control.  Here every entry is a symlink
     into the real repository except the declared target file, which is a real file
     holding the arm's content.  The real repository is never written to.
+
+    Note the last step: the *siblings inside the target's own directory* must be linked
+    too.  An earlier version of this function linked only the ancestors, so a test that
+    imported any other module from the same package failed with ``ModuleNotFoundError``
+    -- which showed up as a failure that had nothing to do with the candidate.
     """
     repo_root = Path(repo_root).resolve()
     shadow = sandbox / "repo"
@@ -137,11 +142,25 @@ def stage_shadow_repo(repo_root: str | os.PathLike, sandbox: Path, target_rel: s
             if child.name in {".git"} or child.name.startswith("__pycache__"):
                 continue
             destination = shadow_dir / child.name
-            if child.name == part:
-                destination.mkdir(parents=True, exist_ok=True)
-            elif not destination.exists():
+            if not destination.exists():
                 os.symlink(child, destination)
+        # descend one level for real: the component on the path becomes a real directory
+        # so the single replaced file has somewhere real to live
         real_dir = real_dir / part
+        shadow_component = shadow_dir / part
+        if shadow_component.is_symlink():
+            shadow_component.unlink()
+        shadow_component.mkdir(parents=True, exist_ok=True)
+    target_dir = shadow.joinpath(*parts[:-1])
+    target_name = parts[-1]
+    for child in real_dir.iterdir():
+        if child.name in {".git"} or child.name.startswith("__pycache__"):
+            continue
+        if child.name == target_name:
+            continue
+        destination = target_dir / child.name
+        if not destination.exists():
+            os.symlink(child, destination)
     target = shadow.joinpath(*parts)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(source_text, encoding="utf-8")
@@ -180,6 +199,7 @@ class RealTaskExecutor:
             if not module_src.is_file():
                 raise RealTaskError(f"target module not found: {module_src}")
             patch_bytes = 0
+            repeats: list[dict[str, Any]] = []
             if arm == "candidate":
                 patch_file = str(params.get("patch_file") or "")
                 if not patch_file:
@@ -196,10 +216,35 @@ class RealTaskExecutor:
                 arm_source = module_src.read_text(encoding="utf-8")
             shadow = stage_shadow_repo(repo_root, sandbox, target_rel, arm_source)
             patched = shadow.joinpath(*Path(target_rel).parts)
+            if arm == "candidate":
+                # An adjusted prior may ask for one more repetition.  It is really
+                # executed here: N independent sandbox runs, each recorded in the
+                # artifact, so declaring replicates=2 is never an overclaim.
+                replicates = max(1, int(params.get("replicates") or 1))
+                repeats = []
+                for index in range(1, replicates):
+                    repeat_sandbox = self._sandbox(workspace, bet.bet_id,
+                                                   f"{arm}_r{index + 1}")
+                    repeat_shadow = stage_shadow_repo(repo_root, repeat_sandbox, target_rel,
+                                                      arm_source)
+                    repeats.append({"replicate": index + 1,
+                                    **run_test_target(task, overlay=repeat_shadow,
+                                                      sandbox=repeat_sandbox)})
             # both arms run in a shadow repo through the same mechanism, so the only
             # difference between them is that one file's content
             run = run_test_target(task, overlay=shadow, sandbox=sandbox)
             payload = {"domain_version": DOMAIN_VERSION, "arm": arm,
+                       "attempted_replicates": max(1, int(params.get("replicates") or 1)),
+                       "replicates_executed": 1 + len(repeats),
+                       "replicate_results": [
+                           {"replicate": r["replicate"], "tests_passed": r["tests_passed"],
+                            "tests_failed": r["tests_failed"], "exit_code": r["exit_code"],
+                            "module_sha256": None, "stdout_sha256": r["stdout_sha256"]}
+                           for r in (repeats)],
+                       "replicates_agreed": all(
+                           (r["tests_passed"], r["tests_failed"]) == (run["tests_passed"],
+                                                                      run["tests_failed"])
+                           for r in (repeats)),
                        "task_id": str(task["task_id"]), "module": target_rel,
                        "module_sha256": file_sha256(patched), "patch_bytes": patch_bytes,
                        "executed_at": time.strftime("%Y-%m-%dT%H:%M:%S"), **run}
@@ -380,7 +425,9 @@ class _SnapshotFileReader:
 
 def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any], job_id: str,
                             trace_token: str, task: Mapping[str, Any], project_root: str,
-                            patch_file: str, instance_id: str = "") -> Path:
+                            patch_file: str, instance_id: str = "",
+                            prior: Mapping[str, Any] | None = None,
+                            prior_audit: Mapping[str, Any] | None = None) -> Path:
     path = store.path("context", "snapshot.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     patch_path = Path(project_root).joinpath(*TASKS_DIRNAME, str(task["task_id"]), patch_file)
@@ -395,11 +442,19 @@ def write_real_task_snapshot(*, store: CommitmentStore, spec: Mapping[str, Any],
         "patch_file": patch_file,
         "patch_sha256": (file_sha256(patch_path) if patch_path.is_file() else ""),
         "message": f"real task {task['task_id']} via {trace_token}",
+        # The prior this bet was frozen with, and the before/after of every decision
+        # variable the prior moved.  The snapshot digest is frozen into the bet as
+        # context_snapshot_hash, so this audit is bound to the frozen record.
+        "prior": dict(prior or {}),
+        "prior_adjusted_parameter": dict(prior_audit or {}),
+        "task_class_key": (prior or {}).get("class_key") or "",
         "candidate_space": [{
             "candidate_id": f"patch_{Path(patch_file).stem}",
             "description": f"apply the declared patch {patch_file}",
             "params": {"task_id": str(task["task_id"]), "patch_file": patch_file,
-                       "project_root": str(project_root), "arm": "candidate"},
+                       "project_root": str(project_root), "arm": "candidate",
+                       "replicates": int((spec.get("evaluation_protocol") or {})
+                                         .get("replicates") or 1)},
             "prior": {"expected_gain": 0.0, "risk": 0.0},
             "rationale": "the single declared treatment difference of this bet",
         }],

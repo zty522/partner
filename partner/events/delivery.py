@@ -101,6 +101,35 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     raw = str(params.get("message") or params.get("text") or prior.get("message")
               or composed.get("message") or composed.get("model_output")
               or prior.get("model_output") or prior.get("summary") or "").strip()
+    # The commitment settlement outranks the draft: when the reconcile Event produced a
+    # settlement-derived body, that body IS the message.  A draft that contradicted the
+    # settlement was already dropped there (and the contradiction recorded).
+    def _settlement_message(value):
+        """The reconcile Event's body, from either shape the flow can hand us.
+
+        The controller stores a node's whole handler result under its node id, so the
+        body sits inside ``semantic_output``; a flattened dict is accepted too.  Reading
+        only the top level silently missed it and sent the raw draft.
+        """
+        if not isinstance(value, dict):
+            return ""
+        direct = str(value.get("settlement_message") or "").strip()
+        if direct:
+            return direct
+        nested = value.get("semantic_output")
+        if isinstance(nested, dict) and nested.get("settlement_present"):
+            return str(nested.get("settlement_message") or "").strip()
+        return ""
+
+    reconcile = next((v for v in reversed(list(flow_outputs.values()))
+                      if isinstance(v, dict) and _settlement_message(v)), {})
+    settlement_body = _settlement_message(reconcile)
+    if settlement_body:
+        # The reconcile body is already complete: it carries the verdict, and the draft
+        # only when the draft did not contradict it.  Appending the draft again would
+        # duplicate it and break the body digest the reconcile Event recorded.
+        raw = settlement_body
+        prepend = False
     status_line = _job_status_line(ctx, params, flow_outputs)
     prepend = bool(params.get("prepend_status", False))
     if status_line and prepend and raw:

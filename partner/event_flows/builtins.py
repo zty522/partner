@@ -46,13 +46,18 @@ DIRECT_ANSWER = Flow("direct_answer", "1.2.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
     Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
-    Node("commitment", "commitment.bet_record", ("understand_3",)),
+    # The recall node runs before the bet is frozen: same-class past settlements become a
+    # prior the record node is obliged to consume.  The reconcile node runs before the
+    # send: the settlement, not the draft prose, is the source of truth for the reply.
+    Node("experience_prior", "commitment.prior_recall", ("understand_3",)),
+    Node("commitment", "commitment.bet_record", ("experience_prior",)),
     Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
     Node("answer", "interaction.direct_answer", ("understand_3",)),
     Node("compose", "presentation.message_compose", ("answer",)),
     Node("critic", "presentation.message_critic", ("compose",)),
     Node("deduplicate", "presentation.message_deduplicate", ("critic",)),
-    Node("send", "delivery.send_text", ("deduplicate",)),
+    Node("commitment_reconcile", "commitment.reply_reconcile", ("deduplicate",)),
+    Node("send", "delivery.send_text", ("commitment_reconcile",)),
     Node("verify", "delivery.verify", ("send",)),
 ), "Answer plus a recorded and machine-settled commitment bet for the message.")
 
@@ -65,7 +70,11 @@ PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
     # commitment nodes live in both: the kernel must be reachable whichever flow the
     # instance's own routing chooses.  Both nodes are bounded, deterministic and
     # isolated -- they perform no project work and call no LLM.
-    Node("commitment", "commitment.bet_record", ("understand_3",)),
+    # The recall node runs before the bet is frozen: same-class past settlements become a
+    # prior the record node is obliged to consume.  The reconcile node runs before the
+    # send: the settlement, not the draft prose, is the source of truth for the reply.
+    Node("experience_prior", "commitment.prior_recall", ("understand_3",)),
+    Node("commitment", "commitment.bet_record", ("experience_prior",)),
     Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
     Node("recall", "memory.context_recall", ("understand_3",)),
     Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall",), optional=True),
@@ -82,7 +91,8 @@ PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
     Node("compose", "presentation.message_compose", ("notify",)),
     Node("message_critic", "presentation.message_critic", ("compose",)),
     Node("deduplicate", "presentation.message_deduplicate", ("message_critic",)),
-    Node("channel", "delivery.channel_route", ("deduplicate",)),
+    Node("commitment_reconcile", "commitment.reply_reconcile", ("deduplicate",)),
+    Node("channel", "delivery.channel_route", ("commitment_reconcile",)),
     Node("send", "delivery.send_text", ("channel",)),
     Node("delivery_verify", "delivery.verify", ("send",)),
 ), "One falsifiable project step; learning/evolution are inserted only when evidence calls for them.")
@@ -277,7 +287,9 @@ LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (
     replace(next(_f for _f in DEFINITIONS if _f.name == "project_iteration"),
             nodes=tuple(_n for _n in next(_f for _f in DEFINITIONS
                                           if _f.name == "project_iteration").nodes
-                        if _n.node_id not in {"commitment", "commitment_execute"})),
+                        if _n.node_id not in {"commitment", "commitment_execute",
+                                              "experience_prior",
+                                              "commitment_reconcile"})),
 )
 _updated=[]
 for _flow in DEFINITIONS:
