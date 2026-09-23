@@ -132,7 +132,7 @@ def test_both_message_flows_reach_the_commitment_nodes():
     """The router picks direct_answer or project_iteration by intent, so the kernel
     has to be reachable from both, and older topologies must stay resolvable."""
     registry = build_flow_registry()
-    for name, version in (("direct_answer", "1.2.0"), ("project_iteration", "2.6.0")):
+    for name, version in (("direct_answer", "1.2.0"), ("project_iteration", "3.1.0")):
         flow = registry.get(name)
         assert flow.version == version, (name, flow.version)
         node_ids = [n.node_id for n in flow.nodes]
@@ -147,6 +147,7 @@ def test_both_message_flows_reach_the_commitment_nodes():
     assert "commitment" in v11 and "commitment_execute" not in v11
     assert "commitment" not in [n.node_id for n in
                                 registry.get("project_iteration", version="2.5.0").nodes]
+    assert registry.get("project_iteration", version="2.6.0").version == "2.6.0"
 
 
 def test_the_handlers_take_one_bet_from_recorded_to_settled(tmp_path):

@@ -62,7 +62,7 @@ DIRECT_ANSWER = Flow("direct_answer", "1.2.0", (
 ), "Answer plus a recorded and machine-settled commitment bet for the message.")
 
 
-PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
+PROJECT_ITERATION_V2_5 = Flow("project_iteration", "2.5.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
     Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
@@ -98,7 +98,45 @@ PROJECT_ITERATION = Flow("project_iteration", "2.5.0", (
 ), "One falsifiable project step; learning/evolution are inserted only when evidence calls for them.")
 
 
-ACTIVE_LEARNING = Flow("active_learning", "1.0.0", (
+PROJECT_ITERATION = Flow("project_iteration", "3.0.0", (
+    Node("understand_1", "interaction.intent_observe"),
+    Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
+    Node("understand_3", "interaction.intent_synthesize", ("understand_2",)),
+    Node("experience_prior", "commitment.prior_recall", ("understand_3",)),
+    Node("commitment", "commitment.bet_record", ("experience_prior",)),
+    Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
+    Node("recall", "memory.context_recall", ("understand_3",)),
+    Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall",), optional=True),
+    Node("inspect", "project.state_inspect", ("pre_iteration_reflect", "recall")),
+    # The domain LLM proposes and attacks a finite candidate set.  Core v1 then
+    # predicts and judges in shadow before freezing the domain's final choice.
+    Node("plan", "project.plan_propose", ("inspect",)),
+    Node("core_state", "core.state_build", ("plan",), parameters={"domain": "project"}),
+    Node("core_forecast", "core.latent_forecast", ("core_state",)),
+    Node("core_jev", "core.jev_evaluate", ("core_state",)),
+    Node("core_commit", "core.commitment_freeze", ("core_forecast", "core_jev")),
+    Node("execute", "project.action_execute", ("core_commit",), continue_on_failure=True),
+    Node("verify", "project.outcome_verify", ("execute",)),
+    Node("reflect", "project.outcome_reflect", ("verify",)),
+    Node("core_settlement", "core.settlement", ("reflect",),
+         parameters={"evaluated_node": "verify"}),
+    Node("reflect_to_evolve", "evolution.reflect_to_evolve", ("reflect",), optional=True),
+    Node("remember", "memory.lesson_extract", ("reflect",), optional=True),
+    Node("route", "core.route_next", ("remember", "core_settlement")),
+    Node("continuation", "project.continuation_propose", ("route",),
+         when_route="continue_project", optional=True),
+    Node("notify", "presentation.notification_decide", ("continuation",)),
+    Node("compose", "presentation.message_compose", ("notify",)),
+    Node("message_critic", "presentation.message_critic", ("compose",)),
+    Node("deduplicate", "presentation.message_deduplicate", ("message_critic",)),
+    Node("commitment_reconcile", "commitment.reply_reconcile", ("deduplicate",)),
+    Node("channel", "delivery.channel_route", ("commitment_reconcile",)),
+    Node("send", "delivery.send_text", ("channel",)),
+    Node("delivery_verify", "delivery.verify", ("send",)),
+), "Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route.")
+
+
+ACTIVE_LEARNING_V1 = Flow("active_learning", "1.0.0", (
     Node("recall", "memory.context_recall"),
     Node("question", "active_learning.question_formulate", ("recall",)),
     Node("source_plan", "active_learning.source_plan", ("question",)),
@@ -113,7 +151,28 @@ ACTIVE_LEARNING = Flow("active_learning", "1.0.0", (
 ), "External knowledge acquisition with source and claim-level verification.")
 
 
-SELF_EVOLUTION = Flow("self_evolution", "1.0.0", (
+ACTIVE_LEARNING = Flow("active_learning", "2.0.0", (
+    Node("recall", "memory.context_recall"),
+    Node("question", "active_learning.question_formulate", ("recall",)),
+    Node("source_plan", "active_learning.source_plan", ("question",)),
+    Node("retrieve", "active_learning.source_retrieve", ("source_plan",)),
+    Node("read", "active_learning.source_read", ("retrieve",)),
+    Node("crosscheck", "active_learning.claim_crosscheck", ("read",)),
+    Node("synthesize", "active_learning.synthesize", ("crosscheck",)),
+    Node("adoption", "active_learning.adoption_candidate", ("synthesize",)),
+    Node("core_state", "core.state_build", ("adoption",), parameters={"domain": "active_learning"}),
+    Node("core_forecast", "core.latent_forecast", ("core_state",)),
+    Node("core_jev", "core.jev_evaluate", ("core_state",)),
+    Node("core_commit", "core.commitment_freeze", ("core_forecast", "core_jev")),
+    Node("matched", "active_learning.matched_verify", ("core_commit",)),
+    Node("core_settlement", "core.settlement", ("matched",),
+         parameters={"evaluated_node": "matched"}),
+    Node("remember", "memory.belief_update", ("matched", "core_settlement")),
+    Node("resume", "core.route_next", ("remember", "core_settlement")),
+), "Core v1 active learning: verified sources become a frozen adoption experiment and settlement.")
+
+
+SELF_EVOLUTION_V1 = Flow("self_evolution", "1.0.0", (
     Node("observe", "self_evolution.issue_observe"),
     Node("diagnose", "self_evolution.issue_diagnose", ("observe",)),
     Node("candidate", "self_evolution.candidate_propose", ("diagnose",)),
@@ -126,6 +185,27 @@ SELF_EVOLUTION = Flow("self_evolution", "1.0.0", (
     Node("habit", "memory.habit_propose", ("decision",), optional=True),
     Node("resume", "selector.assess_next", ("habit",)),
 ), "Partner-internal mechanism improvement with isolated matched evidence and rollback.")
+
+
+SELF_EVOLUTION = Flow("self_evolution", "2.0.0", (
+    Node("observe", "self_evolution.issue_observe"),
+    Node("diagnose", "self_evolution.issue_diagnose", ("observe",)),
+    Node("candidate", "self_evolution.candidate_propose", ("diagnose",)),
+    Node("critic", "self_evolution.candidate_critic", ("candidate",)),
+    Node("core_state", "core.state_build", ("critic",), parameters={"domain": "self_evolution"}),
+    Node("core_forecast", "core.latent_forecast", ("core_state",)),
+    Node("core_jev", "core.jev_evaluate", ("core_state",)),
+    Node("core_commit", "core.commitment_freeze", ("core_forecast", "core_jev")),
+    Node("isolate", "self_evolution.candidate_isolate", ("core_commit",)),
+    Node("baseline", "self_evolution.baseline_execute", ("isolate",)),
+    Node("candidate_run", "self_evolution.candidate_execute", ("baseline",)),
+    Node("compare", "self_evolution.matched_compare", ("candidate_run",)),
+    Node("decision", "self_evolution.promotion_decide", ("compare",)),
+    Node("core_settlement", "core.settlement", ("decision",),
+         parameters={"evaluated_node": "decision"}),
+    Node("habit", "memory.habit_propose", ("decision", "core_settlement"), optional=True),
+    Node("resume", "core.route_next", ("habit", "core_settlement")),
+), "Core v1 self-evolution: reproducible mechanism issue, isolated candidate, matched settlement.")
 
 
 MESSAGE_DELIVERY = Flow("message_delivery", "1.0.0", (
@@ -278,15 +358,34 @@ DEFINITIONS = [DIRECT_ANSWER, PROJECT_ITERATION, ACTIVE_LEARNING, SELF_EVOLUTION
 # Snapshot existing graph definitions before installing the illustrated delivery
 # graph. Pinned historical requests continue to resolve their original topology.
 from dataclasses import replace
+
+
+def _notification_gated_version(flow, version):
+    """Reconstruct a previously shipped notification-gated graph exactly."""
+    gate = next((n.node_id for n in flow.nodes
+                 if n.event_type == "presentation.notification_decide"), "")
+    after = False
+    nodes = []
+    for node in flow.nodes:
+        nodes.append(replace(node, when_output=gate + ".notify") if after else node)
+        if node.node_id == gate:
+            after = True
+    return replace(flow, version=version, nodes=tuple(nodes))
+
+
+PROJECT_ITERATION_V2_6 = _notification_gated_version(PROJECT_ITERATION_V2_5, "2.6.0")
+
+
 LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (
-    DIRECT_ANSWER_V1, DIRECT_ANSWER_V1_1,
+    DIRECT_ANSWER_V1, DIRECT_ANSWER_V1_1, PROJECT_ITERATION_V2_5,
+    PROJECT_ITERATION_V2_6,
+    ACTIVE_LEARNING_V1, SELF_EVOLUTION_V1,
     # The project_iteration entry above is captured *after* the commitment nodes were
     # added, so register the true pre-integration topology as well -- a request pinned
     # to 2.5.0 must resolve to the graph that was actually shipped under that version.
     # It is listed last so it wins for the same (name, version) key.
-    replace(next(_f for _f in DEFINITIONS if _f.name == "project_iteration"),
-            nodes=tuple(_n for _n in next(_f for _f in DEFINITIONS
-                                          if _f.name == "project_iteration").nodes
+    replace(PROJECT_ITERATION_V2_5,
+            nodes=tuple(_n for _n in PROJECT_ITERATION_V2_5.nodes
                         if _n.node_id not in {"commitment", "commitment_execute",
                                               "experience_prior",
                                               "commitment_reconcile"})),

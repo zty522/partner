@@ -352,7 +352,16 @@ class EventWorker:
                     and job.status in {"queued", "dispatched", "running"} and job.flow_id):
                 rows.append(job)
         rows.sort(key=lambda value: value.created_at)
-        return rows[0] if rows else None
+        for job in rows:
+            # Instance-bound workers use the same authoritative DB lease as
+            # shared workers.  Returning an unclaimed row made the first
+            # checkpoint fail with "checkpoint requires an owned lease".
+            if getattr(self, "_db_lease_job_id", None) == job.job_id:
+                return job
+            if self._try_acquire_lock(job.job_id):
+                self._lock_held = job.job_id
+                return job
+        return None
 
     def _emit_progress_message(self, *, job, flow_state, node_id, node_output):
         import sys; sys.stderr.write("[TRACE_EMIT] ENTER node=" + node_id + " flow_type=" + str(flow_state.flow_type) + chr(10)); sys.stderr.flush()

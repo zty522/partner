@@ -194,12 +194,32 @@ class RuntimeConfig:
 
 
 @dataclass
+class JevRuntimeConfig:
+    """Jev starts in shadow; credentials remain in the environment."""
+    mode: str = "shadow"
+    endpoint: str = "https://api.typesafe.ai/v1/systemone"
+    model: str = "jev-latest"
+    api_key_env: str = "TYPESAFE_API_KEY"
+    timeout_seconds: float = 10.0
+
+
+@dataclass
+class CoreV1Config:
+    enabled: bool = True
+    jev: JevRuntimeConfig = field(default_factory=JevRuntimeConfig)
+    budget: Dict = field(default_factory=lambda: {
+        "max_actions": 1, "max_model_calls": 4, "max_child_flows": 1,
+    })
+
+
+@dataclass
 class PartnerConfig:
     """Main configuration."""
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    core_v1: CoreV1Config = field(default_factory=CoreV1Config)
     name: str = "Partner"
 
     def save(self, path: str):
@@ -215,6 +235,13 @@ class PartnerConfig:
             agent=AgentConfig(**data.get('agent', {})),
             scheduler=SchedulerConfig(**data.get('scheduler', {})),
             runtime=RuntimeConfig(**data.get('runtime', {})),
+            core_v1=CoreV1Config(
+                enabled=bool((data.get('core_v1') or {}).get('enabled', True)),
+                jev=JevRuntimeConfig(**((data.get('core_v1') or {}).get('jev') or {})),
+                budget=dict((data.get('core_v1') or {}).get('budget') or {
+                    "max_actions": 1, "max_model_calls": 4, "max_child_flows": 1,
+                }),
+            ),
             name=data.get('name', 'Partner'),
         )
 

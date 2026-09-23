@@ -187,6 +187,12 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     selected = params.get("selected") if isinstance(params.get("selected"), dict) else {}
     if not selected:
         selected = params.get("previous_semantic") if isinstance(params.get("previous_semantic"), dict) else {}
+    # Core v1 freezes a commitment immediately before execution.  Its envelope
+    # is not itself an executable plan, so unwrap the frozen selected action.
+    if isinstance(selected.get("decision"), dict):
+        frozen = selected["decision"].get("selected")
+        if isinstance(frozen, dict):
+            selected = dict(frozen)
     if not selected:
         selected = params
     adapter = getattr(ctx, "adapter", None)
@@ -372,7 +378,7 @@ def outcome_reflect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                  "在 supported/rejected 中必须显式记一条 rejected=execute_fabrication_detected，"
                  "并把 business_delta 判 false，禁止用叙事掩盖执行缺口。\n")
     base = _deliberate(ctx, params, "project_outcome_reflect",
-        "只依据已验证结果反思：哪些认识被支持或否证、是否真的推进业务、下一项目问题是什么。有限样本未达阈值只是否定本次配置下的假设，不能推出物理不可能、化学不可达或性能上限。比较两轮效果前必须核对同一样本集合、预处理、搜索预算与指标口径；多个因素变化不能归因于单因素，不同候选数的最优值或TopK不能直接声称排名改善。还须对照 implementation_evidence 的实际函数调用和常量列表：写死候选列表再过滤不等于实现生成算法，记录方法名称不等于运行了该方法；仅有静态调用名也不能证明某分支已执行，须结合命令回执。字段 supported,rejected,unknown,business_delta,next_question,lesson,evidence_refs。"
+        "只依据已验证结果反思：哪些认识被支持或否证、是否真的推进业务、下一项目问题是什么。有限样本未达阈值只是否定本次配置下的假设，不能推出物理不可能、化学不可达或性能上限。比较两轮效果前必须核对同一样本集合、预处理、搜索预算与指标口径；多个因素变化不能归因于单因素，不同候选数的最优值或TopK不能直接声称排名改善。还须对照 implementation_evidence 的实际函数调用和常量列表：写死候选列表再过滤不等于实现生成算法，记录方法名称不等于运行了该方法；仅有静态调用名也不能证明某分支已执行，须结合命令回执。字段 supported,rejected,unknown,business_delta,next_question,lesson,evidence_refs,objective_complete,failure_class(project/science/epistemic/mechanism/runtime/data),epistemic_gap,missing_external_evidence,source_query,reproducer_passed,repeated_falsified_route,scientific_negative_result,data_scarcity。路由字段必须依据证据：知识或外部来源缺口才标 epistemic；Partner 机制缺陷必须有稳定复现才标 mechanism/runtime 和 reproducer_passed；科学假设被否证要标 scientific_negative_result，不能伪装成自进化。"
         + "执行整体失败与中间数据有效是不同命题：若 evidence 已读取并给出有效数据行数，保留该部分事实，不能仅因后续超时或模型预算耗尽否定已经生成的数据。文件格式核验不证明来源科学合理，结合命令回执判断具体步骤是否运行。"
         + extra)
     sem_out = base.get("semantic_output") or {}
