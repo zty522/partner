@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "protocol_id": "active_learning_api_adoption_v1",
+  "version": "1.0.0",
+  "subject_flow": "benchmark_subject",
+  "arms": ["baseline", "candidate"],
+  "required_inputs": ["dataset_path", "declared_feature", "arm_runner_path"],
+  "allowed_arm_differences": ["arm_configuration.features.declared_feature"],
+  "subject_view": {
+    "research_question": "来源绑定的 sklearn API 学习 handoff 是否改善下游 RMSE 计算兼容性",
+    "comparison": "same environment, inputs and checks",
+    "learning_claim_only": false
+  },
+  "primary_metric": {"name": "rmse", "direction": "lower_is_better"},
+  "expected_effect": {
+    "comparison": "baseline_minus_candidate",
+    "minimum": 0.5,
+    "confidence_interval_must_exclude": 0.0
+  },
+  "guardrails": [
+    {"id": "handoff_source_bound", "hard": true},
+    {"id": "same_inputs", "hard": true},
+    {"id": "numeric_oracle_independent", "hard": true},
+    {"id": "within_budget", "hard": true},
+    {"id": "artifacts_complete", "hard": true}
+  ],
+  "budget": {"baseline_runs": 1, "candidate_runs": 1, "folds": 1,
+             "bootstrap": 1000, "bootstrap_seed": 20260924, "max_seconds": 120},
+  "checkpoints": [
+    {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},
+    {"id": "CP2_CANDIDATE", "after": "plan", "gate": "observe_only"},
+    {"id": "CP3_COMMITMENT", "after": "core_commit", "gate": "hard"},
+    {"id": "CP4_EXECUTION", "after": "execute", "gate": "hard"},
+    {"id": "CP5_VERIFICATION", "after": "verify", "gate": "hard"},
+    {"id": "CP6_SETTLEMENT", "after": "core_settlement", "gate": "observe_only"}
+  ],
+  "evaluators": {"deterministic": true, "domain_metrics": true,
+                 "jev": "shadow", "llm_judge": "shadow"}
+}

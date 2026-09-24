@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "protocol_id": "self_evolution_metric_repair_v1",
+  "version": "1.0.0",
+  "subject_flow": "benchmark_subject",
+  "arms": ["baseline", "candidate"],
+  "required_inputs": ["dataset_path", "declared_feature", "arm_runner_path"],
+  "allowed_arm_differences": ["arm_configuration.features.declared_feature"],
+  "subject_view": {
+    "research_question": "来源绑定的最小 API 修复能否修复可复现 Partner 适配器缺陷且不破坏回归测试",
+    "comparison": "isolated same tests and environment",
+    "production_effective": false
+  },
+  "primary_metric": {"name": "rmse", "direction": "lower_is_better"},
+  "expected_effect": {
+    "comparison": "baseline_minus_candidate",
+    "minimum": 0.5,
+    "confidence_interval_must_exclude": 0.0
+  },
+  "guardrails": [
+    {"id": "isolated_execution", "hard": true},
+    {"id": "same_tests", "hard": true},
+    {"id": "baseline_reproduces", "hard": true},
+    {"id": "no_new_regression", "hard": true},
+    {"id": "within_budget", "hard": true},
+    {"id": "artifacts_complete", "hard": true}
+  ],
+  "budget": {"baseline_runs": 1, "candidate_runs": 1, "folds": 1,
+             "bootstrap": 1000, "bootstrap_seed": 20260924, "max_seconds": 120},
+  "checkpoints": [
+    {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},
+    {"id": "CP2_CANDIDATE", "after": "plan", "gate": "observe_only"},
+    {"id": "CP3_COMMITMENT", "after": "core_commit", "gate": "hard"},
+    {"id": "CP4_EXECUTION", "after": "execute", "gate": "hard"},
+    {"id": "CP5_VERIFICATION", "after": "verify", "gate": "hard"},
+    {"id": "CP6_SETTLEMENT", "after": "core_settlement", "gate": "observe_only"}
+  ],
+  "evaluators": {"deterministic": true, "domain_metrics": true,
+                 "jev": "shadow", "llm_judge": "shadow"}
+}

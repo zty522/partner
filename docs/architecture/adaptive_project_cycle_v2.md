@@ -32,3 +32,5 @@ Qwen 仍负责候选、复杂解释和有限 Flow 蓝图。潜空间动力学模
 确定性回归可证明图结构、条件分支、学习下游门、自进化范围门、父子恢复和 Jev 类型协议。一次真实 LLM 闭环只能证明当前配置在该任务上可运行。2026-09-24 的运行属于单任务、两轮项目 matched canary：它有固定数据、冻结比较和机器评价，但没有通过 benchmark wrapper 运行多任务、多 seed、多 arm 聚合。因此它不是完整的 Partner benchmark。主动学习还缺采用前后的 downstream matched comparison，自进化还缺有真实缺陷时的 baseline/candidate replay。只有跨任务、跨 seed 的 matched benchmark 才能证明稳定效果。
 
 2026-09-24 的隔离验收补充了三项运行约束：显式“第二轮/后一轮”协议会冻结最少轮数，首轮新鲜协议不会把其他 Job 的历史产物作为执行输入，模型终端文字超时时只有成功命令回执与可解析数据产物同时存在才恢复为待独立验证的执行终态。完整证据见 `docs/testing/adaptive_cycle_v2_acceptance_20260924.md`。
+
+同日新增多运行 wrapper：`PartnerBenchmarkSuite` 冻结 task×seed 矩阵，每个单元仍走完整 benchmark parent/child Flow，最后才聚合跨运行 effect 和 bootstrap CI。主动学习 API adoption 与自进化隔离 repair 也各有独立协议，继续复用六检查点、Jev shadow 与确定性 Settlement。`benchmarks/event_runtime/run_core_v1_closure.py` 是三链重跑入口；实跑证据见 `docs/testing/core_v1_three_chain_benchmark_20260924.md`。

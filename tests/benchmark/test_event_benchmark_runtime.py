@@ -260,6 +260,26 @@ def test_public_wrapper_submits_through_application_contract(tmp_path, monkeypat
     assert result.benchmark_run_id.startswith("bench_")
 
 
+def test_wrapper_wait_does_not_treat_temporarily_unrunnable_parent_as_terminal(tmp_path, monkeypatch):
+    from partner.benchmark.wrapper import BenchmarkSubmission, PartnerBenchmarkWrapper
+    import partner.runtime.event_worker as worker_module
+    states = iter(({"status": "running", "assigned_instance": "01"},
+                   {"status": "running", "assigned_instance": "01"},
+                   {"status": "completed", "assigned_instance": "01"}))
+    wrapper = PartnerBenchmarkWrapper(workspace(tmp_path))
+    monkeypatch.setattr(wrapper, "status", lambda _job_id: next(states))
+
+    class TemporarilyIdleWorker:
+        def __init__(self, *_args, **_kwargs): pass
+        def next_job(self): return None
+        def _release_claim(self): pass
+
+    monkeypatch.setattr(worker_module, "EventWorker", TemporarilyIdleWorker)
+    result = wrapper.wait(BenchmarkSubmission(True, "job_wait", "bench_wait", "p",
+                                               "benchmark_experiment", ""), timeout_seconds=2)
+    assert result["status"] == "completed"
+
+
 def test_child_subject_view_excludes_hidden_guardrail_labels(tmp_path):
     root = workspace(tmp_path)
     store = BenchmarkRunStore(root, "bench_isolation")
@@ -271,6 +291,49 @@ def test_child_subject_view_excludes_hidden_guardrail_labels(tmp_path):
     serialized = json.dumps(view)
     assert "guardrail_results" not in serialized
     assert "expected_effect" not in serialized
+
+
+def test_subject_view_threads_public_suite_identity_without_hidden_labels(tmp_path):
+    root = workspace(tmp_path)
+    protocol, _ = BenchmarkProtocolStore(root).load("pk_target_feature_v1")
+    from partner.benchmark.event_runtime import public_subject_view
+    view = public_subject_view(protocol, {"dataset_path": "/data.csv",
+        "declared_feature": "target_basic", "arm_runner_path": "/run.py",
+        "benchmark_seed": 29, "task_id": "target_basic",
+        "guardrail_results": {"hidden": True}}, "candidate")
+    assert view["inputs"]["benchmark_seed"] == 29
+    assert view["inputs"]["task_id"] == "target_basic"
+    assert "guardrail_results" not in json.dumps(view)
+
+
+def test_learning_and_evolution_benchmark_protocols_are_valid(tmp_path):
+    root = workspace(tmp_path)
+    store = BenchmarkProtocolStore(root)
+    learning, _ = store.load("active_learning_api_adoption_v1")
+    evolution, _ = store.load("self_evolution_metric_repair_v1")
+    assert learning.subject_flow == evolution.subject_flow == "benchmark_subject"
+    assert {row["id"] for row in learning.guardrails} >= {"handoff_source_bound", "same_inputs"}
+    assert {row["id"] for row in evolution.guardrails} >= {"baseline_reproduces", "no_new_regression"}
+
+
+def test_confirmed_learning_benchmark_writes_typed_effect_ledger(tmp_path):
+    root = workspace(tmp_path)
+    handoff = root / "handoff.json"
+    handoff.write_text('{"ready":true}', encoding="utf-8")
+    params = {"benchmark_run_id": "bench_learning_effect",
+        "benchmark_protocol_id": "active_learning_api_adoption_v1",
+        "intent_contract": {"benchmark": {"protocol_id": "active_learning_api_adoption_v1",
+            "inputs": {"dataset_path": str(handoff)}}},
+        "flow_outputs": {
+            "benchmark_settlement": {"semantic_output": {"decision": "confirmed"}},
+            "paired_compare": {"semantic_output": {"effect": 1.0,
+                                                     "confidence_interval": [1.0, 1.0]}},
+        }}
+    result = events.effect_record(SimpleNamespace(workspace=str(root)), params)
+    assert result["semantic_output"]["improvement_verified"] is True
+    ledger = root / "state/active_learning/benchmark_settlements/bench_learning_effect.json"
+    assert ledger.is_file()
+    assert json.loads(ledger.read_text())["source_artifact_hash"].startswith("sha256:")
 
 
 def test_benchmark_parent_runs_two_subject_children_and_closes(tmp_path, monkeypatch):

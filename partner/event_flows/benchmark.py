@@ -57,7 +57,7 @@ BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.2.0", tuple(
 ), "One isolated benchmark arm with public-only context and deterministic execution.")
 
 
-BENCHMARK_EXPERIMENT = Flow("benchmark_experiment", "1.0.0", (
+BENCHMARK_EXPERIMENT = Flow("benchmark_experiment", "1.1.0", (
     Node("signal", "benchmark.signal_validate"),
     Node("protocol", "benchmark.protocol_resolve", ("signal",)),
     Node("preflight", "benchmark.environment_preflight", ("protocol",)),
@@ -101,7 +101,8 @@ BENCHMARK_EXPERIMENT = Flow("benchmark_experiment", "1.0.0", (
           "expectation_compare", "guardrail_evaluate", "execution_parity",
           "jev_evaluate", "llm_judge")),
     Node("benchmark_settlement", "benchmark.settlement", ("aggregate",)),
-    Node("benchmark_route", "benchmark.route_next", ("benchmark_settlement",)),
+    Node("effect_record", "benchmark.effect_record", ("benchmark_settlement", "aggregate")),
+    Node("benchmark_route", "benchmark.route_next", ("benchmark_settlement", "effect_record")),
     Node("benchmark_report", "benchmark.report_compose", ("benchmark_route", "aggregate")),
     Node("benchmark_report_verify", "benchmark.report_verify", ("benchmark_report",)),
     Node("compose", "presentation.message_compose", ("benchmark_report_verify",)),

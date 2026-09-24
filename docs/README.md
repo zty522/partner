@@ -1,5 +1,7 @@
 # Partner 文档体系
 
+> **2026-09-24 Core v1 三链 benchmark 已补齐**：Davis 3 task×2 seed 的六个两臂 Event Flow 全部 confirmed；主动学习 handoff 的 downstream matched comparison 与隔离自进化 repair 也均 confirmed，并由 `benchmark.effect_record` 写入各自效果账。详见 [三链真实 benchmark](testing/core_v1_three_chain_benchmark_20260924.md)。这是一项工程闭环验收，不替代论文规模的跨数据集、跨领域和外部复现。
+
 > **2026-09-24 Event Flow 生成策略**：当前由 LLM 生成有限候选 Flow，确定性 Compiler 校验，Jev 与潜空间世界模型做 shadow 筛选和预测，Commitment 冻结后才由 Runtime 执行；Settlement 驱动最小子图迭代。真实轨迹成熟后先训练 FlowRanker、NextEventPolicy 和 OutcomeModel，不直接用当前小样本训练端到端 Flow 生成器。详见 [Flow 生成策略](architecture/flow_synthesis_policy.md) 与 [ADR 0108](decisions/0108-hybrid-event-flow-synthesis.md)。
 
 > **2026-09-23 Core v1 已实现**：项目、主动学习、自进化三条 Flow 已统一接入 LLM 候选、潜空间影子预测、Jev 类型化影子判断、Commitment 冻结、真实 Event 执行、独立评价、Settlement 和确定性触发路由。代码已收敛到唯一 `main`，旧 Flow 按版本保留。当前 Jev 和潜模型仍为 shadow，尚不声称真实项目 uplift。先读 [Core v1 架构](architecture/core_v1.md) 与 [ADR 0107](decisions/0107-core-v1-single-main-decision-spine.md)。

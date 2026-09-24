@@ -2176,3 +2176,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 # 2026-09-24 辅助模型配置与 benchmark 口径修正
 
 Jev 已从 `partner_config.json` 迁入工作区 `config/model_services.json`；世界模型与后续专用模型共用同一服务注册表，主对话 LLM 仍读取 `config/api.json`。项目闭环已完成单任务两轮 matched canary，但尚未运行 benchmark wrapper 的多任务、多 seed、多 arm 完整系统 benchmark。主动学习仍缺 downstream matched comparison，自进化仍缺真实缺陷上的 baseline/candidate replay。
+
+## 2026-09-24 三链 benchmark 补齐
+
+上述三个 benchmark 缺口随后已实际补齐。Davis 3 任务×2 seed 共 6 个两臂 Event Flow 全部 confirmed，平均 RMSE 改善 `0.10971`，跨运行 95% CI `[0.10359, 0.11502]`；主动学习 handoff downstream comparison 与隔离自进化 repair 均为 effect `1.0`、Settlement confirmed。wrapper 的 child suspend 提前返回缺陷也在首轮矩阵中暴露并修复。本轮 Job 均已终态且没有 Partner OS 进程；工作区仍有 2026-09-18/19 等历史 queued/running 投影，生产服务继续 inactive，启动前需单独 reconcile。详见 `docs/testing/core_v1_three_chain_benchmark_20260924.md`。

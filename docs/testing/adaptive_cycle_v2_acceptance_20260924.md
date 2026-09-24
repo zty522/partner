@@ -38,3 +38,5 @@
 本次真实任务运行了一个有固定数据、固定 seed、同数据 baseline/candidate、独立机器评价和两轮 Settlement 的项目级 matched canary。它验证了单条纵向闭环，并得到 baseline RMSE `5.481857656395991`、candidate RMSE `0.9370380247002416`。
 
 本次没有通过 benchmark wrapper 执行任务集、多个 seed、多个系统 arm、失败注入和聚合置信区间，故不能称为完整系统 benchmark。72 项是代码回归测试，也不是科学效果 benchmark。主动学习 Flow 只冻结了来源绑定 handoff，尚未做采用前后 downstream matched comparison；自进化本轮为 `no_change`，尚未做真实 Partner 缺陷的 baseline/candidate replay。
+
+后续状态更新：上述缺口已由独立的三链 benchmark 补齐，不能回写成本次单任务 Cycle 已经执行过。项目多任务/多 seed wrapper、该 handoff 的 downstream matched comparison 和隔离自进化 replay 结果见 `docs/testing/core_v1_three_chain_benchmark_20260924.md`。

@@ -16,6 +16,7 @@ import random
 import subprocess
 import sys
 import uuid
+import os
 
 from partner.benchmark.event_runtime import (
     BenchmarkProtocolStore, BenchmarkRunStore, digest, numeric_metrics,
@@ -139,7 +140,12 @@ def subject_arm_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     timeout = min(3600, max(30, int(budget.get("max_seconds") or 1800)))
     started = _now()
     try:
+        environment = dict(os.environ)
+        environment["PARTNER_DECLARED_FEATURE"] = declared
+        environment["PARTNER_BENCHMARK_SEED"] = str(inputs.get("benchmark_seed") or "0")
+        environment["PARTNER_BENCHMARK_TASK_ID"] = str(inputs.get("task_id") or "")
         completed = subprocess.run(command, cwd=work, text=True, capture_output=True,
+                                   env=environment,
                                    timeout=timeout, check=False)
         receipt = {
             "schema_version": 1, "arm_id": arm, "argv": command,
@@ -778,6 +784,36 @@ def benchmark_settlement(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "evidence_refs": [str(output)], "semantic_output": record}
 
 
+def effect_record(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Project a benchmark settlement into its owning effect ledger."""
+    protocol, _ = _protocol(ctx, params)
+    settlement = _semantic(params, "benchmark_settlement")
+    comparison = _semantic(params, "paired_compare")
+    inputs = _config(params).get("inputs") or {}
+    category = ("active_learning" if protocol.protocol_id.startswith("active_learning_") else
+                "self_evolution" if protocol.protocol_id.startswith("self_evolution_") else
+                "project")
+    record = {"schema_version": 1, "benchmark_run_id": _run_id(params),
+              "protocol_id": protocol.protocol_id, "category": category,
+              "decision": settlement.get("decision"),
+              "improvement_verified": settlement.get("decision") == "confirmed",
+              "effect": comparison.get("effect"),
+              "confidence_interval": comparison.get("confidence_interval"),
+              "source_artifact": str(inputs.get("dataset_path") or ""),
+              "source_artifact_hash": "", "production_effective": False,
+              "recorded_at": _now()}
+    source = Path(record["source_artifact"])
+    if source.is_file():
+        record["source_artifact_hash"] = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+    ledger = (Path(ctx.workspace) / "state" / category / "benchmark_settlements" /
+              f"{_run_id(params)}.json")
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output = _write(ctx, params, "effect_record.json", record)
+    return {"ok": True, "status": "completed", "summary": f"recorded {category} benchmark effect",
+            "evidence_refs": [str(ledger), str(output)], "semantic_output": record}
+
+
 def route_next(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     settlement = _semantic(params, "benchmark_settlement")
     decision = str(settlement.get("decision") or "inconclusive")
@@ -895,6 +931,7 @@ DEFINITIONS = [
     EventDefinition("benchmark.llm_judge", "benchmark", "盲化 LLM 语义评价", llm_judge, execution_method="llm", external_call=True, produces_artifact=True),
     EventDefinition("benchmark.aggregate", "benchmark", "聚合硬门槛、数值和顾问评价", aggregate, produces_artifact=True),
     EventDefinition("benchmark.settlement", "benchmark", "依据冻结协议作出 Benchmark 结算", benchmark_settlement, produces_artifact=True),
+    EventDefinition("benchmark.effect_record", "benchmark", "把效果写入项目、主动学习或自进化账本", effect_record, produces_artifact=True),
     EventDefinition("benchmark.route_next", "benchmark", "依据结算选择后续链路", route_next),
     EventDefinition("benchmark.report_compose", "benchmark", "生成结构化 Benchmark 报告", report_compose, produces_artifact=True),
     EventDefinition("benchmark.report_verify", "benchmark", "核验报告与结论证据", report_verify, reads_existing_artifact=True),

@@ -1265,3 +1265,11 @@ documents:
     tags: [decision, configuration, jev, world-model]
     instances: [all]
     max_chars: 6000
+  - id: core_v1_three_chain_benchmark_20260924
+    path: docs/testing/core_v1_three_chain_benchmark_20260924.md
+    title: Core v1 项目、主动学习与自进化三链真实 benchmark
+    tier: L1
+    authority: current
+    tags: [testing, benchmark, event-flow, active-learning, self-evolution, davis]
+    instances: ["01", "02", all]
+    max_chars: 12000

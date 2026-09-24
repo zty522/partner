@@ -142,7 +142,9 @@ def public_subject_view(protocol: BenchmarkProtocolV1, supplied: Mapping[str, An
         "protocol_version": protocol.version,
         "arm_id": arm,
         "task": dict(protocol.subject_view),
-        "inputs": {key: supplied[key] for key in protocol.required_inputs if key in supplied},
+        "inputs": {key: supplied[key] for key in (*protocol.required_inputs,
+                                                    "benchmark_seed", "task_id")
+                   if key in supplied},
         "budget": dict(protocol.budget),
         "allowed_arm_differences": list(protocol.allowed_arm_differences),
         "arm_configuration": {"features": {"declared_feature": feature}},

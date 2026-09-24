@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 import asyncio
 import json
+import time
 
 from partner.application import PartnerApplicationService
 
@@ -59,24 +60,29 @@ class PartnerBenchmarkWrapper:
         return next((row for row in self.service.list_jobs(limit=500)
                      if row.get("job_id") == job_id), None)
 
-    def wait(self, submission: BenchmarkSubmission) -> dict[str, Any]:
+    def wait(self, submission: BenchmarkSubmission, *, timeout_seconds: float = 3600) -> dict[str, Any]:
         if not submission.accepted or not submission.job_id:
             raise ValueError("cannot wait for a rejected benchmark submission")
         from partner.runtime.event_worker import EventWorker
         row = self.status(submission.job_id) or {}
         worker = EventWorker(self.workspace, str(row.get("assigned_instance") or ""),
                              root_job_id=submission.job_id)
-        job = worker.next_job()
-        if job is None:
-            terminal = self.status(submission.job_id)
-            if terminal and terminal.get("status") in {"completed", "failed", "cancelled"}:
-                return terminal
-            raise RuntimeError("benchmark job is not runnable")
-        try:
-            asyncio.run(worker._run_job_to_terminal(job))
-        finally:
-            worker._release_claim()
-        return self.status(submission.job_id) or {}
+        async def drive() -> dict[str, Any]:
+            deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+            while time.monotonic() < deadline:
+                current = self.status(submission.job_id) or {}
+                if current.get("status") in {"completed", "failed", "cancelled", "blocked"}:
+                    return current
+                job = await asyncio.to_thread(worker.next_job)
+                if job is None:
+                    await asyncio.sleep(.25)
+                    continue
+                try:
+                    await worker._run_with_lease(job)
+                finally:
+                    worker._release_claim()
+            raise TimeoutError(f"benchmark job did not reach a terminal state: {submission.job_id}")
+        return asyncio.run(drive())
 
     def result(self, benchmark_run_id: str) -> dict[str, Any]:
         directory = self.workspace / "state/benchmarks/runs" / benchmark_run_id
@@ -89,4 +95,3 @@ class PartnerBenchmarkWrapper:
 
 
 __all__ = ["BenchmarkSubmission", "PartnerBenchmarkWrapper"]
-
