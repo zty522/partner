@@ -397,7 +397,10 @@ def paired_compare(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     bootstrap_samples = 0
     if matched_ids and set(b_rows) == set(c_rows) and targets_match:
         count = int(protocol.budget.get("bootstrap") or 0)
-        rng = random.Random(int(digest({"run": _run_id(params), "ids": matched_ids})[-12:], 16))
+        # The repetition protocol is frozen before either arm runs.  A run-id
+        # derived seed would make identical evidence settle differently across
+        # reruns, so use the protocol seed directly.
+        rng = random.Random(int(protocol.budget.get("bootstrap_seed") or 0))
         effects = []
         for _ in range(count):
             sampled = [matched_ids[rng.randrange(len(matched_ids))] for _ in matched_ids]
@@ -453,12 +456,37 @@ def guardrail_evaluate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     for guardrail in protocol.guardrails:
         identifier = str(guardrail.get("id") or "")
         values = [(row.get("guardrails") or {}).get(identifier) for row in collections]
+        derived_evidence = None
         if identifier == "artifacts_complete":
             values = [row.get("valid") for row in integrity]
+        elif identifier == "secondary_metrics_not_materially_worse":
+            comparisons = guardrail.get("comparisons") or []
+            baseline_metrics = collections[0].get("metrics") or {}
+            candidate_metrics = collections[1].get("metrics") or {}
+            checks = []
+            for comparison in comparisons:
+                metric = str(comparison.get("metric") or "")
+                baseline_value = baseline_metrics.get(metric)
+                candidate_value = candidate_metrics.get(metric)
+                tolerance = float(comparison.get("absolute_tolerance") or 0.0)
+                direction = str(comparison.get("direction") or "lower_is_better")
+                measured = isinstance(baseline_value, (int, float)) and isinstance(
+                    candidate_value, (int, float))
+                passed = (float(candidate_value) <= float(baseline_value) + tolerance
+                          if measured and direction == "lower_is_better" else
+                          float(candidate_value) >= float(baseline_value) - tolerance
+                          if measured and direction == "higher_is_better" else None)
+                checks.append({"metric": metric, "baseline": baseline_value,
+                               "candidate": candidate_value, "direction": direction,
+                               "absolute_tolerance": tolerance, "passed": passed})
+            derived = bool(checks) and all(row["passed"] is True for row in checks)
+            values = [derived] if checks and all(row["passed"] is not None for row in checks) else []
+            derived_evidence = {"method": "parent_metric_comparison", "checks": checks}
         status = ("pass" if values and all(value is True for value in values) else
                   "fail" if any(value is False for value in values) else "unknown")
         rows.append({"id": identifier, "hard": bool(guardrail.get("hard")), "status": status,
                      "arm_evidence": values,
+                     "derived_evidence": derived_evidence,
                      "operator_attestation": attestations.get(identifier),
                      "attestation_is_authoritative": False})
     hard_pass = all(row["status"] == "pass" for row in rows if row["hard"])

@@ -121,15 +121,15 @@ def test_pair_comparison_and_settlement_are_deterministic(tmp_path):
             "baseline_collect": {"semantic_output": {
                 "predictions": [{"sample_id": str(i), "y_true": 1.0, "y_pred": 2.0}
                                 for i in range(8)],
+                "metrics": {"mae": 1.0, "r2": 0.2},
                 "guardrails": {"no_target_leakage": True,
-                    "official_test_not_used_for_tuning": True, "within_budget": True,
-                    "secondary_metrics_not_materially_worse": True}}},
+                    "official_test_not_used_for_tuning": True, "within_budget": True}}},
             "candidate_collect": {"semantic_output": {
                 "predictions": [{"sample_id": str(i), "y_true": 1.0, "y_pred": 1.5}
                                 for i in range(8)],
+                "metrics": {"mae": 0.5, "r2": 0.4},
                 "guardrails": {"no_target_leakage": True,
-                    "official_test_not_used_for_tuning": True, "within_budget": True,
-                    "secondary_metrics_not_materially_worse": True}}},
+                    "official_test_not_used_for_tuning": True, "within_budget": True}}},
         },
     }
     compared = events.paired_compare(ctx, params)
@@ -144,6 +144,10 @@ def test_pair_comparison_and_settlement_are_deterministic(tmp_path):
         "candidate_integrity": {"semantic_output": {"valid": True}},
     })
     guardrails = events.guardrail_evaluate(ctx, params)
+    secondary = next(row for row in guardrails["semantic_output"]["guardrails"]
+                     if row["id"] == "secondary_metrics_not_materially_worse")
+    assert secondary["status"] == "pass"
+    assert secondary["derived_evidence"]["method"] == "parent_metric_comparison"
     params["flow_outputs"]["guardrail_evaluate"] = guardrails
     params["flow_outputs"].update({
         "jev_evaluate": {"semantic_output": {"status": "abstained"}},

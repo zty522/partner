@@ -26,13 +26,21 @@
     {"id": "official_test_not_used_for_tuning", "hard": true},
     {"id": "within_budget", "hard": true},
     {"id": "artifacts_complete", "hard": true},
-    {"id": "secondary_metrics_not_materially_worse", "hard": false}
+    {
+      "id": "secondary_metrics_not_materially_worse",
+      "hard": false,
+      "comparisons": [
+        {"metric": "mae", "direction": "lower_is_better", "absolute_tolerance": 0.01},
+        {"metric": "r2", "direction": "higher_is_better", "absolute_tolerance": 0.01}
+      ]
+    }
   ],
   "budget": {
     "baseline_runs": 1,
     "candidate_runs": 1,
     "folds": 5,
-    "bootstrap": 1000
+    "bootstrap": 1000,
+    "bootstrap_seed": 20260924
   },
   "checkpoints": [
     {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},
