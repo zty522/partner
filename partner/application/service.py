@@ -927,21 +927,40 @@ class PartnerApplicationService:
             "ablation_drop": ablation_drop,
         }
 
-        try:
-            ctx_for_llm = _intent_ctx(self.root, persona_hint, project_id, channel, sender_id)
-            observe_out = intent_observe(ctx_for_llm, dict(intent_params_base))
-            counter_out = intent_counter_read(ctx_for_llm, {
-                **intent_params_base,
-                "upstream": {"understand_1": observe_out},
-            })
-            synth_params = {
-                **intent_params_base,
-                "upstream": {"understand_1": observe_out, "understand_2": counter_out},
+        ctx_for_llm = _intent_ctx(self.root, persona_hint, project_id, channel, sender_id)
+        if mode == "benchmark":
+            # A structured benchmark marker already freezes the route and
+            # protocol. Running three open-ended intent calls here adds cost
+            # and makes an explicit experiment depend on an unrelated model
+            # availability check. Domain reasoning remains inside the isolated
+            # benchmark_subject child and still fails closed when unavailable.
+            dispatch = project_id or persona_hint or "benchmark"
+            explicit = {
+                "route": "project_iteration", "dispatch_target": dispatch,
+                "warm_reply": "已接收结构化基准实验，正在按冻结协议运行。",
+                "payload": {}, "reason": "structured_benchmark_contract",
             }
-            synth_out = intent_synthesize(ctx_for_llm, synth_params)
-        except Exception as exc:  # noqa: BLE001
-            return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
-                              f"意图审议失败：{type(exc).__name__}: {exc}")
+            observe_out = {"ok": True, "status": "completed", "model_calls": 0,
+                           "semantic_output": explicit}
+            counter_out = {"ok": True, "status": "completed", "model_calls": 0,
+                           "semantic_output": explicit}
+            synth_out = {"ok": True, "status": "completed", "model_calls": 0,
+                         "semantic_output": explicit}
+        else:
+            try:
+                observe_out = intent_observe(ctx_for_llm, dict(intent_params_base))
+                counter_out = intent_counter_read(ctx_for_llm, {
+                    **intent_params_base,
+                    "upstream": {"understand_1": observe_out},
+                })
+                synth_params = {
+                    **intent_params_base,
+                    "upstream": {"understand_1": observe_out, "understand_2": counter_out},
+                }
+                synth_out = intent_synthesize(ctx_for_llm, synth_params)
+            except Exception as exc:  # noqa: BLE001
+                return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
+                                  f"意图审议失败：{type(exc).__name__}: {exc}")
 
         synth_sem = (synth_out or {}).get("semantic_output") or {}
         route = str(synth_sem.get("route") or "").strip()

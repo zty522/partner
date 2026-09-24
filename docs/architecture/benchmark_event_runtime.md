@@ -25,6 +25,13 @@ QQ and terminal clients may use the explicit command prefix:
 The slash command is a transport marker. Natural-language mentions of testing
 do not activate a benchmark.
 
+Because `mode="benchmark"` or the slash marker already freezes the route and
+protocol, submission bypasses the ordinary three-pass LLM intent review. This
+allows the parent run to be created and audited when a model provider is
+temporarily unavailable. LLM-dependent reasoning inside each isolated subject
+does not bypass the provider and fails closed if the configured model cannot
+respond.
+
 ```python
 from partner.benchmark.wrapper import PartnerBenchmarkWrapper
 

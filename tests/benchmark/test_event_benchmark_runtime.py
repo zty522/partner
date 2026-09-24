@@ -182,6 +182,23 @@ def test_application_test_flag_selects_benchmark_parent_flow(tmp_path, monkeypat
     assert state.run_context["evaluation_visibility"] == "hidden_until_terminal"
 
 
+def test_structured_benchmark_does_not_depend_on_generic_intent_llm(tmp_path, monkeypatch):
+    root = workspace(tmp_path)
+    import partner.events.interaction as interaction
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("provider unavailable")
+    monkeypatch.setattr(interaction, "intent_observe", unavailable)
+    monkeypatch.setattr(interaction, "intent_counter_read", unavailable)
+    monkeypatch.setattr(interaction, "intent_synthesize", unavailable)
+    result = PartnerApplicationService(root).submit(
+        "运行冻结 pK 实验", channel="local", sender_id="test", persona_hint="01",
+        project_id="molecular_generation", **benchmark_params(root))
+    assert result.accepted is True
+    assert result.route == "benchmark_experiment"
+    job = PartnerApplicationService(root).list_jobs(limit=1)[0]
+    assert job["intent_model_calls"] == 0
+
+
 def test_explicit_message_marker_selects_benchmark_without_llm_permission(tmp_path, monkeypatch):
     root = workspace(tmp_path)
     import partner.events.interaction as interaction
