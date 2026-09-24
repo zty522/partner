@@ -76,6 +76,12 @@ def _resolve_api_json(provider: str = "") -> dict:
             v = str(primary.get(k) or "").strip()
             if v:
                 out[k] = v
+        # Provider-specific OpenAI-compatible request controls remain explicit
+        # operator config. In particular, Qwen 3.8 Flash defaults to extended
+        # thinking, which is inappropriate for short typed Event JSON unless
+        # the operator deliberately enables it.
+        if isinstance(primary.get("enable_thinking"), bool):
+            out["enable_thinking"] = primary["enable_thinking"]
         # base_url 剥掉尾部 /v1：chat() 内部固定拼 /v1/chat/completions，
         # 避免双 /v1 404。
         b = out.get("base_url", "")
@@ -217,6 +223,8 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
         "temperature": temperature,
         "stream": False,
     }
+    if selected_provider == "qwen" and isinstance(cfg.get("enable_thinking"), bool):
+        payload["enable_thinking"] = cfg["enable_thinking"]
     # Keep extended reasoning for investigation and initial causal design.
     # Code serialization and source-grounded contract checks use the output
     # budget directly; independent review remains a separate model call.
@@ -266,7 +274,11 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                 "total_tokens": int(usage.get("total_tokens") or 0),
                 "model": model, "provider": selected_provider,
                 "finish_reason": finish_reason,
-                "thinking_requested": payload.get('thinking',{}).get('type','default'),
+                "thinking_requested": (
+                    "disabled" if payload.get("enable_thinking") is False else
+                    "enabled" if payload.get("enable_thinking") is True else
+                    payload.get('thinking', {}).get('type', 'default')
+                ),
             }
             logger.info(f"[DirectAPI] {purpose} OK in {elapsed:.1f}s, prompt={len(prompt)}chars response={len(resp_content)}chars")
             _log_api_call(**call_meta, model=model, base_url=api_base, purpose=purpose, status="ok",
