@@ -53,11 +53,26 @@ def workspace(tmp_path: Path) -> Path:
 def benchmark_params(tmp_path: Path) -> dict:
     data = tmp_path / "pk.csv"
     data.write_text("target,pK\na,7.1\n", encoding="utf-8")
+    runner = tmp_path / "run_arm.py"
+    runner.write_text('''\
+import argparse, hashlib, json
+from pathlib import Path
+p=argparse.ArgumentParser(); p.add_argument("--arm"); p.add_argument("--dataset"); p.add_argument("--output")
+a=p.parse_args(); data=Path(a.dataset); feature="target_family" if a.arm=="candidate" else None
+pred=1.1 if a.arm=="candidate" else 1.4
+value={"metrics":{"rmse":pred,"mae":pred,"r2":0.2},
+ "predictions":[{"sample_id":str(i),"y_true":1.0,"y_pred":pred} for i in range(8)],
+ "guardrails":{"no_target_leakage":True,"official_test_not_used_for_tuning":True,"within_budget":True,"artifacts_complete":True},
+ "run_config":{"model":"fixture","folds":"fixed","seeds":"fixed","budget":{"runs":1,"folds":5,"bootstrap":1000},"features":{"declared_feature":feature}},
+ "provenance":{"code_revision":"fixture","data_hash":"sha256:"+hashlib.sha256(data.read_bytes()).hexdigest()}}
+Path(a.output).write_text(json.dumps(value))
+''', encoding="utf-8")
     return {
         "mode": "benchmark",
         "execution_constraints": {
             "benchmark_protocol_id": "pk_target_feature_v1",
-            "benchmark_inputs": {"dataset_path": str(data), "declared_feature": "target_family"},
+            "benchmark_inputs": {"dataset_path": str(data), "declared_feature": "target_family",
+                                 "arm_runner_path": str(runner)},
             "benchmark_guardrail_results": {
                 "no_target_leakage": True,
                 "official_test_not_used_for_tuning": True,
@@ -100,7 +115,7 @@ def test_protocol_preflight_requires_declared_inputs(tmp_path):
     }
     result = events.environment_preflight(ctx, base)
     assert result["ok"] is False
-    assert set(result["semantic_output"]["missing_inputs"]) == {"dataset_path", "declared_feature"}
+    assert set(result["semantic_output"]["missing_inputs"]) == {"dataset_path", "declared_feature", "arm_runner_path"}
 
 
 def test_pair_comparison_and_settlement_are_deterministic(tmp_path):
@@ -233,7 +248,8 @@ def test_public_wrapper_submits_through_application_contract(tmp_path, monkeypat
     result = PartnerBenchmarkWrapper(root).submit(
         protocol_id="pk_target_feature_v1", request="运行冻结实验",
         instance_id="01", project_id="molecular_generation",
-        inputs={"dataset_path": str(data), "declared_feature": "target_family"})
+        inputs={"dataset_path": str(data), "declared_feature": "target_family",
+                "arm_runner_path": str(root / "run_arm.py")})
     assert result.accepted and result.flow_type == "benchmark_experiment"
     assert result.benchmark_run_id.startswith("bench_")
 

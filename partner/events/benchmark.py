@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 import json
 import csv
+import hashlib
 import math
 import random
 import subprocess
+import sys
 import uuid
 
 from partner.benchmark.event_runtime import (
@@ -59,6 +61,114 @@ def _protocol(ctx: Any, params: Mapping[str, Any]):
     if not protocol_id:
         raise ValueError("benchmark protocol_id is required")
     return BenchmarkProtocolStore(ctx.workspace).load(protocol_id)
+
+
+def subject_arm_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Execute exactly one frozen benchmark arm without delegating to an LLM.
+
+    The subject receives only its public view.  The runner is invoked once with
+    an argv list, and its artifact is accepted only when it proves the arm,
+    feature configuration, input dataset and required evidence contract.
+    """
+    contract = params.get("intent_contract")
+    contract = dict(contract) if isinstance(contract, Mapping) else {}
+    view = contract.get("benchmark_subject_view")
+    view = dict(view) if isinstance(view, Mapping) else {}
+    arm = str(view.get("arm_id") or params.get("benchmark_arm_id") or "")
+    inputs = view.get("inputs") if isinstance(view.get("inputs"), Mapping) else {}
+    runner = Path(str(inputs.get("arm_runner_path") or "")).expanduser().resolve()
+    dataset = Path(str(inputs.get("dataset_path") or "")).expanduser().resolve()
+    declared = str(inputs.get("declared_feature") or "")
+    expected_feature = declared if arm == "candidate" else None
+    if arm not in {"baseline", "candidate"}:
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_protocol",
+                "error": f"invalid isolated arm: {arm!r}"}
+    if not runner.is_file() or not dataset.is_file():
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_input",
+                "error": "frozen arm runner or dataset is missing"}
+
+    work = Path(ctx.working_dir) / str(params.get("flow_id") or "unknown_flow")
+    execution = work / ".execution"
+    execution.mkdir(parents=True, exist_ok=True)
+    output = work / "benchmark_evidence.json"
+    command = [sys.executable, str(runner), "--arm", arm,
+               "--dataset", str(dataset), "--output", str(output)]
+    budget = view.get("budget") if isinstance(view.get("budget"), Mapping) else {}
+    timeout = min(3600, max(30, int(budget.get("max_seconds") or 1800)))
+    started = _now()
+    try:
+        completed = subprocess.run(command, cwd=work, text=True, capture_output=True,
+                                   timeout=timeout, check=False)
+        receipt = {
+            "schema_version": 1, "arm_id": arm, "argv": command,
+            "cwd": str(work), "started_at": started, "completed_at": _now(),
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-12000:], "stderr": completed.stderr[-12000:],
+            "invocation_count": 1,
+        }
+    except subprocess.TimeoutExpired as exc:
+        receipt = {
+            "schema_version": 1, "arm_id": arm, "argv": command,
+            "cwd": str(work), "started_at": started, "completed_at": _now(),
+            "returncode": None, "timed_out": True,
+            "stdout": str(exc.stdout or "")[-12000:], "stderr": str(exc.stderr or "")[-12000:],
+            "invocation_count": 1,
+        }
+    receipt_path = execution / "benchmark_arm_command.json"
+    receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2), encoding="utf-8")
+    if receipt.get("returncode") != 0 or not output.is_file():
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_execution",
+                "error": "isolated benchmark arm runner failed",
+                "files": [str(receipt_path)], "evidence_refs": [str(receipt_path)],
+                "semantic_output": {"arm_id": arm, "command_receipts": [str(receipt_path)]}}
+
+    try:
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        metrics = evidence.get("metrics") if isinstance(evidence.get("metrics"), Mapping) else {}
+        predictions = evidence.get("predictions") if isinstance(evidence.get("predictions"), list) else []
+        guardrails = evidence.get("guardrails") if isinstance(evidence.get("guardrails"), Mapping) else {}
+        run_config = evidence.get("run_config") if isinstance(evidence.get("run_config"), Mapping) else {}
+        provenance = evidence.get("provenance") if isinstance(evidence.get("provenance"), Mapping) else {}
+        features = run_config.get("features") if isinstance(run_config.get("features"), Mapping) else {}
+        data_hash = "sha256:" + hashlib.sha256(dataset.read_bytes()).hexdigest()
+        checks = {
+            "primary_metric_numeric": isinstance(metrics.get("rmse"), (int, float))
+                and not isinstance(metrics.get("rmse"), bool) and math.isfinite(float(metrics["rmse"])),
+            "predictions_present": bool(predictions),
+            "guardrails_present": bool(guardrails),
+            "run_config_present": bool(run_config),
+            "arm_feature_exact": features.get("declared_feature") == expected_feature,
+            "dataset_hash_exact": provenance.get("data_hash") == data_hash,
+        }
+    except (OSError, ValueError, TypeError) as exc:
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_artifact",
+                "error": f"invalid benchmark evidence: {type(exc).__name__}: {exc}",
+                "files": [str(output), str(receipt_path)],
+                "evidence_refs": [str(output), str(receipt_path)]}
+    if not all(checks.values()):
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_artifact",
+                "error": "benchmark evidence contract failed", "files": [str(output), str(receipt_path)],
+                "evidence_refs": [str(output), str(receipt_path)],
+                "semantic_output": {"arm_id": arm, "contract_checks": checks,
+                                    "command_receipts": [str(receipt_path)]}}
+    from partner.runtime.artifact_checks import check_file
+    artifact_check = check_file(output)
+    if not artifact_check.get("valid"):
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_artifact",
+                "error": str(artifact_check.get("error") or "artifact check failed"),
+                "files": [str(output), str(receipt_path)],
+                "evidence_refs": [str(output), str(receipt_path)]}
+    semantic = {
+        "arm_id": arm, "business_delta": True, "contract_checks": checks,
+        "artifact_checks": [artifact_check], "verified_artifacts": [str(output)],
+        "command_receipts": [str(receipt_path)], "metrics": dict(metrics),
+        "run_config": dict(run_config), "provenance": dict(provenance),
+    }
+    return {"ok": True, "status": "completed", "business_delta": True,
+            "summary": f"executed isolated {arm} benchmark arm",
+            "files": [str(output), str(receipt_path)],
+            "evidence_refs": [str(output), str(receipt_path)],
+            "metrics": dict(metrics), "semantic_output": semantic}
 
 
 def _write(ctx: Any, params: Mapping[str, Any], name: str, value: Mapping[str, Any]) -> Path:
@@ -722,6 +832,7 @@ def checkpoint_capture(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 DEFINITIONS = [
+    EventDefinition("benchmark_subject.arm_execute", "benchmark", "严格执行一个冻结 Benchmark 实验臂", subject_arm_execute, execution_method="subprocess", produces_artifact=True, idempotent=False, timeout_seconds=3600),
     EventDefinition("benchmark.signal_validate", "benchmark", "验证结构化 Benchmark 标志", signal_validate),
     EventDefinition("benchmark.protocol_resolve", "benchmark", "解析并固定 Benchmark 协议", protocol_resolve, reads_existing_artifact=True),
     EventDefinition("benchmark.environment_preflight", "benchmark", "检查输入、Event 与 Flow 完整性", environment_preflight, reads_existing_artifact=True),

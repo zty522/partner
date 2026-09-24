@@ -28,3 +28,11 @@ MiniMax 在该节点连续三次返回 HTTP 429 / code 2056，信息为 Token Pl
 删除重复配置并切换 `api.json.default_provider=qwen` 后，`qwen3.8-flash` 短探针成功。长提示最初因模型默认开启思考而连续三次达到90秒硬超时；随后在 Qwen provider 条目显式设置 `enable_thinking=false`，约18k input token 的长提示探针成功，baseline subject 从 `candidate.propose` 继续通过 critic、select、世界模型/Jev和 Commitment，到达真实 execute。
 
 该 execute 暴露了新的实验隔离缺陷：baseline subject 的通用 LLM action 同时调用了 baseline 和 candidate runner，并生成一个合并 `benchmark_evidence.json`；两个分臂原始文件虽然数值真实，但这违反“一次 subject 只运行当前 arm”的协议，也使父 collector 不能把合并文件当成合格分臂证据。因此当前 run 不继续 candidate，不宣称 Settlement 成功。后续需把 arm 执行收敛为协议驱动的专用 Event，由 Runtime 注入当前 arm，不能依靠 LLM 遵守命令文字。
+
+## 隔离修复
+
+旧 Job `job_19fa9d176ebb4e3e`、父 Flow `flow_666a6f9df74f4a13` 和 baseline 子 Flow `flow_8d816b6adcd64aec` 已于 2026-09-24 标记为 `cancelled`。原始产物和账本保留，不能作为成功实验引用。
+
+`benchmark_subject@1.1.0` 使用专用 `benchmark_subject.arm_execute` 替代通用 LLM action。该 Event 只接受 subject 公开视图中的当前 arm，以 argv 数组调用冻结 runner 一次，并校验 RMSE、预测记录、guardrails、run config、当前臂特征和数据 SHA-256。baseline 必须记录空 declared feature，candidate 必须精确记录预声明 feature；任一不符均 fail-closed。协议 `pk_target_feature_v1@1.1.0` 将 `arm_runner_path` 纳入必需输入和冻结哈希，并明确单臂最长 1800 秒。旧 `benchmark_subject@1.0.0` 仍只为历史 Flow 的版本解析保留。
+
+仓库级父子 Flow 测试已验证两臂分别执行、子 Flow 恢复、六个检查点、父 Flow 结算和 run close。真实 Davis 新运行须使用新 run id，最终结果将在完成后追加；本节只证明隔离机制修复，不提前宣称科学结果。

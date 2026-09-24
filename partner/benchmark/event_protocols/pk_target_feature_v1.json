@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "protocol_id": "pk_target_feature_v1",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "subject_flow": "benchmark_subject",
   "arms": ["baseline", "candidate"],
-  "required_inputs": ["dataset_path", "declared_feature"],
+  "required_inputs": ["dataset_path", "declared_feature", "arm_runner_path"],
   "allowed_arm_differences": ["arm_configuration.features.declared_feature"],
   "subject_view": {
     "research_question": "加入预声明的 target-level feature 是否改善 pK 预测",
@@ -40,7 +40,8 @@
     "candidate_runs": 1,
     "folds": 5,
     "bootstrap": 1000,
-    "bootstrap_seed": 20260924
+    "bootstrap_seed": 20260924,
+    "max_seconds": 1800
   },
   "checkpoints": [
     {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},

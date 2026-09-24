@@ -3,10 +3,12 @@
 The parent owns protocol truth and evaluation.  The subject receives only a
 public arm view and emits checkpoints; it cannot see scores or hidden labels.
 """
+from dataclasses import replace
+
 from partner.event_fabric.flows import EventFlowDefinition as Flow, FlowNode as Node
 
 
-BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.0.0", (
+BENCHMARK_SUBJECT_V1 = Flow("benchmark_subject", "1.0.0", (
     Node("recall", "memory.context_recall"),
     Node("inspect", "project.state_inspect", ("recall",)),
     Node("cp_state", "checkpoint.capture", ("inspect",),
@@ -36,6 +38,14 @@ BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.0.0", (
     Node("cp_settlement", "checkpoint.capture", ("core_settlement",),
          parameters={"checkpoint_id": "CP6_SETTLEMENT", "source_node": "core_settlement"}),
 ), "One isolated benchmark arm. It exposes checkpoints but no evaluator feedback.")
+
+
+BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.1.0", tuple(
+    replace(node, event_type="benchmark_subject.arm_execute",
+            optional=False, continue_on_failure=False)
+    if node.node_id == "execute" else node
+    for node in BENCHMARK_SUBJECT_V1.nodes
+), "One isolated benchmark arm with a deterministic single-arm executor.")
 
 
 BENCHMARK_EXPERIMENT = Flow("benchmark_experiment", "1.0.0", (

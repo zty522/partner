@@ -79,6 +79,8 @@ def build_flow_registry() -> EventFlowRegistry:
     from .benchmark import DEFINITIONS as benchmark_definitions
     for definition in benchmark_definitions:
         registry.register(definition)
+    from .benchmark import BENCHMARK_SUBJECT_V1
+    registry._versions[(BENCHMARK_SUBJECT_V1.name, BENCHMARK_SUBJECT_V1.version)] = BENCHMARK_SUBJECT_V1
     from .cycle import DEFINITIONS as cycle_definitions, HISTORICAL as cycle_historical
     for definition in cycle_definitions:
         registry.register(definition)
