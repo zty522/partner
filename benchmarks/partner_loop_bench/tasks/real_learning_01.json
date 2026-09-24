@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "task_id": "real_learning_01",
+  "domain": "active_learning",
+  "execution_kind": "metric_api_patch",
+  "scenario": "After an sklearn upgrade, a production RMSE helper raises TypeError because the squared keyword is no longer accepted. A version-bound handoff says the current public API exposes a dedicated RMSE function.",
+  "instruction": "Choose one adoption candidate. The evaluator will implement it and run numerical compatibility tests in the installed environment.",
+  "candidates": [
+    {"id": "manual_sqrt_mse", "description": "Compute sqrt(mean_squared_error) locally."},
+    {"id": "keep_removed_keyword", "description": "Keep squared=False and catch failures at the caller."},
+    {"id": "use_root_metric", "description": "Adopt the dedicated current RMSE API named in the versioned handoff."},
+    {"id": "return_zero", "description": "Return zero if the metric call fails."}
+  ],
+  "constraints": ["source-bound adoption", "same numerical inputs", "no dependency downgrade"]
+}

@@ -13,18 +13,19 @@ from partner.benchmark.wrapper import PartnerBenchmarkWrapper
 DEFAULT_TASKS = ("project_01", "learning_01", "evolution_01")
 
 
-def run(workspace: Path, task_ids: tuple[str, ...]) -> dict:
+def run(workspace: Path, task_ids: tuple[str, ...], *, runner_name: str = "sealed_runner.py",
+        protocol_id: str = "partner_loop_full_vs_single_v1") -> dict:
     here = Path(__file__).resolve().parent
     wrapper = PartnerBenchmarkWrapper(workspace)
     rows = []
     for task_id in task_ids:
         task_path = here / "tasks" / f"{task_id}.json"
         submitted = wrapper.submit(
-            protocol_id="partner_loop_full_vs_single_v1",
-            request=f"/benchmark partner_loop_full_vs_single_v1\nblind_task={task_id}",
+            protocol_id=protocol_id,
+            request=f"/benchmark {protocol_id}\nblind_task={task_id}",
             instance_id="01", project_id="partner_core_v1_1",
             inputs={"task_path": str(task_path),
-                    "arm_runner_path": str(here / "sealed_runner.py"),
+                    "arm_runner_path": str(here / runner_name),
                     "task_id": task_id, "benchmark_seed": 20260924},
             allow_external_judges=False)
         terminal = wrapper.wait(submitted, timeout_seconds=900)
@@ -61,7 +62,7 @@ def run(workspace: Path, task_ids: tuple[str, ...]) -> dict:
                           "falsified" if isinstance(uplift, float) and uplift <= 0 else
                           "inconclusive")
     output = {"schema_version": 1, "benchmark": "Partner-LoopBench pilot",
-              "protocol_id": "partner_loop_full_vs_single_v1",
+              "protocol_id": protocol_id, "runner": runner_name,
               "task_count": len(rows), "all_terminal": all(row["job_status"] == "completed" for row in rows),
               "baseline_success_rate": baseline_success,
               "full_partner_success_rate": candidate_success,
@@ -104,8 +105,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", default="/mnt/e/work/partner_workspace")
     parser.add_argument("--tasks", nargs="*", default=list(DEFAULT_TASKS))
+    parser.add_argument("--runner", default="sealed_runner.py")
+    parser.add_argument("--protocol", default="partner_loop_full_vs_single_v1")
     args = parser.parse_args()
-    print(json.dumps(run(Path(args.workspace).resolve(), tuple(args.tasks)), ensure_ascii=False, indent=2))
+    print(json.dumps(run(Path(args.workspace).resolve(), tuple(args.tasks),
+                         runner_name=args.runner, protocol_id=args.protocol), ensure_ascii=False, indent=2))
     return 0
 
 

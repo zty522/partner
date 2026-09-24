@@ -33,9 +33,9 @@ Event 不调用 Event。父 Runtime 根据已验证协议启动相应 subject Fl
 
 ## 任务与指标
 
-v1 任务包含 15 项：项目迭代、主动学习、Partner 自进化各 5 项。首个 pilot 每类抽一项。核心指标为 Task Success、Autonomous Uplift、False Evolution Rate、Valid Run Rate；后续加入 Learning-to-Action Gain、恢复率、Event/模型调用成本和纵向斜率。
+当前任务包包含 24 项：项目迭代、主动学习、Partner 自进化各 8 项，覆盖初始选择题、真实隔离执行以及 warmup→transfer。核心指标为 Task Success、Autonomous Uplift、False Evolution Rate、Valid Run Rate 和 Learning-to-Action Gain；后续加入恢复率、Event/模型调用成本和纵向斜率。
 
-15 项选择题只用于基础设施校准，不足以支撑论文结论。正式任务必须加入真实产物执行、未知缺陷定位、来源选择与下游采用，并由独立维护者密封答案。
+初始 15 项选择题只用于基础设施校准，不足以支撑论文结论。正式任务必须加入真实产物执行、未知缺陷定位、来源选择与下游采用，并由独立维护者密封答案。
 
 ## 纵向与消融路线
 
@@ -50,3 +50,9 @@ v1 任务包含 15 项：项目迭代、主动学习、Partner 自进化各 5 �
 控制组共 3 次模型调用、1,596 tokens；完整闭环共 6 次模型调用、5,650 tokens。当前额外推理成本没有换来成功率增益。
 
 这说明闭环基础设施可以运行，也说明当前简单任务有明显天花板效应，尚无证据表明增加 Critic 与 Commitment 能提升任务效果。下一轮要提高任务区分度并加入纵向记忆消费，不能把“Event 更多”当成能力提高。
+
+## 首个纵向结果
+
+`partner_loop_memory_vs_none_v1` 已把 arm-specific memory 纳入公开视图合同：baseline 不读取历史，candidate 只能读取带来源 Settlement、来源文件和正确 SHA-256 的验证记录。三个 warmup→transfer 对中，无记忆为 `0/3`，相关验证记忆为 `3/3`，Learning-to-Action Gain=`1.0`；把 candidate 记忆轮换成其他领域的有效经验后为 `0/3`。这证明相关记忆消费链能改变动作，并通过了无关记忆负对照。
+
+该结果是内部 registry 映射的机制验收，不是开放世界学习结论。正式 benchmark 仍需外部隐藏任务、多 seed、错误/冲突/过期记忆压力测试和跨模型复现。

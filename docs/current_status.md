@@ -2185,3 +2185,6 @@ Jev 已从 `partner_config.json` 迁入工作区 `config/model_services.json`；
 Core v1 已进入盲化效果验证阶段。`partner_loop_bench_subject@1.0.0` 只读取公开任务，父 `benchmark_experiment` 保管隐藏答案并做权威 Settlement。有效三任务 pilot 中 single-turn 与 full Partner 都是 3/3，Autonomous Uplift=0，修正协议后的结论为 falsified。当前结论是基础设施有效、效果未证实；下一门槛是难度校准后的真实执行任务、纵向记忆消费和预声明消融。
 
 运行前已将 160 个 2026-09-18/19 的无进程旧非终态投影 append-only reconcile 为 cancelled；没有删除历史证据。当前新 pilot Jobs 均终态。
+## 2026-09-24：纵向记忆消费初验
+
+Partner-LoopBench 已增加真实 HGB 分组评估、sklearn API 执行和 477 Job/SQLite 检索 fixture。single-turn 与 full Partner 在这三项仍同为 3/3，完整闭环增益继续被否证。随后三组 warmup→transfer 显示 no-memory 0/3、相关 verified-memory 3/3、无关 verified-memory 0/3，Learning-to-Action Gain=1.0。该证据只支持来源绑定记忆的特异性消费机制，不支持开放世界泛化声明。

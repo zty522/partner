@@ -145,6 +145,11 @@ def public_subject_view(protocol: BenchmarkProtocolV1, supplied: Mapping[str, An
     # frozen in the parent manifest but can never cross into a child view.
     public_inputs = {key: supplied[key] for key in public_keys
                      if key in supplied and not str(key).startswith("hidden_")}
+    overrides = supplied.get("arm_input_overrides")
+    arm_overrides = overrides.get(arm) if isinstance(overrides, Mapping) else None
+    if isinstance(arm_overrides, Mapping):
+        public_inputs.update({str(key): value for key, value in arm_overrides.items()
+                              if not str(key).startswith("hidden_")})
     return {
         "protocol_id": protocol.protocol_id,
         "protocol_version": protocol.version,

@@ -43,6 +43,11 @@ def _task(params: Mapping[str, Any]) -> dict[str, Any]:
     return dict(_semantic(params, "inspect").get("task") or {})
 
 
+def _memory(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    value = _semantic(params, "inspect").get("verified_memory")
+    return [dict(row) for row in value or [] if isinstance(row, Mapping)]
+
+
 def _policy(params: Mapping[str, Any]) -> str:
     value = _view(params).get("arm_configuration") or {}
     return str(value.get("policy") or "full_partner")
@@ -72,11 +77,34 @@ def task_inspect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     leaked = sorted(forbidden & keys(task))
     if leaked:
         return {"ok": False, "status": "failed", "error": f"public task leaks evaluator keys: {leaked}"}
-    record = {"visibility": "public_only", "history_access": False, "memory_access": False,
+    memory = []
+    memory_path = Path(str(inputs.get("memory_path") or "")).expanduser().resolve()
+    if str(inputs.get("memory_path") or ""):
+        if not memory_path.is_file():
+            return {"ok": False, "status": "failed", "error": "declared memory_path missing"}
+        try:
+            memory_doc = json.loads(memory_path.read_text(encoding="utf-8"))
+            for row in memory_doc.get("lessons") or []:
+                if not isinstance(row, Mapping) or row.get("verified") is not True \
+                        or not row.get("source_settlement"):
+                    continue
+                source = Path(str(row.get("source_artifact") or "")).expanduser().resolve()
+                expected_hash = str(row.get("source_sha256") or "")
+                if not source.is_file() or expected_hash != hashlib.sha256(source.read_bytes()).hexdigest():
+                    continue
+                memory.append(dict(row))
+        except (OSError, ValueError, TypeError) as exc:
+            return {"ok": False, "status": "failed", "error": f"invalid verified memory: {exc}"}
+    record = {"visibility": "public_only", "history_access": False,
+              "memory_access": bool(memory), "verified_memory": memory[-8:],
               "policy": _policy(params), "task": task, "task_path": str(path),
-              "task_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+              "task_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+              "memory_path": str(memory_path) if memory else "",
+              "memory_sha256": hashlib.sha256(memory_path.read_bytes()).hexdigest() if memory else "",
+              "memory_records_verified": bool(memory)}
+    refs = [str(path)] + ([str(memory_path)] if memory else [])
     return {"ok": True, "status": "completed", "summary": "inspected public blind task",
-            "evidence_refs": [str(path)], "semantic_output": record}
+            "evidence_refs": refs, "semantic_output": record}
 
 
 def candidate_propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -86,7 +114,9 @@ def candidate_propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "You are the subject in a blinded benchmark. You cannot see the answer. "
         "Use only this public task. Return JSON with candidate_ids (best-first), "
         "hypothesis, expected_observation, failure_condition, and evidence_used. "
-        "Do not invent candidate IDs.\nPUBLIC_TASK=" + json.dumps(task, ensure_ascii=False))
+        "Treat VERIFIED_MEMORY as prior evidence, not as an answer key. "
+        "Do not invent candidate IDs.\nPUBLIC_TASK=" + json.dumps(task, ensure_ascii=False) +
+        "\nVERIFIED_MEMORY=" + json.dumps(_memory(params), ensure_ascii=False))
     raw, usage = call_model(ctx, purpose="loop_bench_propose", prompt=prompt)
     parsed = json_object(raw)
     allowed = {str(row.get("id")) for row in task.get("candidates") or [] if isinstance(row, Mapping)}
@@ -114,7 +144,8 @@ def candidate_critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "Act as an adversarial critic. Given the public task and a proposed ranking, "
         "identify unsupported assumptions and return JSON with surviving_ids, objections, "
         "and recommended_id. IDs must come from the task.\n" + json.dumps(
-            {"task": _task(params), "proposal": proposal}, ensure_ascii=False))
+            {"task": _task(params), "verified_memory": _memory(params),
+             "proposal": proposal}, ensure_ascii=False))
     raw, usage = call_model(ctx, purpose="loop_bench_critic", prompt=prompt)
     parsed = json_object(raw)
     allowed = {str(row.get("id")) for row in _task(params).get("candidates") or []

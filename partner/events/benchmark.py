@@ -293,15 +293,22 @@ def run_freeze(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         code_revision = "unavailable"
     input_artifacts = {}
-    for key, value in supplied.items():
+    def collect_paths(value: Any, prefix: str = "") -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                collect_paths(item, f"{prefix}.{key}" if prefix else str(key))
+            return
+        if not prefix.endswith("_path"):
+            return
         path = Path(str(value))
         if path.is_file():
             hasher = __import__("hashlib").sha256()
             with path.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     hasher.update(chunk)
-            input_artifacts[key] = {"path": str(path.resolve()), "bytes": path.stat().st_size,
-                                    "sha256": hasher.hexdigest()}
+            input_artifacts[prefix] = {"path": str(path.resolve()), "bytes": path.stat().st_size,
+                                       "sha256": hasher.hexdigest()}
+    collect_paths(supplied)
     manifest = {
         "schema_version": 1, "run_id": _run_id(params), "state": "running",
         "run_mode": "benchmark", "protocol_id": protocol.protocol_id,
@@ -494,8 +501,12 @@ def execution_parity_evaluate(ctx: Any, params: dict[str, Any]) -> dict[str, Any
     differences = _diff_paths(left_config, right_config)
     # Artifact run_config uses a concise features.declared_feature path; the
     # public arm view uses arm_configuration.features.declared_feature.
+    # Input-view differences (for example a candidate-only verified memory)
+    # are already checked by variant_parity.  Execution parity compares only
+    # differences that are expected to appear in artifact run_config.
     allowed = {value.removeprefix("arm_configuration.")
-               for value in protocol.allowed_arm_differences}
+               for value in protocol.allowed_arm_differences
+               if value.startswith("arm_configuration.")}
     unexpected = sorted(differences - allowed)
     required = sorted(allowed - differences)
     b_feature = ((left_config.get("features") or {}).get("declared_feature")
@@ -619,6 +630,23 @@ def guardrail_evaluate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         derived_evidence = None
         if identifier == "artifacts_complete":
             values = [row.get("valid") for row in integrity]
+        elif identifier == "memory_source_verified":
+            memory_checks = []
+            for arm, collection in zip(protocol.arms, collections):
+                try:
+                    child = json.loads(Path(str(collection.get("record_path") or "")).read_text(encoding="utf-8"))
+                    inspected = (((child.get("node_outputs") or {}).get("inspect") or {}).get("semantic_output") or {})
+                except (OSError, ValueError, TypeError):
+                    inspected = {}
+                expected = arm == protocol.arms[1]
+                memory_checks.append({"arm": arm, "expected_memory": expected,
+                                      "memory_access": inspected.get("memory_access"),
+                                      "records_verified": inspected.get("memory_records_verified")})
+            derived = all((row["memory_access"] is False if not row["expected_memory"] else
+                           row["memory_access"] is True and row["records_verified"] is True)
+                          for row in memory_checks)
+            values = [derived]
+            derived_evidence = {"method": "subject_inspect_provenance", "checks": memory_checks}
         elif identifier == "secondary_metrics_not_materially_worse":
             comparisons = guardrail.get("comparisons") or []
             baseline_metrics = collections[0].get("metrics") or {}

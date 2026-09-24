@@ -1297,3 +1297,11 @@ documents:
     tags: [testing, benchmark, event-flow, qwen, blind-evaluation]
     instances: ["01", all]
     max_chars: 10000
+  - id: partner_loop_bench_longitudinal_20260924
+    path: docs/testing/partner_loop_bench_longitudinal_20260924.md
+    title: Partner-LoopBench 真实执行与纵向记忆验收
+    tier: L1
+    authority: current
+    tags: [testing, benchmark, longitudinal, memory, active-learning, self-evolution]
+    instances: ["01", all]
+    max_chars: 12000
