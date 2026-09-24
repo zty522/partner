@@ -8,6 +8,14 @@ tiers:
   L3: current project state, latest receipt, and task evidence
   L4: raw logs and historical archives; never load by default
 documents:
+  - id: core_v1_benchmark_start_20260924
+    path: docs/operations/core_v1_benchmark_start_20260924.md
+    title: Core v1 Davis benchmark 启动与 MiniMax 配额阻塞记录
+    tier: L3
+    authority: current
+    tags: [benchmark, core-v1, minimax, runtime, blocked]
+    instances: ["01", all]
+    max_chars: 5000
   - id: event_flow_synthesis_policy
     path: docs/architecture/flow_synthesis_policy.md
     title: Event Flow 生成、迭代与学习策略
