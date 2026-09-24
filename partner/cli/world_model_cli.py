@@ -245,24 +245,12 @@ def cmd_world_model_configure(args):
         else:
             config["fallback_to_llm"] = current_fallback
 
-    # Save config as YAML at config/world_model.yaml
-    wm_path = os.path.join(workspace, "config", "world_model.yaml")
-    os.makedirs(os.path.dirname(wm_path), exist_ok=True)
     try:
-        import yaml
-        with open(wm_path, "w", encoding="utf-8") as f:
-            yaml.dump({"world_model": config}, f, default_flow_style=False)
+        from partner.model_services import update_model_service
+        wm_path = update_model_service(workspace, "world_model", config)
         print(f"\n  {C_GREEN}✅ World model config saved to: {wm_path}{C_RESET}")
-    except ImportError:
-        # Fallback: write JSON
-        wm_json_path = os.path.join(workspace, "config", "world_model.json")
-        try:
-            with open(wm_json_path, "w", encoding="utf-8") as f:
-                json.dump({"world_model": config}, f, indent=2, ensure_ascii=False)
-            print(f"\n  {C_GREEN}✅ World model config saved to: {wm_json_path}{C_RESET}")
-            print(f"  {C_YELLOW}⚠ yaml module not available, saved as JSON instead{C_RESET}")
-        except Exception as e:
-            print(f"\n  {C_RED}❌ Failed to save config: {e}{C_RESET}")
+    except Exception as e:
+        print(f"\n  {C_RED}❌ Failed to save config: {e}{C_RESET}")
 
     print()
 

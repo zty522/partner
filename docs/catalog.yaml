@@ -1249,3 +1249,19 @@ documents:
     tags: [testing, acceptance, event-flow, qwen, jev, delivery]
     instances: ["02", all]
     max_chars: 12000
+  - id: auxiliary_model_configuration
+    path: docs/architecture/model_services_config.md
+    title: Jev、世界模型与专用模型统一配置
+    tier: L1
+    authority: canonical
+    tags: [configuration, jev, world-model, credentials]
+    instances: [all]
+    max_chars: 7000
+  - id: auxiliary_model_configuration_0110
+    path: docs/decisions/0110-unified-auxiliary-model-configuration.md
+    title: 辅助模型统一工作区配置决策
+    tier: L1
+    authority: canonical
+    tags: [decision, configuration, jev, world-model]
+    instances: [all]
+    max_chars: 6000

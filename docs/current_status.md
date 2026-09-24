@@ -2173,3 +2173,6 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 项目计划、迭代、主动学习、自进化与 benchmark 的候选 Flow 当前由 LLM 结构化生成，经确定性 Compiler、Jev shadow、潜空间预测和 Commitment 后执行。Settlement 只允许最小子图迭代，并按证据区分项目阴性、知识缺口和 Partner 机制缺陷。神经策略先从真实轨迹训练 FlowRanker、NextEventPolicy 和 OutcomeModel，达到 matched benchmark 前不接管完整 Flow 生成。规范见 `docs/architecture/flow_synthesis_policy.md`。
 
 结构化 benchmark 入口已与普通三遍 LLM 意图审议解耦：明确的协议标志可直接创建父 Flow；subject 内真实需要 LLM 的节点仍按配置调用并在 provider 不可用时失败关闭。2026-09-24 当前 MiniMax key 返回 Token Plan 用量上限，不能据此宣称完整实验已运行成功。
+# 2026-09-24 辅助模型配置与 benchmark 口径修正
+
+Jev 已从 `partner_config.json` 迁入工作区 `config/model_services.json`；世界模型与后续专用模型共用同一服务注册表，主对话 LLM 仍读取 `config/api.json`。项目闭环已完成单任务两轮 matched canary，但尚未运行 benchmark wrapper 的多任务、多 seed、多 arm 完整系统 benchmark。主动学习仍缺 downstream matched comparison，自进化仍缺真实缺陷上的 baseline/candidate replay。

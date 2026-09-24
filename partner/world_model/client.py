@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 import yaml
 
+from partner.model_services import load_model_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +25,10 @@ def load_world_model_config(workspace: str) -> dict:
       2. <workspace>/../config/world_model.yaml
       3. <workspace>/../../config/world_model.yaml
     """
+    configured = load_model_service(workspace, "world_model")
+    if configured:
+        logger.info("[WORLD_MODEL] loaded config from model_services.json")
+        return configured
     resolved = os.path.abspath(workspace)
     candidates = [
         os.path.join(resolved, "config", "world_model.yaml"),
@@ -52,7 +58,7 @@ class WorldModelClient:
     REST endpoints. The server internally calls AETHER (CogVideoX on GPU),
     saves generated videos, and downloads them to the local workspace.
 
-    Config fields (from world_model.yaml):
+    Config fields (from config/model_services.json, service ``world_model``):
       - enabled: enable/disable
       - endpoint: main server URL (default http://localhost:8100)
       - timeout: request timeout in seconds (default 120)

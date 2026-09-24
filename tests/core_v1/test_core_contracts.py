@@ -66,6 +66,31 @@ def test_jev_missing_key_fails_open_for_execution_but_records_unavailable():
     assert "TYPESAFE_API_KEY" in result.reason
 
 
+def test_auxiliary_model_registry_supplies_jev_config_and_secret(tmp_path):
+    from partner.core_v1.service import jev_client
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/model_services.json").write_text(json.dumps({"services": {
+        "jev": {"mode": "shadow", "endpoint": "https://judge.invalid/decide",
+                "model": "typesafe/jev-test", "authentication": {"api_key": "local-secret"}}
+    }}), encoding="utf-8")
+    client = jev_client(tmp_path, environ={})
+    assert client.config.endpoint == "https://judge.invalid/decide"
+    assert client.config.model == "typesafe/jev-test"
+    assert client.config.api_key == "local-secret"
+
+
+def test_world_model_uses_shared_auxiliary_model_registry(tmp_path):
+    from partner.world_model.client import load_world_model_config
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/model_services.json").write_text(json.dumps({"services": {
+        "world_model": {"enabled": True, "provider": "fixture",
+                        "endpoint": "http://world.invalid", "timeout": 7}
+    }}), encoding="utf-8")
+    config = load_world_model_config(str(tmp_path))
+    assert config["enabled"] is True
+    assert config["endpoint"] == "http://world.invalid"
+
+
 def test_candidate_normalizes_text_evidence_contract_without_crashing():
     from partner.core_v1.service import candidates_from_outputs
     candidates, selected = candidates_from_outputs({'plan': {'semantic_output': {

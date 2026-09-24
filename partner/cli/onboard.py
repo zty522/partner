@@ -66,17 +66,12 @@ def _save_workspace_config(workspace: str, config: dict):
             json.dump(qq_data, f, indent=2, ensure_ascii=False)
         print(f"  {C_GREEN}✅ QQ config saved to: {qq_config_path}{C_RESET}")
 
-    # Save world model config
+    # Save auxiliary world-model config in the shared model-service registry.
     wm = config.get("world_model", {})
     if wm:
-        wm_path = os.path.join(workspace, "config", "world_model.yaml")
-        try:
-            import yaml
-            with open(wm_path, "w", encoding="utf-8") as f:
-                yaml.dump({"world_model": wm}, f, default_flow_style=False)
-            print(f"  {C_GREEN}✅ World model config saved to: {wm_path}{C_RESET}")
-        except ImportError:
-            print(f"  {C_YELLOW}⚠ yaml not available, skipping world_model.yaml{C_RESET}")
+        from partner.model_services import update_model_service
+        wm_path = update_model_service(workspace, "world_model", wm)
+        print(f"  {C_GREEN}✅ World model config saved to: {wm_path}{C_RESET}")
 
 
 def detect_environment():
@@ -613,17 +608,6 @@ def cmd_onboard(args):
             config_dir = os.path.join(workspace, "config")
             os.makedirs(config_dir, exist_ok=True)
             _save_workspace_config(workspace, config)
-
-            # Generate world_model.yaml if enabled
-            wm = config.get("world_model", {})
-            if wm:
-                wm_path = os.path.join(config_dir, "world_model.yaml")
-                try:
-                    import yaml
-                    with open(wm_path, "w", encoding="utf-8") as f:
-                        yaml.dump({"world_model": wm}, f, default_flow_style=False)
-                except ImportError:
-                    pass
 
             print(f"\n  {C_GREEN}✅ 配置已保存到: {workspace}{C_RESET}")
 

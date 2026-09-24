@@ -449,18 +449,9 @@ def _get_instance_status(instance_id: str, workspace: str) -> dict:
 
     # World model enabled
     try:
-        wm_yaml = os.path.join(workspace, "config", "world_model.yaml")
-        if os.path.exists(wm_yaml):
-            import yaml
-            with open(wm_yaml) as f:
-                data = yaml.safe_load(f)
-            result["world_model_enabled"] = bool(data.get("world_model", {}).get("enabled", False)) if isinstance(data, dict) else False
-        else:
-            wm_json = os.path.join(workspace, "config", "world_model.json")
-            if os.path.exists(wm_json):
-                with open(wm_json) as f:
-                    data = json.load(f)
-                result["world_model_enabled"] = bool(data.get("world_model", {}).get("enabled", False)) if isinstance(data, dict) else False
+        from partner.model_services import load_model_service
+        result["world_model_enabled"] = bool(
+            load_model_service(workspace, "world_model").get("enabled", False))
     except Exception:
         pass
 

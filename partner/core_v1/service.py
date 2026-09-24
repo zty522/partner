@@ -15,6 +15,7 @@ from .models import (
 )
 from .policy import TriggerEvidence, route_next
 from .store import CoreStore
+from partner.model_services import load_model_service, resolve_api_key
 
 
 def now_iso() -> str:
@@ -179,8 +180,7 @@ def forecast_from_dict(value: Mapping[str, Any]) -> Forecast:
 
 
 def jev_client(workspace: str | Path, *, transport=None, environ=None) -> JevClient:
-    cfg = load_config(workspace).get("jev")
-    cfg = dict(cfg) if isinstance(cfg, dict) else {}
+    cfg = load_model_service(workspace, "jev")
     try:
         mode = CoreMode(str(cfg.get("mode") or "shadow"))
     except ValueError:
@@ -189,6 +189,7 @@ def jev_client(workspace: str | Path, *, transport=None, environ=None) -> JevCli
         mode=mode, endpoint=str(cfg.get("endpoint") or "https://api.typesafe.ai/v1/systemone"),
         model=str(cfg.get("model") or "jev-latest"),
         api_key_env=str(cfg.get("api_key_env") or "TYPESAFE_API_KEY"),
+        api_key=resolve_api_key(cfg, environ),
         timeout_seconds=float(cfg.get("timeout_seconds") or 10)), transport=transport, environ=environ)
 
 

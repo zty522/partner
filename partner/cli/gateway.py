@@ -366,18 +366,8 @@ def cmd_gateway_status(args):
         # Check world model enabled
         wm_enabled = False
         try:
-            wm_config_path = os.path.join(instance_ws, "config", "world_model.yaml")
-            if os.path.exists(wm_config_path):
-                import yaml
-                with open(wm_config_path) as f:
-                    wm_data = yaml.safe_load(f)
-                wm_enabled = bool(wm_data.get("world_model", {}).get("enabled", False)) if isinstance(wm_data, dict) else False
-            else:
-                wm_json_path = os.path.join(instance_ws, "config", "world_model.json")
-                if os.path.exists(wm_json_path):
-                    with open(wm_json_path) as f:
-                        wm_data = json.load(f)
-                    wm_enabled = bool(wm_data.get("world_model", {}).get("enabled", False)) if isinstance(wm_data, dict) else False
+            from partner.model_services import load_model_service
+            wm_enabled = bool(load_model_service(instance_ws, "world_model").get("enabled", False))
         except Exception:
             pass
 

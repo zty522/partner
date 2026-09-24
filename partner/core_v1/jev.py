@@ -7,7 +7,7 @@ unavailable judgment.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -35,6 +35,7 @@ class JevConfig:
     endpoint: str = "https://api.typesafe.ai/v1/systemone"
     model: str = "jev-latest"
     api_key_env: str = "TYPESAFE_API_KEY"
+    api_key: str = field(default="", repr=False, compare=False)
     timeout_seconds: float = 10.0
 
 
@@ -65,7 +66,8 @@ class JevClient:
     def evaluate(self, state: DecisionState, *, questions: Mapping[str, Any] | None = None) -> TypedJudgment:
         if self.config.mode == CoreMode.DISABLED:
             return TypedJudgment("disabled", self.config.model, {}, reason="Jev disabled")
-        api_key = str(self.environ.get(self.config.api_key_env) or "").strip()
+        api_key = (str(self.config.api_key or "").strip() or
+                   str(self.environ.get(self.config.api_key_env) or "").strip())
         if not api_key:
             return TypedJudgment("unavailable", self.config.model, {},
                                  reason=f"missing {self.config.api_key_env}")
