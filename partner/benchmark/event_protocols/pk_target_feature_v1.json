@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "protocol_id": "pk_target_feature_v1",
+  "version": "1.0.0",
+  "subject_flow": "benchmark_subject",
+  "arms": ["baseline", "candidate"],
+  "required_inputs": ["dataset_path", "declared_feature"],
+  "allowed_arm_differences": ["arm_configuration.features.declared_feature"],
+  "subject_view": {
+    "research_question": "加入预声明的 target-level feature 是否改善 pK 预测",
+    "model": "frozen_HGB",
+    "split": "frozen_target_group_folds",
+    "official_test_for_tuning": false
+  },
+  "primary_metric": {
+    "name": "rmse",
+    "direction": "lower_is_better"
+  },
+  "expected_effect": {
+    "comparison": "baseline_minus_candidate",
+    "minimum": 0.03,
+    "confidence_interval_must_exclude": 0.0
+  },
+  "guardrails": [
+    {"id": "no_target_leakage", "hard": true},
+    {"id": "official_test_not_used_for_tuning", "hard": true},
+    {"id": "within_budget", "hard": true},
+    {"id": "artifacts_complete", "hard": true},
+    {"id": "secondary_metrics_not_materially_worse", "hard": false}
+  ],
+  "budget": {
+    "baseline_runs": 1,
+    "candidate_runs": 1,
+    "folds": 5,
+    "bootstrap": 1000
+  },
+  "checkpoints": [
+    {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},
+    {"id": "CP2_CANDIDATE", "after": "plan", "gate": "observe_only"},
+    {"id": "CP3_COMMITMENT", "after": "core_commit", "gate": "hard"},
+    {"id": "CP4_EXECUTION", "after": "execute", "gate": "hard"},
+    {"id": "CP5_VERIFICATION", "after": "verify", "gate": "hard"},
+    {"id": "CP6_SETTLEMENT", "after": "core_settlement", "gate": "observe_only"}
+  ],
+  "evaluators": {
+    "deterministic": true,
+    "domain_metrics": true,
+    "jev": "shadow",
+    "llm_judge": "shadow"
+  }
+}

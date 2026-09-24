@@ -6,7 +6,10 @@ import time
 def validate_constraints(value):
     allowed = {'run_until_epoch', 'max_rounds', 'proposal_only', 'read_only_paths',
                'evolution_cycle', 'evolution_apply', 'action_seconds', 'local_learning_root',
-               'method_arm', 'method_arm_label'}
+               'method_arm', 'method_arm_label', 'benchmark_protocol_id',
+               'benchmark_protocol_version', 'benchmark_inputs',
+               'benchmark_guardrail_results', 'benchmark_allow_external_judges',
+               'checkpoint_policy'}
     if set(value)-allowed:
         raise ValueError('unknown execution constraint')
     result = dict(value)
@@ -20,6 +23,12 @@ def validate_constraints(value):
             raise ValueError(key + ' must be boolean')
     if 'action_seconds' in result:
         result['action_seconds'] = max(60, min(1800, int(result['action_seconds'])))
+    for key in ('benchmark_inputs', 'benchmark_guardrail_results'):
+        if key in result and not isinstance(result[key], dict):
+            raise ValueError(key + ' must be an object')
+    if ('benchmark_allow_external_judges' in result
+            and not isinstance(result['benchmark_allow_external_judges'], bool)):
+        raise ValueError('benchmark_allow_external_judges must be boolean')
     if 'run_until_epoch' in result:
         deadline = float(result['run_until_epoch'])
         if not math.isfinite(deadline) or deadline <= 0:

@@ -889,6 +889,15 @@ class PartnerApplicationService:
         preallocated_job_id: str = "",
     ) -> Submission:
         clean = str(text or "").replace("\x00", "").strip()
+        incoming_constraints = dict(execution_constraints or {})
+        # Explicit slash syntax is a transport-level flag, not an LLM intent
+        # guess.  Web/API callers should prefer mode=benchmark plus the same
+        # structured fields.
+        if clean.startswith("/benchmark"):
+            first = clean.splitlines()[0].split()
+            mode = "benchmark"
+            if len(first) > 1 and not incoming_constraints.get("benchmark_protocol_id"):
+                incoming_constraints["benchmark_protocol_id"] = first[1].strip()
         if not clean and not attachments:
             return Submission(False, "", "", "", "rejected", "enqueue_work", "消息为空")
 
@@ -903,10 +912,10 @@ class PartnerApplicationService:
         from partner.projects.dynamic_project_registry import DynamicProjectRegistry
         from partner.runtime.status_context import runtime_status
 
-        method_arm = str((execution_constraints or {}).get("method_arm")
-                          or (execution_constraints or {}).get("benchmark_method_arm")
+        method_arm = str(incoming_constraints.get("method_arm")
+                          or incoming_constraints.get("benchmark_method_arm")
                           or "")
-        ablation_drop = str((execution_constraints or {}).get("ablation_drop") or "")
+        ablation_drop = str(incoming_constraints.get("ablation_drop") or "")
         intent_params_base = {
             "request": clean,
             "attachments": list(attachments),
@@ -949,6 +958,9 @@ class PartnerApplicationService:
         # dedicated improvement flow is always selected.
         if mode in {"self_improvement", "learning_improvement"} and scope == "partner":
             route = "project_iteration"
+        if mode == "benchmark":
+            route = "project_iteration"
+            dispatch_target = project_id or dispatch_target or persona_hint or "benchmark"
 
         if route not in {"direct_answer", "project_iteration"}:
             return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
@@ -1035,7 +1047,7 @@ class PartnerApplicationService:
         # Development rollout is scoped to explicitly configured instances.
         # This only changes a new project request; it never schedules work itself.
         cycle_policy = self._application_config().get('bounded_evolution_cycle') or {}
-        constraint_input = dict(execution_constraints or {})
+        constraint_input = dict(incoming_constraints)
         if (persona_hint in cycle_policy.get('instances', [])
                 and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}):
             defaults = {'evolution_cycle': True, 'max_rounds': 2,
@@ -1048,12 +1060,38 @@ class PartnerApplicationService:
         )
         if project_id:
             intent_contract['explicit_project_id'] = project_id
+        benchmark_run_id = ""
+        benchmark_protocol_id = ""
+        checkpoint_policy_ref = ""
+        if mode == "benchmark":
+            benchmark_protocol_id = str(
+                intent_contract['execution_constraints'].get('benchmark_protocol_id') or "")
+            if not benchmark_protocol_id:
+                return Submission(False, "", "", persona_hint, "rejected", "benchmark_experiment",
+                                  "Benchmark 运行缺少 benchmark_protocol_id", "")
+            benchmark_run_id = f"bench_{uuid.uuid4().hex[:16]}"
+            checkpoint_policy_ref = str(
+                intent_contract['execution_constraints'].get('checkpoint_policy') or "protocol")
+            intent_contract['benchmark'] = {
+                'run_id': benchmark_run_id, 'run_mode': 'benchmark',
+                'protocol_id': benchmark_protocol_id,
+                'protocol_version': str(intent_contract['execution_constraints'].get(
+                    'benchmark_protocol_version') or ''),
+                'inputs': dict(intent_contract['execution_constraints'].get('benchmark_inputs') or {}),
+                'guardrail_results': dict(intent_contract['execution_constraints'].get(
+                    'benchmark_guardrail_results') or {}),
+                'allow_external_judges': bool(intent_contract['execution_constraints'].get(
+                    'benchmark_allow_external_judges')),
+                'checkpoint_policy_ref': checkpoint_policy_ref,
+            }
 
         # Decide flow name based on dispatch_target.
         # Improvement modes take precedence over project routing when explicitly set.
         mode = intent_contract.get('mode') or ''
         scope = intent_contract.get('scope') or ''
-        if mode == 'self_improvement' and scope == 'partner':
+        if mode == 'benchmark':
+            flow_name = 'benchmark_experiment'
+        elif mode == 'self_improvement' and scope == 'partner':
             flow_name = 'self_improvement_cycle'
             dispatch_target = 'partner_self_improvement'
         elif mode == 'learning_improvement' and scope == 'partner':
@@ -1091,6 +1129,11 @@ class PartnerApplicationService:
                 intent_contract_path="",
                 intent_contract=intent_contract,
                 intent_model_calls=sum(out.get('model_calls', 1) for out in (observe_out, counter_out, synth_out)),
+                run_mode='benchmark' if mode == 'benchmark' else 'normal',
+                benchmark_run_id=benchmark_run_id,
+                benchmark_protocol_id=benchmark_protocol_id,
+                checkpoint_policy_ref=checkpoint_policy_ref,
+                evaluation_visibility='hidden_until_terminal' if mode == 'benchmark' else '',
             )
             job.root_event_id = received.event_id
             self.fabric.complete(received, EventSummary(
@@ -1103,6 +1146,13 @@ class PartnerApplicationService:
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
                 task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
+                run_context={
+                    'run_mode': job.run_mode, 'benchmark_run_id': benchmark_run_id,
+                    'benchmark_protocol_id': benchmark_protocol_id,
+                    'benchmark_arm_id': '', 'checkpoint_policy_ref': checkpoint_policy_ref,
+                    'evaluation_visibility': job.evaluation_visibility,
+                    'catalog_version': event_catalog.version,
+                } if mode == 'benchmark' else {},
             )
             flow_state.root_event_id = received.event_id
             EventFlowStore(self.root).save(flow_state)

@@ -81,6 +81,7 @@ class EventFlowState:
     active_child_flow_id: str = ""
     selected_route: str = ""
     definition_history: list[dict[str, Any]] = field(default_factory=list)
+    run_context: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -123,13 +124,15 @@ class EventFlowController:
         self.store = store
 
     def start(self, definition: EventFlowDefinition, *, catalog_version: str,
-              task_id: str, project_id: str, instance_id: str) -> EventFlowState:
+              task_id: str, project_id: str, instance_id: str,
+              run_context: dict[str, Any] | None = None) -> EventFlowState:
         roots = [node.node_id for node in definition.nodes if not node.depends_on]
         state = EventFlowState(
             flow_id=f"flow_{uuid.uuid4().hex[:16]}", flow_type=definition.name,
             definition_version=definition.version, catalog_version=catalog_version,
             task_id=task_id, project_id=project_id, instance_id=instance_id,
             ready_node_ids=roots,
+            run_context=dict(run_context or {}),
         )
         self.store.save(state)
         return state

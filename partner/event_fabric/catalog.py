@@ -37,6 +37,12 @@ class EventDefinition:
     concurrency_scope: str = "project"
     permission_class: str = "local"
     legacy: bool = False
+    granularity: str = "semantic"
+    preconditions: tuple[str, ...] = ()
+    postconditions: tuple[str, ...] = ()
+    evidence_contract: tuple[str, ...] = ()
+    checkpoint_policy: str = "after_terminal"
+    failure_classes: tuple[str, ...] = ()
 
     def public_record(self) -> dict[str, Any]:
         value = asdict(self)

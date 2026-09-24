@@ -39,6 +39,12 @@ class JobRecord:
     ready_event_ids: list[str] = field(default_factory=list)
     completed_event_ids: list[str] = field(default_factory=list)
     suspended_flows: list[dict[str, Any]] = field(default_factory=list)
+    run_mode: str = "normal"
+    benchmark_run_id: str = ""
+    benchmark_protocol_id: str = ""
+    benchmark_arm_id: str = ""
+    checkpoint_policy_ref: str = ""
+    evaluation_visibility: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

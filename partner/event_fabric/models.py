@@ -14,7 +14,7 @@ EVENT_SERIES = {
     "interaction", "project", "active_learning", "self_evolution", "evolution",
     "planning", "memory", "presentation", "delivery", "runtime",
     "selector", "frontend", "visualization", "notification", "acceptance",
-    "improvement",
+    "improvement", "benchmark", "checkpoint", "candidate", "core",
     # The commitment kernel projects its own lifecycle into events; the series has
     # to be registered here or EventLedger.create rejects it at flow startup
     # (see partner/observe/precedents.py case_05_event_series_unknown).
@@ -52,6 +52,12 @@ class EventEnvelope:
     node_id: str = ""
     branch_id: str = "main"
     attempt: int = 1
+    run_mode: str = "normal"
+    benchmark_run_id: str = ""
+    benchmark_protocol_id: str = ""
+    benchmark_arm_id: str = ""
+    checkpoint_policy_ref: str = ""
+    evaluation_visibility: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,6 +90,11 @@ class EventSummary:
     llm_trace_refs: list[str] = field(default_factory=list)
     token_usage: dict[str, Any] = field(default_factory=dict)
     next_reason: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    duration_ms: float = 0.0
+    input_hash: str = ""
+    output_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

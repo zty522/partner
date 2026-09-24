@@ -12,7 +12,7 @@ from .runtime_storage import workspace_dir
 from .sqlite_base import get_connection
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_BASE_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -62,7 +62,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     attachments_json    TEXT,
     metadata_json       TEXT,
     request_id          TEXT,
-    request_fingerprint TEXT
+    request_fingerprint TEXT,
+    run_mode            TEXT NOT NULL DEFAULT 'normal',
+    benchmark_run_id    TEXT,
+    benchmark_protocol_id TEXT,
+    benchmark_arm_id    TEXT,
+    checkpoint_policy_ref TEXT,
+    evaluation_visibility TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status_next
@@ -176,6 +182,10 @@ class JobRepository:
             ("origin_instance", "TEXT"), ("assigned_instance", "TEXT"),
             ("intake_instance_id", "TEXT"), ("sender_id", "TEXT"),
             ("request_id", "TEXT"), ("request_fingerprint", "TEXT"),
+            ("run_mode", "TEXT NOT NULL DEFAULT 'normal'"),
+            ("benchmark_run_id", "TEXT"), ("benchmark_protocol_id", "TEXT"),
+            ("benchmark_arm_id", "TEXT"), ("checkpoint_policy_ref", "TEXT"),
+            ("evaluation_visibility", "TEXT"),
         ]
         for col, decl in cols:
             if col in existing:
@@ -267,6 +277,12 @@ class JobRepository:
             _js(record.get("suspended_flows")),
             _js(record.get("attachments")),
             _js(record.get("metadata")),
+            record.get("run_mode") or "normal",
+            record.get("benchmark_run_id"),
+            record.get("benchmark_protocol_id"),
+            record.get("benchmark_arm_id"),
+            record.get("checkpoint_policy_ref"),
+            record.get("evaluation_visibility"),
         )
 
     def upsert_from_record(self, record, actor="ApplicationService._save", *, owner=None, fencing_token=None, projection_path=None):
@@ -300,8 +316,10 @@ class JobRepository:
                  cancel_requested, next_run_at, created_at, updated_at,
                  started_at, finished_at, ready_event_ids_json,
                  completed_event_ids_json, suspended_flows_json,
-                 attachments_json, metadata_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 attachments_json, metadata_json, run_mode, benchmark_run_id,
+                 benchmark_protocol_id, benchmark_arm_id, checkpoint_policy_ref,
+                 evaluation_visibility)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(job_id) DO UPDATE SET
                     project_id = excluded.project_id,
                     title = excluded.title,
@@ -332,7 +350,13 @@ class JobRepository:
                     completed_event_ids_json = excluded.completed_event_ids_json,
                     suspended_flows_json = excluded.suspended_flows_json,
                     attachments_json = excluded.attachments_json,
-                    metadata_json = excluded.metadata_json""",
+                    metadata_json = excluded.metadata_json,
+                    run_mode = excluded.run_mode,
+                    benchmark_run_id = excluded.benchmark_run_id,
+                    benchmark_protocol_id = excluded.benchmark_protocol_id,
+                    benchmark_arm_id = excluded.benchmark_arm_id,
+                    checkpoint_policy_ref = excluded.checkpoint_policy_ref,
+                    evaluation_visibility = excluded.evaluation_visibility""",
                 row,
             )
             from_status = existing["status"] if existing else None

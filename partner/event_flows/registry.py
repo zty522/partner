@@ -76,6 +76,9 @@ class EventFlowRegistry:
 def build_flow_registry() -> EventFlowRegistry:
     from .builtins import DEFINITIONS, LEGACY_PRESENTATION_FLOWS
     registry = EventFlowRegistry(DEFINITIONS)
+    from .benchmark import DEFINITIONS as benchmark_definitions
+    for definition in benchmark_definitions:
+        registry.register(definition)
     from .cycle import DEFINITIONS as cycle_definitions, HISTORICAL as cycle_historical
     for definition in cycle_definitions:
         registry.register(definition)

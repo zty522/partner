@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from inspect import isawaitable, iscoroutinefunction
 from typing import Any
 import asyncio
+import hashlib
+import json
 
 from .catalog import EventCatalog
 from .flows import EventFlowController, EventFlowDefinition, EventFlowState
@@ -44,9 +46,13 @@ class EventFlowRunner:
                   "flow_outputs": dict(state.node_outputs),
                   "previous_semantic": (previous.get("semantic_output", {})
                                         if isinstance(previous, dict) else {}),
+                  "flow_event_ids": dict(state.node_event_ids),
                   "flow_id": state.flow_id,
                   "node_id": node.node_id, "project_id": state.project_id,
                   "instance_id": state.instance_id}
+        params["run_context"] = dict(state.run_context)
+        for key, value in state.run_context.items():
+            params.setdefault(key, value)
         if state.current_event_id and state.waiting_task_id:
             event = self.ledger.get_event_history(state.current_event_id)
             from .models import EventEnvelope
@@ -60,14 +66,26 @@ class EventFlowRunner:
                 flow_id=state.flow_id, flow_type=state.flow_type,
                 node_id=node.node_id, branch_id=node.branch_id,
                 concurrency_key=node.concurrency_key or f"project:{state.project_id}",
+                run_mode=str(state.run_context.get("run_mode") or "normal"),
+                benchmark_run_id=str(state.run_context.get("benchmark_run_id") or ""),
+                benchmark_protocol_id=str(state.run_context.get("benchmark_protocol_id") or ""),
+                benchmark_arm_id=str(state.run_context.get("benchmark_arm_id") or ""),
+                checkpoint_policy_ref=str(state.run_context.get("checkpoint_policy_ref") or ""),
+                evaluation_visibility=str(state.run_context.get("evaluation_visibility") or ""),
                 payload={"flow_node": True, "definition_version": definition.version},
             )
         params["event_id"] = event.event_id
+        input_hash = "sha256:" + hashlib.sha256(json.dumps(
+            params, ensure_ascii=False, sort_keys=True, default=str,
+            separators=(",", ":")).encode("utf-8")).hexdigest()
         state.current_event_id = event.event_id
         state.node_event_ids[node.node_id] = event.event_id
         self.controller.store.save(state)
         self.ledger.transition(event, "running")
         import time
+        from datetime import datetime, timezone
+        started_wall = datetime.now(timezone.utc).isoformat()
+        started_clock = time.perf_counter()
         if hasattr(ctx, "__dict__"):
             ctx.event_deadline = time.monotonic() + max(1, int(event_definition.timeout_seconds))
         try:
@@ -123,6 +141,13 @@ class EventFlowRunner:
             next_event_candidates=list(output.get("next_event_candidates") or []),
             notification_kind=str(output.get("notification_kind") or "routine"),
             semantic_output=semantic, token_usage=dict(output.get("token_usage") or {}),
+            started_at=started_wall,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            duration_ms=(time.perf_counter() - started_clock) * 1000.0,
+            input_hash=input_hash,
+            output_hash="sha256:" + hashlib.sha256(json.dumps(
+                output, ensure_ascii=False, sort_keys=True, default=str,
+                separators=(",", ":")).encode("utf-8")).hexdigest(),
         )
         self.ledger.complete(event, summary)
         recoverable = (terminal == 'failed' and event_definition.idempotent

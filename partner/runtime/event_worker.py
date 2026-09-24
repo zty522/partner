@@ -480,6 +480,9 @@ class EventWorker:
                 if suspended.get('kind')=='domain_handoff':
                     from partner.runtime.domain_handoff import merge_video_result
                     merge_video_result(parent,state)
+                if suspended.get('kind') == 'benchmark':
+                    from partner.runtime.benchmark_children import merge_child
+                    merge_child(self, parent, state, suspended)
                 try:
                     self.controller.resume(parent, child_flow_id=state.flow_id)
                 except ValueError:
@@ -501,6 +504,7 @@ class EventWorker:
                     raise
                 job.flow_id = parent.flow_id
                 job.flow_type = parent.flow_type
+                job.benchmark_arm_id = str(parent.run_context.get("benchmark_arm_id") or "")
                 job.status = "running"
                 job.ready_event_ids = list(parent.ready_node_ids)
                 self._save_job(job)
@@ -597,6 +601,16 @@ class EventWorker:
         }
         if job.suspended_flows:
             initial.update(dict(job.suspended_flows[-1].get("context") or {}))
+        # The system under test receives only the protocol's public arm view.
+        # Hidden evaluator labels and expected outputs remain in the parent.
+        if state.flow_type == "benchmark_subject":
+            public = initial.get("benchmark_subject_view")
+            initial["intent_contract"] = {
+                "original_request": job.request,
+                "mode": "benchmark_subject", "scope": "isolated_subject",
+                "benchmark_subject_view": dict(public) if isinstance(public, dict) else {},
+                "execution_constraints": {},
+            }
         if state.flow_type == 'project_cycle':
             from partner.events.cycle import enrich
             initial = enrich(ctx, initial, state.node_outputs)
@@ -691,6 +705,11 @@ class EventWorker:
             output_for_child = dict(result.output)
             output_for_child['cycle_child'] = cycle_child
             start_child(self, job, result.flow_state, output_for_child)
+        benchmark_child = result.output.get('benchmark_child') or (
+            result.output.get('semantic_output') or {}).get('benchmark_child')
+        if benchmark_child:
+            from partner.runtime.benchmark_children import start_child
+            start_child(self, job, result.flow_state, result.output)
         self._save_job(job)
         return True
 
