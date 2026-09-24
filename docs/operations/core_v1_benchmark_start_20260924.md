@@ -36,3 +36,18 @@ MiniMax 在该节点连续三次返回 HTTP 429 / code 2056，信息为 Token Pl
 `benchmark_subject@1.1.0` 使用专用 `benchmark_subject.arm_execute` 替代通用 LLM action。该 Event 只接受 subject 公开视图中的当前 arm，以 argv 数组调用冻结 runner 一次，并校验 RMSE、预测记录、guardrails、run config、当前臂特征和数据 SHA-256。baseline 必须记录空 declared feature，candidate 必须精确记录预声明 feature；任一不符均 fail-closed。协议 `pk_target_feature_v1@1.1.0` 将 `arm_runner_path` 纳入必需输入和冻结哈希，并明确单臂最长 1800 秒。旧 `benchmark_subject@1.0.0` 仍只为历史 Flow 的版本解析保留。
 
 仓库级父子 Flow 测试已验证两臂分别执行、子 Flow 恢复、六个检查点、父 Flow 结算和 run close。真实 Davis 新运行须使用新 run id，最终结果将在完成后追加；本节只证明隔离机制修复，不提前宣称科学结果。
+
+## 首次干净完整运行
+
+- Job：`job_2d274c5e3ec44009`
+- Benchmark run：`bench_5e9522710d3343bb`
+- 父 Flow：`flow_15e72893cbff428b`
+- baseline 子 Flow：`flow_3232338117784453`
+- candidate 子 Flow：`flow_7d5e04788c3d40e9`
+- 终态：Job、父 Flow、两个子 Flow 和 manifest 均为 `completed`；Settlement 为 `confirmed`，`valid=true`
+
+baseline 和 candidate 各有且只有一份 `invocation_count=1`、`returncode=0` 的命令回执，argv 中的 arm 分别为 `baseline` 和 `candidate`。两臂各产生 30,056 条同 sample id、同 truth 的 out-of-fold 预测。baseline 的 declared feature 为 null，candidate 精确为 `target_aac20`。
+
+baseline RMSE 为 0.7885014888，candidate RMSE 为 0.6495254264，冻结方向下的改善为 0.1389760624。1000 次固定 seed bootstrap 的 95% CI 为 [0.1290150478, 0.1486379029]，超过预声明最小改善 0.03 且不跨 0。MAE 从 0.5050648390 降至 0.4098221440，R² 从 0.2233091449 升至 0.4729698391。全部四个硬 guardrail 以及派生的 secondary metric guardrail 通过，执行配置只含协议允许的 feature 差异。Qwen 双顺序盲评一致；Jev 因缺少 `TYPESAFE_API_KEY` 标记为 shadow/unavailable，不参与权威裁决。报告核验和 local event-ledger delivery ACK 均通过。
+
+该次运行还显示 `benchmark_subject@1.1.0` 的通用 memory recall 和 project state inspect 会让反思节点看到历史污染运行内容。它没有进入父级确定性指标、配对比较或 Settlement，因而不改变上述结论，但违反严格认知隔离。`benchmark_subject@1.2.0` 已将二者替换成 public-only context 和 declared-input inspection Event：禁止读取项目历史、记忆及先前实验臂，只暴露当前公开视图与声明输入哈希。后续新运行默认使用 1.2.0；1.0.0 和 1.1.0 仅用于解析历史状态。

@@ -91,6 +91,12 @@ def test_catalog_and_registry_expose_benchmark_as_events_and_flows(tmp_path):
     assert catalog.get("benchmark.paired_compare") is not None
     parent = registry.get("benchmark_experiment")
     subject = registry.get("benchmark_subject")
+    assert subject.version == "1.2.0"
+    assert subject.node("recall").event_type == "benchmark_subject.context_initialize"
+    assert subject.node("inspect").event_type == "benchmark_subject.state_inspect"
+    assert subject.node("execute").event_type == "benchmark_subject.arm_execute"
+    assert not [n for n in subject.nodes if n.event_type in
+                {"memory.context_recall", "project.state_inspect", "project.action_execute"}]
     assert parent.node("baseline_submit").event_type == "benchmark.variant_submit"
     assert parent.node("candidate_submit").event_type == "benchmark.variant_submit"
     assert len([n for n in subject.nodes if n.event_type == "checkpoint.capture"]) == 6

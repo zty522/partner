@@ -40,12 +40,21 @@ BENCHMARK_SUBJECT_V1 = Flow("benchmark_subject", "1.0.0", (
 ), "One isolated benchmark arm. It exposes checkpoints but no evaluator feedback.")
 
 
-BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.1.0", tuple(
+BENCHMARK_SUBJECT_V1_1 = Flow("benchmark_subject", "1.1.0", tuple(
     replace(node, event_type="benchmark_subject.arm_execute",
             optional=False, continue_on_failure=False)
     if node.node_id == "execute" else node
     for node in BENCHMARK_SUBJECT_V1.nodes
 ), "One isolated benchmark arm with a deterministic single-arm executor.")
+
+
+BENCHMARK_SUBJECT = Flow("benchmark_subject", "1.2.0", tuple(
+    replace(node, event_type="benchmark_subject.context_initialize")
+    if node.node_id == "recall" else
+    replace(node, event_type="benchmark_subject.state_inspect")
+    if node.node_id == "inspect" else node
+    for node in BENCHMARK_SUBJECT_V1_1.nodes
+), "One isolated benchmark arm with public-only context and deterministic execution.")
 
 
 BENCHMARK_EXPERIMENT = Flow("benchmark_experiment", "1.0.0", (

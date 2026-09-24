@@ -63,6 +63,51 @@ def _protocol(ctx: Any, params: Mapping[str, Any]):
     return BenchmarkProtocolStore(ctx.workspace).load(protocol_id)
 
 
+def _subject_view(params: Mapping[str, Any]) -> dict[str, Any]:
+    contract = params.get("intent_contract")
+    contract = dict(contract) if isinstance(contract, Mapping) else {}
+    value = contract.get("benchmark_subject_view")
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def subject_context_initialize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Establish a public-only context boundary for a benchmark subject."""
+    view = _subject_view(params)
+    if not view or str(view.get("arm_id") or "") not in {"baseline", "candidate"}:
+        return {"ok": False, "status": "failed", "failure_class": "benchmark_protocol",
+                "error": "benchmark subject public view is missing or invalid"}
+    semantic = {"visibility": "public_arm_only", "history_access": False,
+                "memory_access": False, "subject_view": view}
+    return {"ok": True, "status": "completed", "semantic_output": semantic,
+            "summary": f"initialized isolated {view['arm_id']} subject context"}
+
+
+def subject_state_inspect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Inspect only declared inputs; never project history, memory or prior arms."""
+    view = _subject_view(params)
+    inputs = view.get("inputs") if isinstance(view.get("inputs"), Mapping) else {}
+    artifacts: dict[str, Any] = {}
+    for key, value in inputs.items():
+        if not str(key).endswith("_path"):
+            continue
+        path = Path(str(value)).expanduser().resolve()
+        if not path.is_file():
+            return {"ok": False, "status": "failed", "failure_class": "benchmark_input",
+                    "error": f"declared subject input is missing: {key}"}
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        artifacts[str(key)] = {"path": str(path), "bytes": path.stat().st_size,
+                               "sha256": hasher.hexdigest()}
+    semantic = {"visibility": "public_arm_only", "arm_id": str(view.get("arm_id") or ""),
+                "task": dict(view.get("task") or {}), "declared_inputs": dict(inputs),
+                "input_artifacts": artifacts, "history_access": False, "memory_access": False}
+    return {"ok": True, "status": "completed", "semantic_output": semantic,
+            "evidence_refs": [row["path"] for row in artifacts.values()],
+            "summary": f"inspected declared inputs for {semantic['arm_id']} only"}
+
+
 def subject_arm_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Execute exactly one frozen benchmark arm without delegating to an LLM.
 
@@ -70,10 +115,7 @@ def subject_arm_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     an argv list, and its artifact is accepted only when it proves the arm,
     feature configuration, input dataset and required evidence contract.
     """
-    contract = params.get("intent_contract")
-    contract = dict(contract) if isinstance(contract, Mapping) else {}
-    view = contract.get("benchmark_subject_view")
-    view = dict(view) if isinstance(view, Mapping) else {}
+    view = _subject_view(params)
     arm = str(view.get("arm_id") or params.get("benchmark_arm_id") or "")
     inputs = view.get("inputs") if isinstance(view.get("inputs"), Mapping) else {}
     runner = Path(str(inputs.get("arm_runner_path") or "")).expanduser().resolve()
@@ -832,6 +874,8 @@ def checkpoint_capture(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 DEFINITIONS = [
+    EventDefinition("benchmark_subject.context_initialize", "benchmark", "建立不读取历史的 Benchmark 公开上下文", subject_context_initialize),
+    EventDefinition("benchmark_subject.state_inspect", "benchmark", "只核验当前实验臂的声明输入", subject_state_inspect, reads_existing_artifact=True),
     EventDefinition("benchmark_subject.arm_execute", "benchmark", "严格执行一个冻结 Benchmark 实验臂", subject_arm_execute, execution_method="subprocess", produces_artifact=True, idempotent=False, timeout_seconds=3600),
     EventDefinition("benchmark.signal_validate", "benchmark", "验证结构化 Benchmark 标志", signal_validate),
     EventDefinition("benchmark.protocol_resolve", "benchmark", "解析并固定 Benchmark 协议", protocol_resolve, reads_existing_artifact=True),
