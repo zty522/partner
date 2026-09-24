@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "learning_03",
+  "domain": "active_learning",
+  "scenario": "A GitHub README claims a method beats the published baseline, but the linked paper reports a different split.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "trust_readme",
+      "description": "Use the README number directly."
+    },
+    {
+      "id": "crosscheck_primary_sources",
+      "description": "Cross-check code, paper, data split, and commit before forming a claim."
+    },
+    {
+      "id": "average_numbers",
+      "description": "Average incompatible reported metrics."
+    },
+    {
+      "id": "ignore_split",
+      "description": "Treat split details as irrelevant."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

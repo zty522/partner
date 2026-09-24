@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-09-23"
+updated_at: "2026-09-24"
 authority_order: [canonical, current, reference, historical]
 tiers:
   L0: always-load routing metadata only
@@ -1273,3 +1273,27 @@ documents:
     tags: [testing, benchmark, event-flow, active-learning, self-evolution, davis]
     instances: ["01", "02", all]
     max_chars: 12000
+  - id: partner_loop_bench_architecture
+    path: docs/architecture/partner_loop_bench.md
+    title: Partner-LoopBench 盲化纵向自主闭环评测
+    tier: L1
+    authority: canonical
+    tags: [benchmark, event-flow, blind-evaluation, longitudinal, ablation]
+    instances: [all]
+    max_chars: 12000
+  - id: partner_loop_bench_decision_0111
+    path: docs/decisions/0111-partner-loop-bench-blind-longitudinal-evaluation.md
+    title: 盲化纵向 Event/Flow benchmark 决策
+    tier: L1
+    authority: canonical
+    tags: [decision, benchmark, self-evolution, active-learning]
+    instances: [all]
+    max_chars: 7000
+  - id: partner_loop_bench_pilot_20260924
+    path: docs/testing/partner_loop_bench_pilot_20260924.md
+    title: Partner-LoopBench 三领域真实 pilot
+    tier: L1
+    authority: current
+    tags: [testing, benchmark, event-flow, qwen, blind-evaluation]
+    instances: ["01", all]
+    max_chars: 10000

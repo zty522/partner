@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "protocol_id": "partner_loop_full_vs_single_v1",
+  "version": "1.1.0",
+  "subject_flow": "partner_loop_bench_subject",
+  "arms": ["baseline", "candidate"],
+  "required_inputs": ["task_path", "arm_runner_path"],
+  "allowed_arm_differences": ["arm_configuration.policy"],
+  "subject_view": {
+    "research_question": "完整 Partner 决策闭环是否优于单轮 LLM 选择",
+    "evaluation_visibility": "sealed_until_both_arms_terminal",
+    "arm_policies": {"baseline": "single_turn", "candidate": "full_partner"}
+  },
+  "primary_metric": {"name": "task_success", "direction": "higher_is_better"},
+  "expected_effect": {"comparison": "candidate_minus_baseline", "minimum": 0.01},
+  "guardrails": [
+    {"id": "oracle_hidden", "hard": true},
+    {"id": "same_public_task", "hard": true},
+    {"id": "within_budget", "hard": true},
+    {"id": "artifacts_complete", "hard": true}
+  ],
+  "budget": {"baseline_runs": 1, "candidate_runs": 1, "bootstrap": 0,
+             "bootstrap_seed": 20260924, "max_seconds": 120},
+  "checkpoints": [
+    {"id": "CP1_STATE", "after": "inspect", "gate": "observe_only"},
+    {"id": "CP2_CANDIDATE", "after": "plan", "gate": "observe_only"},
+    {"id": "CP3_COMMITMENT", "after": "core_commit", "gate": "hard"},
+    {"id": "CP4_EXECUTION", "after": "execute", "gate": "hard"},
+    {"id": "CP5_VERIFICATION", "after": "verify", "gate": "hard"},
+    {"id": "CP6_SETTLEMENT", "after": "core_settlement", "gate": "observe_only"}
+  ],
+  "evaluators": {"deterministic": true, "domain_metrics": true,
+                 "jev": "shadow", "llm_judge": "disabled"}
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "visibility": "external_evaluator_only",
+  "answers": {
+    "project_01": "target_family_aggregate",
+    "project_02": "group_split_first",
+    "project_03": "calibration_probe",
+    "project_04": "paired_seed_comparison",
+    "project_05": "reject_leaky_feature",
+    "learning_01": "read_release_and_source",
+    "learning_02": "adopt_with_matched_replay",
+    "learning_03": "crosscheck_primary_sources",
+    "learning_04": "extract_executable_claim",
+    "learning_05": "reject_unbound_summary",
+    "evolution_01": "query_ready_index",
+    "evolution_02": "reproduce_then_patch",
+    "evolution_03": "preserve_delivery_ack",
+    "evolution_04": "isolate_candidate_workspace",
+    "evolution_05": "reject_reflection_only"
+  }
+}

@@ -503,7 +503,8 @@ def execution_parity_evaluate(ctx: Any, params: dict[str, Any]) -> dict[str, Any
     c_feature = ((right_config.get("features") or {}).get("declared_feature")
                  if isinstance(right_config.get("features"), Mapping) else None)
     declared = (_config(params).get("inputs") or {}).get("declared_feature")
-    feature_valid = b_feature in {None, ""} and c_feature == declared
+    feature_required = "declared_feature" in protocol.required_inputs
+    feature_valid = (b_feature in {None, ""} and c_feature == declared) if feature_required else True
     configs_present = bool(left_config) and bool(right_config)
     valid = configs_present and not unexpected and not required and feature_valid
     record = {"valid": valid, "configs_present": configs_present,
@@ -511,7 +512,8 @@ def execution_parity_evaluate(ctx: Any, params: dict[str, Any]) -> dict[str, Any
               "unexpected": unexpected, "declared_but_unchanged": required,
               "baseline_declared_feature": b_feature,
               "candidate_declared_feature": c_feature,
-              "expected_declared_feature": declared, "feature_valid": feature_valid}
+              "expected_declared_feature": declared, "feature_check_required": feature_required,
+              "feature_valid": feature_valid}
     output = _write(ctx, params, "execution_parity.json", record)
     return {"ok": True, "status": "completed", "summary": f"execution parity: {valid}",
             "evidence_refs": [str(output)], "semantic_output": record,

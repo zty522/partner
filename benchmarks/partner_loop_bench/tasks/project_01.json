@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "project_01",
+  "domain": "project_iteration",
+  "scenario": "A pK model uses a frozen target-group split. Residual error is strongly shared by proteins in the same target family, while ligand-only descriptors are already saturated. Choose the next single bounded experiment.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "add_random_ligand_bits",
+      "description": "Add 128 random ligand bits as controls."
+    },
+    {
+      "id": "target_family_aggregate",
+      "description": "Add a train-fold-only target-family aggregate feature with leakage checks."
+    },
+    {
+      "id": "switch_random_split",
+      "description": "Replace the frozen group split with a random split."
+    },
+    {
+      "id": "increase_trees",
+      "description": "Double tree count without changing features."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

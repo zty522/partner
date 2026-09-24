@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "learning_05",
+  "domain": "active_learning",
+  "scenario": "A generated summary recommends changing retry policy but contains no source spans or version information.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "apply_summary",
+      "description": "Apply it immediately."
+    },
+    {
+      "id": "reject_unbound_summary",
+      "description": "Reject adoption until claims bind to versioned source evidence."
+    },
+    {
+      "id": "repeat_summary",
+      "description": "Generate a longer summary."
+    },
+    {
+      "id": "mark_learned",
+      "description": "Mark learning complete from file existence."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

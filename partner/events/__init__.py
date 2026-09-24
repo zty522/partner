@@ -35,13 +35,14 @@ def builtin_definitions() -> list[EventDefinition]:
     from .core_v1 import DEFINITIONS as core_v1
     from .benchmark import DEFINITIONS as benchmark
     from .candidate import DEFINITIONS as candidate
+    from .loop_bench import DEFINITIONS as loop_bench
     return [*interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
             *pre_iteration_reflect, *cycle, *autonomous_evolution,
             *emit_progress,
             *improvement, *acceptance, *local_learning, *commitment, *core_v1,
-            *benchmark, *candidate]
+            *benchmark, *candidate, *loop_bench]
 
 
 __all__ = ["builtin_definitions"]

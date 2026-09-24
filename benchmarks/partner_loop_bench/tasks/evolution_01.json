@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "evolution_01",
+  "domain": "self_evolution",
+  "scenario": "Three workers repeatedly enumerate 477 historical Job JSON files to find one ready item, causing 9p stalls. Choose the mechanism fix.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "query_ready_index",
+      "description": "Claim from a native SQLite ready-job index and reserve scans for reconcile flows."
+    },
+    {
+      "id": "more_workers",
+      "description": "Add more workers."
+    },
+    {
+      "id": "longer_timeout",
+      "description": "Only increase the timeout."
+    },
+    {
+      "id": "delete_history",
+      "description": "Delete all historical evidence."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

@@ -137,17 +137,24 @@ class BenchmarkRunStore:
 def public_subject_view(protocol: BenchmarkProtocolV1, supplied: Mapping[str, Any], arm: str) -> dict[str, Any]:
     """Return the only protocol view visible to the system under test."""
     feature = supplied.get("declared_feature") if arm == protocol.arms[1] else None
+    task = dict(protocol.subject_view)
+    arm_policies = task.pop("arm_policies", {})
+    policy = (arm_policies.get(arm) if isinstance(arm_policies, Mapping) else None)
+    public_keys = tuple(protocol.required_inputs) + ("benchmark_seed", "task_id")
+    # Evaluator-only inputs use a deliberately separate namespace.  They are
+    # frozen in the parent manifest but can never cross into a child view.
+    public_inputs = {key: supplied[key] for key in public_keys
+                     if key in supplied and not str(key).startswith("hidden_")}
     return {
         "protocol_id": protocol.protocol_id,
         "protocol_version": protocol.version,
         "arm_id": arm,
-        "task": dict(protocol.subject_view),
-        "inputs": {key: supplied[key] for key in (*protocol.required_inputs,
-                                                    "benchmark_seed", "task_id")
-                   if key in supplied},
+        "task": task,
+        "inputs": public_inputs,
         "budget": dict(protocol.budget),
         "allowed_arm_differences": list(protocol.allowed_arm_differences),
-        "arm_configuration": {"features": {"declared_feature": feature}},
+        "arm_configuration": {"features": {"declared_feature": feature},
+                              "policy": policy or "frozen_arm"},
         "evaluation_contract": {
             "primary_metric": dict(protocol.primary_metric),
             "guardrails": [{"id": str(row.get("id")), "hard": bool(row.get("hard"))}

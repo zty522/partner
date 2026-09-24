@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "project_05",
+  "domain": "project_iteration",
+  "scenario": "A new feature improves validation RMSE by 0.2, but it is computed using each target’s full-dataset mean including held-out rows.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "promote_feature",
+      "description": "Promote because the effect is large."
+    },
+    {
+      "id": "reject_leaky_feature",
+      "description": "Reject the contaminated result and rebuild fold-local features."
+    },
+    {
+      "id": "hide_method",
+      "description": "Omit feature construction details."
+    },
+    {
+      "id": "test_tune",
+      "description": "Tune on the test set to confirm."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

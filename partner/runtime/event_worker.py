@@ -603,7 +603,8 @@ class EventWorker:
             initial.update(dict(job.suspended_flows[-1].get("context") or {}))
         # The system under test receives only the protocol's public arm view.
         # Hidden evaluator labels and expected outputs remain in the parent.
-        if state.flow_type == "benchmark_subject":
+        if (state.run_context.get("run_mode") == "benchmark"
+                and state.flow_type != "benchmark_experiment"):
             public = initial.get("benchmark_subject_view")
             initial["intent_contract"] = {
                 "original_request": job.request,

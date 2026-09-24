@@ -1,5 +1,7 @@
 # Partner 文档体系
 
+> **2026-09-24 Partner-LoopBench pilot**：新增与隐藏评价器隔离的自主 subject Flow 和 15 项三领域任务包。修正零提升误报后，项目迭代、主动学习、自进化各一项真实双臂运行均完成；single-turn 与 full Partner 都是 3/3，uplift=0，按最低 0.01 的冻结假设均为 falsified。框架跑通，但尚无自主闭环增益证据，且任务存在天花板效应。详见 [架构](architecture/partner_loop_bench.md) 与 [pilot](testing/partner_loop_bench_pilot_20260924.md)。
+
 > **2026-09-24 Core v1 三链 benchmark 已补齐**：Davis 3 task×2 seed 的六个两臂 Event Flow 全部 confirmed；主动学习 handoff 的 downstream matched comparison 与隔离自进化 repair 也均 confirmed，并由 `benchmark.effect_record` 写入各自效果账。详见 [三链真实 benchmark](testing/core_v1_three_chain_benchmark_20260924.md)。这是一项工程闭环验收，不替代论文规模的跨数据集、跨领域和外部复现。
 
 > **2026-09-24 Event Flow 生成策略**：当前由 LLM 生成有限候选 Flow，确定性 Compiler 校验，Jev 与潜空间世界模型做 shadow 筛选和预测，Commitment 冻结后才由 Runtime 执行；Settlement 驱动最小子图迭代。真实轨迹成熟后先训练 FlowRanker、NextEventPolicy 和 OutcomeModel，不直接用当前小样本训练端到端 Flow 生成器。详见 [Flow 生成策略](architecture/flow_synthesis_policy.md) 与 [ADR 0108](decisions/0108-hybrid-event-flow-synthesis.md)。

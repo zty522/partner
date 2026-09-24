@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "project_03",
+  "domain": "project_iteration",
+  "scenario": "Candidate uncertainty is used to prioritize wet-lab assays, but predicted intervals are systematically too narrow. Pick the next bounded experiment.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "more_decimals",
+      "description": "Print more probability decimals."
+    },
+    {
+      "id": "calibration_probe",
+      "description": "Run frozen-fold calibration and coverage diagnostics before changing acquisition."
+    },
+    {
+      "id": "larger_batch",
+      "description": "Increase assay batch size immediately."
+    },
+    {
+      "id": "ignore_uncertainty",
+      "description": "Rank only by point estimate."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

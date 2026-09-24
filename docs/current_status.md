@@ -2180,3 +2180,8 @@ Jev 已从 `partner_config.json` 迁入工作区 `config/model_services.json`；
 ## 2026-09-24 三链 benchmark 补齐
 
 上述三个 benchmark 缺口随后已实际补齐。Davis 3 任务×2 seed 共 6 个两臂 Event Flow 全部 confirmed，平均 RMSE 改善 `0.10971`，跨运行 95% CI `[0.10359, 0.11502]`；主动学习 handoff downstream comparison 与隔离自进化 repair 均为 effect `1.0`、Settlement confirmed。wrapper 的 child suspend 提前返回缺陷也在首轮矩阵中暴露并修复。本轮 Job 均已终态且没有 Partner OS 进程；工作区仍有 2026-09-18/19 等历史 queued/running 投影，生产服务继续 inactive，启动前需单独 reconcile。详见 `docs/testing/core_v1_three_chain_benchmark_20260924.md`。
+## 2026-09-24：Partner-LoopBench 盲化 pilot
+
+Core v1 已进入盲化效果验证阶段。`partner_loop_bench_subject@1.0.0` 只读取公开任务，父 `benchmark_experiment` 保管隐藏答案并做权威 Settlement。有效三任务 pilot 中 single-turn 与 full Partner 都是 3/3，Autonomous Uplift=0，修正协议后的结论为 falsified。当前结论是基础设施有效、效果未证实；下一门槛是难度校准后的真实执行任务、纵向记忆消费和预声明消融。
+
+运行前已将 160 个 2026-09-18/19 的无进程旧非终态投影 append-only reconcile 为 cancelled；没有删除历史证据。当前新 pilot Jobs 均终态。

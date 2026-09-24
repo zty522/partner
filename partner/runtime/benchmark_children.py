@@ -19,7 +19,8 @@ def start_child(worker, job, parent, output):
         "benchmark_child")
     if not isinstance(request, dict):
         return
-    if parent.flow_type != "benchmark_experiment" or request.get("flow") != "benchmark_subject":
+    requested_flow = str(request.get("flow") or "")
+    if parent.flow_type != "benchmark_experiment" or not requested_flow:
         raise ValueError("invalid benchmark child request")
     arm = str(request.get("arm_id") or "")
     if arm not in {"baseline", "candidate"}:
@@ -30,8 +31,11 @@ def start_child(worker, job, parent, output):
     context = dict(parent.run_context)
     context.update({"run_mode": "benchmark", "benchmark_arm_id": arm,
                     "evaluation_visibility": "hidden_until_terminal"})
+    # The protocol was already resolved and statically validated by the
+    # parent's preflight Event.  Start that pinned subject definition rather
+    # than silently substituting the legacy deterministic subject.
     child = worker.controller.start(
-        worker.flows.get("benchmark_subject"), catalog_version=parent.catalog_version,
+        worker.flows.get(requested_flow), catalog_version=parent.catalog_version,
         task_id=job.job_id, project_id=job.project_id,
         instance_id=job.assigned_instance or job.origin_instance,
         run_context=context)
@@ -82,4 +86,3 @@ def merge_child(worker, parent, child, suspension):
         "summary": f"{arm} child {child.status}; {len(checkpoints)} checkpoints",
     }
     worker.store.save(parent)
-

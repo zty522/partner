@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "project_04",
+  "domain": "project_iteration",
+  "scenario": "Two generation policies differ by a small reward under high seed variance. Compute is limited to one decisive next comparison.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "best_seed_only",
+      "description": "Report the best seed from each policy."
+    },
+    {
+      "id": "paired_seed_comparison",
+      "description": "Run paired seeds with identical budgets and bootstrap the paired effect."
+    },
+    {
+      "id": "new_metric",
+      "description": "Choose a new metric after seeing results."
+    },
+    {
+      "id": "longer_candidate",
+      "description": "Give only the candidate more compute."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}

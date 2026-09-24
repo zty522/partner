@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "task_id": "learning_04",
+  "domain": "active_learning",
+  "scenario": "A 90-page methods document contains many ideas; the project has one specific serialization bottleneck.",
+  "instruction": "Choose exactly one candidate action. Use only the stated evidence.",
+  "candidates": [
+    {
+      "id": "summarize_all",
+      "description": "Write a broad document summary."
+    },
+    {
+      "id": "extract_executable_claim",
+      "description": "Extract one source-bound, executable claim tied to the bottleneck and a test."
+    },
+    {
+      "id": "save_title",
+      "description": "Record only title and URL."
+    },
+    {
+      "id": "rewrite_docs",
+      "description": "Rewrite project documentation without testing."
+    }
+  ],
+  "constraints": [
+    "one bounded action",
+    "do not use hidden evaluator feedback",
+    "state a falsifiable expectation"
+  ]
+}
