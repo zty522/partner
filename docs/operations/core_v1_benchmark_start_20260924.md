@@ -51,3 +51,16 @@ baseline 和 candidate 各有且只有一份 `invocation_count=1`、`returncode=
 baseline RMSE 为 0.7885014888，candidate RMSE 为 0.6495254264，冻结方向下的改善为 0.1389760624。1000 次固定 seed bootstrap 的 95% CI 为 [0.1290150478, 0.1486379029]，超过预声明最小改善 0.03 且不跨 0。MAE 从 0.5050648390 降至 0.4098221440，R² 从 0.2233091449 升至 0.4729698391。全部四个硬 guardrail 以及派生的 secondary metric guardrail 通过，执行配置只含协议允许的 feature 差异。Qwen 双顺序盲评一致；Jev 因缺少 `TYPESAFE_API_KEY` 标记为 shadow/unavailable，不参与权威裁决。报告核验和 local event-ledger delivery ACK 均通过。
 
 该次运行还显示 `benchmark_subject@1.1.0` 的通用 memory recall 和 project state inspect 会让反思节点看到历史污染运行内容。它没有进入父级确定性指标、配对比较或 Settlement，因而不改变上述结论，但违反严格认知隔离。`benchmark_subject@1.2.0` 已将二者替换成 public-only context 和 declared-input inspection Event：禁止读取项目历史、记忆及先前实验臂，只暴露当前公开视图与声明输入哈希。后续新运行默认使用 1.2.0；1.0.0 和 1.1.0 仅用于解析历史状态。
+
+## 1.2.0 最终验收运行
+
+- Job：`job_767874112b114070`
+- Benchmark run：`bench_cc47db5d81c245d6`
+- 父 Flow：`flow_1ae840f7f0ee45a9`
+- baseline 子 Flow：`flow_8823243f951a4914`
+- candidate 子 Flow：`flow_e579d2b10cc04a00`
+- 代码 revision：`f83cb226dfb89c93048e2de6ff3bdb9fd27bca87`
+
+最终验收完整通过。两个子 Flow 均固定为 `benchmark_subject@1.2.0`、无失败节点，各有六个检查点；`recall` 与 `inspect` 均记录 `visibility=public_arm_only`、`history_access=false`、`memory_access=false`。两臂分别只有一次 runner 命令回执。Job、父 Flow、两个子 Flow、manifest 均为 `completed`，报告核验和 local event-ledger delivery ACK 通过。
+
+确定性结果与首次干净运行完全一致：baseline RMSE 0.7885014888，candidate RMSE 0.6495254264，改善 0.1389760624，95% bootstrap CI [0.1290150478, 0.1486379029]，Settlement 为 `confirmed` 且 `valid=true`。Qwen 双顺序盲评一致。Jev 仍因没有 `TYPESAFE_API_KEY` 仅标记为 shadow/unavailable，不影响权威确定性结算。
