@@ -22,3 +22,9 @@
 MiniMax 在该节点连续三次返回 HTTP 429 / code 2056，信息为 Token Plan 用量上限。配额查询还表明该旧域名 key 当前没有 active Token Plan。没有替换 provider，没有生成伪候选，没有运行 baseline HGB，也没有 Settlement。Run manifest 保持 `running`，可在 MiniMax 配额恢复后从 `candidate.propose` 继续，不应重复创建新 run。
 
 本记录证明结构化入口和父子 Flow 已真实启动，不证明 benchmark 完成或 Core v1 获得 uplift。
+
+## Qwen 切换后的恢复结果
+
+删除重复配置并切换 `api.json.default_provider=qwen` 后，`qwen3.8-flash` 短探针成功。长提示最初因模型默认开启思考而连续三次达到90秒硬超时；随后在 Qwen provider 条目显式设置 `enable_thinking=false`，约18k input token 的长提示探针成功，baseline subject 从 `candidate.propose` 继续通过 critic、select、世界模型/Jev和 Commitment，到达真实 execute。
+
+该 execute 暴露了新的实验隔离缺陷：baseline subject 的通用 LLM action 同时调用了 baseline 和 candidate runner，并生成一个合并 `benchmark_evidence.json`；两个分臂原始文件虽然数值真实，但这违反“一次 subject 只运行当前 arm”的协议，也使父 collector 不能把合并文件当成合格分臂证据。因此当前 run 不继续 candidate，不宣称 Settlement 成功。后续需把 arm 执行收敛为协议驱动的专用 Event，由 Runtime 注入当前 arm，不能依靠 LLM 遵守命令文字。
