@@ -1,7 +1,7 @@
 """One user-authorized two-round cycle, with an obligatory post-delivery audit."""
 from partner.event_fabric.flows import EventFlowDefinition as Flow, FlowNode as Node
 
-ROUND = Flow('project_cycle_round', '1.0.0', (
+ROUND_V1 = Flow('project_cycle_round', '1.0.0', (
     Node('recall', 'memory.context_recall'),
     Node('inspect', 'project.state_inspect', ('recall',)),
     Node('plan', 'project.plan_propose', ('inspect',)),
@@ -10,7 +10,22 @@ ROUND = Flow('project_cycle_round', '1.0.0', (
     Node('reflect', 'project.outcome_reflect', ('verify',), continue_on_failure=True),
 ), 'A real project round; its terminal returns to the cycle, never starts an independent continuation.')
 
-CYCLE = Flow('project_cycle', '1.1.0', (
+
+ROUND = Flow('project_cycle_round', '2.0.0', (
+    Node('recall', 'memory.context_recall'),
+    Node('inspect', 'project.state_inspect', ('recall',)),
+    Node('plan', 'project.plan_propose', ('inspect',)),
+    Node('core_state', 'core.state_build', ('plan',), parameters={'domain': 'project'}),
+    Node('core_forecast', 'core.latent_forecast', ('core_state',)),
+    Node('core_jev', 'core.jev_evaluate', ('core_state',)),
+    Node('core_commit', 'core.commitment_freeze', ('core_forecast', 'core_jev')),
+    Node('execute', 'project.action_execute', ('core_commit',), continue_on_failure=True),
+    Node('verify', 'project.outcome_verify', ('execute',), continue_on_failure=True),
+    Node('reflect', 'project.outcome_reflect', ('verify',), continue_on_failure=True),
+    Node('core_settlement', 'core.settlement', ('reflect',), parameters={'evaluated_node': 'verify'}),
+), 'One designed project round with Core commitment and settlement; no autonomous continuation.')
+
+CYCLE_V1 = Flow('project_cycle', '1.1.0', (
     Node('round_one', 'cycle.round_request', parameters={'round_number': 1}),
     Node('round_two', 'cycle.round_request', ('round_one',), parameters={'round_number': 2}),
     Node('assess', 'cycle.assess', ('round_two',)),
@@ -30,6 +45,70 @@ CYCLE = Flow('project_cycle', '1.1.0', (
     Node('final_summary', 'cycle.final_summary', ('evolve',), continue_on_failure=True),
     Node('finish', 'cycle.finish', ('final_summary',)),
 ), 'Two rounds, channel acknowledgments, report, memory, autonomous evidence-driven evolution, final summary, then stop.')
+
+
+CYCLE = Flow('project_cycle', '2.0.0', (
+    Node('initialize', 'cycle.initialize'),
+    Node('design_one', 'cycle.round_design', ('initialize',), parameters={'round_number': 1}),
+    Node('round_one', 'cycle.round_request', ('design_one',), parameters={'round_number': 1}),
+    Node('settle_one', 'cycle.round_settle', ('round_one',), parameters={'round_number': 1}),
+    Node('learning_one', 'cycle.learning_request', ('settle_one',), parameters={'round_number': 1}),
+    Node('impact_one', 'cycle.learning_impact_settle', ('learning_one',), parameters={'round_number': 1}),
+
+    Node('design_two', 'cycle.round_design', ('impact_one',), parameters={'round_number': 2},
+         when_output='settle_one.continue_iteration'),
+    Node('round_two', 'cycle.round_request', ('design_two',), parameters={'round_number': 2},
+         when_output='settle_one.continue_iteration'),
+    Node('settle_two', 'cycle.round_settle', ('round_two',), parameters={'round_number': 2},
+         when_output='settle_one.continue_iteration'),
+    Node('downstream_two', 'cycle.learning_downstream_settle', ('settle_two',),
+         parameters={'learning_round': 1, 'evaluation_round': 2},
+         when_output='settle_one.continue_iteration'),
+    Node('learning_two', 'cycle.learning_request', ('downstream_two',), parameters={'round_number': 2},
+         when_output='settle_one.continue_iteration'),
+    Node('impact_two', 'cycle.learning_impact_settle', ('learning_two',), parameters={'round_number': 2},
+         when_output='settle_one.continue_iteration'),
+
+    Node('design_three', 'cycle.round_design', ('impact_two',), parameters={'round_number': 3},
+         when_output='settle_two.continue_iteration'),
+    Node('round_three', 'cycle.round_request', ('design_three',), parameters={'round_number': 3},
+         when_output='settle_two.continue_iteration'),
+    Node('settle_three', 'cycle.round_settle', ('round_three',), parameters={'round_number': 3},
+         when_output='settle_two.continue_iteration'),
+    Node('downstream_three', 'cycle.learning_downstream_settle', ('settle_three',),
+         parameters={'learning_round': 2, 'evaluation_round': 3},
+         when_output='settle_two.continue_iteration'),
+    Node('learning_three', 'cycle.learning_request', ('downstream_three',), parameters={'round_number': 3},
+         when_output='settle_two.continue_iteration'),
+    Node('impact_three', 'cycle.learning_impact_settle', ('learning_three',), parameters={'round_number': 3},
+         when_output='settle_two.continue_iteration'),
+
+    Node('assess', 'cycle.assess', ('impact_one', 'downstream_two', 'impact_two',
+                                    'downstream_three', 'impact_three')),
+    Node('notify', 'presentation.notification_decide', ('assess',)),
+    Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
+    Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
+    Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
+    Node('report', 'cycle.report_request', ('text_ack',)),
+    Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True),
+    Node('experience', 'cycle.memory_update', ('report_ack',), parameters={'kind': 'lesson'}),
+    Node('growth', 'cycle.memory_update', ('experience',), parameters={'kind': 'growth'}),
+    Node('habit', 'cycle.memory_update', ('growth',), parameters={'kind': 'habit'}),
+    Node('seal', 'cycle.seal', ('habit',)),
+    Node('partner_audit', 'cycle.partner_audit', ('seal',)),
+    Node('evolution_gate', 'cycle.evolution_gate', ('partner_audit',)),
+    Node('evolve', 'cycle.evolution_request', ('evolution_gate',)),
+    Node('final_summary', 'cycle.final_summary', ('evolve',), continue_on_failure=True),
+    Node('final_notify', 'presentation.notification_decide', ('final_summary',)),
+    Node('final_compose', 'presentation.message_compose', ('final_notify',), continue_on_failure=True),
+    Node('final_critic', 'presentation.message_critic', ('final_compose',), continue_on_failure=True),
+    Node('final_deduplicate', 'presentation.message_deduplicate', ('final_critic',), continue_on_failure=True),
+    Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
+    Node('finish', 'cycle.finish', ('final_ack',)),
+), 'Settlement-driven project rounds, conditional learning, then Partner-only post-run evolution audit.')
 
 def evolution_flow(expanded=False, repair_tests=False, preflight_revision=False):
     nodes = []
@@ -182,4 +261,4 @@ def _resolved_definitions():
 
 DEFINITIONS = _resolved_definitions()
 DEFINITIONS_BY_VERSION = {'2.0.0': evolution_flow_v2()}
-HISTORICAL = [evolution_flow(), evolution_flow(expanded=True), evolution_flow(expanded=True, repair_tests=True)]
+HISTORICAL = [ROUND_V1, CYCLE_V1, evolution_flow(), evolution_flow(expanded=True), evolution_flow(expanded=True, repair_tests=True)]

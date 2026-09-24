@@ -25,6 +25,7 @@ KINDS = {
     'molecular_diversity': 'source_refs:[candidate JSON or JSONL], rows_key:candidates (JSONL root array uses empty string), smiles_key:canonical_smiles; compute actual Morgan r=2 2048-bit similarities and Murcko scaffold counts',
     'molecule_grid': 'source_refs:[JSON or JSONL], rows_key:candidates (JSONL root array uses empty string), smiles_key:canonical_smiles, id_key:candidate_id, indices:[0,...] (max 6)',
     'distribution': 'source_refs:[JSON or JSONL], rows_key: dot-separated array key (JSONL root uses empty string), value_key: numeric field, x_label with evidenced units',
+    'scalar_bar': 'source_refs:[JSON], values:{中文标签: dot-separated numeric field}, y_label; compare 2–6 scalar measurements from one real record',
     'experiment_timeline': 'source_refs:[JSON] containing groups.*.future_state_timeline and func_ticks; separate clocks explicitly shown',
     'test_matrix': 'source_refs:[baseline_receipt.json,candidate_receipt.json], labels:[baseline,candidate]; exact same testcase identity required',
     'code_excerpt': 'source_refs:[text/code], start_line, end_line (max 24); actual source only',
@@ -155,6 +156,21 @@ def render(plan, directory, allowed_paths):
                 ax.loglog([p['step'] for p in points],[p['error'] for p in points],'o-',label=f'实测拟合斜率 {slope:.4f}')
                 ax.set(xlabel='步长 dt（对数坐标；使用原数据时间单位）',ylabel='最大相对能量误差（对数坐标）'); ax.legend(); ax.grid(alpha=.2)
                 measured={'points':points,'log_log_slope':slope,'metric_definition':'maximum absolute relative energy deviation across ALL sampled rows in the full interval; NOT endpoint error'}
+            elif kind == 'scalar_bar':
+                data = json_data(paths[0])
+                values = plan.get('values') or {}
+                if not isinstance(values, dict) or not 2 <= len(values) <= 6:
+                    raise ValueError('scalar_bar needs 2–6 labeled selectors')
+                labels = list(values)
+                numbers = [float(select(data, values[label])) for label in labels]
+                if not all(math.isfinite(value) for value in numbers):
+                    raise ValueError('scalar_bar values must be finite')
+                bars = ax.bar(labels, numbers, color=['#547AA5', '#D97745', '#6B9F78', '#8B6FA8', '#B99A45', '#5B8C85'][:len(labels)])
+                ax.bar_label(bars, fmt='%.4g', padding=3)
+                ax.set(ylabel=plan.get('y_label', '原数据单位'))
+                ax.grid(axis='y', alpha=.18)
+                measured = {'values': dict(zip(labels, numbers)),
+                            'selectors': values, 'source': str(paths[0])}
             elif kind == 'pdb_structure':
                 import numpy as np
                 atoms = _atoms(paths[0]); chain = plan.get('chain'); selected = set(map(int,plan.get('residues',[])))

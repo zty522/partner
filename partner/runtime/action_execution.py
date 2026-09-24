@@ -196,8 +196,35 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
             write_json(checkpoint, {'state':'running', 'commands':history, 'conversation':conversation, 'inflight':None})
             if result['timed_out']:
                 break
+    # The model's final prose is not the execution itself.  A provider may
+    # time out after all commands have finished, as happened in production
+    # with Qwen.  Recover only a narrow execution terminal: at least one
+    # successful command and at least one parseable data artifact owned by
+    # this fresh Event directory.  Scientific/goal success remains the job of
+    # the downstream verification and settlement Events.
+    from partner.runtime.artifact_checks import inspect_artifacts
+    checks = inspect_artifacts(work)
+    valid = [row for row in checks if row.get('valid')]
+    successful = [row for row in history
+                  if row.get('executed') and not row.get('timed_out')
+                  and row.get('exit_code') == 0]
+    if successful and valid:
+        lines = '\n'.join(
+            f"【业务产物】{row['path']} [bytes={row.get('bytes', 0)}]"
+            for row in valid[:20])
+        answer = (lines + '\n'
+            '【执行动作】模型终端响应超时；运行器依据成功命令回执和可解析数据产物恢复执行终态。\n'
+            '【真实发现】仅确认本 Event 已产生真实数据；目标和科学结论仍由后续独立验证与结算裁决。\n'
+            '【未解决】模型未返回最终叙述。')
+        write_json(checkpoint, {'state':'completed', 'answer':answer,
+            'completion_source':'command_artifact_recovery',
+            'recovery_reason':'model terminal unavailable after productive commands',
+            'verified_artifacts':valid, 'commands':history,
+            'conversation':conversation, 'inflight':None})
+        return answer
     write_json(checkpoint, {'state':'budget_exhausted', 'commands':history,
-                           'conversation':conversation, 'inflight':None})
+                           'conversation':conversation, 'inflight':None,
+                           'artifact_checks':checks})
     if deadline - time.monotonic() <= 3:
         raise TimeoutError('action wall-clock deadline exhausted; command receipts and checkpoint preserved')
     raise RuntimeError('action model-turn budget exhausted; command receipts and checkpoint preserved')

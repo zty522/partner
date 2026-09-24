@@ -63,14 +63,14 @@ def cycle_view(value, inventory=False):
         'schema_content_present':'content' in row,
         'confidence':str(row.get('confidence'))[:100], 'record_ref':'memory_'+kind+'.json'}
         for kind,row in value.get('memory',{}).items()}
-    result['assessment'] = {'summary':str(value.get('assessment',{}).get('summary',''))[:1500],
-        'excerpt':json.dumps(value.get('assessment',{}),ensure_ascii=False)[:2000],
+    result['assessment'] = {'summary':str(value.get('assessment',{}).get('summary',''))[:1000],
+        'excerpt':json.dumps(value.get('assessment',{}),ensure_ascii=False)[:1200],
         'full_record':'assessment.json'}
     result['aspects'] = list(ASPECTS)
-    result['runtime_contract'] = runtime_contract()
+    result['runtime_contract'] = compact(runtime_contract(), 350, 3)
     reports = value.get('report_content') or []
     result['report_content'] = [next((r for r in reports if r['path'].endswith('.pdf')), reports[0])] if reports else []
-    result['substantive_artifacts'] = [{**r,'excerpt':r['excerpt'][:1500]} for r in value.get('substantive_artifacts',[])[:4]]
+    result['substantive_artifacts'] = [{**r,'excerpt':r['excerpt'][:900]} for r in value.get('substantive_artifacts',[])[:3]]
     columns = ('event_id','event_type','node_id','status','created_at','mechanism')
     result['event_terminals'] = {'columns':columns,
         'rows':[[r.get(k) for k in columns] for r in value.get('event_terminals',[])]}
@@ -397,7 +397,8 @@ def collect(ctx, params):
             rows.append({'path':str(p),'sha256':item['sha256'],'excerpt':text})
 
     rounds={}
-    for name in ('round_one','round_two','report'):
+    for name in ('round_one','round_two','round_three',
+                 'learning_one','learning_two','learning_three','report'):
         row=read(cycle/(name+'.json'))
         rounds[name]={'flow_id':row.get('flow_id'),'status':row.get('status'),
             'nodes':{k:{f:v.get(f) for f in ('ok','status','summary','error','business_delta','semantic_output') if f in v}
@@ -412,10 +413,11 @@ def collect(ctx, params):
     value={'cycle_id':ctx.job_id,'instance_id':ctx.instance_id,'project_id':params['project_id'],
            'original_request':manifest.get('request'), 'aspects':ASPECTS,
            'rounds':rounds,'memory':{k:read(cycle/('memory_'+k+'.json')) for k in ('lesson','growth','habit')},
-           'delivery':{k:read(cycle/(k+'.json')) for k in ('text_ack','report_ack')},
+           'delivery':{k:read(cycle/(k+'.json')) for k in ('text_ack','report_ack','final_ack')},
            'assessment':read(cycle/'assessment.json'),'source_inventory':inventory,
            'artifacts':rows[:35], 'all_artifact_refs':[r['path'] for r in rows],
-           'manifest':manifest_path}
+           'manifest':manifest_path,
+           'experiment_context': params.get('experiment_context') or {}}
     # The audit must inspect actual scripts/report content, not only optimistic
     # action summaries. Keep these separate from duplicated receipt excerpts.
     substantive = [r for r in rows if Path(r['path']).suffix in ('.py', '.md', '.csv')]
@@ -434,7 +436,7 @@ def collect(ctx, params):
         , 'created_at': related.get(r.get('event_id'), {}).get('created_at'),
           'node_id': related.get(r.get('event_id'), {}).get('node_id')}
         for eid in related for r in ledger._projection().rows(ledger.summaries_path,entity=eid,limit=1)]
-    return persist(ctx,params,value,'已读取本周期两轮、交付、报告和记忆的真实证据')
+    return persist(ctx,params,value,'已读取本周期全部项目轮、学习、交付、报告和记忆的真实证据')
 
 
 def read_plan(ctx, params):
@@ -1240,4 +1242,3 @@ DEFINITIONS = [EventDefinition('autoevolution.'+name,'evolution',
     execution_method='local' if name in _LOCAL else 'llm',
     timeout_seconds=(900 if name in ('runtime_verify','runtime_reload','release_baseline','release_candidate') else 600 if name=='release' else 300),
     max_attempts=2) for name,handler in _HANDLERS.items()]
-

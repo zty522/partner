@@ -261,8 +261,7 @@ def check_git_diff() -> CheckResult:
     """Check that actual git changes exist (proves code was really modified)."""
     try:
         result = subprocess.run(
-            # 2026-09-17: GUI git diff removed with the retirement.
-[]
+            ["git", "diff", "--stat", "--", "partner/web"],
             capture_output=True, text=True, timeout=10,
             cwd=str(PROJECT_ROOT),
         )

@@ -1225,3 +1225,27 @@ documents:
     tier: L2
     authority: current
     tags: [index, repository, sqlite, 9p, performance]
+  - id: adaptive_project_cycle_v2
+    path: docs/architecture/adaptive_project_cycle_v2.md
+    title: 项目迭代、主动学习与 Partner 自进化有界闭环
+    tier: L1
+    authority: current
+    tags: [event-first, project-iteration, active-learning, self-evolution, settlement, jev]
+    instances: [all]
+    max_chars: 12000
+  - id: adaptive_cycle_decision_0109
+    path: docs/decisions/0109-adaptive-project-learning-evolution-cycle.md
+    title: 自适应项目、学习与自进化 Flow 决策
+    tier: L1
+    authority: canonical
+    tags: [decision, event-first, active-learning, self-evolution, settlement]
+    instances: [all]
+    max_chars: 10000
+  - id: adaptive_cycle_acceptance_20260924
+    path: docs/testing/adaptive_cycle_v2_acceptance_20260924.md
+    title: Adaptive Project Cycle v2 单任务真实验收
+    tier: L2
+    authority: current
+    tags: [testing, acceptance, event-flow, qwen, jev, delivery]
+    instances: ["02", all]
+    max_chars: 12000

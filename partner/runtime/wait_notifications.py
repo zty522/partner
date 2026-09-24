@@ -38,37 +38,15 @@ def enqueue_if_due(worker,job,state,now=None):
     notice=JobRecord(job_id=jid,project_id=job.project_id,title='长任务等待状态',request='告诉用户当前任务尚在运行，简短说明当前阶段；不要编造进度百分比、完成时间、新发现或下一步。',channel=job.channel,sender_id=job.sender_id,origin_instance=job.origin_instance,intake_instance_id=job.intake_instance_id,assigned_instance=job.assigned_instance,persona_hint=job.persona_hint,status='queued',created_at=timestamp,updated_at=timestamp,root_event_id=job.root_event_id,report_policy='none',event_catalog_version=worker.catalog.version,intent_contract={'notification_kind':'waiting','notification_scope':job.root_event_id,'waiting_for_job':job.job_id,'running_snapshot':{'flow_type':job.flow_type,'current_stage':stage,'elapsed_seconds':round(now-saved['started_at'])}})
     flow=worker.controller.start(definition,catalog_version=worker.catalog.version,task_id=jid,project_id=job.project_id,instance_id=job.intake_instance_id)
     flow.root_event_id=job.root_event_id;worker.store.save(flow)
-    notice.flow_id=flow.flow_id;notice.flow_type=flow.flow_type;worker._save_job(notice)
+    notice.flow_id=flow.flow_id;notice.flow_type=flow.flow_type;worker._enqueue_followup(notice)
     saved.update(count=saved['count']+1,notice_job_id=jid,next_at=now+min(900,180*2**min(saved['count']+1,3)))
     write_json(path,saved)
     return jid
 
 
 async def dispatch_if_due(worker,job,state,ctx,now=None):
-    """Run the lightweight notice graph inside the owning worker's existing slot.
-
-    This prevents an all-busy pool from starving notifications. The ordinary
-    claim gate still arbitrates against other workers; notice handlers only
-    project durable status and use the canonical outbound queue.
-    """
-    jid=enqueue_if_due(worker,job,state,now)
-    if not jid or not worker.shared_mode or not worker._try_acquire_lock(jid):return jid
-    from dataclasses import replace
-    notice=worker._load_job(worker.jobs_dir/(jid+'.json'))
-    try:
-        flow=worker.store.load(notice.flow_id);definition=worker.flows.get(flow.flow_type,version=flow.definition_version)
-        notice.status='running';worker._save_job(notice)
-        initial={'request':notice.request,'channel':notice.channel,'sender_id':notice.sender_id,'origin_instance':notice.origin_instance,
-                 'project_id':notice.project_id,'root_event_id':notice.root_event_id,'intent_contract':notice.intent_contract}
-        context=replace(ctx,job_id=jid)
-        while flow.ready_node_ids:
-            result=await worker.runner.run_ready_node(flow,definition,flow.ready_node_ids[0],context,initial)
-            flow=result.flow_state
-            if result.output.get('status')=='waiting':break
-        notice.status=flow.status;notice.completed_event_ids=list(flow.completed_node_ids);worker._save_job(notice)
-    finally:
-        (worker.lock_dir/f'{jid}.lock').unlink(missing_ok=True)
-    return jid
+    """Durably enqueue a message Flow without replacing the current Job lease."""
+    return enqueue_if_due(worker,job,state,now)
 
 
 def enqueue_report_failure(worker,job):
@@ -79,4 +57,4 @@ def enqueue_report_failure(worker,job):
     flow=worker.controller.start(definition,catalog_version=worker.catalog.version,task_id=jid,project_id=job.project_id,instance_id=job.intake_instance_id)
     flow.root_event_id=job.root_event_id;worker.store.save(flow)
     notice=JobRecord(job_id=jid,project_id=job.project_id,title='报告交付缺口',request='如实说明报告未完成的阶段，不将报告失败称为业务实验失败。',channel=job.channel,sender_id=job.sender_id,origin_instance=job.origin_instance,intake_instance_id=job.intake_instance_id,assigned_instance=job.assigned_instance,persona_hint=job.persona_hint,status='queued',created_at=now,updated_at=now,root_event_id=job.root_event_id,report_policy='none',event_catalog_version=worker.catalog.version,flow_id=flow.flow_id,flow_type=flow.flow_type,intent_contract={'failure_for_job':job.job_id,'notification_kind':'blocked','notification_scope':job.root_event_id})
-    worker._save_job(notice);write_json(marker,{'notice_job_id':jid,'at':now});return jid
+    worker._enqueue_followup(notice);write_json(marker,{'notice_job_id':jid,'at':now});return jid

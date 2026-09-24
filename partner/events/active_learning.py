@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 import json
 import re
 
@@ -82,10 +83,6 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                     "url": str(row.url), "snippet": str(row.snippet)})
     from pathlib import Path
     from partner.runtime.source_evidence import fetch
-    proposed = previous.get('primary_sources') or params.get('sources') or []
-    for row in proposed:
-        url = row.get('url') if isinstance(row,dict) else str(row)
-        if url and url.startswith(('https://','http://')): sources.append({'url':url})
     unique = {row["url"]: row for row in sources}
     work = Path(getattr(ctx,'working_dir', '') or Path(ctx.workspace)/'state/event_runtime/work'/str(getattr(ctx,'job_id','learning')))
     directory = work / 'sources' / str(params.get('flow_id') or 'standalone')
@@ -214,6 +211,42 @@ def matched_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def handoff_freeze(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Freeze sourced knowledge as a candidate for a later project round.
+
+    Reading is not improvement.  The handoff is ready only when real downloaded
+    sources, source-bound readings and an adoption candidate all exist.  Its
+    downstream effect remains unverified until a later matched project action.
+    """
+    outputs = params.get('flow_outputs') if isinstance(params.get('flow_outputs'), dict) else {}
+    def sem(name):
+        row = outputs.get(name) if isinstance(outputs.get(name), dict) else {}
+        return row.get('semantic_output') if isinstance(row.get('semantic_output'), dict) else {}
+    retrieved = sem('retrieve').get('sources') or []
+    readings = sem('read').get('readings') or []
+    synthesis = sem('synthesize')
+    adoption = sem('adoption')
+    source_urls = {str(row.get('url') or '') for row in retrieved if isinstance(row, dict)}
+    reading_urls = {str(row.get('url') or '') for row in readings if isinstance(row, dict)}
+    ready = bool(source_urls and reading_urls and reading_urls <= source_urls
+                 and adoption.get('event_type') and adoption.get('hypothesis'))
+    value = {
+        'ready': ready, 'status': 'candidate_frozen' if ready else 'inconclusive',
+        'source_urls': sorted(source_urls), 'reading_urls': sorted(reading_urls),
+        'candidate': adoption, 'synthesis': synthesis,
+        'improvement_verified': False,
+        'required_next_evidence': 'next project round must cite this handoff and produce matched downstream evidence',
+    }
+    path = Path(ctx.working_dir) / str(params.get('flow_id') or 'learning') / 'learning_handoff.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+    return {'ok': ready, 'status': 'completed' if ready else 'failed',
+            'failure_class': '' if ready else 'learning_evidence',
+            'error': '' if ready else 'learning handoff lacks sourced reading or adoption candidate',
+            'semantic_output': value, 'summary': '主动学习候选已冻结，尚未宣称改善',
+            'files': [str(path)], 'evidence_refs': [str(path)]}
+
+
 DEFINITIONS = [
     EventDefinition("active_learning.question_formulate", "active_learning", "形成会改变项目决策的学习问题", question_formulate, execution_method="llm"),
     EventDefinition("active_learning.source_plan", "active_learning", "规划论文、官方文档和代码多源检索", source_plan, execution_method="llm"),
@@ -223,4 +256,5 @@ DEFINITIONS = [
     EventDefinition("active_learning.synthesize", "active_learning", "形成影响项目决策的新知识", synthesize, execution_method="llm"),
     EventDefinition("active_learning.adoption_candidate", "active_learning", "形成外部知识采用 Candidate", adoption_candidate, execution_method="llm"),
     EventDefinition("active_learning.matched_verify", "active_learning", "基线/候选匹配验证知识采用价值", matched_verify),
+    EventDefinition("active_learning.handoff_freeze", "active_learning", "冻结有来源的采用候选并等待下游改善验证", handoff_freeze, reads_existing_artifact=True, produces_artifact=True),
 ]

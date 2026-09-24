@@ -8,7 +8,7 @@ def start_child(worker, job, parent, output):
         return
     # Only the new bounded parent can request these fixed child types.
     if parent.flow_type not in {'project_cycle', 'self_improvement_cycle', 'learning_improvement_cycle'} or request['flow'] not in {
-            'project_cycle_round', 'pdf_report', 'autonomous_evolution'}:
+            'project_cycle_round', 'pdf_report', 'active_learning', 'autonomous_evolution'}:
         raise ValueError('invalid cycle child request')
     node = request['owner_node']
     definition = worker.flows.get(parent.flow_type, version=parent.definition_version)

@@ -621,20 +621,6 @@ class EventWorker:
             done,_=await asyncio.wait({pending},timeout=30)
             if not done: await dispatch_if_due(self,job,state,ctx)
         result=await pending
-        # SIDE-BAND: per-event progress message (only for round-style flows).
-        # emit_progress runs after a node completes; it enqueues a short
-        # Chinese message to the same outbound queue used by message_critic -> send.
-        # Failures are isolated — they must not block the round.
-        if (result.output.get("ok") and result.flow_state.flow_type in
-                {"project_cycle_round", "project_iteration_round"}):
-            try:
-                self._emit_progress_message(
-                    job=job, flow_state=result.flow_state,
-                    node_id=node_id, node_output=result.output,
-                )
-            except Exception as exc:
-                # Side-band failure must not affect round advancement.
-                pass
         if result.output.get("status") == "waiting":
             self._save_job(job)
             return False

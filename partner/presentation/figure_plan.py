@@ -57,6 +57,17 @@ def validate(plans,sources):
                                          f"is missing/non-numeric in row {index}. Do not plot exception text or "
                                          "mixed event schemas as a numeric distribution; choose a supported field "
                                          "or a real code_excerpt instead") from exc
+            if kind=='scalar_bar':
+                if source.suffix.lower() not in {'.json', '.jsonl'}:
+                    raise ValueError('scalar_bar requires one JSON source')
+                values=p.get('values') or {}
+                if not isinstance(values,dict) or not 2<=len(values)<=6:
+                    raise ValueError('scalar_bar requires 2–6 labeled numeric selectors')
+                data=json_data(source)
+                for selector in values.values():
+                    number=float(select(data,selector))
+                    if not __import__('math').isfinite(number):
+                        raise ValueError('scalar_bar selector is not finite')
             if kind=='molecule_grid':
                 rows=select(json_data(source),p.get('rows_key','candidates'))
                 for i in p.get('indices',[0]):rows[int(i)][p.get('smiles_key','canonical_smiles')]
@@ -110,6 +121,40 @@ def executable_choices(sources):
     choices = []
     for row in source_catalog(sources):
         candidates = []
+        if row.get('format') in {'.json', '.jsonl'}:
+            source = next((s for s in sources if s.get('evidence_id') == row['source_id']), {})
+            try:
+                data = json_data(source.get('path', ''))
+            except (OSError, ValueError, TypeError):
+                data = {}
+            if isinstance(data, dict):
+                numeric = {str(k):v for k,v in data.items()
+                           if isinstance(v,(int,float)) and not isinstance(v,bool)}
+                pairs = []
+                for key in numeric:
+                    if key.startswith('baseline_'):
+                        suffix=key[len('baseline_'):]
+                        peer='candidate_'+suffix
+                        own_peer = ''
+                        if peer in numeric:
+                            pairs.append((key,peer))
+                        # Candidate result records commonly store their own
+                        # metric as ``test_rmse`` beside ``baseline_rmse``.
+                        # Accept that shape only when the same record carries
+                        # concrete candidate-role evidence.
+                        else:
+                            own_peer = next((name for name in (suffix, 'test_'+suffix)
+                                             if name in numeric), '')
+                        if not any(pair[0] == key for pair in pairs) and own_peer and (
+                            str(data.get('role') or data.get('model_role') or '').lower() == 'candidate'
+                            or (isinstance(data.get('features'), list)
+                                and len(data.get('features')) >= 2)):
+                            pairs.append((key,own_peer))
+                for baseline,candidate in pairs[:2]:
+                    suffix=baseline[len('baseline_'):]
+                    candidates.append({'kind':'scalar_bar','source_refs':[row['source_id']],
+                        'values':{'Baseline':baseline,'Candidate':candidate},
+                        'y_label':suffix+'（原数据单位）'})
         for array in row.get('actual_arrays', []):
             for field in array.get('numeric_fields', []):
                 candidates.append({'kind':'distribution', 'source_refs':[row['source_id']],

@@ -4,6 +4,7 @@ Workspace resource resolution uses single-level ``os.scandir``; deeper walks onl
 See ``docs/operations/read_discipline_audit_20260917.md``.
 """
 
+from __future__ import annotations
 """Hermes-style dynamic file path resolver.
 
 Instead of hardcoded search paths, uses `find` / `locate` / `os.walk`
@@ -12,7 +13,6 @@ Mirrors how Hermes Agent uses its terminal+file tools to dynamically probe
 the filesystem when a given path doesn't exist.
 """
 
-from __future__ import annotations
 
 import logging
 import os

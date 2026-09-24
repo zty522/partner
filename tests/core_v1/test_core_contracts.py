@@ -49,12 +49,13 @@ def test_jev_uses_typed_protocol_and_remains_advisory():
             "readiness": {"type": "score", "score": 2.8, "confidence": 0.85,
                           "legend": {"0": "no", "3": "yes"},
                           "probabilities": {"0": 0.05, "3": 0.95}},
-        }, "usage": {"input_tokens": 50, "output_tokens": 8}}
+        }, "usage": {"input_tokens": 50, "output_tokens": 8, "cost": 0.00041}}
     client = JevClient(JevConfig(mode=CoreMode.SHADOW), transport=transport,
                        environ={"TYPESAFE_API_KEY": "test-key"})
     result = client.evaluate(state())
     assert result.status == "completed" and not result.authoritative
     assert result.answers["route"]["choice"] == "continue_project"
+    assert result.usage["cost"] == pytest.approx(0.00041)
     assert seen["url"].endswith("/v1/systemone")
     assert seen["payload"]["questions"]["route"]["type"] == "choice"
 
@@ -63,6 +64,17 @@ def test_jev_missing_key_fails_open_for_execution_but_records_unavailable():
     result = JevClient(environ={}).evaluate(state())
     assert result.status == "unavailable"
     assert "TYPESAFE_API_KEY" in result.reason
+
+
+def test_candidate_normalizes_text_evidence_contract_without_crashing():
+    from partner.core_v1.service import candidates_from_outputs
+    candidates, selected = candidates_from_outputs({'plan': {'semantic_output': {
+        'candidates': [], 'selected': {'id': 'chosen', 'event_type': 'project.agent_action',
+        'parameters': {'script': 'true'}, 'success_criteria': 'file exists',
+        'evidence_contract': 'JSON hash and metric'}}}}, 'project')
+    assert selected == 'chosen'
+    assert candidates[0].success_criteria == ('file exists',)
+    assert candidates[0].evidence_contract['description'] == 'JSON hash and metric'
 
 
 def test_latent_model_abstains_then_learns_and_detects_ood(tmp_path):

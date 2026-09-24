@@ -151,7 +151,7 @@ ACTIVE_LEARNING_V1 = Flow("active_learning", "1.0.0", (
 ), "External knowledge acquisition with source and claim-level verification.")
 
 
-ACTIVE_LEARNING = Flow("active_learning", "2.0.0", (
+ACTIVE_LEARNING_V2 = Flow("active_learning", "2.0.0", (
     Node("recall", "memory.context_recall"),
     Node("question", "active_learning.question_formulate", ("recall",)),
     Node("source_plan", "active_learning.source_plan", ("question",)),
@@ -170,6 +170,14 @@ ACTIVE_LEARNING = Flow("active_learning", "2.0.0", (
     Node("remember", "memory.belief_update", ("matched", "core_settlement")),
     Node("resume", "core.route_next", ("remember", "core_settlement")),
 ), "Core v1 active learning: verified sources become a frozen adoption experiment and settlement.")
+
+
+ACTIVE_LEARNING = Flow("active_learning", "2.1.0", (
+    *ACTIVE_LEARNING_V2.nodes[:-2],
+    Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve")),
+    Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
+    Node("resume", "core.route_next", ("remember", "core_settlement")),
+), "Source-grounded learning freezes a candidate handoff; downstream project execution must prove improvement.")
 
 
 SELF_EVOLUTION_V1 = Flow("self_evolution", "1.0.0", (
@@ -379,7 +387,7 @@ PROJECT_ITERATION_V2_6 = _notification_gated_version(PROJECT_ITERATION_V2_5, "2.
 LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (
     DIRECT_ANSWER_V1, DIRECT_ANSWER_V1_1, PROJECT_ITERATION_V2_5,
     PROJECT_ITERATION_V2_6,
-    ACTIVE_LEARNING_V1, SELF_EVOLUTION_V1,
+    ACTIVE_LEARNING_V1, ACTIVE_LEARNING_V2, SELF_EVOLUTION_V1,
     # The project_iteration entry above is captured *after* the commitment nodes were
     # added, so register the true pre-integration topology as well -- a request pinned
     # to 2.5.0 must resolve to the graph that was actually shipped under that version.

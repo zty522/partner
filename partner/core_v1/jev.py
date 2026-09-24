@@ -84,10 +84,13 @@ class JevClient:
                            if isinstance(v, dict) and "confidence" in v]
             confidence = min(confidences) if confidences else 0.0
             usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+            typed_usage = {str(k): (float(v) if isinstance(v, float) else int(v))
+                           for k, v in usage.items() if isinstance(v, (int, float))
+                           and not isinstance(v, bool)}
             return TypedJudgment(
                 "completed", str(response.get("model") or self.config.model), answers,
                 confidence=max(0.0, min(1.0, confidence)),
-                usage={str(k): int(v) for k, v in usage.items()},
+                usage=typed_usage,
                 latency_ms=(time.monotonic() - started) * 1000,
                 authoritative=self.config.mode == CoreMode.GATED)
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

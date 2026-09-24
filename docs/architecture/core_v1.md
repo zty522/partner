@@ -7,7 +7,7 @@ Core v1 不是第二套 Runtime。它是现有 Event Runtime 中的统一决策�
 最新三条 Flow 为：
 
 - `project_iteration@3.1.0`
-- `active_learning@2.0.0`
+- `active_learning@2.1.0`
 - `self_evolution@2.0.0`
 
 `project_iteration@2.5.0/2.6.0` 等已运行图继续可解析，不能就地改写。
@@ -58,9 +58,9 @@ Settlement 将新 transition 先原子写入 Linux-native SQLite 热索引，再
 
 ### Jev
 
-Jev 使用 TypeSafe 官方 `POST /v1/systemone` 协议和 `jev-latest`。一次请求并行回答 Choice、Noul 和 Score 问题。Core v1 默认 `shadow`；密钥只从 `TYPESAFE_API_KEY` 读取，响应、日志和冻结记录不保存密钥。缺密钥、超时、HTTP 错误或类型错误都生成 `unavailable` 记录，真实执行继续。
+Jev 当前通过 OpenRouter `POST /api/alpha/decisions` 协议调用 `typesafe/jev-1.13`。一次请求并行回答 Choice、Noul 和 Score 问题。Core v1 默认 `shadow`；密钥只从 `OPENROUTER_API_KEY` 读取，响应、日志和冻结记录不保存密钥。缺密钥、超时、HTTP 错误或类型错误都生成 `unavailable` 记录，真实执行继续。
 
-Jev 只判断限定问题：建议路由、是否为知识缺口、是否为 Partner 机制缺陷、候选是否准备好。它不能证明科学结论、授予权限、应用代码或覆盖 Settlement。接口依据 [TypeSafe OpenAPI](https://api.typesafe.ai/openapi.json)；模型定位依据 [TypeSafe Jev 说明](https://typesafe.ai/blog/introducing-system-one-models-and-jev)。
+Jev 只判断限定问题：建议路由、是否为知识缺口、是否为 Partner 机制缺陷、候选是否准备好。它不能证明科学结论、授予权限、应用代码或覆盖 Settlement。接口依据 OpenRouter 的 Jev API 与类型化判断指南。
 
 ### Commitment
 
@@ -107,4 +107,4 @@ Commitment 后只允许相应领域 Event 执行。项目以 `project.outcome_ve
 
 ## 当前边界
 
-Core v1 已实现代码、Flow 接线、历史版本兼容、Jev typed adapter、潜模型、不可变存储、触发政策和确定性 benchmark。Jev 尚未用真实 key 做校准，潜模型尚未积累真实项目 transition，因此两者保持 shadow。它们变成 advisory 或 gated 之前，必须分别完成校准误差、OOD 拒绝、路由收益和失败降级 benchmark。
+Core v1 已实现代码、Flow 接线、历史版本兼容、Jev typed adapter、潜模型、不可变存储、触发政策和确定性 benchmark。Jev 已完成真实连通性探测但尚未做校准，潜模型尚未积累真实项目 transition，因此两者保持 shadow。它们变成 advisory 或 gated 之前，必须分别完成校准误差、OOD 拒绝、路由收益和失败降级 benchmark。

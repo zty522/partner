@@ -246,6 +246,23 @@ def message_critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         accepted = bool(value.get('accepted')) and not value.get('problems') and not fact_audit.get('unsupported_claims') and not template and not tool_payload and 0 < len(message) <= limit
         if accepted: break
         save_message_review(attempt+1, None)
+    # A rewrite produced on the last critic attempt has not itself been fact
+    # checked yet.  Give that final candidate one bounded fact-only review;
+    # otherwise the previous draft's unsupported claims incorrectly poison a
+    # clean correction and the delivery chain can never converge.
+    last_revised = str((reviews[-1] if reviews else {}).get('revised_message') or '').strip()
+    if not accepted and last_revised and last_revised == message.strip():
+        audit_raw, audit_usage = call_model(ctx, purpose='message_factcheck', prompt=(
+            '你只审查<outgoing_message>内本次待发送消息，不审查来源全文。逐个检查消息新增的具体事实、数值和机制是否由来源直接支持。'
+            '只输出JSON：{"unsupported_claims":["逐字列出缺依据的断言及原因"]}；确实没有才返回空数组。\n'
+            + '<source_facts>'+facts+'</source_facts>\n<outgoing_message>'+message+'</outgoing_message>'))
+        final_audit = json_object(audit_raw)
+        if not isinstance(final_audit.get('unsupported_claims'), list):
+            final_audit = {'unsupported_claims':['最终改稿事实审计未返回有效结果']}
+        for key in ('prompt_tokens','completion_tokens','total_tokens'):
+            usage[key] = usage.get(key,0) + int(audit_usage.get(key) or 0)
+        value = {**value, 'fact_audit': final_audit}
+        save_message_review(3, final_audit)
     # Sprint 37: a long-running autonomous loop must not stall on *format*.
     # The honesty guarantee is that no message carrying an unsupported fact
     # claim is sent.  When the fact audit is CLEAN (no unsupported_claims) and
@@ -718,6 +735,44 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         draft = {'path':str(revision_path), 'content':revision}
         phase = 'review'
         save_review()
+    if not accepted and reviews:
+        # After the bounded repair budget, preserve only claims the independent
+        # reviewer itself marked verified.  This produces a short evidence
+        # report instead of either publishing disputed prose or losing the
+        # entire PDF because the model repeatedly reintroduced an overclaim.
+        verified = value.get('verified_claims') or []
+        source_rows = (sources.get('semantic_output') or {}).get('sources') or []
+        known_ids = {row.get('evidence_id') for row in source_rows}
+        lines = ['# 项目证据报告', '', '## 已核验结果', '']
+        for item in verified[:8]:
+            if isinstance(item, dict):
+                claim = str(item.get('claim') or '').strip()
+                ids = [str(x) for x in item.get('evidence_ids') or [] if x in known_ids]
+            else:
+                claim, ids = str(item).strip(), []
+            if claim:
+                lines.append('- ' + claim + ((' ' + ''.join(f'[{x}]' for x in ids)) if ids else ''))
+        assets = visual_context(outputs)
+        if assets:
+            lines += ['', '## 真实证据图', '']
+            lines += [f"[[figure:{row['id']}]]" for row in assets if row.get('id')]
+        lines += ['', '## 证据边界', '',
+                  '本版本仅保留独立审查已确认的主张；被审查为证据不足的解释、因果或泛化结论均未发布。',
+                  '', '## 证据索引', '']
+        lines += [f"- [{row['evidence_id']}] {Path(row['path']).name}"
+                  for row in source_rows if row.get('evidence_id') and row.get('exists')]
+        fallback='\n'.join(lines).strip()+'\n'
+        errors=_citation_errors(fallback,sources)
+        from partner.presentation.document import figure_errors
+        errors += figure_errors(fallback,outputs)
+        if verified and not errors:
+            fallback_path=Path(ctx.working_dir)/'项目证据报告_审查降级稿.md'
+            fallback_path.write_text(fallback,encoding='utf-8')
+            draft={'path':str(fallback_path),'content':fallback}
+            accepted=True
+            value={**value,'accepted':True,'unsupported_claims':[],
+                   'required_edits':[],'review_fallback':True,
+                   'excluded_claim_count':sum(len(r.get('unsupported_claims') or []) for r in reviews)}
     return {"ok": accepted, "status": "completed" if accepted else "failed",
             "path":draft.get('path', ''), "content":draft.get('content', ''),
             "semantic_output":{**value, 'reviews':reviews},

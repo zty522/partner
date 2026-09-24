@@ -8,6 +8,7 @@ resource layer (``partner/index/*.py``).  See
 ``docs/operations/read_discipline_audit_20260917.md``.
 """
 
+from __future__ import annotations
 """Maintenance-only bulk indexing.  No production read-path code.
 
 The ``os.walk`` calls in this module are bounded by an explicit root
@@ -41,7 +42,6 @@ Usage:
     plans = ck.generate_frontend_improvements(diffs)
 """
 
-from __future__ import annotations
 
 import logging
 import os

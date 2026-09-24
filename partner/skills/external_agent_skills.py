@@ -8,6 +8,7 @@ resource layer (``partner/index/*.py``).  See
 ``docs/operations/read_discipline_audit_20260917.md``.
 """
 
+from __future__ import annotations
 """External Agent skill executor — simplified with two-tier dispatch.
 
 General agents (hermes, openclaw, codex) are called through adapter.chat().
@@ -16,7 +17,6 @@ Specialized CLI agents (cytobridge, etc.) are dispatched through AgentDispatcher
 Each agent invocation is clearly marked with [agent_name] in progress messages.
 """
 
-from __future__ import annotations
 
 import json
 import logging

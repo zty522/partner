@@ -1,3 +1,7 @@
+## 2026-09-24：Adaptive Project Cycle v2 完成单任务端到端验收
+
+`project_cycle@2.0.0` 已将自主轮次设计、Settlement 条件续轮、可解决知识缺口触发的 `active_learning@2.1.0`、后一项目轮的学习效果结算，以及交付后 Partner-only 自进化审计接为一个有界 Event Flow。最终隔离验收 `job_b14bfc0c820d43bf` 完成 36 个父节点且无失败节点：两轮分别得到 test RMSE 5.4819 与 0.9370，第二轮通过哈希绑定消费第一轮产物；文字、PDF 和最终消息均获得 ACK，`delivery_verified=true`。运行后审计没有发现满足硬门的 Partner 缺陷，因此正确结算为 `no_change`。另一个真实主动学习 Flow `job_learning_real_af541928f231` 完成 17 个节点并冻结来源绑定候选，但尚无下游 matched uplift，不能声称学习改善。Jev 已通过 OpenRouter `typesafe/jev-1.13` 真实调用并保持 shadow，Qwen `qwen3.8-flash` 仍为主 LLM。72 项本次相关回归通过；仍不声称跨任务或长期 uplift。详见 [Adaptive Cycle v2](architecture/adaptive_project_cycle_v2.md)、[验收记录](testing/adaptive_cycle_v2_acceptance_20260924.md)和 [ADR 0109](decisions/0109-adaptive-project-learning-evolution-cycle.md)。
+
 ## 2026-09-23：Partner Core v1 基础框架已接入 main
 
 Commitment feature 的 19 个提交经 154 项聚焦测试后快进合并至 `main`；无独有提交的 `cleanup-v1` 与 feature worktree 均已删除。未跟踪 canary 产物先归档至 `partner_workspace/archive/commitment_kernel_20260919_09df9c5/` 并生成 SHA-256 清单。

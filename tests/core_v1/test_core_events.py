@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 from partner.events import core_v1
 
@@ -73,9 +74,15 @@ def test_flow_registry_places_commitment_before_real_execution():
         assert flow.node("core_settlement").event_type == "core.settlement"
 
 
-def test_instance_worker_claims_authoritative_lease_before_returning_job(tmp_path):
+def test_instance_worker_claims_authoritative_lease_before_returning_job(tmp_path, monkeypatch):
     from partner.application import PartnerApplicationService
     from partner.runtime.event_worker import EventWorker
+    from partner.events import interaction
+    def intent(ctx, params):
+        return {"semantic_output": {"route": "project_iteration",
+                "dispatch_target": "project", "warm_reply": "received"}}
+    for name in ("intent_observe", "intent_counter_read", "intent_synthesize"):
+        monkeypatch.setattr(interaction, name, intent)
     (tmp_path / "config").mkdir()
     (tmp_path / "config/partner_config.json").write_text('{"agent":{"backend":"direct"}}')
     for identifier in ("01", "02", "03", "04", "05"):
@@ -89,3 +96,49 @@ def test_instance_worker_claims_authoritative_lease_before_returning_job(tmp_pat
     assert worker._db_lease_job_id == job.job_id
     assert worker._db_lease_owner
     worker._release_claim()
+
+
+def test_explicit_second_phase_is_a_deterministic_cycle_floor(tmp_path, monkeypatch):
+    from partner.events import cycle
+    ctx = SimpleNamespace(workspace=str(tmp_path), job_id="j", instance_id="02")
+    params = {"project_id":"p", "request":"第一轮建立基线，后一轮增加x2",
+              "intent_contract":{"original_request":"第一轮建立基线，后一轮增加x2",
+                  "execution_constraints":{"max_rounds":2}}}
+    cycle.initialize(ctx, params)
+    root = tmp_path / "state/cycles/j"
+    (root / "round_one.json").write_text(json.dumps({"status":"completed",
+        "node_outputs":{"plan":{"semantic_output":{"selected":{}}},
+        "verify":{"business_delta":True,"semantic_output":{"verified":True}},
+        "reflect":{"semantic_output":{}},"core_settlement":{"semantic_output":{}}}}))
+    monkeypatch.setattr(cycle, "call_model", lambda *a, **k: (json.dumps({
+        "route":"complete", "objective_complete":True, "reason":"baseline passed"}), {}))
+    result = cycle.round_settle(ctx, {"round_number":1})
+    assert result["primary_route"] == "continue_project"
+    assert result["semantic_output"]["explicit_protocol_floor"] == 2
+
+
+def test_fresh_first_round_rejects_foreign_job_provenance(tmp_path):
+    from partner.events.project import outcome_verify
+    from partner.runtime.artifact_checks import check_file
+    artifact = tmp_path / "candidate.json"
+    artifact.write_text(json.dumps({"value":1,
+        "source":"/state/event_runtime/work/job_old123/flow_x/data.csv"}))
+    checked = check_file(artifact)
+    ctx = SimpleNamespace(workspace=str(tmp_path), job_id="job_current")
+    result = outcome_verify(ctx, {"previous":{"business_delta":True,
+        "semantic_output":{"artifact_checks":[checked]}},
+        "intent_contract":{"round_number":1,
+            "original_request":"第一轮生成基线，后一轮建立候选"}})
+    assert result["business_delta"] is False
+    assert result["semantic_output"]["provenance_violations"] == ["job_old123"]
+
+
+def test_candidate_metric_record_offers_executable_scalar_figure(tmp_path):
+    from partner.presentation.figure_plan import executable_choices
+    source = tmp_path / "model_candidate.json"
+    source.write_text(json.dumps({"features":["x1","x2"],
+        "baseline_rmse":12.8, "test_rmse":0.5}))
+    sources = [{"evidence_id":"E01", "path":str(source), "exists":True}]
+    plan = next(row["plan"] for row in executable_choices(sources)
+                if row["plan"]["kind"] == "scalar_bar")
+    assert plan["values"] == {"Baseline":"baseline_rmse", "Candidate":"test_rmse"}

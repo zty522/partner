@@ -109,7 +109,7 @@ class TypedJudgment:
     model: str
     answers: Mapping[str, Any]
     confidence: float = 0.0
-    usage: Mapping[str, int] = field(default_factory=dict)
+    usage: Mapping[str, int | float] = field(default_factory=dict)
     latency_ms: float = 0.0
     reason: str = ""
     authoritative: bool = False

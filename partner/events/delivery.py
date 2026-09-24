@@ -95,9 +95,11 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
     flow_outputs = params.get("flow_outputs") if isinstance(params.get("flow_outputs"), dict) else {}
     composed = next((value for key, value in reversed(list(flow_outputs.items()))
-                     if key in {"message_critic", "critic", "compose"} and isinstance(value, dict)), {})
+                     if key in {"final_critic", "message_critic", "critic",
+                                "final_compose", "compose"} and isinstance(value, dict)), {})
     dedup = next((value for key, value in reversed(list(flow_outputs.items()))
-                  if key in {"deduplicate", "dedup"} and isinstance(value, dict)), {})
+                  if key in {"final_deduplicate", "deduplicate", "dedup"}
+                  and isinstance(value, dict)), {})
     raw = str(params.get("message") or params.get("text") or prior.get("message")
               or composed.get("message") or composed.get("model_output")
               or prior.get("model_output") or prior.get("summary") or "").strip()

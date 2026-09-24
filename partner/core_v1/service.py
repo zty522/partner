@@ -42,6 +42,16 @@ def _semantic(outputs: Mapping[str, Any], node: str) -> dict[str, Any]:
     return dict(value)
 
 
+def _mapping(value: Any, *, field: str) -> dict[str, Any]:
+    """Normalize an LLM field without treating text as key/value pairs."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    if value in (None, "", (), []):
+        return {}
+    return {"description": str(value), "normalized_from": type(value).__name__,
+            "field": field}
+
+
 def _candidate(row: Mapping[str, Any], index: int, *, domain: str) -> CandidateAction:
     candidate_id = str(row.get("id") or row.get("candidate_id") or f"{domain}_{index}")
     event_type = str(row.get("event_type") or row.get("selected_event") or
@@ -54,11 +64,11 @@ def _candidate(row: Mapping[str, Any], index: int, *, domain: str) -> CandidateA
                       row.get("reason") or event_type)
     return CandidateAction(
         candidate_id=candidate_id, event_type=event_type, description=description,
-        parameters=dict(row.get("parameters") or {}),
+        parameters=_mapping(row.get("parameters"), field="parameters"),
         expected_observation=str(row.get("expected_observation") or row.get("hypothesis") or ""),
         disproof=str(row.get("disproof") or ""), risk=str(row.get("risk") or "unknown"),
         success_criteria=tuple(str(v) for v in criteria),
-        evidence_contract=dict(row.get("evidence_contract") or {}),
+        evidence_contract=_mapping(row.get("evidence_contract"), field="evidence_contract"),
         rollback=str(row.get("rollback") or ""))
 
 
@@ -141,11 +151,12 @@ def state_from_dict(value: Mapping[str, Any]) -> DecisionState:
 def candidate_from_dict(value: Mapping[str, Any]) -> CandidateAction:
     return CandidateAction(
         candidate_id=str(value["candidate_id"]), event_type=str(value["event_type"]),
-        description=str(value.get("description") or ""), parameters=dict(value.get("parameters") or {}),
+        description=str(value.get("description") or ""),
+        parameters=_mapping(value.get("parameters"), field="parameters"),
         expected_observation=str(value.get("expected_observation") or ""),
         disproof=str(value.get("disproof") or ""), risk=str(value.get("risk") or "unknown"),
         success_criteria=tuple(value.get("success_criteria") or ()),
-        evidence_contract=dict(value.get("evidence_contract") or {}),
+        evidence_contract=_mapping(value.get("evidence_contract"), field="evidence_contract"),
         rollback=str(value.get("rollback") or ""), proposed_by=str(value.get("proposed_by") or "domain_llm"))
 
 

@@ -16,6 +16,18 @@ def _workspace(ctx: Any) -> str:
     return str(getattr(ctx, "workspace", "") or "")
 
 
+def _fresh_first_round(params: dict[str, Any]) -> bool:
+    contract = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}
+    try:
+        round_number = int(contract.get('round_number') or 0)
+    except (TypeError, ValueError):
+        round_number = 0
+    original = str(contract.get('original_request') or params.get('request') or '')
+    return round_number == 1 and bool(re.search(
+        r'(?:第一轮|第\s*1\s*轮|first\s+round).{0,100}(?:生成|建立|创建|只允许|generate|create|establish)',
+        original, re.I | re.S))
+
+
 def state_inspect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     project_id = str(params.get("project_id") or "")
     value = build_project_cognition_context(
@@ -56,10 +68,14 @@ def state_inspect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     recent = recent_execution_context(_workspace(ctx), project_id, str(getattr(ctx, 'job_id', '')))
     from partner.runtime.execution_context import verified_project_artifacts
     from partner.runtime.action_execution import write_json
-    artifacts=verified_project_artifacts(_workspace(ctx),project_id,str(getattr(ctx,'job_id','')),[r['input'] for r in local])
+    fresh_first = _fresh_first_round(params)
+    artifacts = ([] if fresh_first else
+        verified_project_artifacts(_workspace(ctx),project_id,str(getattr(ctx,'job_id','')),
+                                   [r['input'] for r in local]))
     index=Path(getattr(ctx,'working_dir',Path(_workspace(ctx))/'state/event_runtime/work'/str(getattr(ctx,'job_id','inspect'))))/'verified_project_artifacts.json'
     write_json(index,{'project_id':project_id,'artifacts':artifacts})
-    value['verified_artifact_index']={'path':str(index),'count':len(artifacts),'recent':artifacts[:16]}
+    value['verified_artifact_index']={'path':str(index),'count':len(artifacts),'recent':artifacts[:16],
+        'historical_execution_inputs_suppressed':fresh_first}
     root_id=str(params.get('root_event_id') or '')
     if re.fullmatch(r'evt_[a-f0-9]+',root_id):
         feedback=Path(_workspace(ctx))/'state/application/request_context'/f'{root_id}.json'
@@ -225,6 +241,10 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "【真实发现】<一句话>\n"
         "【未解决】<一句话>"
     )
+    if _fresh_first_round(params):
+        prompt += (f'\n这是显式新鲜首轮协议。不得读取或复用其他 Job 的运行产物；任何包含 '
+                   f'/state/event_runtime/work/job_ 且 Job ID 不是 {getattr(ctx, "job_id", "")} 的路径都不是本轮输入。'
+                   '本轮只能使用用户显式输入和当前 Event 新生成的数据，且不得提前执行后一轮候选。')
     index=((params.get('flow_outputs') or {}).get('inspect',{}).get('semantic_output') or {}).get('verified_artifact_index')
     if index:
         prompt += '\n已验真历史产物总索引='+json.dumps(index,ensure_ascii=False)+'。优先按此索引找到所需实验；工作根目录同名旧文件不能替代实际运行来源。此索引由运行器核验生成，只读使用，禁止自行改写索引或完成/验收记录；只提交实际业务文件给后续核验Event。'
@@ -342,13 +362,28 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 previous_hashes.add(hashlib.file_digest(handle, 'sha256').hexdigest())
 
     novel = any(row.get('sha256') not in previous_hashes for row in evidence)
-    verified = bool(prior.get('business_delta') and evidence and novel and all(
+    foreign_job_refs = []
+    if _fresh_first_round(params):
+        current = str(getattr(ctx, 'job_id', ''))
+        for row in evidence:
+            path = Path(row['path'])
+            if path.suffix.lower() not in ('.json', '.jsonl', '.md', '.py', '.txt'):
+                continue
+            try:
+                text = path.read_text(errors='replace')[:200000]
+            except OSError:
+                continue
+            foreign_job_refs.extend(ref for ref in re.findall(
+                r'/state/event_runtime/work/(job_[A-Za-z0-9]+)', text) if ref != current)
+    verified = bool(prior.get('business_delta') and evidence and novel and not foreign_job_refs and all(
         row['valid'] and row['sha256'] == expected.get(row['path']) for row in evidence))
     from partner.runtime.implementation_evidence import inspect_implementations
     implementations = inspect_implementations(prior.get("files") or [])
     return {"ok": True, "status": "completed", "business_delta":verified,
             "semantic_output":{"verified":verified, "evidence":evidence, "implementation_evidence":implementations,
-                "execution":sem, "new_content":novel, "limitation":"解析和执行来源核验不等于科学结论成立"},
+                "execution":sem, "new_content":novel,
+                "provenance_violations": sorted(set(foreign_job_refs)),
+                "limitation":"解析和执行来源核验不等于科学结论成立"},
             "evidence_refs":[r['path'] for r in evidence if r['valid']],
             "summary":"执行产物已通过格式、哈希和执行来源检查" if verified else "未获得可验证的业务数据，不计为推进"}
 
