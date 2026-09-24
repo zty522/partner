@@ -93,27 +93,20 @@ class LLMProviderConfig:
 def resolve_provider_config(workspace: str | Path) -> LLMProviderConfig:
     """Resolve the configured provider from the workspace config files.
 
-    Read order mirrors the runner's own routing file first, then the generic
-    ``api.json``.  The credential is never logged or returned in public views.
+    ``api.json`` is the single provider registry. The top-level
+    ``default_provider`` selects one complete entry from ``apis``. The
+    credential is never logged or returned in public views.
     """
     workspace = Path(workspace)
-    routing = workspace / "config" / "agent_api_config.json"
-    if routing.exists():
-        payload = json.loads(routing.read_text(encoding="utf-8"))
-        provider = str((payload.get("_routing") or {}).get("provider") or "")
-        entry = dict(payload.get(provider) or {})
-        if provider and entry.get("api_key") and entry.get("base_url") and entry.get("model"):
-            return LLMProviderConfig(provider, str(entry["model"]), str(entry["base_url"]),
-                                     str(entry["api_key"]))
     generic = workspace / "config" / "api.json"
     if generic.exists():
         payload = json.loads(generic.read_text(encoding="utf-8"))
         apis = dict(payload.get("apis") or {})
-        for name, entry in apis.items():
-            entry = dict(entry or {})
-            if entry.get("api_key") and entry.get("base_url") and entry.get("model"):
-                return LLMProviderConfig(str(name), str(entry["model"]), str(entry["base_url"]),
-                                         str(entry["api_key"]))
+        provider = str(payload.get("default_provider") or "").strip().lower()
+        entry = dict(apis.get(provider) or {})
+        if provider and entry.get("api_key") and entry.get("base_url") and entry.get("model"):
+            return LLMProviderConfig(provider, str(entry["model"]), str(entry["base_url"]),
+                                     str(entry["api_key"]))
     raise ProposalError("no usable provider configuration found in the workspace")
 
 

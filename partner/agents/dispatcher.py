@@ -106,7 +106,7 @@ def _resolve_llm_env_var(
 
     # 2. Partner workspace config (only for primary LLM credential keys).
     # 2026-09-14: expanded allowlist to include all provider-named keys so that
-    # the workspace config (config/agent_api_config.json) becomes the sole
+    # the workspace config (config/api.json) becomes the sole
     # source of LLM credentials for agent subprocesses.
     if names[0] in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY",
                     "QWEN_API_KEY", "ANTHROPIC_API_KEY", "XIAOMI_API_KEY",
@@ -115,7 +115,7 @@ def _resolve_llm_env_var(
         try:
             from ..adapters.agent_config_sync import desired_hermes_model_config
             cfg = desired_hermes_model_config(workdir or os.getcwd())
-            # 2026-09-14: agent_api_config.json uses provider-named keys; map each
+            # api.json selects a complete provider entry; map each
             # env-style key name to the right field in the config block.
             key_map = {
                 "OPENAI_API_KEY": "api_key",
@@ -141,7 +141,7 @@ def _resolve_llm_env_var(
 
     # 3. (2026-09-14 removed) bash -lic + _inject_hermes_api_key fallback.
     # All LLM credentials must come from workspace config files
-    # (config/agent_api_config.json, config/api.json) — never from shell env.
+    # (config/api.json) — never from shell env.
     # _resolve_llm_env_var returns "" here, forcing callers to fall back to
     # workspace config.
     return ""
@@ -361,27 +361,27 @@ class AgentDispatcher:
         # from API key prefix (sk-d = deepseek, sk-ant = anthropic, sk- = openai).
         # Such heuristic picks a vendor based on the key's textual shape — it
         # overrides the operator's explicit config and makes the agent bypass
-        # the workspace config (config/agent_api_config.json). When the
+        # the workspace config (config/api.json). When the
         # operator's config says minimax and the shell accidentally exports
         # a sk-d* DEEPSEEK key, the agent silently routes to deepseek and
         # exhausts the deepseek quota. LLM endpoint selection must come
-        # exclusively from the workspace config; if any of base_url / model /
+        # exclusively from workspace config/api.json; if any of base_url / model /
         # provider is still missing, treat that as a config error and surface
         # it rather than guessing from the key prefix.
         if _llm_env_api_key and not _llm_env_base_url:
             logger.error(
                 "agent_dispatch: LLM api_key is set but base_url is missing; "
-                "set it explicitly in config/agent_api_config.json"
+                "set it explicitly in config/api.json"
             )
         if _llm_env_api_key and not _llm_env_model:
             logger.error(
                 "agent_dispatch: LLM api_key is set but model is missing; "
-                "set it explicitly in config/agent_api_config.json"
+                "set it explicitly in config/api.json"
             )
         if _llm_env_api_key and not _llm_env_provider:
             logger.error(
                 "agent_dispatch: LLM api_key is set but provider is missing; "
-                "set it explicitly in config/agent_api_config.json"
+                "set it explicitly in config/api.json"
             )
         if _llm_env_api_key:
             all_vars["__llm_api_key__"] = _llm_env_api_key
@@ -652,7 +652,7 @@ class AgentDispatcher:
         except Exception:
             pass
 
-        # Also try reading from Partner's agent API config
+        # Also resolve the selected provider from Partner's single API config.
         try:
             ws_dir = task.context.get("working_dir", "") or os.getcwd()
             from ..adapters.agent_config_sync import desired_hermes_model_config

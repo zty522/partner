@@ -28,16 +28,17 @@ def workspace_root_from_path(workspace: str) -> str:
     return path
 
 
-def unified_agent_config_path(workspace: str) -> str:
-    return os.path.join(workspace_root_from_path(workspace), "config", "agent_api_config.json")
+def unified_api_config_path(workspace: str) -> str:
+    return os.path.join(workspace_root_from_path(workspace), "config", "api.json")
 
 
-def instance_agent_config_path(workspace: str) -> str:
-    return os.path.join(os.path.abspath(workspace or os.getcwd()), "config", "agent_api_config.json")
+def instance_api_config_path(workspace: str) -> str:
+    return os.path.join(os.path.abspath(workspace or os.getcwd()), "config", "api.json")
 
 
-def load_agent_api_config(workspace: str) -> dict[str, Any]:
-    for path in (unified_agent_config_path(workspace), instance_agent_config_path(workspace)):
+def load_api_config(workspace: str) -> dict[str, Any]:
+    """Load the single authoritative LLM provider registry, ``api.json``."""
+    for path in (unified_api_config_path(workspace), instance_api_config_path(workspace)):
         try:
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as f:
@@ -50,13 +51,10 @@ def load_agent_api_config(workspace: str) -> dict[str, Any]:
 
 
 def desired_hermes_model_config(workspace: str) -> dict[str, str]:
-    data = load_agent_api_config(workspace)
-    routing = data.get("_routing") if isinstance(data.get("_routing"), dict) else {}
-    default_agent = str(routing.get("default_agent") or "hermes").strip().lower()
-    if default_agent != "hermes":
-        return {}
-    section = data.get("hermes") if isinstance(data.get("hermes"), dict) else {}
-    provider = str(section.get("provider") or "").strip()
+    data = load_api_config(workspace)
+    provider = str(data.get("default_provider") or "").strip().lower()
+    apis = data.get("apis") if isinstance(data.get("apis"), dict) else {}
+    section = apis.get(provider) if isinstance(apis.get(provider), dict) else {}
     model = str(section.get("model") or "").strip()
     base_url = str(section.get("base_url") or "").strip()
     api_key = str(section.get("api_key") or "").strip()

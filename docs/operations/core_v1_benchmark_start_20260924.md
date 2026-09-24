@@ -6,7 +6,7 @@
 
 ## 配置
 
-Partner 的三处实际 LLM 路由已统一为 `minimax / MiniMax-M3`：`api.json` 默认 provider、`agent_api_config.json` Hermes 子进程配置，以及 `partner_config.json` 的 agent/classifier 配置。凭据未写入本文档。
+最初曾同时维护 `api.json` 和重复的 `agent_api_config.json`。用户随后明确要求删除重复文件，以 `api.json` 作为唯一 LLM provider、模型、端点和凭据来源；Direct API、Hermes 子进程和 Commitment proposer 均读取其 `default_provider` 对应的完整条目。2026-09-24 已切换为用户新配置的 Qwen。凭据未写入本文档。
 
 结构化 benchmark 入口同时修正为不经过普通三遍 LLM 意图审议；明确协议直接创建父 Flow，subject 内 LLM 节点仍正常调用 provider 并 fail-closed。
 
