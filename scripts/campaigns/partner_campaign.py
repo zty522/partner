@@ -167,7 +167,7 @@ def main() -> int:
                 seed_default_work(root, state.campaign_id)
         output = {"ok": True, "campaign_id": state.campaign_id, "status": state.status}
         if args.detach:
-            template = Path(__file__).resolve().parents[2] / "deploy/systemd/partner-campaign@.service"
+            template = Path(__file__).resolve().parents[2] / "deploy/partner-campaign@.service"
             link = subprocess.run(
                 ["systemctl", "--user", "link", str(template)], capture_output=True, text=True,
             )
