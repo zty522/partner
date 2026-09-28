@@ -3,13 +3,15 @@
 Avoids the subprocess.PIPE deadlock on WSL (Python 3.13 parent, Python 3.11 child)
 by using simple HTTP requests.
 """
-import json, os, time, logging, threading
+import json, os, time, logging, threading, uuid
 import requests
 import concurrent.futures
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 _usage_local = threading.local()
+_http_session = requests.Session()
+_http_session.trust_env = False
 
 
 def get_last_usage() -> dict:
@@ -29,17 +31,17 @@ def _load_deepseek_key():
 API_KEY = _load_deepseek_key()
 API_BASE = "https://api.deepseek.com"
 MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-# Default provider when the caller does not explicitly pick one.
-# Switched back to "minimax" (MiniMax-M3) on 2026-09-12 per user request.
-# DeepSeek remains the explicit alternative via api.json apis.deepseek or
-# PARTNER_DEFAULT_PROVIDER=deepseek env override.
-DEFAULT_PROVIDER = os.environ.get("PARTNER_DEFAULT_PROVIDER", "minimax")
+# ``config/api.json`` is authoritative.  Qwen is only the bootstrap default
+# used when that file is unavailable; alternate providers require an explicit
+# caller/config selection and are never silent fallbacks.
+DEFAULT_PROVIDER = os.environ.get("PARTNER_DEFAULT_PROVIDER", "qwen")
 
 
 def _resolve_api_json(provider: str = "") -> dict:
     """从 workspace config/api.json 读取 provider 配置（统一管理入口）。
 
-    默认 MiniMax。DeepSeek 只能由调用方显式指定，绝不作为 fallback。
+    默认读取 api.json.default_provider（当前为 Qwen）。其他 provider 只能由
+    调用方显式指定，绝不作为 fallback。
 
     解析顺序：~/.partner_workspace 指针 → workspace_root/config/api.json。
     任何失败都返回空 dict，调用方回退到环境变量 / 模块默认值。
@@ -50,7 +52,7 @@ def _resolve_api_json(provider: str = "") -> dict:
         if os.path.exists(pointer):
             raw = open(pointer, encoding="utf-8", errors="replace").read().strip()
             norm = raw.replace("\\", "/")
-            if norm.startswith("/mnt/"):
+            if os.path.isabs(norm):
                 ws_root = norm
             elif len(norm) >= 2 and norm[1] == ":":
                 ws_root = "/mnt/" + norm[0].lower() + norm[2:]
@@ -64,7 +66,7 @@ def _resolve_api_json(provider: str = "") -> dict:
         apis = data.get("apis", {}) or {}
         requested = str(provider or "").strip().lower()
         # (2026-09-14) 默认 provider 优先读 config/api.json 顶层 default_provider 字段，
-        # 其次回退到 PARTNER_DEFAULT_PROVIDER env，最后才是模块常量 "minimax"。
+        # 其次回退到 PARTNER_DEFAULT_PROVIDER env，最后才是模块常量 "qwen"。
         # 这样 operator 只需改 config 就能切换默认 LLM，不用动 env 或代码。
         cfg_default = str(data.get("default_provider") or "").strip().lower()
         selected_name = requested if requested else (cfg_default or DEFAULT_PROVIDER)
@@ -92,6 +94,11 @@ def _resolve_api_json(provider: str = "") -> dict:
     except Exception:
         return {}
 
+def _direct_session() -> requests.Session:
+    """Process-local direct, proxy-free connection pool."""
+    return _http_session
+
+
 def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, timeout: int):
     """requests.post 带外层硬超时。
 
@@ -106,14 +113,11 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
     # 最多 180s；连接超时仍 15s（minimax 后端挂掉时不该等 60s 才建连）。
     def _do():
         read_timeout = max(60, min(timeout, 180))
-        # Force brand-new TCP connection per request to avoid stale socket
-        # reuse after a previous hung call.
         hdrs = dict(headers)
-        hdrs.setdefault("Connection", "close")
-        with requests.Session() as session:
-            session.trust_env = False
-            return session.post(url, headers=hdrs, json=payload,
-                                timeout=(min(15, timeout), read_timeout), proxies=proxies)
+        hdrs.setdefault("Connection", "keep-alive")
+        return _direct_session().post(
+            url, headers=hdrs, json=payload,
+            timeout=(min(15, timeout), read_timeout), proxies=proxies)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(_do)
@@ -129,7 +133,7 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
 
 
 def _log_api_call(**kw):
-    """记录 API 调用日志；失败不影响主流程。provider 缺省为 MiniMax。"""
+    """记录 API 调用日志；失败不影响主流程。provider 来自统一配置。"""
     try:
         from ..api_log import append_api_call
         provider = DEFAULT_PROVIDER
@@ -185,11 +189,12 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
          purpose: str = "chat", timeout: int = 90, provider: str = "",
          *, workspace: str = "", instance_id: str = "", project_id: str = "",
          task_id: str = "", episode_id: str = "", event_type: str = "") -> str:
-    """Send a chat request to the explicitly selected provider (MiniMax by default).
+    """Send a chat request to the configured provider (Qwen by default).
     
     Returns the model's response text, or empty string on failure.
     """
-    _usage_local.value = {}
+    call_id = "model_" + uuid.uuid4().hex[:16]
+    _usage_local.value = {"call_id": call_id, "purpose": purpose, "status": "started"}
     cfg = _resolve_api_json(provider)
     call_meta = {
         "workspace_root": workspace,
@@ -257,7 +262,9 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
             timeout=timeout,
         )
         if r is None:
-            _usage_local.value = {"error": "hard timeout"}
+            _usage_local.value = {"call_id": call_id, "purpose": purpose,
+                                  "provider": selected_provider, "model": model,
+                                  "status": "failed", "error": "hard timeout"}
             _log_api_call(**call_meta, model=model, purpose=purpose, status="failed",
                           error="hard timeout", elapsed_ms=int((time.time() - start) * 1000),
                           prompt_chars=len(prompt))
@@ -269,6 +276,8 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
             finish_reason = data["choices"][0].get("finish_reason", "")
             usage = data.get("usage") or {}
             _usage_local.value = {
+                "call_id": call_id, "purpose": purpose, "status": "ok",
+                "elapsed_ms": int(elapsed * 1000),
                 "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
@@ -335,15 +344,22 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                                   prompt_chars=len(prompt))
             return resp_content
         else:
-            _usage_local.value = {"error": f"HTTP {r.status_code}"}
+            _usage_local.value = {"call_id": call_id, "purpose": purpose,
+                                  "provider": selected_provider, "model": model,
+                                  "status": "failed", "http_status": r.status_code,
+                                  "elapsed_ms": int(elapsed * 1000),
+                                  "error": f"HTTP {r.status_code}"}
             logger.warning(f"[DirectAPI] {purpose} HTTP {r.status_code} in {elapsed:.1f}s: {r.text[:200]}")
             _log_api_call(**call_meta, model=model, base_url=api_base, purpose=purpose, status="failed",
                           error=f"HTTP {r.status_code}: {r.text[:150]}",
                           elapsed_ms=int(elapsed * 1000), prompt_chars=len(prompt))
             return ""
     except Exception as e:
-        _usage_local.value = {"error": type(e).__name__}
         elapsed = time.time() - start
+        _usage_local.value = {"call_id": call_id, "purpose": purpose,
+                              "provider": selected_provider, "model": model,
+                              "status": "failed", "elapsed_ms": int(elapsed * 1000),
+                              "error": type(e).__name__}
         logger.warning(f"[DirectAPI] {purpose} failed in {elapsed:.1f}s: {e}")
         _log_api_call(**call_meta, model=model, base_url=api_base, purpose=purpose, status="failed",
                       error=str(e), elapsed_ms=int(elapsed * 1000), prompt_chars=len(prompt))

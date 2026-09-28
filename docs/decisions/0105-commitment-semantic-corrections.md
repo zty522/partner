@@ -110,6 +110,6 @@ environment = "production" if bool(payload.get("publish_eligible")) else "synthe
 `test_legacy_v1_records_stay_readable_and_are_never_rewritten` 原先断言
 "旧 `publish_eligible=true` 不降级"。该预期本身错误，已改为断言
 `publish_eligible is False` + `legacy_publish_claim is True` + `environment == "legacy_unknown"`
-+ blocker 存在。新增 `tests/commitment/test_legacy_publish_safety.py`（10 项）覆盖
++ blocker 存在。新增 `benchmark/commitment/test_legacy_publish_safety.py`（10 项）覆盖
 v1 带/不带发布声明、不得映射为 production、缺失 baseline 证据不得 matched、
 legacy 不得被经验/晋升消费、v2 生产路径不受影响、新对象不再序列化 v1、历史字节与哈希不变。

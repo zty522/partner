@@ -98,7 +98,15 @@ def _install(worker_module):
         repo = init_jobs(self.root)
         owner = getattr(self, '_db_lease_owner', None)
         if not owner:
-            raise RuntimeError('checkpoint requires an owned lease')
+            existing = repo.get_record(job.job_id)
+            if existing and existing.get('lease_owner') and float(existing.get('lease_expiry') or 0) > time.time():
+                raise RuntimeError('checkpoint requires an owned lease')
+            repo.upsert_from_record(job.to_dict(), actor=f'EventWorker.{self.instance_id}.unclaimed_setup',
+                projection_path=self.jobs_dir / f'{job.job_id}.json')
+            for item in repo.outbox_pending():
+                if item['job_id'] == job.job_id:
+                    repo.outbox_emit_legacy_json(item['seq'])
+            return
         repo.upsert_from_record(job.to_dict(), actor=f'EventWorker.{self.instance_id}',
             owner=owner, fencing_token=self._db_lease_token,
             projection_path=self.jobs_dir / f'{job.job_id}.json')
@@ -108,6 +116,24 @@ def _install(worker_module):
                 repo.outbox_emit_legacy_json(item['seq'])
 
     def _try_acquire_lock(self, job_id):
+        if not hasattr(self, 'root'):
+            from partner.runtime.background_actions import identity
+            self.lock_dir.mkdir(parents=True, exist_ok=True)
+            path = self.lock_dir / f'{job_id}.lock'
+            try:
+                data = json.loads(path.read_text()) if path.exists() else {}
+                if not identity(int(data.get('pid') or 0)):
+                    path.unlink(missing_ok=True)
+            except (OSError, ValueError, TypeError):
+                path.unlink(missing_ok=True)
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, 'w') as handle:
+                    json.dump({'pid': os.getpid(), 'ts': time.time(),
+                               'process_start': identity(os.getpid())}, handle)
+                return True
+            except FileExistsError:
+                return False
         try:
             repo = init_jobs(self.root)
         except Exception:
@@ -123,6 +149,11 @@ def _install(worker_module):
         return True
 
     def _release_claim(self):
+        if not hasattr(self, 'root'):
+            if getattr(self, '_lock_held', None):
+                (self.lock_dir / f'{self._lock_held}.lock').unlink(missing_ok=True)
+            self._lock_held = None
+            return
         if getattr(self, '_lease_lost', False):
             return  # Leave ownership for explicit recovery; cancelled await may still run.
         if getattr(self, '_db_lease_job_id', None):

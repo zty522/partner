@@ -140,6 +140,19 @@ def reflect_to_evolve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     case). Self-evolution spawn happens only when trigger_aspect
     decides candidates are non-trivial.
     """
+    constraints = ((params.get('intent_contract') or {}).get('execution_constraints') or {})
+    if constraints.get('evolution_cycle') is False:
+        return {
+            'ok': True,
+            'status': 'completed',
+            'semantic_output': {
+                'aspect': 'iteration',
+                'decision': 'disabled_by_contract',
+                'candidates': [],
+                'dispatched_to_self_evolution': False,
+            },
+            'summary': '本次冻结合同明确关闭自进化，未派发 self_evolution',
+        }
     workspace = _workspace(ctx)
     aspect = "iteration"
     round_id = params.get("round_id") or         f"{int(time.time())}-{params.get('job_id', '')}"

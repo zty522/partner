@@ -31,7 +31,7 @@
    两个参数都是**加性**的，默认值保持原行为（原来硬编码 `channel="local"`、
    `sender_id="partner_<id>_self"`）。没有它们，flow 的 `send` 节点不可能走到 qq 分支
    （`send_text` 明确要求 recipient identity）。
-2. **`scripts/relay_deliver_once.py`（新）**：有界投递器。一次扫描队列、最多 `--limit` 条、
+2. **`scripts/messaging/relay_deliver_once.py`（新）**：有界投递器。一次扫描队列、最多 `--limit` 条、
    硬 `--deadline-seconds`；**直连平台 REST API 而不是走 bot 包装层**，因为包装层把任何回答都压成
    一个 bool，而投递需要平台自己的回执（消息 id）或拒绝码——证据必须来自平台，不能来自本地写文件。
    先试 origin 实例自己的 bot，遇到注销码（11255 / 40011028）再落到 relay 实例（默认 03）。
@@ -65,11 +65,11 @@
 ## 测试
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/     # 26 passed（新增 8 项）
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/  # 141 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/     # 26 passed（新增 8 项）
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/  # 141 passed
 git diff --check                                                          # clean
 ```
-`tests/runtime/test_relay_delivery.py` 覆盖：qq 渠道确实把消息排进 outbox（且 local 渠道不排）、
+`benchmark/runtime/test_relay_delivery.py` 覆盖：qq 渠道确实把消息排进 outbox（且 local 渠道不排）、
 缺 recipient 时拒绝且不排、origin bot 被注销时**回落到 relay** 并记录平台回执、投递成功写回执 +
 标记 delivered + 不会被重复发送、所有 bot 都拒绝时标记 failed、dry-run 不发。
 

@@ -31,7 +31,7 @@ from .idempotent_submit import (
     UnauthorisedInstanceError,
     RESERVATION_STATES,
     canonical_payload, compute_fingerprint,
-    reserve, acquire_ownership, mark_state, reap_expired, lookup,
+    reserve, acquire_ownership, mark_state, reap_expired, reacquire, lookup,
     lookup_by_job,
 )
 
@@ -72,6 +72,8 @@ def to_submission_result(
         request_id=str(request_id),
         fingerprint=str(fingerprint),
         owner_token=str(owner_token),
+        message=str(message),
+        message_id=str(message_id),
         was_idempotent_hit=bool(was_idempotent_hit),
     )
 
@@ -88,7 +90,9 @@ class SubmissionResult:
     request_id: str
     fingerprint: str
     owner_token: str
-    was_idempotent_hit: bool
+    message: str = ""
+    message_id: str = ""
+    was_idempotent_hit: bool = False
 
 
 def _db_path_for(workspace_root: str | Path) -> Path:
@@ -102,7 +106,15 @@ def _verify_identity(*, workspace_root, instance, recipient_ref) -> dict:
         return {"instance_id": instance, "user_ref": None,
                 "bot_id": None, "sender_openid": ""}
     from partner.identity.binding import verify_recipient
-    return verify_recipient(str(workspace_root), instance, recipient_ref)
+    verified = verify_recipient(str(workspace_root), instance, recipient_ref)
+    # Normalize the typed identity result at the application boundary.  The
+    # verified user reference is the outbound recipient; the CLI's synthetic
+    # sender name must never replace it.
+    return {"instance_id": verified.instance_id,
+            "user_ref": verified.user_ref,
+            "bot_id": verified.bot_id,
+            "sender_openid": verified.user_ref,
+            "source": verified.source}
 
 
 def _authorise_subject(*, subject_allowed, instance) -> None:
@@ -324,6 +336,25 @@ def orchestrate_submit(
             except Exception:
                 pass
             raise
+        if not sub.job_id:
+            try:
+                mark_state(
+                    db_path=db_path, request_id=request_id,
+                    workspace_root=str(workspace_root),
+                    subject_id=r_subject, owner_token=new_owner,
+                    new_state="failed",
+                )
+            except Exception:
+                pass
+            return to_submission_result(
+                job_id="", project_id=sub.project_id or project_id,
+                assigned_instance=sub.assigned_instance or instance,
+                status=sub.status or ("completed" if sub.accepted else "rejected"),
+                route=sub.route or "", message=sub.message,
+                message_id=sub.message_id, request_id=request_id,
+                fingerprint=fp, owner_token=new_owner,
+                persona_hint=instance, was_idempotent_hit=True,
+            )
         try:
             mark_state(
                 db_path=db_path, request_id=request_id,
@@ -399,6 +430,30 @@ def orchestrate_submit(
         except Exception:
             pass
         raise
+
+    if not sub.job_id:
+        # Direct answers and rejected intent decisions do not create a Job.
+        # They therefore cannot enter the reservation's ``submitted`` state,
+        # whose invariant requires a durable job_id.  Release the reservation
+        # as failed/retryable and return the real synchronous result.
+        try:
+            mark_state(
+                db_path=db_path, request_id=request_id,
+                workspace_root=str(workspace_root),
+                subject_id=subject_id or real_sender_id,
+                owner_token=owner_token, new_state="failed",
+            )
+        except Exception:
+            pass
+        return to_submission_result(
+            job_id="", project_id=sub.project_id or project_id,
+            assigned_instance=sub.assigned_instance or instance,
+            status=sub.status or ("completed" if sub.accepted else "rejected"),
+            route=sub.route or "", message=sub.message,
+            message_id=sub.message_id, request_id=request_id,
+            fingerprint=fp, owner_token=owner_token,
+            persona_hint=instance, was_idempotent_hit=False,
+        )
 
     try:
         mark_state(

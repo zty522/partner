@@ -49,10 +49,27 @@ def improvement_observe_plan(ctx, params):
 
     Real runtime evidence only. Does not fabricate QQ messages or business rounds.
     """
-    from partner.event_fabric import EventLedger
-    from partner.index.resource_catalog import ResourceCatalog
-    evidence=[r['path'] for r in ResourceCatalog(ctx.workspace).query('flow',limit=5)]
+    from partner.index.resource_catalog import ResourceCatalog, job_records
+    constraints = ((params.get("intent_contract") or {}).get("execution_constraints") or {})
+    requested_jobs = [str(value) for value in constraints.get("observation_job_ids") or []]
+    if not requested_jobs:
+        requested_jobs = [str(row.get("job_id") or "")
+                          for row in job_records(ctx.workspace, limit=12)]
+    evidence = []
+    observed_jobs = []
+    for job_id in requested_jobs:
+        if not job_id or not job_id.replace("_", "").isalnum():
+            continue
+        path = Path(ctx.workspace) / "state" / "run_logs" / job_id / "events.jsonl"
+        if path.is_file():
+            evidence.append(str(path))
+            observed_jobs.append(job_id)
+        if len(evidence) >= 5:
+            break
+    if not evidence:
+        evidence = [r['path'] for r in ResourceCatalog(ctx.workspace).query('flow',limit=5)]
     return _semantic({"available_evidence": evidence[:20],
+        "observed_job_ids": observed_jobs,
         "plan_mode": params.get("plan_mode", "self_improvement"),
         "max_observation_steps": int(params.get("max_observation_steps", 2)),
         "max_opportunities": int(params.get("max_opportunities", 1))},
@@ -89,10 +106,19 @@ def improvement_observe_execute(ctx, params):
                         log_lines.append(f"probe {f.name}: read_failed={exc}")
             except Exception as exc:
                 log_lines.append(f"probe {path.name}: list_failed={exc}")
-        elif path.is_file() and path.stat().st_size < 100000:
+        elif path.is_file():
             try:
-                text = path.read_text(errors="replace")[:2000]
-                log_lines.append(f"probe {path.name}: {text[:200]}")
+                from partner.index.resource_catalog import ResourceCatalog
+                receipt = ResourceCatalog(ctx.workspace).read(
+                    path, max_bytes=24000, purpose="self_evolution_runtime_log")
+                text = receipt["text"]
+                signals = [line[:600] for line in text.splitlines()
+                           if any(word in line.lower() for word in
+                                  ("failed", "error", "timeout", "budget exhausted",
+                                   "retry", "blocked", "hallucin"))][:12]
+                log_lines.append(
+                    f"probe {path.name}: bytes={receipt['bytes_read']} "
+                    f"truncated={receipt['truncated']} signals={json.dumps(signals, ensure_ascii=False)}")
             except Exception as exc:
                 log_lines.append(f"probe {path.name}: read_failed={exc}")
     return _semantic({"probed_paths": evidence_paths, "probe_summary": log_lines[:10],
@@ -209,6 +235,20 @@ def improvement_experiment_request(ctx, params):
 
     Persists the parent/child link; does not pretend to have started the experiment.
     """
+    constraints = ((params.get("intent_contract") or {})
+                   .get("execution_constraints") or {})
+    # A learning-only request must stop after producing its evidence-bound
+    # ideas.  Previously this Event always converted a selected learning
+    # opportunity into an autonomous-evolution child, even when the caller had
+    # explicitly frozen ``evolution_cycle`` to false.  Besides violating the
+    # request boundary, that could modify production code during what should be
+    # a read-only literature pass.
+    if constraints.get("evolution_cycle") is False:
+        return _semantic({
+            "status": "no_experiment",
+            "reason": "evolution_cycle explicitly disabled",
+            "evolution_cycle": False,
+        }, "active-learning evidence retained; self-evolution explicitly disabled")
     selected = saved_hop(ctx, params, "opportunity_select") or {}
     sels = list(selected.get("selected") or [])
     if not sels:

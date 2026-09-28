@@ -168,10 +168,24 @@ def candidate_select(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     critic = _semantic(params, "critic")
     candidates = critic.get("surviving_ids") or proposal.get("candidate_ids") or []
     selected = str(candidates[0]) if candidates else "abstain"
+    public_candidates = []
+    for row in _task(params).get("candidates") or []:
+        if not isinstance(row, Mapping):
+            continue
+        identifier = str(row.get("id") or "")
+        public_candidates.append({"id": identifier, "event_type": "loop_bench.action_execute",
+            "description": str(row.get("description") or identifier),
+            "parameters": {"selection": identifier},
+            "expected_observation": proposal.get("expected_observation") or "",
+            "disproof": proposal.get("failure_condition") or "",
+            "risk": "unknown"})
+    chosen = next((row for row in public_candidates if row["id"] == selected),
+                  public_candidates[0] if public_candidates else {})
     record = {"selected_id": selected, "alternatives": [str(v) for v in candidates[1:]],
               "policy": _policy(params), "selection_rule": "critic_rank_then_first",
               "expected_observation": proposal.get("expected_observation"),
-              "failure_condition": proposal.get("failure_condition")}
+              "failure_condition": proposal.get("failure_condition"),
+              "candidates": public_candidates, "selected": chosen}
     return {"ok": True, "status": "completed", "summary": f"selected {selected}",
             "semantic_output": record}
 
@@ -202,7 +216,10 @@ def action_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     inputs = view.get("inputs") if isinstance(view.get("inputs"), Mapping) else {}
     runner = Path(str(inputs.get("arm_runner_path") or "")).expanduser().resolve()
     task_path = Path(str(inputs.get("task_path") or "")).expanduser().resolve()
-    selected = str(_semantic(params, "core_commit").get("selected_id") or "")
+    committed = _semantic(params, "core_commit")
+    decision = committed.get("decision") if isinstance(committed.get("decision"), Mapping) else {}
+    selected_row = decision.get("selected") if isinstance(decision.get("selected"), Mapping) else {}
+    selected = str(selected_row.get("candidate_id") or committed.get("selected_id") or "")
     if not runner.is_file() or not task_path.is_file() or not selected:
         return {"ok": False, "status": "failed", "error": "runner, task or commitment missing"}
     work = Path(ctx.working_dir) / str(params.get("flow_id") or "unknown_flow")

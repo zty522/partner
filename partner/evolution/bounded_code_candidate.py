@@ -472,11 +472,11 @@ def synthesize_validate_apply(workspace: str | Path, repo_root: str | Path,
     if shell_source.is_dir():
         shutil.copytree(shell_source, validation_root / "shells")
     (validation_root / TARGET).write_text(candidate_source, encoding="utf-8")
-    shutil.copytree(source_repo / "tests", validation_root / "tests")
-    command = [sys.executable, "-m", "pytest", "tests/test_native_project_event_route.py",
-               "tests/test_continuous_project_events.py"]
+    shutil.copytree(source_repo / "benchmark", validation_root / "benchmark")
+    command = [sys.executable, "-m", "pytest", "benchmark/projects/test_dynamic_project_registry.py",
+               "benchmark/projects/test_sprint36_pure_event_runtime.py"]
     if project_id == "molecular_generation":
-        command.append("tests/test_molecular_method_candidate.py")
+        command.append("benchmark/research/test_research_downstream.py")
     command.append("-q")
     proc = subprocess.run(command, cwd=validation_root, text=True, capture_output=True,
                           timeout=240, check=False)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import time
@@ -22,7 +23,7 @@ from typing import Any, Iterable
 from .runtime_storage import workspace_dir
 from .sqlite_base import get_connection
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -158,10 +159,32 @@ class CodeRepository:
             return
         conn = get_connection(self.db_path)
         conn.executescript(SCHEMA_SQL)
+        # CREATE TABLE IF NOT EXISTS cannot upgrade an existing native index.
+        # ``mtime`` was added after the first schema shipped, and old runtime
+        # directories otherwise fail every parse after AST rows have already
+        # been partially written.  Migrate before any identity cleanup/ingest.
+        repo_columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(repo_files)").fetchall()}
+        if "mtime" not in repo_columns:
+            conn.execute("ALTER TABLE repo_files ADD COLUMN mtime REAL")
         conn.execute(
-            "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
+        from .runtime_storage import workspace_incarnation
+        identity = workspace_incarnation(self.repo_root)
+        previous = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='workspace_identity'").fetchone()
+        if previous is None or previous["value"] != identity:
+            # These are derived indexes. A path may be deleted and recreated
+            # while its native runtime directory survives (common in tests and
+            # restored workspaces); offsets from the former inode are invalid.
+            for table in ("repo_files", "workspace_files", "symbols",
+                          "symbol_calls", "file_keywords", "code_watermark"):
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('workspace_identity',?)",
+                (identity,))
         self._schema_ready = True
 
     # ----- ingest -----

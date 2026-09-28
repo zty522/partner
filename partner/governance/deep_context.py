@@ -218,7 +218,7 @@ def build_deep_context_pack(
     # Stable design and acceptance standards accompany every high-entropy
     # call. They are constraints, never evidence of business success.
     for relative in (
-        "docs/sprint33_三条认知黄金链与深上下文验收.md",
+        "docs/sprints/sprint_33_三条认知黄金链与深上下文验收.md",
         "docs/architecture/project_centered_application.md",
     ):
         path = repo / relative

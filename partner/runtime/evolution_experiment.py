@@ -61,13 +61,13 @@ def freeze(directory, tests, expectations):
     if (directory / 'freeze.json').exists():
         return json.loads((directory / 'freeze.json').read_text())
     target.mkdir(parents=True, exist_ok=True)
-    for name in ('partner','tests','scripts','shells'):
+    for name in ('partner','benchmark','scripts','shells'):
         if (REPO / name).exists():
             shutil.copytree(REPO/name, target/name, dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns('__pycache__','*.pyc','.pytest_cache','node_modules','.git','workspace'))
     for name in ('pyproject.toml','pytest.ini','setup.cfg','conftest.py'):
         if (REPO/name).is_file(): shutil.copy2(REPO/name,target/name)
-    overlay = 'tests/test_autonomous_cycle_reproducer.py'
+    overlay = 'benchmark/test_autonomous_cycle_reproducer.py'
     code = str(tests.get('test_code') or '')
     import ast
     tree = ast.parse(code)
@@ -88,7 +88,7 @@ def freeze(directory, tests, expectations):
     for name in regressions:
         relative = name.split('::')[0]
         path = (REPO / relative).resolve()
-        if not relative.startswith('tests/') or REPO not in path.parents or not path.is_file():
+        if not relative.startswith('benchmark/') or REPO not in path.parents or not path.is_file():
             raise ValueError('nonexistent regression test')
     (target / overlay).write_text(code)
     value = {'repo':str(target), 'test_file':overlay, 'test_sha256':sha(target/overlay),
@@ -431,9 +431,12 @@ def perform_runtime_verify(workspace, applied_receipt):
         if module.endswith('.__init__'):
             module = module[:-len('.__init__')]
         try:
+            env = os.environ.copy()
+            existing_path = env.get('PYTHONPATH', '')
+            env['PYTHONPATH'] = str(REPO) + (os.pathsep + existing_path if existing_path else '')
             run = _sp.run([_sys.executable, '-c',
                 f'import {module}; print(\"loaded\", {module!r})'],
-                cwd=workspace, capture_output=True, text=True, timeout=20)
+                cwd=REPO, env=env, capture_output=True, text=True, timeout=20)
             results.append({'module':module,'ok':run.returncode==0,
                             'stdout':run.stdout[-500:],'stderr':run.stderr[-500:]})
         except Exception as exc:

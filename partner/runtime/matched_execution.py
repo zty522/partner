@@ -53,7 +53,7 @@ def isolate(workspace, candidate, repo=None):
     hashes = {}
     for name in tests + regression:
         file = str(name).split('::', 1)[0]
-        if not file.startswith('tests/') or not file.endswith('.py'):
+        if not file.startswith('benchmark/') or not file.endswith('.py'):
             raise ValueError('only existing pytest tests can be executed')
         hashes[file] = file_hash(inside(repo, file))
     source_hashes = {p: file_hash(inside(repo, p)) for p in targets}
@@ -68,7 +68,7 @@ def isolate(workspace, candidate, repo=None):
     for kind in ('baseline', 'candidate'):
         copy = directory / kind
         copy.mkdir()
-        for name in ('partner', 'tests', 'scripts', 'shells'):
+        for name in ('partner', 'benchmark', 'scripts', 'shells'):
             if (repo / name).is_dir():
                 shutil.copytree(repo / name, copy / name, ignore=ignore)
         for name in ('pyproject.toml', 'pytest.ini', 'setup.cfg', 'conftest.py'):
@@ -240,4 +240,3 @@ def compare(workspace, before, after):
     except (OSError, ValueError, KeyError, TypeError):
         return {'decision': 'inconclusive', 'improved': False, 'regression_passed': False,
                 'criteria_results': {}, 'breakdown': {}, 'evidence_refs': []}
-

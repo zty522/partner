@@ -44,7 +44,7 @@ def start_manual_truth_canary(workspace: str, project_id: str) -> dict[str, Any]
                 "all candidate source quotes match named inputs",
                 "candidate mean v2 reward improves by >= 0.15", "full regression remains passing",
             ],
-            "tests": ["tests/test_manual_governance.py", "tests/test_policy_control.py"],
+            "tests": ["benchmark/cognition/test_manual_governance.py", "benchmark/cognition/test_policy_control.py"],
             "project_id": project_id,
         }).get("experiment") or {})
     return {"ok": bool(experiment), "decision_key": decision_key,
@@ -124,7 +124,7 @@ def _experiment_for(workspace: str, project_id: str, decision_key: str,
             "at least 3 samples per arm", "candidate success rate >= 0.67",
             "candidate mean v2 reward improves by >= 0.15", "regression remains passing",
         ],
-        "tests": ["tests/test_policy_control.py", "tests/test_campaign.py"],
+        "tests": ["benchmark/cognition/test_policy_control.py", "benchmark/projects/test_campaign.py"],
         "project_id": project_id,
     })
     return str((result.get("experiment") or {}).get("experiment_id") or "")

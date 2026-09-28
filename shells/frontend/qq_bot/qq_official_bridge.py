@@ -12,6 +12,7 @@ import logging
 import os
 import threading
 import time
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,18 +53,31 @@ class QQQfficialBridgeConfig:
     auto_reconnect: bool = True
     max_reply_length: int = 1800
     workspace: str = ""
+    outbound_delivery_enabled: bool = True
 
 
 class QQQfficialBridge:
     def __init__(self, workspace: str, config: QQQfficialBridgeConfig | None = None):
-        self.workspace = str(Path(workspace).resolve())
-        self.root = str(Path(self.workspace).parent.parent)
-        self.instance_id = Path(self.workspace).name
+        supplied = Path(workspace).resolve()
+        if supplied.parent.name == "instances" and re.fullmatch(r"0[1-5]", supplied.name):
+            instance_workspace = supplied
+            root = supplied.parent.parent
+            instance_id = supplied.name
+        else:
+            root = supplied
+            instance_id = str(os.environ.get("PARTNER_INSTANCE_ID") or "02")
+            if not re.fullmatch(r"0[1-5]", instance_id):
+                raise ValueError("PARTNER_INSTANCE_ID must be one of 01..05")
+            instance_workspace = root / "instances" / instance_id
+        self.workspace = str(instance_workspace)
+        self.root = str(root)
+        self.instance_id = instance_id
         self.config = config or QQQfficialBridgeConfig(); self.config.workspace = self.workspace
         state = Path(self.workspace) / "state"; state.mkdir(parents=True, exist_ok=True)
         self._delivery_state_file = str(state / "qq_delivery_state.json")
         self._history_file = str(state / "qq_chat_history.jsonl")
         self._seen_file = state / "qq_seen_messages.json"
+        self._binding_file = state / "record" / "bot_id.json"
         self._lock_path = state / "qq_bridge.lock"; self._lock_handle = None
         self._bot: QQQfficialBot | None = None; self._running = False
         self._stats = {"messages_received": 0, "messages_sent": 0, "errors": 0}
@@ -119,7 +133,8 @@ class QQQfficialBridge:
         self._bot.set_message_handler(self._handle_message)
         self._bot.set_ready_handler(self._handle_ready)
         self._bot.set_error_handler(self._handle_error)
-        self._start_notification_poller()
+        if self.config.outbound_delivery_enabled:
+            self._start_notification_poller()
         try: self._bot.start()
         finally: self._running = False; self._write_delivery_state(False, "stopped")
 
@@ -137,6 +152,51 @@ class QQQfficialBridge:
         path = Path(self._delivery_state_file); temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"); os.replace(temporary, path)
 
+    def _persist_identity_binding(self, info: QQBotInfo | None = None,
+                                  user_openid: str = "") -> None:
+        """Persist the identity contract consumed by submission routing.
+
+        Readiness proves the bot identity; inbound messages add scoped user
+        OpenIDs.  Credentials are deliberately excluded.  The replace is
+        atomic so the CLI cannot observe a half-written binding.
+        """
+        current: dict[str, Any] = {}
+        try:
+            current = json.loads(self._binding_file.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            pass
+        allowed = [str(value) for value in current.get("allowed_user_openids") or []
+                   if str(value)]
+        # Migrate the pre-binding-format record only when it proves a real
+        # inbound C2C event.  This is not a "last seen" routing guess: the
+        # OpenID, platform message id and message type were written by this
+        # instance's authenticated QQ callback.  Once migrated, all Web/QQ
+        # submissions use the normal strict recipient_ref verification.
+        if not allowed:
+            legacy_path = Path(self.workspace) / "state" / "qq_user_context.json"
+            try:
+                legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError):
+                legacy = {}
+            legacy_openid = str(legacy.get("openid") or "").strip()
+            if (legacy_openid and str(legacy.get("message_type") or "") == "c2c"
+                    and str(legacy.get("last_msg_id") or "").strip()):
+                allowed.append(legacy_openid)
+        if user_openid and user_openid not in allowed:
+            allowed.append(user_openid)
+        value = {
+            "schema_version": 1,
+            "instance_id": self.instance_id,
+            "bot_id": str(getattr(info, "id", "") or current.get("bot_id") or self.config.app_id),
+            "bot_name": str(getattr(info, "name", "") or current.get("bot_name") or ""),
+            "allowed_user_openids": allowed,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._binding_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._binding_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self._binding_file)
+
     def _expire_stale_delivery_startup(self, timeout_sec: float | None = None) -> bool:
         timeout = float(os.environ.get("PARTNER_QQ_READY_TIMEOUT_SEC", "90")) if timeout_sec is None else timeout_sec
         try:
@@ -148,7 +208,9 @@ class QQQfficialBridge:
         self._write_delivery_state(False, "error", "ReadyTimeoutError"); return True
 
     def _handle_ready(self, _info: QQBotInfo) -> None:
-        self._write_delivery_state(True, "ready")
+        self._persist_identity_binding(_info)
+        status = "ready" if self.config.outbound_delivery_enabled else "ready_commands_only"
+        self._write_delivery_state(True, status)
 
     def _handle_error(self, exc: Exception) -> None:
         self._stats["errors"] += 1; self._write_delivery_state(False, "error", type(exc).__name__)
@@ -222,6 +284,7 @@ class QQQfficialBridge:
             return
         if not self._remember(msg.msg_id):
             return
+        self._persist_identity_binding(user_openid=str(msg.sender_id or ""))
         self._stats["messages_received"] += 1
         self._append_history("user", text or "(attachment-only)",
                              sender_id=msg.sender_id, sender_name=msg.sender_name,
@@ -257,22 +320,169 @@ class QQQfficialBridge:
         if sub_result.job_id:
             self._record_submission_receipt(msg.msg_id, sub_result.job_id,
                                               sub_result.assigned_instance)
-            if not self._reply(msg, "已接收。" + sub_result.job_id[:20] +
-                                 "（assigned=" + sub_result.assigned_instance + "）"):
-                self._record_reply_failure(msg.msg_id, "ack_reply")
+            # Acceptance and Flow-plan messages are queued by the dedicated
+            # notification compose -> critic -> delivery Events.  Sending a
+            # second hard-coded reply here made QQ disagree with Web and hid
+            # the actual Event plan.
         else:
             if not self._reply(msg, sub_result.message or "已收到"):
                 self._record_reply_failure(msg.msg_id, "direct_answer_reply")
 
     def _handle_special_command(self, text: str, _msg: QQMessage) -> str | None:
-        if text.strip().lower() in {"/help", "help", "帮助", "使用帮助"}:
-            return "直接告诉我你想推进什么即可。我会把任务交给统一 Event 工作流；/status 可查看当前后台工作。"
-        if text.strip().lower() in {"/status", "status", "状态", "当前状态"}:
-            jobs = PartnerApplicationService(self.root).list_jobs(limit=20)
-            active = [x for x in jobs if x.get("status") in {"queued", "dispatched", "running"}]
-            if not active: return "当前没有正在执行的后台工作。"
-            return "当前后台工作：" + "；".join(f"{x.get('title')}（{x.get('status')}）" for x in active[:4])
+        command = text.strip()
+        lowered = command.lower()
+        if lowered in {"/help", "help", "帮助", "使用帮助"}:
+            return ("直接发送项目任务即可。\n/status：查看本实例在途任务\n"
+                    "/last：查看最近任务\n/job <job_id>：查看终态和四条结果链\n"
+                    "/flow <job_id>：查看实际 Flow 节点状态\n"
+                    "/events <job_id> [页码]：查看 Event 列表\n"
+                    "/event <job_id> <event_id或node_id>：查看输入输出\n"
+                    "/result <job_id>：查看最终结算；/log <job_id>：网页链接")
+        if lowered in {"/status", "status", "状态", "当前状态"}:
+            jobs = [row for row in PartnerApplicationService(self.root).list_jobs(limit=50)
+                    if str(row.get("assigned_instance") or row.get("origin_instance") or "") == self.instance_id]
+            active = [row for row in jobs if row.get("status") in {"queued", "dispatched", "running", "paused"}]
+            if not active:
+                return "当前没有在途任务。发送 /last 可查看最近一次运行。"
+            return "当前在途：\n" + "\n\n".join(self._job_status_text(row) for row in active[:3])
+        if lowered in {"/last", "last", "最近任务"}:
+            jobs = [row for row in PartnerApplicationService(self.root).list_jobs(limit=50)
+                    if str(row.get("assigned_instance") or row.get("origin_instance") or "") == self.instance_id]
+            return self._job_status_text(jobs[0]) if jobs else "暂无任务记录。"
+        match = re.fullmatch(r"/(job|log|flow|result)\s+([A-Za-z0-9_.-]+)", command, re.I)
+        if match:
+            kind, needle = match.group(1).lower(), match.group(2)
+            row, error = self._find_job(needle)
+            if error:
+                return error
+            if kind == "flow":
+                return self._flow_status_text(row)
+            if kind == "result":
+                return self._result_text(row)
+            if kind == "log":
+                return f"运行日志：{self._web_url(str(row.get('job_id') or ''))}"
+            return self._job_status_text(row)
+        match = re.fullmatch(r"/events\s+([A-Za-z0-9_.-]+)(?:\s+(\d+))?", command, re.I)
+        if match:
+            row, error = self._find_job(match.group(1))
+            return error or self._events_text(row, max(1, int(match.group(2) or 1)))
+        match = re.fullmatch(r"/event\s+([A-Za-z0-9_.-]+)\s+([A-Za-z0-9_.-]+)", command, re.I)
+        if match:
+            row, error = self._find_job(match.group(1))
+            return error or self._event_detail_text(row, match.group(2))
         return None
+
+    def _instance_jobs(self, limit: int = 200) -> list[dict]:
+        return [row for row in PartnerApplicationService(self.root).list_jobs(limit=limit)
+                if str(row.get("assigned_instance") or row.get("origin_instance") or "") == self.instance_id]
+
+    def _find_job(self, needle: str) -> tuple[dict, str]:
+        matches = [row for row in self._instance_jobs()
+                   if str(row.get("job_id") or "") == needle
+                   or str(row.get("job_id") or "").startswith(needle)]
+        if not matches:
+            return {}, "未找到本实例的该任务。"
+        exact = [row for row in matches if str(row.get("job_id") or "") == needle]
+        if len(matches) > 1 and not exact:
+            return {}, "Job 前缀不唯一，请输入更长的 ID。"
+        return (exact or matches)[0], ""
+
+    def _trace(self, row: dict) -> dict:
+        from partner.web.run_trace import trace_overview
+        return trace_overview(self.root, str(row.get("job_id") or ""), limit=500)
+
+    def _web_url(self, job_id: str) -> str:
+        base = os.environ.get("PARTNER_WEB_BASE_URL", "http://127.0.0.1:8765").rstrip("/")
+        return f"{base}/?job={job_id}"
+
+    def _job_status_text(self, row: dict) -> str:
+        job_id = str(row.get("job_id") or "")
+        current = str(row.get("current_event_id") or "")
+        flow_type = str(row.get("flow_type") or "")
+        try:
+            trace = self._trace(row)
+            last = (trace.get("events") or [])[-1] if trace.get("events") else {}
+            if last:
+                current = str(last.get("node_id") or current)
+                flow_type = str(last.get("flow_type") or flow_type)
+            count = int((trace.get("counts") or {}).get("events") or 0)
+        except Exception:
+            count = 0
+        title = str(row.get("title") or row.get("request") or job_id)[:48]
+        result = [f"{title}\nJob：{job_id}\n状态：{row.get('status')}｜Flow：{flow_type or '-'}｜"
+                  f"当前：{current or '已结束'}｜Events：{count}"]
+        try:
+            for item in (trace.get("chains") or {}).values():
+                result.append(f"{item.get('name')}：{item.get('events', 0)} Events｜"
+                              f"失败 {item.get('failed', 0)}｜{item.get('last_summary') or '未触发'}")
+            completion = trace.get("completion") or {}
+            result.append(f"终态记录：{'已写入' if completion.get('recorded') else '尚未写入'}")
+        except Exception:
+            pass
+        result.append(self._web_url(job_id))
+        return "\n".join(result)
+
+    def _flow_status_text(self, row: dict) -> str:
+        trace = self._trace(row)
+        lines = [f"Job {row.get('job_id')} 的实际 Flow："]
+        for flow in trace.get("flows") or []:
+            lines.append(f"\n{flow.get('flow_type')}｜{flow.get('status')}｜{flow.get('flow_id')}")
+            for node in flow.get("nodes") or []:
+                lines.append(f"- {node.get('node_id')} [{node.get('runtime_status')}] {node.get('event_type')}")
+        lines.append(self._web_url(str(row.get("job_id") or "")))
+        return "\n".join(lines)
+
+    def _events_text(self, row: dict, page: int) -> str:
+        trace = self._trace(row)
+        lifecycle = trace.get("events") or []
+        final_by_event: dict[str, dict] = {}
+        for item in lifecycle:
+            final_by_event[str(item.get("event_id") or "")] = item
+        events = list(final_by_event.values())
+        page_size = 10
+        start = (page - 1) * page_size
+        selected = events[start:start + page_size]
+        pages = max(1, (len(events) + page_size - 1) // page_size)
+        if not selected:
+            return f"页码超出范围；共 {len(events)} Events，{pages} 页。"
+        lines = [f"Job {row.get('job_id')} Events 第 {page}/{pages} 页："]
+        for item in selected:
+            lines.append(f"- {item.get('node_id')} [{item.get('status')}]\n  {item.get('event_id')}｜{item.get('event_type')}")
+        lines.append(f"输入输出：/event {row.get('job_id')} <event_id或node_id>")
+        return "\n".join(lines)
+
+    def _event_detail_text(self, row: dict, needle: str) -> str:
+        trace = self._trace(row)
+        candidates = [item for item in trace.get("events") or []
+                      if str(item.get("event_id") or "") == needle
+                      or str(item.get("event_id") or "").startswith(needle)
+                      or str(item.get("node_id") or "") == needle]
+        ids = list(dict.fromkeys(str(item.get("event_id") or "") for item in candidates))
+        if not ids:
+            return "没有找到该 Event 或节点。先用 /events <job_id> 查看列表。"
+        if len(ids) > 1:
+            return "匹配到多个 Event，请使用完整 event_id。"
+        from partner.web.run_trace import event_detail
+        detail = event_detail(self.root, str(row.get("job_id") or ""), ids[0])
+        text = json.dumps(detail.get("lifecycle") or [], ensure_ascii=False, indent=2)
+        if len(text) > 9000:
+            text = text[:9000] + "\n…内容过长，完整内容请看网页。"
+        return f"Event {ids[0]} 的脱敏生命周期：\n{text}\n{self._web_url(str(row.get('job_id') or ''))}"
+
+    def _result_text(self, row: dict) -> str:
+        trace = self._trace(row)
+        completion = trace.get("completion") or {}
+        lines = [f"Job {row.get('job_id')} 最终结算：{completion.get('status')}",
+                 f"终态日志：{'已写入' if completion.get('recorded') else '尚未写入'}",
+                 f"节点：完成 {completion.get('completed_nodes', 0)}｜失败 {completion.get('failed_nodes', 0)}｜跳过 {completion.get('skipped_nodes', 0)}"]
+        if completion.get("error"):
+            lines.append(f"错误：{completion.get('error')}")
+        outputs = completion.get("final_outputs") or {}
+        if outputs:
+            body = json.dumps(outputs, ensure_ascii=False, indent=2)
+            lines.append("最终节点输出：\n" + body[:6000])
+        lines.append(self._web_url(str(row.get("job_id") or "")))
+        return "\n".join(lines)
 
     def _record_submission_receipt(self, msg_id: str, job_id: str,
                                      assigned_instance: str) -> None:
@@ -319,9 +529,29 @@ class QQQfficialBridge:
             outbound = Path(self.root) / "state/application/outbound" / self.instance_id
             while self._running:
                 self._expire_stale_delivery_startup()
-                for path in sorted(outbound.glob("*.json")) if outbound.exists() else []:
+                paths = list(outbound.glob("*.json")) if outbound.exists() else []
+                def queued_order(path: Path):
+                    try:
+                        row = json.loads(path.read_text(encoding="utf-8"))
+                        # Terminal business text and PDF are the reason the
+                        # user ran the job.  Let them pass a lifecycle backlog;
+                        # lifecycle messages keep chronological order within
+                        # their own class and are still all delivered.
+                        priority = 1 if '.notification.' in path.name else 0
+                        return (priority, str(row.get("created_at") or ""), path.name)
+                    except (OSError, ValueError, TypeError):
+                        return (2, "", path.name)
+                # Notification filenames are unique rather than sequential.
+                # Preserve the Event creation order using the durable payload
+                # timestamp; lexical UUID order can send completion before start.
+                for path in sorted(paths, key=queued_order):
                     try:
                         value = json.loads(path.read_text(encoding="utf-8"))
+                        terminal_state = str(value.get("delivery_state") or "")
+                        if terminal_state in {"sent", "delivered", "superseded", "blocked"}:
+                            suffix = ".sent" if terminal_state in {"sent", "delivered"} else f".{terminal_state}"
+                            os.replace(path, path.with_suffix(suffix))
+                            continue
                         if not application_delivery_due(value, time.time()): continue
                         from partner.presentation.notifications import stale_progress
                         if stale_progress(path,value):
@@ -354,6 +584,15 @@ class QQQfficialBridge:
             for index,chunk in enumerate(chunks):
                 if index < int(value.get('text_chunks_delivered',0)): continue
                 if not self.send_proactive(user,chunk,bypass_quiet=True): return False
+                bot = getattr(self, "_bot", None)
+                receipt = (bot.get_last_api_post_receipt()
+                           if bot and hasattr(bot, "get_last_api_post_receipt") else {})
+                value.setdefault('platform_acks', []).append({
+                    'kind': 'text', 'chunk': index + 1,
+                    'http_status': receipt.get('http_status'),
+                    'platform_message_id': receipt.get('platform_message_id') or '',
+                    'timestamp': receipt.get('timestamp') or '',
+                })
                 value['text_chunks_delivered']=index+1
                 write_json(path,value)
             if not chunks: return False
@@ -382,10 +621,29 @@ class QQQfficialBridge:
         pdfs = list(value.get('pdf_artifacts') or [])[:1]
         if pdfs and not value.get('pdf_delivered'):
             pdf = Path(str(pdfs[0]))
-            if not (pdf.is_file() and self.send_file_proactive(user, pdf.read_bytes(), file_name=pdf.name)):
+            if not pdf.is_file():
                 return False
+            pdf_bytes = pdf.read_bytes()
+            import hashlib
+            actual_sha = hashlib.sha256(pdf_bytes).hexdigest()
+            expected_sha = str(value.get('pdf_sha256') or '')
+            if expected_sha and actual_sha != expected_sha:
+                value['pdf_version_error'] = {
+                    'reason': 'sha_mismatch', 'expected': expected_sha,
+                    'actual': actual_sha, 'path': str(pdf), 'at': time.time()}
+                write_json(path, value)
+                return False
+            if not self.send_file_proactive(user, pdf_bytes, file_name=pdf.name):
+                return False
+            bot = getattr(self, "_bot", None)
+            receipt = (bot.get_last_api_post_receipt()
+                       if bot and hasattr(bot, "get_last_api_post_receipt") else {})
             value['pdf_delivered'] = True
-            value.setdefault('component_acks',[]).append({'kind':'pdf','at':time.time()})
+            value.setdefault('component_acks',[]).append({
+                'kind':'pdf', 'filename':pdf.name, 'sha256':actual_sha,
+                'size_bytes':len(pdf_bytes), 'at':time.time(),
+                'http_status':receipt.get('http_status'),
+                'platform_message_id':receipt.get('platform_message_id') or ''})
             write_json(path, value)
         return True
 
@@ -393,9 +651,28 @@ class QQQfficialBridge:
         ledger = EventLedger(self.root)
         event = ledger.create("delivery.channel_ack", "delivery", correlation_id=str(payload.get("job_id") or ""),
                               job_id=str(payload.get("job_id") or ""), instance_id=self.instance_id, channel="qq")
-        ledger.complete(event, EventSummary(event_id=event.event_id, status="completed",
-                                           headline="QQ 已确认消息交付", outcome="文本、请求的图片与 PDF 均获得渠道确认",
-                                           evidence_refs=[str(path)], notification_kind="routine"))
+        summary = EventSummary(event_id=event.event_id, status="completed",
+                               headline="QQ 已确认消息交付", outcome="文本、请求的图片与 PDF 均获得渠道确认",
+                               evidence_refs=[str(path)], notification_kind="routine")
+        ledger.complete(event, summary)
+        try:
+            from partner.index.job_repository import init as _init_jobs
+            from partner.runtime.event_run_log import EventRunLog
+            job = _init_jobs(self.root).get(str(payload.get("job_id") or "")) or {}
+            EventRunLog(self.root, str(payload.get("job_id") or "")).event(
+                phase="finished", flow_id=str(job.get("flow_id") or ""),
+                flow_type=str(job.get("flow_type") or "message_delivery"),
+                node_id="channel_ack", event_id=event.event_id,
+                event_type="delivery.channel_ack",
+                inputs={"channel": "qq", "outbound_receipt": str(path)},
+                outputs={"ok": True, "status": "completed",
+                         "summary": summary.headline,
+                         "component_acks": list(payload.get("component_acks") or []),
+                         "text_delivered": bool(payload.get("text_delivered")),
+                         "pdf_delivered": bool(payload.get("pdf_delivered"))},
+                status="completed")
+        except Exception:
+            logger.exception("QQ ACK saved; run-trace projection failed")
         try:
             from partner.runtime.iteration_receipts import write_request_receipts
             job_path = Path(self.root) / "state/application/jobs" / f"{payload.get('job_id')}.json"
@@ -428,7 +705,15 @@ class QQQfficialBridge:
 
 
 def create_bridge(workspace: str, config_path: str | None = None) -> QQQfficialBridge:
-    bridge = QQQfficialBridge(workspace)
+    target = Path(workspace).resolve()
+    if config_path:
+        config = Path(config_path).resolve()
+        parts = config.parts
+        if "instances" in parts:
+            index = parts.index("instances")
+            if index + 1 < len(parts) and re.fullmatch(r"0[1-5]", parts[index + 1]):
+                target = Path(*parts[:index + 2])
+    bridge = QQQfficialBridge(str(target))
     if config_path: bridge.load_config_from_file(config_path)
     return bridge
 

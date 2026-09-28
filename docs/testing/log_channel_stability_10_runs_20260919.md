@@ -105,4 +105,4 @@ before {'job_d05cbba0c5774433': ['failed', 1789576495.133206], 'job_9120c0f42d7a
 - 分析：`/tmp/stability_analysis.json`（由 `/tmp/analyze_stability.py` 生成）
 - 驱动：`/tmp/stability_run.py`（可用 `STAB_PREFIX` / `STAB_OUT` / `STAB_START` 复跑）
 - 日志渠道：`/mnt/e/work/partner_workspace/state/outbound/replies.log` 第 19–28 行
-- 读取入口：`python3 scripts/read_replies.py --workspace /mnt/e/work/partner_workspace --limit 10`
+- 读取入口：`python3 scripts/messaging/read_replies.py --workspace /mnt/e/work/partner_workspace --limit 10`

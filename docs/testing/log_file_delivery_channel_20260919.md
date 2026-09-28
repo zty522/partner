@@ -20,7 +20,7 @@ QQ 渠道依赖平台侧的 bot↔用户关系（02 的已注销），且投递�
 
 ```bash
 cd /mnt/e/work/partner_commitment
-PYTHONPATH=. python3 scripts/read_replies.py --workspace /mnt/e/work/partner_workspace \
+PYTHONPATH=. python3 scripts/messaging/read_replies.py --workspace /mnt/e/work/partner_workspace \
     [--limit 5] [--job job_xxx] [--grep TOKEN] [--json]
 ```
 
@@ -53,14 +53,14 @@ PYTHONPATH=. python3 scripts/read_replies.py --workspace /mnt/e/work/partner_wor
 ## 测试
 
 ```
-tests/runtime/     31 passed（本轮新增：log 渠道追加+回执可核验、多次追加不丢行、channel_route 接受 log、
+benchmark/runtime/     31 passed（本轮新增：log 渠道追加+回执可核验、多次追加不丢行、channel_route 接受 log、
                               任意 trace token 形状被识别且不误吞英文、evolution_pipeline 导入回归）
-tests/commitment/ 141 passed
+benchmark/commitment/ 141 passed
 git diff --check  clean
 ```
 
 ## 边界
 
 - 未改默认渠道（仍 `local`）；要用日志渠道需显式 `submit_native(..., channel="log")`。
-- 未删除 QQ 渠道与 relay 投递器，它们仍在（`scripts/relay_deliver_once.py`），只是不再需要。
+- 未删除 QQ 渠道与 relay 投递器，它们仍在（`scripts/messaging/relay_deliver_once.py`），只是不再需要。
 - 日志渠道只证明"离开系统并落到可核查的文件"，**不证明有人类读过**；人侧确认仍是最终判据。

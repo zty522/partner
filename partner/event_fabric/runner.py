@@ -53,7 +53,22 @@ class EventFlowRunner:
         params["run_context"] = dict(state.run_context)
         for key, value in state.run_context.items():
             params.setdefault(key, value)
-        if state.current_event_id and state.waiting_task_id:
+        # A dynamic project iteration freezes its design as the first Event.
+        # Bind that immutable output into every later Event's contract without
+        # allowing one Event handler to invoke or mutate another Event.
+        if state.flow_type == 'project_cycle_round' and node_id != 'design':
+            blueprint = ((state.node_outputs.get('design') or {}).get('semantic_output') or {})
+            if blueprint:
+                contract = dict(params.get('intent_contract') or {})
+                contract['round_blueprint'] = blueprint
+                contract['round_number'] = blueprint.get('round_number', contract.get('round_number'))
+                refs = list(blueprint.get('learning_handoff_refs') or [])
+                if refs:
+                    contract['learning_handoff_path'] = refs[0]
+                    contract['learning_handoff_refs'] = refs
+                params['intent_contract'] = contract
+        resuming_wait = bool(state.current_event_id and state.waiting_task_id)
+        if resuming_wait:
             event = self.ledger.get_event_history(state.current_event_id)
             from .models import EventEnvelope
             event = EventEnvelope(**{k:v for k,v in event.items() if k in EventEnvelope.__dataclass_fields__})
@@ -75,6 +90,16 @@ class EventFlowRunner:
                 payload={"flow_node": True, "definition_version": definition.version},
             )
         params["event_id"] = event.event_id
+        from partner.runtime.event_run_log import EventRunLog
+        trace = EventRunLog(self.ledger.root, state.task_id)
+        def write_trace(method: str, **values: Any) -> None:
+            try:
+                getattr(trace, method)(**values)
+            except Exception:
+                # Observability is a projection and can never change business execution.
+                pass
+        write_trace("flow_plan", flow_id=state.flow_id, definition=definition,
+                    reason="event_runtime_definition")
         input_hash = "sha256:" + hashlib.sha256(json.dumps(
             params, ensure_ascii=False, sort_keys=True, default=str,
             separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -86,6 +111,12 @@ class EventFlowRunner:
         from datetime import datetime, timezone
         started_wall = datetime.now(timezone.utc).isoformat()
         started_clock = time.perf_counter()
+        attempt = int(state.node_retry_counts.get(node_id, 0)) + 1
+        if not resuming_wait:
+            write_trace("event", phase="started", flow_id=state.flow_id,
+                        flow_type=state.flow_type, node_id=node.node_id,
+                        event_id=event.event_id, event_type=node.event_type,
+                        inputs=params, status="running", attempt=attempt)
         if hasattr(ctx, "__dict__"):
             ctx.event_deadline = time.monotonic() + max(1, int(event_definition.timeout_seconds))
         try:
@@ -110,20 +141,65 @@ class EventFlowRunner:
                       "error": f"{type(exc).__name__}: {exc}",
                       "failure_class": "event_handler",
                       "mechanism": f"event/{node.event_type}"}
+        # Public, secret-free receipt for every successful or failed LLM Event.
+        # token_usage is redacted in user-facing traces, so provider/model
+        # identity needs its own audit field.
+        if event_definition.execution_method == "llm":
+            receipt = dict(getattr(getattr(ctx, "adapter", None),
+                                   "last_usage", {}) or {})
+            if receipt:
+                allowed = {key: receipt.get(key) for key in (
+                    "call_id", "provider", "model", "purpose", "status",
+                    "http_status", "elapsed_ms", "finish_reason",
+                    "thinking_requested") if receipt.get(key) is not None}
+                if allowed:
+                    output["model_call_receipt"] = allowed
         if output.get("status") == "waiting":
             import time
             state.waiting_task_id = str(output.get("background_task_id") or "")
             state.next_check_at = time.time() + 5
             self.controller.store.save(state)
+            write_trace("event", phase="waiting", flow_id=state.flow_id,
+                        flow_type=state.flow_type, node_id=node.node_id,
+                        event_id=event.event_id, event_type=node.event_type,
+                        outputs=output, status="waiting",
+                        duration_ms=(time.perf_counter() - started_clock) * 1000.0,
+                        attempt=attempt)
             return EventRunResult(state, node_id, event.event_id, output)
         state.waiting_task_id = ""
         state.next_check_at = 0.0
         terminal = "completed" if output.get("ok") else "failed"
         files = [str(value) for value in output.get("files") or []]
+        try:
+            from pathlib import Path
+            from partner.index.artifact_repository import init as _init_artifacts
+            artifacts = _init_artifacts(self.ledger.root)
+            for file_path in files:
+                path = Path(file_path)
+                if not path.is_file() or artifacts.by_path(str(path)):
+                    continue
+                suffix = path.suffix.lower()
+                kind = ("report_pdf" if suffix == ".pdf" else
+                        "figure" if suffix in {".png", ".jpg", ".jpeg", ".svg", ".webp"} else
+                        "report_markdown" if suffix == ".md" else "event_artifact")
+                artifacts.register(
+                    path=str(path), kind=kind, purpose=node.event_type,
+                    job_id=state.task_id, flow_id=state.flow_id,
+                    producer_event=event.event_id,
+                    media_type=("application/pdf" if suffix == ".pdf" else ""),
+                )
+        except Exception:
+            # Artifact discovery is a read projection; the Event result remains
+            # authoritative and must not be changed by an index outage.
+            pass
         semantic = output.get("semantic_output")
         if not isinstance(semantic, dict):
             semantic = {key: value for key, value in output.items()
                         if key not in {"model_output", "content"}}
+        else:
+            semantic = dict(semantic)
+            if output.get("model_call_receipt"):
+                semantic.setdefault("model_call_receipt", output["model_call_receipt"])
         summary = EventSummary(
             event_id=event.event_id, status=terminal,
             headline=str(output.get("summary") or output.get("error") or node.event_type)[:500],
@@ -162,6 +238,11 @@ class EventFlowRunner:
             state.next_check_at = time.time() + 15 * (retry_count + 1)
             state.current_event_id = ''
             self.controller.store.save(state)
+            write_trace("event", phase="retry_scheduled", flow_id=state.flow_id,
+                        flow_type=state.flow_type, node_id=node.node_id,
+                        event_id=event.event_id, event_type=node.event_type,
+                        outputs=output, status="waiting",
+                        duration_ms=summary.duration_ms, attempt=attempt)
             return EventRunResult(state, node_id, event.event_id,
                 {**output, 'status':'waiting', 'retry_scheduled':True})
         state.node_outputs[node.node_id] = output
@@ -170,4 +251,9 @@ class EventFlowRunner:
             summary=summary.to_dict())
         state.current_event_id = ""
         self.controller.store.save(state)
+        write_trace("event", phase="finished", flow_id=state.flow_id,
+                    flow_type=state.flow_type, node_id=node.node_id,
+                    event_id=event.event_id, event_type=node.event_type,
+                    outputs=output, status=terminal,
+                    duration_ms=summary.duration_ms, attempt=attempt)
         return EventRunResult(state, node.node_id, event.event_id, output)

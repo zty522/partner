@@ -87,12 +87,12 @@ delivery_policy: local   channel_ack: False
 ## 测试
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/      # 8 passed
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/   # 141 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/      # 8 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/   # 141 passed
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  # 135
 git diff --check                                                          # clean
 ```
-`tests/runtime/test_bounded_worker.py` 覆盖：无作用域查询行为不变；按 job_id/flow_id/
+`benchmark/runtime/test_bounded_worker.py` 覆盖：无作用域查询行为不变；按 job_id/flow_id/
 root_event_id 的 SQL 过滤（含 25 条积压干扰下不泄漏）；终态 root Job 不再返回；
 `_next_scoped_job` 拒绝外来 flow 只取自身 flow；`next_job()` 在设定 root_job_id 时
 不与全局队列交互；未设定时仍走原路径。

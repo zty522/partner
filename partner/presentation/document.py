@@ -49,6 +49,33 @@ def readability_errors(text):
     return ['正文仍有内部记录字段/长标识，请译成中文结果并将追溯编号留在证据附录：'+', '.join(sorted(set(bad)))] if bad else []
 
 
+def report_semantic_errors(text, outputs):
+    """Deterministic reader-value gate for a full project report."""
+    errors=[]
+    title=next((line[2:].strip() for line in text.splitlines() if line.startswith('# ')), '')
+    if not title or title in {'项目证据报告','项目进展报告','运行报告','报告'}:
+        errors.append('标题必须写明研究对象、候选改动和评价问题，不能使用通用报告名')
+    required={
+        '核心结论':r'核心结论|主要结论',
+        '研究问题与协议':r'研究问题|实验问题|冻结协议|实验协议',
+        '结果':r'结果|主要发现',
+        '局限':r'局限|限制|未解决',
+    }
+    for label,pattern in required.items():
+        if not re.search(pattern,text):errors.append(f'报告缺少“{label}”')
+    if len(re.sub(r'\s+','',text)) < 500:
+        errors.append('正文过短，无法独立解释问题、方法、结果和边界')
+    for asset in figure_assets(outputs):
+        params=asset.get('parameters') or {}; measured=asset.get('measured') or {}
+        field=str(params.get('value_key') or '').lower()
+        if params.get('kind')=='distribution' and (
+                int(measured.get('count') or 0)<5 or measured.get('min')==measured.get('max')):
+            errors.append(f"图 {asset.get('id')} 不是有效分布：样本不足或没有变化")
+        if any(token in field for token in ('byte','confidence','token','hash','exit_code','duration_ms')):
+            errors.append(f"图 {asset.get('id')} 展示的是运行元数据，不是项目研究结果")
+    return errors
+
+
 def semantic_conflicts(text,outputs):
     """Check distinctions grounded in typed measurements, independent of prose LLMs."""
     errors=[];assets=figure_assets(outputs)

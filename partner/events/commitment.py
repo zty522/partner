@@ -153,7 +153,7 @@ def _job_request(ctx) -> str:
 
 
 def _trace_token(ctx, params: Mapping[str, Any]) -> str:
-    direct = str(params.get("trace_token") or "").strip()
+    direct = str(params.get("trace_token") or params.get("runtime_trace_token") or "").strip()
     if direct:
         return direct
     for candidate in (params.get("message"), params.get("goal"), _job_request(ctx)):

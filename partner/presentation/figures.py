@@ -298,6 +298,10 @@ def observed_caption(kind,plan,measured,paths):
     if kind=='molecular_diversity':return f"由 {measured['molecule_count']} 个实际候选重算 {measured['pair_count']} 对 Morgan 指纹相似度及 {measured['scaffold_count']} 种 Murcko 骨架；这是集合结构差异，不是药效或跨批次改善证明。"+source
     if kind=='molecule_grid':return '按原始 SMILES 绘制的所选候选二维结构；下方标出原候选编号，不表示已证实结合或抑制活性。'+source
     if kind=='distribution':return f"数据字段 {plan['value_key']} 的分布，共 {measured['count']} 个实际记录；没有绘制跨批次因果比较。"+source
+    if kind=='scalar_bar':
+        values=measured.get('values') or {}
+        shown='，'.join(f'{label}={value:.6g}' for label,value in values.items())
+        return f"同一证据记录中的预先指定指标对比：{shown}；柱高按原始数值绘制。"+source
     if kind=='experiment_timeline':return '蓝色为 Future 状态采样，橙色为后台函数记录。两条轨道使用各自记录的时钟；位置不能直接解释为同步绝对时间。'+source
     if kind=='test_matrix':return '同一组测试的实际状态对照，绿为通过、红为失败；横轴编号对应报告中的用例说明。没有性能测量。'+source
     if kind=='code_excerpt':return f"原始代码第 {measured['start_line']}–{measured['end_line']} 行的原文节选。"+source

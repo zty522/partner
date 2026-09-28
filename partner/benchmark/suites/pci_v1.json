@@ -27,7 +27,7 @@
     "train": [],
     "dev": [],
     "held_out": [],
-    "note": "Held-out labels are pinned to the dataset author; this manifest declares which families are in each split once the synthetic seeds are upgraded to materialised data (see docs/operations/benchmark_data_card_template.md)."
+    "note": "Held-out labels are pinned to the dataset author; this manifest declares which families are in each split once the synthetic seeds are upgraded to materialised data (see benchmark/studies/reference_docs/operations/benchmark_data_card_template.md)."
   },
   "baseline_arms": [
     {"name": "static-agent", "fixture": "partner.benchmark.fixtures.software_pipeline"},

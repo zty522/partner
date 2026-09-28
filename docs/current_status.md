@@ -1,3 +1,41 @@
+## 2026-09-28：第二次目录收敛与三 Bot 独立重跑
+
+仓库根散落研究材料和 ADR 已迁入规范文档目录，临时执行器、空锁、旧备份、误生成根状态与缓存已清理；权威运行证据和登录态保留。01 日志自进化生成了红测，但 reviewer 认定测试未复现原始症状，因此 fail-closed 为 inconclusive 且未改生产；02 完成同池同 seed 分子对照并因 QED/SA 护栏失败诚实 reject，4 页 PDF 获 02 QQ ACK；03 首次暴露 learning-only 错派自进化并完成修复，最终 Job 只读 external、生成两个带哈希和 quote span 的想法且 0 个自进化 Event。三实例分别 5/11/3 条 QQ payload 全部 sent，最终非终态 Job 为 0。详见 [三任务独立重跑](testing/three_task_rerun_20260928.md)。
+
+## 2026-09-28：文档/工作区整理与三实例真实任务通过
+
+`docs/` 已按 architecture、research、operations、testing、sprints、handoff、active_learning、self_evolution、reference 与 archive 分区，顶层只保留规范入口；仓库缓存、前端可再生构建物、浏览器缓存和失效 PID 已清除，历史 Job/Flow/Event、登录态、实验产物与外部资料全部保留。Markdown 相对链接检查为零失效。
+
+三个独立 QQ Bot 完成真实验收：01 从指定历史 `events.jsonl` 发现并修复报告视图缺失诊断问题，完成红/绿匹配实验、源码应用、新进程验证与回滚门；02 在同一 170 分子池、同 seed 和确定性评价器下运行 rule 与 maxmin_fingerprint，对多样性改善但 QED/SA 护栏失败的候选如实 reject，并生成 4 页、2 图 PDF；03 从本地 `external/` 索引读取三份真实资料，形成两个来源绑定、可证伪的 Partner 改进想法，不冒充已验证改善。三个 Job 的 QQ 文本均获 HTTP 200 与平台 message ID，02 的同一 PDF 也获文件 ACK；Web 首页和最终 Job API 返回 HTTP 200。
+
+运行中发现并修复全工作区递归扫描、项目周期与自进化开关耦合、显式项目模式被错误降级为 direct answer、同步结果违反 idempotency job_id 不变量、报告预览路径导致图计划失败等问题。Qwen 曾返回一次额度 429，但后续调用恢复并完成最终链路。聚焦回归 217 项通过。证据、失败样本和边界见 [三实例真实验收](testing/three_instance_real_runs_20260928.md)，清理范围见 [清理记录](operations/cleanup_20260928.md)。
+
+## 2026-09-27：Sprint 38 动态迭代与 Expected Run v2 条件验收
+
+动态项目轮、自进化候选循环、主动学习插入、真实运行图、研究优先 Web/PDF 和统一效果验收已实现。真实样本覆盖一轮停止、四轮压力、检索失败、模型超时和两轮成功闭环；最终 `job_92993e22d7954de8` 的 baseline/candidate RMSE 为 `0.7885 → 0.6495`，10,000 次 bootstrap CI 为 `[0.1291, 0.1489]`，主动学习 handoff 被第二轮消费，确定性验收 14/14、100 分。当前再发行 PDF 无本地路径，包含匹配比较和 fold delta 图；Web 深链接默认显示完整研究问题、协议、CI、学习影响和结论边界。
+
+Sprint 38 六项架构完成条件通过；Expected Run v2 保持条件验收，因为唯一四轮真实 Job 的后两轮执行失败，尚未证明同一 Job 四轮科学序列全部有效。自进化零候选真实路径已验证，动态多尝试目前只有固定回放证据。完整矩阵见 [Sprint 38 / v2 验收](testing/sprint38_v2_acceptance_20260927.md)。
+
+## 2026-09-27：真实 Web/QQ 全链与生产自进化首次同时完成
+
+实例 02 的 `job_f2a8f02a58c54b14` 从显式绑定收件人的真实消息开始，完成两轮项目、外部主动学习及下游消费、Web/QQ 阶段消息、Event 生成的双总结与带图 PDF、经验/成长/习惯、运行后审计、源码自进化和 Web/QQ 终态消息。根 Flow 与 5 个子 Flow 全部 completed、无失败节点；阶段文本、报告文本/图片/PDF和自进化终态文本均获得 QQ 平台 ACK，Web 均有独立投影回执，`completion.delivery_verified=true`。冻结数据上只增加 `x2` 后 test RMSE 为 `1.7945 → 0.5293`，主动学习 downstream settlement 为 improved；读取深度仍保留 `partial_failure` 警告，不能将全部指标改善归因于主动学习。
+
+运行后审计发现跨 Event 的相同大块 payload 仍重复写日志。自进化基线目标测试失败、候选 6/6 通过，matched/release comparison 通过，补丁写入 `partner/runtime/event_run_log.py`，fresh-interpreter 验证成功且未回滚，最终 `production_effective=true`。外部复核又发现首版测试没有覆盖 Runner 每节点新建 logger 的真实生命周期，因此补做持久并发安全 digest 索引和跨进程验收；两进程重复 50 KB payload 的第二条记录仅保留 digest reference。监督硬化后 189 项聚焦回归通过。本轮是完整业务/主动学习/交付链成功和一次监督下自进化成功，尚不外推为无人监督稳定自进化。完整路径、证据位置和限制见 [2026-09-27 完整端到端验收](testing/core_v1_full_e2e_acceptance_20260927.md)，每日记录见 [自进化](self_evolution/daily/2026-09-27.md) 与 [主动学习](active_learning/daily/2026-09-27.md)。
+
+## 2026-09-25：Core v1 三链与两轮真实项目完整闭环通过
+
+修复后的真实 Job `job_0345967d12784df6` 已完成 36 个父节点：两轮由父周期冻结蓝图，分别建立 x1 baseline 与在完全相同显式 split 上加入 x2 的 candidate；Commitment 执行合同、业务目录、逐样本 split、输入哈希和跨轮消费全部通过确定性门。test RMSE 为 `29.011865 → 0.880671`，两个业务 Flow 使用独立 Runtime 审计目录。文本、3 张来源绑定图和 PDF 均生成并获得 local ACK，`delivery_verified=true`；经验、成长和习惯已更新。运行后 Partner 审计未发现新的可复现机制问题，Evolution Gate 正确结算 `no_change`，没有强造源码 Candidate。
+
+同时完成无 oracle lesson 泄漏的 Partner-LoopBench 纵向重跑：3 个 warmup 无 uplift 均 falsified，3 个 transfer 为 no-memory `0/3`、verified-memory `3/3`，Learning-to-Action Gain=`1.0`。Core v1 三链 closure 的项目 suite 6/6 confirmed，平均 effect `0.1097099`、bootstrap CI `[0.1035896, 0.1150230]`；主动学习与自进化 matched benchmark effect 均为 `1.0`。本轮还修复了报告遗漏项目产物、自进化漏选已有回归测试和终态 Job 遗留非终态 Flow 投影，新增 index-first Flow reconciliation 并修复 76 个历史投影。107 项变更相关回归通过。全仓 sweep 为 1361 passed/51 failed/3 skipped 后修复了其中一项消息降级回归；其余失败集中在旧 lease fixture、退役研究 adapter/benchmark scaffold、Round 4–6 源码字符串断言和旧 FakeAgent 流程，完整仓库目前仍非全绿。详细证据见 [完整闭环验收](testing/core_v1_full_closure_acceptance_20260925.md)。当前结论是工程闭环与受控三链已通过，仍不外推为开放世界、跨模型或长期论文级自主改善。
+
+## 2026-09-25：Commitment 执行合同、原始路径约束与纵向记忆来源完成首轮修复
+
+针对完整闭环审计发现的假阳性，项目执行 Event 现为每轮生成机器可读 `execution_contract.json`：冻结只读动作不得训练或写业务产物，实际变更路径必须落在用户显式声明的共享工作树目录内；共享树外的输出根会在调用执行模型前拒绝；违约时 execute/verify/Settlement fail-closed。执行 prompt 不再把 selected 路径一律降为建议；运行说明文件留在 Runtime 审计目录，不污染显式项目目录。交付后 Partner 审计会确定性读取每轮合同并形成可复现机制 Issue，不再完全依赖 LLM 自查。Partner-LoopBench subject 升至 1.1.0，CP2 后接入真实 `core.state_build → core.latent_forecast/Jev → core.commitment_freeze`。纵向 runner 不再读取 sealed oracle 的 `transfer_lessons`，lesson 改由公开 warmup 任务、实际 subject Commitment 和隐藏 evaluator 成功终态派生，并同时兼容 Core v1.1 嵌套 Commitment 与旧记录。相关核心回归 91 项通过；扩大组合回归 164 项通过，另有 8 项既有独立失败（Job lease fixture、旧 execution-context fixture 与消息文案门），均未落在本次修改路径。修复后的真实外部模型综合运行尚未执行，因此当前结论是合同代码和回归已完成，不提前声称统一闭环通过。
+
+## 2026-09-24：完整闭环对齐审计——子链可用，统一自主闭环尚未验收
+
+逐层核对 Adaptive Project Cycle、Core 决策、主动学习、自进化、Partner-LoopBench、消息/PDF 与记忆原始产物后，当前准确口径为：Event/Flow 工程骨架、真实命令执行、跨轮产物消费、确定性 Settlement 和若干受控 matched 子链已跑通；“自主发现下一项目动作→知识缺口触发主动学习→下轮业务改善→交付→从自身 trace 发现未知缺陷→源码自进化→后续保持改善”的统一闭环尚未通过。两轮样本还有两项实质假阳性：Round 2 冻结只读检查却实际训练并写出 candidate，且用户限定的项目目录不存在、产物写到 Runtime 目录后仍被判 supported；运行后自审计没有发现这些问题。世界模型和 Jev 都是 shadow，实际选择仍由领域 LLM 预选；本次交付 ACK 是 local event ledger，不是 QQ/网页；纵向记忆 `0/3→3/3` 的关键 lesson 正文来自 sealed oracle，而非 Partner 自主归纳。85 项聚焦回归通过，队列无非终态 Job，当前无 Partner 服务运行。详见 [完整对齐审计](testing/partner_full_loop_alignment_audit_20260924.md)。
+
 ## 2026-09-24：Adaptive Project Cycle v2 完成单任务端到端验收
 
 `project_cycle@2.0.0` 已将自主轮次设计、Settlement 条件续轮、可解决知识缺口触发的 `active_learning@2.1.0`、后一项目轮的学习效果结算，以及交付后 Partner-only 自进化审计接为一个有界 Event Flow。最终隔离验收 `job_b14bfc0c820d43bf` 完成 36 个父节点且无失败节点：两轮分别得到 test RMSE 5.4819 与 0.9370，第二轮通过哈希绑定消费第一轮产物；文字、PDF 和最终消息均获得 ACK，`delivery_verified=true`。运行后审计没有发现满足硬门的 Partner 缺陷，因此正确结算为 `no_change`。另一个真实主动学习 Flow `job_learning_real_af541928f231` 完成 17 个节点并冻结来源绑定候选，但尚无下游 matched uplift，不能声称学习改善。Jev 已通过 OpenRouter `typesafe/jev-1.13` 真实调用并保持 shadow，Qwen `qwen3.8-flash` 仍为主 LLM。72 项本次相关回归通过；仍不声称跨任务或长期 uplift。详见 [Adaptive Cycle v2](architecture/adaptive_project_cycle_v2.md)、[验收记录](testing/adaptive_cycle_v2_acceptance_20260924.md)和 [ADR 0109](decisions/0109-adaptive-project-learning-evolution-cycle.md)。
@@ -85,7 +123,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - 设置直接读写工作区 `config/partner_config.json` 与 `config/api.json`，保留未知字段；已有密钥不回显，
   空输入保留原值，显式勾选才会清除。API 文件使用原子替换和 `0600` 权限写入。
 - 修正根 `.gitignore` 的通用 `workspace/` 规则误伤 GUI 源码问题；仅放行
-  `shells/frontend/desktop_gui/workspace/**`，根 `/docs/`、`/tests/` 的用户既有忽略约定不变。
+  `shells/frontend/desktop_gui/workspace/**`，根 `/docs/`、`/benchmark/` 的用户既有忽略约定不变。
 
 ## 2026-09-12：Sprint 36 纯 Event 生产迁移与三端重构已实现（ADR 0098）
 
@@ -140,7 +178,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - 修复相同 replay 重复累加成功后验的污染：用稳定 observation identity 去重，现有污染以 append-only invalidation 纠正，未改写历史。
 - 三类 PDF 已分别命名并逐页渲染验收；外部学习报告的超长表格崩溃和尾页空白已修复。
 - 最终全仓回归：`1123 passed, 2 warnings in 166.53s`。当前 01–05 仍保持暂停；只有外学习形成被接受且带来下游改善的 Candidate、自进化带来真实业务 uplift 并通过可回滚 canary 后，才恢复长跑。
-- 权威细节见 `docs/sprint33_三条认知黄金链与深上下文验收.md` 与 ADR 0091。
+- 权威细节见 `docs/sprints/sprint_33_三条认知黄金链与深上下文验收.md` 与 ADR 0091。
 
 ## 2026-09-11：02 单项目生产连续窗口与 Reward 归因修复
 
@@ -169,7 +207,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - Studio 已完成真实离屏渲染：默认项目时间线不再混入 acceptance-only 测试事件，负业务实验用中文明确说明“不晋升”，本地绝对路径不向日常界面泄露；审计视图仍保留完整记录。
 - 最终全仓回归为 `1095 passed, 2 warnings in 162.91s`，`git diff --check` 通过。
 - 最终服务保持停止。已证明的是有界链路和一个 02 生产 WorkItem，不是五实例长期成熟；04 下游 uplift、05 激活后持续改善、01/03 同等级 canary 仍待后续逐项证明。
-- 详细故障链、代码边界和下一阶段进入条件见 `docs/sprint31_认知内核与运行时单向收敛.md`。
+- 详细故障链、代码边界和下一阶段进入条件见 `docs/sprints/sprint_31_认知内核与运行时单向收敛.md`。
 
 ## 2026-09-10：系统收敛审计完成，自动运行已冻结（历史起点）
 
@@ -275,7 +313,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 
 ## 2026-09-08：Sprint 23 最终装载状态（ADR 0077）
 
-- Git 已用根 `.gitignore` 忽略 `/docs/`、`/tests/`，并把既有文件从索引移除；本地文件保留。只有提交当前 staged deletion 后，远端才会真正停止跟踪。
+- Git 已用根 `.gitignore` 忽略 `/docs/`、`/benchmark/`，并把既有文件从索引移除；本地文件保留。只有提交当前 staged deletion 后，远端才会真正停止跟踪。
 - 02 已连续生成带真实分子图、同数据对照与历史实验表的 PDF，并经 QQ API ACK 交付。MaxMin 在两个新 seed 上提高指纹多样性，但独立 critic 因样本量、QED 代价和下游证据不足否决生产 Candidate；代码已自动回滚。
 - 04 已完成高质量仓库源码与论文 PDF 全文片段读取并交付报告；目标不在 adoption 白名单时诚实拒绝。执行完成与 source-quality 现已分账，低质量证据是 `evidence_incomplete` 学习终态，不再触发整轮重试。
 - 外部主动学习只记 `learning_progress`，不再污染 `business_progress` 或生产策略资格；既有误分类 trajectory 通过 append-only revision 更正。
@@ -367,7 +405,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - 固定双槽已退出当前生产合同。scheduler 每个 watchdog sweep 读取 CPU、`MemAvailable` 与 5 分钟 load，
   在配置上限内动态选择 1–5 个实例；资源下降时不抢杀在途任务，只停止补位并自然排空。00:23 实测为
   22 逻辑 CPU、约 10.5 GiB 可用内存、load 1.90，选择 5 槽；服务实际运行 01–05 五个独立进程。
-- `scripts/run_seed_all.py` 现在覆盖 01–05，使用唯一 run-id，并可用 `--instances` 做子集验收；显式 inbox
+- `scripts/campaigns/run_seed_all.py` 现在覆盖 01–05，使用唯一 run-id，并可用 `--instances` 做子集验收；显式 inbox
   优先于重启恢复/自动续跑，避免测试消息被旧项目任务抢占。
 - 同轮五实例真实结果：02 分子生成得到 attempted=100、valid=85、unique=85、mean QED=0.537781，Reward=0.85；
   03 数值实验 Reward=0.85；01 与 04 虽执行成功，但结论重复，均 Reward=-0.1，未伪装成业务进步。
@@ -446,9 +484,9 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
   让 promotion→apply 形成 governance 自循环（候选一进 production_readiness/ 就触发决策循环）。
 - 新增 `partner/evolution/overnight_canary.py`：`run_once(workspace, dry_run=...)` /
   `run_loop(...)` / 写 `overnight/canary_run` 事件，失败过多升 `overnight/many_failures`。
-- 新增 `scripts/run_overnight_canary.py`（SIGINT-clean shutdown，120s 间隔，dry_run=0），
+- 新增 `scripts/campaigns/run_overnight_canary.py`（SIGINT-clean shutdown，120s 间隔，dry_run=0），
   实机已在跑（pid 242691）。
-- 新增测试 `tests/test_decision_handoff.py`（24 例）+ `tests/test_overnight_canary.py`（7 例）。
+- 新增测试 `benchmark/cognition/test_decision_handoff.py`（24 例）+ `benchmark/projects/test_overnight_canary.py`（7 例）。
 - 全仓回归 **829 passed**（前 798 +31 新增），0 failed。
 - **实证数据（已写入 share/mind/governance/evolution_events.jsonl）**：
   - overnight canary 4 次迭代：examined=1 / applied=0 / skipped=1（candidate_research_downstream_a420574f08ad
@@ -497,7 +535,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
     `git apply` → `git add` → `git commit`，commit message 固定
     `evolution(apply): <experiment_id> → <target_file>`；
   - 失败 → 升级 `policy/auto_apply_failed` 事件 + 72h `apply_blacklist.json` 冷却；
-  - 路径用 `_is_safe_target` 限定 `partner/<pkg>/...py` / `tests/...py`，禁止越界；
+  - 路径用 `_is_safe_target` 限定 `partner/<pkg>/...py` / `benchmark/...py`，禁止越界；
   - 每条 apply 结果都进 `share/mind/governance/evolution_events.jsonl`。
 - 新增 `partner/evolution/curiosity_bridge.py`（216 行）：
   - `propose()` 从 task_state.unresolved_questions 抽信号→topic，写 md note + evolution event；
@@ -577,7 +615,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - 旧 5 个 BLOCKED/被停实例 unblock 路径：调用 `unblock_blocked_instance(workspace, iid,
   evidence_paths=[latest_receipt, evolution_candidate, external_sources/summary.md], reason=...)`，
   每个实例挂 3 份真实独立证据，全部 ok。
-- 完整主动学习+自进化链 `scripts/run_full_active_learning_cycle.py`：每个 enabled 实例跑
+- 完整主动学习+自进化链 `scripts/campaigns/run_full_active_learning_cycle.py`：每个 enabled 实例跑
   topic_selected → diagnosis_completed → query_proposed → candidate_bundled →
   matched_experiment_completed 五个 append-only evolution 事件，落 `governance/evolution_candidates/
   cand_<id>_<ts>_<hash>.json` 一份 + `external_sources/alcycle_<UTC>/` 4 份引用 + summary.md。
@@ -598,7 +636,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
   让 `instance_native.handle_terminal` 和 `manual_runtime.record_manual_task_outcome`
   （包括 manual_stable 兼容边界）调用同一份规则，避免漂移。manual 失败时返回
   `manual_real_action_contract_failed`，instance 失败时进入 BLOCKED + 写 `native_project_blocked`。
-- 新增 `scripts/rebound_instances_to_real_action_contract.py`：把 BLOCKED 实例用
+- 新增 `scripts/migrations/rebound_instances_to_real_action_contract.py`：把 BLOCKED 实例用
   `yield_blocked_without_evidence`（watchdog 最后手段）一次性 yield、写入
   `rebind_events.jsonl` 审计行，方便运维回查"哪一台是为了合同生效被显式诊断性唤醒"。
 - 落实后启动顺序：
@@ -614,7 +652,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
   `instance_native_max_repeat_findings=2`、`instance_native_require_external_artifact=true`
   写到 `partner_workspace/config/partner_config.json`，与 ADR 0061 默认值一致。
 - 全仓回归：`752 passed, 2 warnings in 97.75s`（比 v1 749 +3：新增
-  `tests/test_rebound_adr0061.py` 三例）。旧 Campaign systemd 服务单元文件保留为
+  `benchmark/projects/test_rebound_adr0061.py` 三例）。旧 Campaign systemd 服务单元文件保留为
   benchmark/matched experiment 能力，未启动、未排程，符合 ADR 0059 的"只看不动"定位。
 
 ## 2026-09-03 紧急修复：实例原生真实外部动作合同（ADR 0061）
@@ -756,7 +794,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 > Sprint 18 v2 规格现已完成：包含双资格 Observation、主动课程 selector/critic、分级 RepairRecipe、隔离
 > Candidate builder、可复算 policy update、三个真实项目、三日期抗遗忘和 bounded production canary。
 > 当前状态仍是 `Specification Ready / Implementation Not Started`；不能把规格完成写成主动学习已经完成。
-> 规范入口：`docs/sprint18_主动课程自动修复与受限晋升.md`。
+> 规范入口：`docs/sprints/sprint_18_主动课程自动修复与受限晋升.md`。
 
 - 生产默认仍是 `manual_stable`；当前另有用户显式授权的实验 Campaign `campaign_f8ace4ef3e44`，仅 04/05、
   最多双槽、7 天硬截止、MiniMax-M3 only。它不是普通消息的默认自治。
@@ -1135,7 +1173,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - **Candidate 已可真正执行**：`targetdiff_bdk_function_pool` 和 `execute_candidate` 已接入直接 Event
   registry。只有 `execution_ready=true`、实例在 allowlist、handler 存在，且 production 模式下
   `production_effective=true` 才能执行。知识笔记明确登记为 `knowledge_draft`，不可执行、不可晋升。
-- **伪晋升已纠正**：旧 `tests/test_bdk_real_promote.py` 用硬编码 baseline/candidate reward 写入真实
+- **伪晋升已纠正**：旧 `benchmark/research/test_bdk_real_promote.py` 用硬编码 baseline/candidate reward 写入真实
   workspace，不能证明业务改善。测试已隔离到 `tmp_path`；真实 `control_policy.json` 中的
   `bdk_closure_1788004048` 已移除，相关历史记录通过 correction ledger 作废但保留审计痕迹。
 - **BDK 边界**：当前 BDK FunctionPool 是小型数值函数选择器（Linear/Quadratic/Fourier/ExpDecay），
@@ -1189,7 +1227,7 @@ Core v1 新增统一状态、有限候选、Jev typed adapter、PCA＋ridge 潜�
 - **生产侧效应 = NONE** (BDK skill 不在任何 canary choices 中,
   choose_action 查 promoted_id in choices 返回 None)
 
-- **fixture 自动回滚** (`tests/test_bdk_real_promote.py`):
+- **fixture 自动回滚** (`benchmark/research/test_bdk_real_promote.py`):
   - 备份 `/tmp/bdk_real_promote_backup/` 在 module 启动时
   - 测试结束只回滚 control_policy.json (canary 数据保留)
   - 3 个新测试 PASSED
@@ -1606,7 +1644,7 @@ BDK 集成走 `import` 路线后，需要用户授权才能让 Partner 在 04 �
 策略边界，不复制其 TypeScript/Rust 根基。详见 `architecture/harness_reference_adoption.md`。
 
 历史 Campaign 状态只作为运行证据，不代表当前仍在运行。实时状态必须通过
-`python scripts/partner_campaign.py status`、scheduler、systemd 和 heartbeat 联合读取；静态文档不硬编码 active PID。
+`python scripts/campaigns/partner_campaign.py status`、scheduler、systemd 和 heartbeat 联合读取；静态文档不硬编码 active PID。
 
 ### 1.1 最新手动核心修复摘要（优先读取）
 
@@ -1714,7 +1752,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 
 ### 4.4 持续运行 Campaign
 
-- `scripts/partner_campaign.py` 可创建 30 分钟、数小时或一天的持久 Campaign，并用 user systemd
+- `scripts/campaigns/partner_campaign.py` 可创建 30 分钟、数小时或一天的持久 Campaign，并用 user systemd
   transient unit 脱离外部 Agent 会话运行。
 - Controller 在五实例间自动选择最多两个槽位；每个 WorkItem 有租约、真实 task ID、状态、产物、
   交付回执和重试预算。重启后从 task log 恢复，不重复注入。
@@ -1771,7 +1809,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 - 01 使用 content inbox 做发布前证据准备；02 已发现 TargetDiff 的 184087 条 affinity 记录并进入真实数据分析；
   03 编写 Campaign 历史指标分析器；04 真实 clone/fetch SESA 并抽取 Skill Bank 适配面；05 进行候选回放。
 - 01/02/03 的真实输入 smoke 已通过，详细 PDF 内容质量门达到 9 节、约 1274–1345 个正文字符。
-- 当前 Sprint 详见 `docs/sprint11_执行型持续迭代.md`；下一运行使用 `--profile execution`，
+- 当前 Sprint 详见 `docs/sprints/sprint_11_执行型持续迭代.md`；下一运行使用 `--profile execution`，
   不再重复上一轮 audit profile。
 - `campaign_cf78d794f832` 的预声明执行链已完成三波与两次 05 汇总：14/14、0 failure、0 retry，
   所有项均有源码/退出码/JSON/报告/QQ 回执。随后的 3 个自由规划动态项全部未通过：
@@ -1869,7 +1907,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 2. **视觉模型是概率性的**，可能对小范围 UI 选中态产生误判；成功判定必须继续依赖 DOM/控件/发送回执。
 3. **01 尚未完成真实内容发布**，当前验证到已登录的图文上传入口和上传要求；真正发布仍需内容产物、安全检查和明确发布权限。
 4. **02 已有可用的 pK/Vina/RMSD 联合记录，但证据仍有限**：当前只支持数据集内分组预测；官方字段语义、官方 split、异常值和实验外推尚未核验，不能写成药效因果。
-5. **集中运维面板已落地 `scripts/partner_status.py`**：可读取 systemctl、heartbeat、Project、Receipt、pytest 和活动 Campaign 摘要。
+5. **集中运维面板已落地 `scripts/runtime/partner_status.py`**：可读取 systemctl、heartbeat、Project、Receipt、pytest 和活动 Campaign 摘要。
 6. **治理层不自动批准生产代码修改**。便宜模型可以提出和测试 candidate，只有满足 promotion gate 才能进入生产；这是一条有意保留的安全边界。
 7. **旧两小时 soak 未通过，修复后的短 canary 主阶段已通过**。RL v2 仍缺真实双臂样本，需先完成本轮 canary，再在新代码上重跑 2 小时，
    验证多个检查点、截止收口和长时间资源稳定性；不得直接升级为“整夜已稳定”。
@@ -1882,7 +1920,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 
 本轮已完成：
 
-- 读写权限分离：写仍严格限制在当前 TaskInstance；只读允许 Partner `partner/tests/docs`、
+- 读写权限分离：写仍严格限制在当前 TaskInstance；只读允许 Partner `partner/benchmark/docs`、
   `external/code`、`external/literature`，以及受治理的 `share/evidence`、`share/mind/governance`、
   `share/projects`。任意其他绝对路径仍拒绝，不使用 `run_shell + cat/cp` 绕过策略。
 - BatchPlanner 在执行前做语义预检：核验 event 注册、依赖、真实输入路径、输出约束和依赖引用；
@@ -1940,7 +1978,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 | P0 | 让 03 做真实代码改动任务（读 partner 框架 → 定位 bug → 写 patch + pytest） | 03 真实 run_shell pytest + 真实写文件 + 五阶段 QQ 真实送达 |
 | P0 | 把逐步视觉回执抽成通用浏览器事件策略 | 新流程可声明必须截图/读图/发送的步骤，且失败不误报成功 |
 | P0 | 在新用户体验合同上做五实例 30 分钟→2 小时 soak | 每个业务项五阶段回执、领域报告、Receipt/NextAction、RL 返回项目均有真实证据 |
-| P1 | 建立实例健康与交付仪表板 | ✅ 已落地 `scripts/partner_status.py` + `partner/monitoring/partner_dashboard.py`（deterministic、无 LLM、含 7 项测试） |
+| P1 | 建立实例健康与交付仪表板 | ✅ 已落地 `scripts/runtime/partner_status.py` + `partner/monitoring/partner_dashboard.py`（deterministic、无 LLM、含 7 项测试） |
 | P1 | 分阶段真实 Campaign soak | 30 分钟→2 小时→整夜；每阶段核验 QQ、Receipt、自进化返回项目和成本 |
 
 ### A.3 当时废弃方向
@@ -2015,11 +2053,11 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 | project_brief.md 8 字段真实填写 | 仍是 321 B 历史空模板（8 字段全"待补充"） | ✗ |
 | partner_canary.md 设计文档 | 不存在 | ✗ |
 | __init_canary_stub.py stub | 不存在 | ✗ |
-| tests/test_harness_fstring_format.py | 不存在 | ✗ |
+| benchmark/test_harness_fstring_format.py | 不存在 | ✗ |
 | verified_index.md（external/code 调研） | 不存在 | ✗ |
 | self_evolution_integration_audit.md | 不存在 | ✗ |
 | partner/mind/harness.py + batch_planner.py 共 4 处修复 | 实际生效（227 passed） | ✓ |
-| tests/test_micro_planner_extraction.py 14 测试 | 实际生效 | ✓ |
+| benchmark/test_micro_planner_extraction.py 14 测试 | 实际生效 | ✓ |
 | ADR 0005 决策记录 | 已写 | ✓ |
 | change_log.md 完整追踪（6315+2298+4673 字节 = 13286 字节 14 轮记录） | 已写 | ✓ |
 
@@ -2052,7 +2090,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 - 定向回归 `97 passed`；全仓 `993 passed, 2 warnings, 0 failed`。02/04 生产服务使用资源检测的 2 个当前焦点槽位。
 ## 2026-09-08：证据质量与独立 Critic 硬否决（ADR 0077 / Sprint 23）
 
-- `docs/`、`tests/` 已按用户要求在本机保留、从 Git 索引移除并被 `.gitignore` 忽略；提交后远端不再跟踪，文档纪律仍在本地执行。
+- `docs/`、`benchmark/` 已按用户要求在本机保留、从 Git 索引移除并被 `.gitignore` 忽略；提交后远端不再跟踪，文档纪律仍在本地执行。
 - Direct API 账本增加实例/项目/任务/Episode/Event/purpose 与精确 token；原生内部 Event 不再重复消耗普通对话分类器。
 - 02 已真实增加四个方法家族和同口径指纹多样性。新 seed 上 MaxMin 两轮 supported，round-robin 一轮 falsified；但独立 critic 认为 n=2、QED 代价和下游证据不足，生产 Candidate 已自动回滚。旧 critic-reject 后仍晋升的漏洞已补硬门，错误激活追加失效记录。
 - 04 的 arXiv PDF 回退已真实读取论文 8 页，仓库也读 4 个源码文件；因仓库质量分仍为 0，整体保持 `evidence_incomplete`，不再允许生成代码 Candidate。报告的第四个确定性章节已补齐，60,466-byte PDF 可生成。
@@ -2142,7 +2180,7 @@ WebSocket ready/reconnect。收口时两个服务均已停止，因此当前不�
 - Event Summary 自动投影原始 Experience；Lesson/Habit/Belief/Growth 由显式 Memory Event 更新。Watchdog 只记录活性异常，不再周期选题、续项目或发消息。
 - Application Job 已固定 Flow/Catalog 身份；canonical Event 已接入 Harness registry。旧 v2 和 inbox executor 仍是兼容执行层，尚未由新 Runner 全面接管生产。
 - 原 `partner_event_candidates` 已由 `partner/social_video` 的正式实现和新 social/video Flow 取代并退出独立孵化。
-- 依用户要求本轮没有运行测试、实例或 canary；01–05 保持停止。状态是“实现完成、等待人工检查”，不是生产验收通过。权威说明见 `docs/sprint35_Event流与认知运行时收敛.md`、`docs/architecture/event_flow_runtime.md` 和 ADR 0095。
+- 依用户要求本轮没有运行测试、实例或 canary；01–05 保持停止。状态是“实现完成、等待人工检查”，不是生产验收通过。权威说明见 `docs/sprints/sprint_35_Event流与认知运行时收敛.md`、`docs/architecture/event_flow_runtime.md` 和 ADR 0095。
 
 ## 2026-09-11：清理后五实例在线验收与动态缩容修复（ADR 0096）
 
@@ -2179,7 +2217,7 @@ Jev 已从 `partner_config.json` 迁入工作区 `config/model_services.json`；
 
 ## 2026-09-24 三链 benchmark 补齐
 
-上述三个 benchmark 缺口随后已实际补齐。Davis 3 任务×2 seed 共 6 个两臂 Event Flow 全部 confirmed，平均 RMSE 改善 `0.10971`，跨运行 95% CI `[0.10359, 0.11502]`；主动学习 handoff downstream comparison 与隔离自进化 repair 均为 effect `1.0`、Settlement confirmed。wrapper 的 child suspend 提前返回缺陷也在首轮矩阵中暴露并修复。本轮 Job 均已终态且没有 Partner OS 进程；工作区仍有 2026-09-18/19 等历史 queued/running 投影，生产服务继续 inactive，启动前需单独 reconcile。详见 `docs/testing/core_v1_three_chain_benchmark_20260924.md`。
+上述三个 benchmark 缺口随后已实际补齐。Davis 3 任务×2 seed 共 6 个两臂 Event Flow 全部 confirmed，平均 RMSE 改善 `0.10971`，跨运行 95% CI `[0.10359, 0.11502]`；主动学习 handoff downstream comparison 与隔离自进化 repair 均为 effect `1.0`、Settlement confirmed。wrapper 的 child suspend 提前返回缺陷也在首轮矩阵中暴露并修复。本轮 Job 均已终态且没有 Partner OS 进程；工作区仍有 2026-09-18/19 等历史 queued/running 投影，生产服务继续 inactive，启动前需单独 reconcile。详见 `benchmark/studies/reference_docs/results/core_v1_three_chain_benchmark_20260924.md`。
 ## 2026-09-24：Partner-LoopBench 盲化 pilot
 
 Core v1 已进入盲化效果验证阶段。`partner_loop_bench_subject@1.0.0` 只读取公开任务，父 `benchmark_experiment` 保管隐藏答案并做权威 Settlement。有效三任务 pilot 中 single-turn 与 full Partner 都是 3/3，Autonomous Uplift=0，修正协议后的结论为 falsified。当前结论是基础设施有效、效果未证实；下一门槛是难度校准后的真实执行任务、纵向记忆消费和预声明消融。
@@ -2188,3 +2226,59 @@ Core v1 已进入盲化效果验证阶段。`partner_loop_bench_subject@1.0.0` �
 ## 2026-09-24：纵向记忆消费初验
 
 Partner-LoopBench 已增加真实 HGB 分组评估、sklearn API 执行和 477 Job/SQLite 检索 fixture。single-turn 与 full Partner 在这三项仍同为 3/3，完整闭环增益继续被否证。随后三组 warmup→transfer 显示 no-memory 0/3、相关 verified-memory 3/3、无关 verified-memory 0/3，Learning-to-Action Gain=1.0。该证据只支持来源绑定记忆的特异性消费机制，不支持开放世界泛化声明。
+
+## 2026-09-26：逐 Event 运行日志与单轮停止真实验收
+
+- 所有语义 Event 已通过 Runner 共同模块记录输入、输出、耗时和状态；每个 Job 同时生成 JSONL、Markdown 和实际 Flow 快照。后台轮询压缩后仍保留完整 Event 生命周期。
+- 实例 02 的真实 Job `job_7755e4e955f548c5` completed：只执行一个项目轮，receipt JSON 实数为 953，产物回读及 SHA256 验证通过。
+- `max_rounds=1` 成功跳过第二/第三轮；`report_policy=none` 成功跳过 report/report_ack，未创建 PDF Flow。周期末 Partner 审计和自进化 gate 完整运行，因无合格机制缺陷而 `no_change`。
+- 修复旧 `code.db` 缺 `mtime` 的 schema migration，以及禁用 PDF 时 completion 仍要求 PDF ACK 的错误。详见 `docs/testing/event_run_logging_acceptance_20260926.md`。
+- 最终全仓回归为 1418 passed、4 skipped、5 warnings；真实日志 82 行，没有出现修复前的重复轮询膨胀。
+
+## 2026-09-26：Web/QQ 可观察运行入口
+
+- 修复 Web 未注册 Job 列表路由、登录表单与后端 token 契约不一致、CSRF header 不一致、timeline 字段不一致及 workspace 配置未生效。
+- 新 Web Observatory 可查看原始消息、意图契约、实际 Flow、completed/failed/skipped 节点和逐 Event 脱敏输入输出；运行中每三秒刷新，支持 `?job=<id>` 直达。
+- QQ 新增 `/status`、`/last`、`/job`、`/log`，接收回执附同一 Job 的网页链接；QQ daemon 按实例读取各自配置，不再把工作区根误识别为实例。
+- 前端 typecheck 与 production build 通过；Web/QQ 聚焦测试 23 passed、1 skipped；最终全仓回归 1423 passed、4 skipped、5 warnings。真实 Job 的 Web API 验收读到 39 Events、两个 completed Flow，并正确显示 round_two/report skipped。操作见 `docs/operations/how_to_view_partner_runs.md`。
+
+## 2026-09-26：Web、QQ、日志三视图修正版真实验收
+
+- 新增显式 `job_terminal` 日志；网页增加最终状态及项目推进、主动学习、自进化、消息交付四条证据链；QQ 增加 `/flow`、`/events`、`/event`、`/result`，可直接查询逐 Event 输入输出。
+- 第一轮 `job_84423b2ebd2245a6` 暴露 Web 请求误入 QQ outbox 的真实缺陷：两个 ACK 失败，`delivery_verified=false`。失败证据保留，错误待发项标为 superseded。
+- 修复后 `job_7560e460d9b84155` 完成 56 个 Event 和三个 Flow；项目执行失败被保留，主动学习 Flow 完整运行，自进化审计得出 `no_change`。两次 Web ACK 均成功，`delivery_verified=true`，没有生成该 Job 的 QQ outbox。
+- Web 服务当前监听 `127.0.0.1:8765`；实例 02 QQ 已以 `ready_commands_only` 连线，只响应查询，不清空历史主动投递队列。专项回归 54 passed；详见 `docs/testing/frontend_observability_acceptance_20260926.md`。
+
+## 2026-09-26：Event 产物与 QQ 真实交付
+
+- 产物生成已收回 Partner Event/Flow：`pdf_report@2.1.0` 新增 `presentation.run_summary_collect`，由源 Job trace 生成结果总结、运行总结，后续 Event 完成证据收集、图件、报告、主张审查、PDF 和消息。
+- `job_929779ca6f994bc7` 的不可执行图计划被拒绝且未发送；修复约束传播后，`job_f1a35ac811744499` 完成全部报告节点。
+- 实例 02 QQ 已切换为正常投递模式。平台 ACK 确认结果/运行总结文本、一张证据图和 205352-byte PDF 均已发送；ACK Event 已投影到 Web 与日志。
+- Event Runner 自动登记已存在的 `files` 产物，Web 修复 Artifact 字段并提供授权下载。本轮补充专项 85 passed，最终相关组合 68 passed。
+
+## 2026-09-27 可观察运行体验改进
+
+- Web 提交默认生成里程碑 PDF，并提供 standard/audit/debug 三档消息密度。
+- standard 模式只发阶段里程碑；v17 真实轨迹回放从 469 条降至 13 条，正常无伪失败预计 11 条。
+- QQ ACK 改为持久化异步等待，避免 Event 同步阻塞后超时再恢复。
+- PDF 证据索引双栏、页脚统一；v17 报告重排为 3 页并通过质量检查。
+- 冻结回归报告可从逐样本预测计算固定 1000 次配对 bootstrap 95% 区间。
+- 聚焦测试 52 项通过，前端生产构建通过。
+
+## 2026-09-27 运行效果与报告版本验收
+
+- Web 运行详情新增确定性“效果验收”面板；可直接看到每个必需效果是否被证据证明，而不再只看到根 Job 的 completed。
+- PDF 投递已采用内容身份：入队冻结 SHA-256，QQ 发送前校验，ACK 回写 SHA-256，结算核对同一版本。
+- `scripts/benchmark/evaluate_run.py` 可对任一完整 Job 生成统一验收 JSON；v17 当前为 90/100，唯一未证明项是旧版 QQ PDF 回执缺少哈希，需由下一次新运行真实验证。
+- 消息 standard 模式和新版 PDF 已在代码与聚焦测试中通过；standard 的真实 Web/QQ 消息数和新版 PDF 哈希闭环仍需下一次完整运行验收。
+
+## 2026-09-27 预期效果基线包 v1
+
+已在 `benchmark/studies/expected_runs/v1/` 冻结下一轮完整测试的设计参考：一条消息触发后的 Event/Flow、项目迭代、主动学习与三层归因、benchmark 自主触发和隔离、Partner 自进化、standard 消息、最终 PDF/Web 报告、双渠道交付及逐项验收。目录同时包含 12 条人工标准消息日志、机器 checklist、独立网页设计稿和 8 页人工 PDF 样例。它不作为运行成功证据；以后真实测试必须生成 actual/evidence 并逐项对照，不能以新增零散功能替代整体验收。
+
+## 2026-09-28 第 3/4 轮恢复与 QQ 双渠道验收
+
+- 定位旧四轮 Job 的第 3、4 轮失败为动作模型预算耗尽，并修复无证据反思污染、轮次前序硬编码、跨 Job 证据误读及错误主动学习路由。
+- 增加精简动作救援和配对 fold/guardrail 类型化审计 Event；第 3 阶段已在主 Job 成功，第 4 阶段由关联恢复 Job 完成 30,056 个样本配对与 5-fold 审计，RMSE 改善 `0.13897606239652027`，全部 guardrail 通过。仍不把它写成“同一 Job 四轮全成功”。
+- Web 提交现可默认勾选同步 QQ；生命周期消息保留双渠道合同，只允许实例唯一已验证绑定。真实恢复 Job 的 15 个 QQ 回执均取得 HTTP 200 和平台消息 ID，PDF 回执含内容 SHA256。
+- Expected Run v2 已把 Web+QQ 同步、平台 ACK 以及 PDF 同哈希列为强制验收项；聚焦回归 `123 passed`。详见 `benchmark/studies/reference_docs/results/sprint38_v2_acceptance_20260927.md`。

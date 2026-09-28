@@ -33,6 +33,7 @@ dependencies = [
     "reportlab>=4.0",
     "json5>=0.9",
     "json-repair>=0.30",
+    "flask>=3.0",
 ]
 
 [project.optional-dependencies]
@@ -78,4 +79,5 @@ shells = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["benchmark"]
+norecursedirs = ["studies"]

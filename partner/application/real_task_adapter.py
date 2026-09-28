@@ -2,7 +2,7 @@
 
 The bounded action is a real repository task, not a metric toy:
 
-* the input is a real task definition on disk (``benchmarks/real_tasks/<id>/task.json``)
+* the input is a real task definition on disk (``benchmark/studies/real_tasks/<id>/task.json``)
   that names a real failing test, the real module the candidate may change, and the
   real patch the candidate declares;
 * the measurement is the project's own test runner.  ``pytest`` decides how many tests
@@ -50,7 +50,7 @@ TEST_RE = re.compile(r"runtime_real_task[A-Za-z0-9_\-]*")
 SUMMARY_RE = re.compile(r"(\d+) (passed|failed|error|errors|skipped)")
 
 #: Where task definitions live, relative to the project root.
-TASKS_DIRNAME = ("benchmarks", "real_tasks")
+TASKS_DIRNAME = ("benchmark", "studies", "real_tasks")
 
 
 class RealTaskError(RuntimeError):

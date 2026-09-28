@@ -104,7 +104,12 @@ class EventMemory:
         if kind not in paths:
             raise ValueError(f"unknown memory kind: {kind}")
         import uuid
-        row = {"schema_version": 1, "recorded_at": _now(), "record_id":uuid.uuid4().hex, **dict(record)}
+        supplied = dict(record)
+        default_id = (f"{kind}_{supplied.get('scope')}"
+                      if supplied.get("scope") and supplied.get("content") == supplied.get("scope")
+                      else uuid.uuid4().hex)
+        row = {"schema_version": 1, "recorded_at": _now(),
+               "record_id": default_id, **supplied}
         _append(paths[kind], row)
         return str(paths[kind])
 

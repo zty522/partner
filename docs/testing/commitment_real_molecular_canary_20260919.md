@@ -18,7 +18,7 @@
 > 其负结果保留，不删除、不覆盖。
 >
 > 三点具体更正：
-> 1. 实验由 Hermes 直接运行 `scripts/run_commitment_molecular_canary.py`，**不是** 02 实例完成；
+> 1. 实验由 Hermes 直接运行 `scripts/benchmark/run_commitment_molecular_canary.py`，**不是** 02 实例完成；
 > 2. 选择的 `scaffold_cap + QED/SA` 已偏离当前主线（项目简报明确"重复 QED/SA 头部排序不会增加
 >    目标活性证据"，主线是 TargetDiff pK 预测、外部实验 pK 测试集与靶点级新特征）；
 > 3. `scaffold_cap` 不使用 seed，两个 declared seed 产生完全相同结果，**不能**作为两个独立重复。
@@ -47,7 +47,7 @@
 
 | # | 命令 | 退出码 | 结果 |
 |---|---|---|---|
-| 1 | `PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/` | 0 | **125 passed** |
+| 1 | `PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/` | 0 | **125 passed** |
 | 2 | `python3 -c "from partner.events import builtin_definitions; builtin_definitions()"` | 0 | 135 条定义、无重名 |
 | 3 | `git diff --check` | 0 | clean |
 | 4 | canary 运行器 `--dry-run` | 0 | 取锁→只读投影→契约校验→冻结（freeze_hash `eb6dbbacdbc2897a`，replicates=2）→停 |
@@ -56,7 +56,7 @@
 
 ## 4. 投递与 ID
 
-- 投递命令：`cd /mnt/e/work/partner && python3 scripts/send_manual_task.py --workspace /mnt/e/work/partner_workspace --instance 02 --task-file <task>`
+- 投递命令：`cd /mnt/e/work/partner && python3 scripts/messaging/send_manual_task.py --workspace /mnt/e/work/partner_workspace --instance 02 --task-file <task>`
 - inbox row id：**`manual_02_1789800227_9f8b4c48317b`**（1881 chars，创建于 2026-09-19T06:43:47Z）
 - 任务文件：`benchmark_runs/commitment_canary/instance02_task.txt`
 - commitment 侧 ID：run_id `molecular_canary_02`、bet_id `bet_molecular_canary_02`
@@ -137,7 +137,7 @@ publish_blockers      = ['falsification_violation:sa_ceiling_broken',
 02 侧未消费该任务，原因是一个**由本轮指令本身造成的冲突**：
 
 - 02 实例当前**没有进程在运行**（`instance.pid` 81637 是陈旧 pid）；
-- 唯一消费 `desktop_inbox.jsonl` 的入口是旧主链 `scripts/run_instance_native_runtime.py`
+- 唯一消费 `desktop_inbox.jsonl` 的入口是旧主链 `scripts/runtime/run_instance_native_runtime.py`
   （及其 worker / bridge / readmission）；
 - 启动它会按 `_worker_count` 领取排队的 Job，即消费那 **139 个 queued / 20 个 running**；
 - 而本轮指令明确要求"不得顺带领取 139 个 queued Job"、"不得启动无界 campaign"。
@@ -180,7 +180,7 @@ publish_blockers      = ['falsification_violation:sa_ceiling_broken',
 1. **legacy 反推 production**（本轮主修复，数据合同层）；
 2. **第一次真实 canary BLOCKED**：`PoolError: unknown selection method ''` —— canary 声明的候选空间
    把动作放在 `method` 键，而 proposer 从 `params` 读取动作参数；内核正确地拒绝了空动作。
-   已修接线 + 新增 `tests/commitment/test_canary_wiring.py`（4 项）并在同一有界任务内重跑；
+   已修接线 + 新增 `benchmark/commitment/test_canary_wiring.py`（4 项）并在同一有界任务内重跑；
 3. **`falsified` 曾禁止 `improvement_over_baseline=True`**：真实场景（主指标改善但 guardrail 失败）
    会被这个旧不变量挡住。已放开并让机器规则显式归因，新增测试
    `test_falsified_with_improvement.py`；

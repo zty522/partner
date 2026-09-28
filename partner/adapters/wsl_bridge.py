@@ -1,7 +1,7 @@
 """MAINTENANCE_ONLY_INDEXING / BULK-RESCAN.
 
 This module performs bounded bulk ingestion via ``os.walk`` only under explicit one-shot maintenance hooks (e.g.
-``scripts/refresh_resource_indexes.py`` and the dedicated bootstrap paths under ``partner/index/resource_catalog.py``).
+``scripts/governance/refresh_resource_indexes.py`` and the dedicated bootstrap paths under ``partner/index/resource_catalog.py``).
 Production Event code MUST NOT import this module to walk the
 filesystem.  Read access in production goes through the indexed
 resource layer (``partner/index/*.py``).  See

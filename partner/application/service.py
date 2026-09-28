@@ -882,7 +882,7 @@ class PartnerApplicationService:
         persona_hint: str = "",
         project_id: str = "",
         attachments: Sequence[str | os.PathLike | Mapping[str, object]] = (),
-        report_policy: str = "milestone",
+        report_policy: str | None = None,
         execution_constraints: Mapping[str, object] | None = None,
         mode: str = "",
         scope: str = "",
@@ -916,10 +916,18 @@ class PartnerApplicationService:
                           or incoming_constraints.get("benchmark_method_arm")
                           or "")
         ablation_drop = str(incoming_constraints.get("ablation_drop") or "")
+        conversation_project = ""
+        if not project_id and persona_hint and sender_id:
+            try:
+                from partner.projects.session_context import SessionContext
+                conversation_project = (SessionContext(self.root).lookup(
+                    f"{channel}:{persona_hint}:{sender_id}") or "")
+            except Exception:
+                conversation_project = ""
         intent_params_base = {
             "request": clean,
             "attachments": list(attachments),
-            "project_id": project_id or persona_hint or "",
+            "project_id": project_id or conversation_project or persona_hint or "",
             "available_projects": self._list_available_projects(persona_hint),
             "mode": mode,
             "scope": scope,
@@ -977,6 +985,12 @@ class PartnerApplicationService:
         # dedicated improvement flow is always selected.
         if mode in {"self_improvement", "learning_improvement"} and scope == "partner":
             route = "project_iteration"
+        if mode == "project_iteration":
+            route = "project_iteration"
+            instance_project = (PROJECTS.get(persona_hint) or (persona_hint, ""))[0]
+            dispatch_target = (project_id or
+                               (dispatch_target if dispatch_target not in {"", "direct_answer"} else "") or
+                               instance_project or "project_iteration")
         if mode == "benchmark":
             route = "project_iteration"
             dispatch_target = project_id or dispatch_target or persona_hint or "benchmark"
@@ -1004,7 +1018,7 @@ class PartnerApplicationService:
                         persona_hint=persona_hint or "",
                         project_id=dispatch_target or persona_hint or "",
                     )
-                return Submission(True, "", dispatch_target or persona_hint or "",
+                return Submission(True, "", conversation_project or dispatch_target or persona_hint or "",
                                   persona_hint, "completed", "direct_answer",
                                   answer_text, "")
             except Exception as exc:  # noqa: BLE001
@@ -1066,16 +1080,43 @@ class PartnerApplicationService:
         # Development rollout is scoped to explicitly configured instances.
         # This only changes a new project request; it never schedules work itself.
         cycle_policy = self._application_config().get('bounded_evolution_cycle') or {}
-        constraint_input = dict(incoming_constraints)
+        # The intent Event may extract only user-explicit round bounds.  The
+        # configured rollout supplies defaults, while structured API fields
+        # remain authoritative.  Keeping this precedence prevents a default
+        # two-round rollout from overriding an explicit "one run, then stop".
+        synthesized_constraints = synth_sem.get('execution_constraints')
+        if not isinstance(synthesized_constraints, Mapping):
+            synthesized_constraints = {}
+        synthesized_constraints = {
+            key: value for key, value in synthesized_constraints.items()
+            if key in {'max_rounds'}
+        }
+        explicit_round_budget = ('max_rounds' in incoming_constraints
+                                 or 'max_rounds' in synthesized_constraints)
+        constraint_input = dict(synthesized_constraints)
         if (persona_hint in cycle_policy.get('instances', [])
                 and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}):
             defaults = {'evolution_cycle': True, 'max_rounds': 2,
                         'evolution_apply': cycle_policy.get('apply') is True,
                         'action_seconds': cycle_policy.get('action_seconds', 300)}
-            constraint_input = {**defaults, **constraint_input}
+            constraint_input = {**defaults, **constraint_input, **incoming_constraints}
+        else:
+            constraint_input = {**constraint_input, **incoming_constraints}
         intent_contract['execution_constraints'] = (
             dict(validate_constraints(constraint_input))
             if constraint_input else {}
+        )
+        # Disabling the self-evolution cycle necessarily disables production
+        # application.  Keep one normalized contract so downstream Events do
+        # not see the contradictory pair cycle=false/apply=true.
+        if intent_contract['execution_constraints'].get('evolution_cycle') is False:
+            intent_contract['execution_constraints']['evolution_apply'] = False
+        # A transport/API supplied policy is authoritative.  When the caller
+        # omitted it, honour an explicit policy extracted from the user's
+        # request (for example “不生成 PDF”), then fall back to milestone.
+        effective_report_policy = str(
+            report_policy if report_policy is not None
+            else synth_sem.get('report_policy') or 'milestone'
         )
         if project_id:
             intent_contract['explicit_project_id'] = project_id
@@ -1123,9 +1164,13 @@ class PartnerApplicationService:
         else:
             flow_name = "project_iteration"
 
-        # Explicit, bounded two-round workflow; semantic project selection still
-        # belongs to the intent Events, not keyword routing.
-        if intent_contract['execution_constraints'].get('evolution_cycle') and not mode:
+        # An explicit round budget selects the project-cycle orchestrator even
+        # when post-run self-evolution is disabled.  These are independent
+        # controls: ``max_rounds`` shapes project iteration, while
+        # ``evolution_cycle`` decides whether Partner may evolve itself.
+        cycle_constraints = intent_contract['execution_constraints']
+        if (cycle_constraints.get('evolution_cycle')
+                or explicit_round_budget) and mode in {'', 'project_iteration'}:
             flow_name = 'project_cycle'
 
         try:
@@ -1142,7 +1187,10 @@ class PartnerApplicationService:
                 origin_instance=persona_hint if persona_hint in PROJECTS else "",
                 assigned_instance=assigned,
                 intake_instance_id=persona_hint or "",
-                created_at=_now(), updated_at=_now(), report_policy=report_policy,
+                # Report policy is a caller contract.  Intent synthesis may
+                # recommend content, but it must never silently suppress a
+                # report explicitly requested by Web/QQ/CLI.
+                created_at=_now(), updated_at=_now(), report_policy=effective_report_policy,
                 attachments=[{"path": str(item.get("path")) if isinstance(item, Mapping) else item}
                              for item in attachments],
                 intent_contract_path="",
@@ -1166,15 +1214,32 @@ class PartnerApplicationService:
                 flow_definition, catalog_version=event_catalog.version,
                 task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
                 run_context={
+                    'runtime_trace_token': f'runtime_trace_{job.job_id}',
                     'run_mode': job.run_mode, 'benchmark_run_id': benchmark_run_id,
                     'benchmark_protocol_id': benchmark_protocol_id,
                     'benchmark_arm_id': '', 'checkpoint_policy_ref': checkpoint_policy_ref,
                     'evaluation_visibility': job.evaluation_visibility,
                     'catalog_version': event_catalog.version,
-                } if mode == 'benchmark' else {},
+                } if mode == 'benchmark' else {
+                    'runtime_trace_token': f'runtime_trace_{job.job_id}',
+                },
             )
             flow_state.root_event_id = received.event_id
+            # Intake owns the first two visible lifecycle transitions.  Mark
+            # the plan here so the worker does not announce the same root plan
+            # again; dynamically inserted child Flows still announce theirs.
+            flow_state.run_context["lifecycle_plan_announced"] = True
             EventFlowStore(self.root).save(flow_state)
+            try:
+                from partner.runtime.event_run_log import EventRunLog
+                EventRunLog(self.root, job.job_id).intake(
+                    message=clean, channel=channel, sender_id=sender_id,
+                    project_id=dispatch_target, instance_id=assigned,
+                    intent_contract=intent_contract, flow_id=flow_state.flow_id,
+                    definition=flow_definition,
+                )
+            except Exception:
+                pass  # Run logs are non-authoritative and must fail open.
             job.event_catalog_version = event_catalog.version
             job.flow_id = flow_state.flow_id
             job.flow_type = flow_state.flow_type
@@ -1183,8 +1248,31 @@ class PartnerApplicationService:
                 self._save(job)
                 self._append_event("job_accepted", job, route=flow_name, channel=channel)
                 self._dispatch_locked(job)
-            # Reply: warm_reply from synthesize, with fallback
-            reply = warm_reply or f"已派发到 {flow_name}。"
+            # Acceptance and the concrete Flow plan are user-facing work too:
+            # compose, review and deliver them through dedicated Events.
+            ctx_for_llm.job_id = job.job_id
+            ctx_for_llm.project_id = dispatch_target
+            ctx_for_llm.instance_id = assigned
+            accepted_notice = {}
+            try:
+                from partner.runtime.lifecycle_notifications import publish_lifecycle
+                accepted_notice = publish_lifecycle(
+                    workspace=self.root, ctx=ctx_for_llm, lifecycle_phase="accepted",
+                    root_event_id=received.event_id, request=clean, flow_name=flow_name,
+                    intent_contract=intent_contract)
+                planned = []
+                for flow_node in flow_definition.nodes:
+                    event_def = event_catalog.get(flow_node.event_type)
+                    planned.append(event_def.description if event_def else flow_node.event_type)
+                publish_lifecycle(
+                    workspace=self.root, ctx=ctx_for_llm, lifecycle_phase="flow_planned",
+                    root_event_id=received.event_id, flow_name=flow_name,
+                    planned_events=planned, intent_contract=intent_contract)
+            except Exception as exc:  # lifecycle projection cannot invalidate intake
+                logging.getLogger(__name__).warning(
+                    "lifecycle intake notification failed for %s: %s", job.job_id, exc)
+            reply = str(accepted_notice.get("message") or warm_reply
+                        or f"已派发到 {flow_name}。")
             return Submission(True, job.job_id, dispatch_target, assigned,
                               job.status, flow_name, reply, "")
         except Exception as exc:  # noqa: BLE001
@@ -1271,9 +1359,20 @@ class PartnerApplicationService:
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
                 task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
+                run_context={'runtime_trace_token': f'runtime_trace_{job.job_id}'},
             )
             flow_state.root_event_id = received.event_id
             EventFlowStore(self.root).save(flow_state)
+            try:
+                from partner.runtime.event_run_log import EventRunLog
+                EventRunLog(self.root, job.job_id).intake(
+                    message=text, channel=channel or "local", sender_id=job.sender_id,
+                    project_id=dispatch_target, instance_id=assigned,
+                    intent_contract=intent_contract, flow_id=flow_state.flow_id,
+                    definition=flow_definition,
+                )
+            except Exception:
+                pass
             job.event_catalog_version = event_catalog.version
             job.flow_id = flow_state.flow_id
             job.flow_type = flow_state.flow_type

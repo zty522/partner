@@ -551,15 +551,35 @@ class QQQfficialBot:
                     timeout=aiohttp.ClientTimeout(total=10),
                 ) as resp:
                     if resp.status in (200, 201, 204):
+                        try:
+                            body = await resp.json(content_type=None)
+                        except Exception:
+                            body = {}
+                        self._last_api_post_receipt = {
+                            "http_status": resp.status,
+                            "endpoint": endpoint,
+                            "platform_message_id": str((body or {}).get("id") or ""),
+                            "timestamp": str((body or {}).get("timestamp") or ""),
+                        }
                         self._stats["messages_sent"] += 1
                         return True
                     else:
                         text = await resp.text()
+                        self._last_api_post_receipt = {
+                            "http_status": resp.status, "endpoint": endpoint,
+                            "platform_message_id": "", "error": text[:500],
+                        }
                         logger.error(f"API POST {endpoint} failed: {resp.status} {text}")
                         return False
         except Exception as e:
             logger.error(f"API request error: {e}")
+            self._last_api_post_receipt = {"http_status": 0, "endpoint": endpoint,
+                                           "platform_message_id": "", "error": str(e)[:500]}
             return False
+
+    def get_last_api_post_receipt(self) -> Dict:
+        """Return the last concrete HTTP response without credentials."""
+        return dict(getattr(self, "_last_api_post_receipt", {}) or {})
 
     async def _api_get(self, endpoint: str) -> Optional[Dict]:
         """Make a GET request to the QQ Bot API."""

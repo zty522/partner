@@ -15,6 +15,7 @@ from .views import ArtifactView, EventDetail, JobView, UserUpdate
 LINE_LABEL = {
     "project": "项目", "active_learning": "外部学习",
     "self_evolution": "系统改进", "interaction": "对话",
+    "notification": "运行消息",
 }
 
 
@@ -80,11 +81,17 @@ class ApplicationReadModel:
             "active_learning.synthesize", "active_learning.matched_verify",
             "self_evolution.issue_diagnose", "self_evolution.candidate_propose",
             "self_evolution.matched_compare", "self_evolution.promotion_decide",
+            "notification.lifecycle_compose",
         }
-        for row in self.ledger.recent_summaries(limit=limit, project_id=project_id):
+        # Lifecycle notifications add three auditable summaries around every
+        # business transition.  Scan a wider bounded window, then apply the
+        # public limit after filtering, so notification records cannot crowd
+        # all business updates out of the Web conversation.
+        for row in self.ledger.recent_summaries(
+                limit=max(limit * 20, 200), project_id=project_id):
             view = project_summary(row)
             series = str(row.get("series") or "project")
-            if series not in {"project", "active_learning", "self_evolution", "interaction"}:
+            if series not in {"project", "active_learning", "self_evolution", "interaction", "notification"}:
                 continue
             event_type = str(row.get("event_type") or "")
             # Only canonical product Events enter the default conversation.
@@ -98,7 +105,7 @@ class ApplicationReadModel:
                 update_id=str(row.get("event_id") or ""),
                 job_id=str(row.get("job_id") or row.get("correlation_id") or ""),
                 project_id=str(row.get("project_id") or ""),
-                line="conversation" if series == "interaction" else series,
+                line="conversation" if series in {"interaction", "notification"} else series,
                 kind="blocked" if row.get("status") in {"failed", "blocked"} else
                      "completed" if row.get("notification_kind") in {"final", "milestone"} else "progress",
                 subject=_safe_text(row.get("headline") or LINE_LABEL.get(series, series)),
@@ -109,6 +116,8 @@ class ApplicationReadModel:
                 created_at=str(row.get("created_at") or row.get("updated_at") or ""),
                 evidence_refs=tuple(str(x) for x in row.get("evidence_refs") or []),
             ))
+            if len(result) >= limit:
+                break
         return result
 
     def event_details(self, job_id: str = "", limit: int = 200) -> list[EventDetail]:
@@ -116,12 +125,14 @@ class ApplicationReadModel:
         for row in self.ledger.recent_summaries(limit=limit, include_audit=True):
             if job_id and str(row.get("job_id") or row.get("correlation_id") or "") != job_id:
                 continue
+            semantic = row.get("semantic_output") if isinstance(row.get("semantic_output"), dict) else {}
             result.append(EventDetail(
                 event_id=str(row.get("event_id") or ""), flow_id=str(row.get("flow_id") or ""),
                 node=str(row.get("node_id") or ""), series=str(row.get("series") or ""),
                 status=str(row.get("status") or ""), semantic_summary=str(row.get("headline") or ""),
                 claims=tuple(row.get("claims") or []), evidence=tuple(row.get("evidence_refs") or []),
                 token_usage=dict(row.get("token_usage") or {}),
+                model_receipt=dict(semantic.get("model_call_receipt") or {}),
                 failure={"class": row.get("failure_class"), "mechanism": row.get("mechanism")},
                 next_candidates=tuple(row.get("next_event_candidates") or []),
             ))

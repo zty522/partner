@@ -96,6 +96,7 @@ class EventDetail:
     claims: tuple[dict[str, Any], ...] = ()
     evidence: tuple[str, ...] = ()
     token_usage: dict[str, Any] = field(default_factory=dict)
+    model_receipt: dict[str, Any] = field(default_factory=dict)
     failure: dict[str, Any] = field(default_factory=dict)
     next_candidates: tuple[dict[str, Any], ...] = ()
 

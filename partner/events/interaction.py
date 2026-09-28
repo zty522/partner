@@ -48,9 +48,13 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
             "  - 已有 project_id：从下方当前 instance 项目列表中选一个\n"
             "payload 仅在 dispatch_target=browser_video_learning / xhs_authoring 时填写。"
             "warm_reply：1-2 句普通中文，告诉用户接下来要做什么；不要承诺未确定的结果；不要复读内部 ID、文件名、哈希。"
+            "execution_constraints 只提取用户原文明示的运行边界：明确只运行一轮、一次或禁止后续迭代时写"
+            "{\"max_rounds\":1}；明确指定轮数时写对应 max_rounds；未明示则写空对象。不得自行添加轮数。"
+            "report_policy：用户明确不要报告或 PDF 时写 none；明确要求最终报告时写 final；其余写 milestone。"
+            "report_policy=none 时，warm_reply 不得说生成报告或 PDF；JSON 验收产物应称为记录或文件。"
             "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
             "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
-              "knowledge_gaps,route,dispatch_target,warm_reply,payload,reason。"
+              "knowledge_gaps,route,dispatch_target,warm_reply,payload,execution_constraints,report_policy,reason。"
         ),
     }
     prompt = (
@@ -73,6 +77,8 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
     )
     raw, usage = call_model(ctx, purpose=f"intent_{role}", prompt=prompt)
     value = json_object(raw)
+    if value.get("route") == "project":
+        value["route"] = "project_iteration"
     calls = 1
     if role == 'synthesize' and value.get('route') not in ('direct_answer', 'project_iteration'):
         original_raw = raw
@@ -83,6 +89,8 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
                  for k in set(usage) | set(retry_usage)
                  if isinstance(usage.get(k, 0), (int, float)) and isinstance(retry_usage.get(k, 0), (int, float))}
         value = json_object(raw)
+        if value.get("route") == "project":
+            value["route"] = "project_iteration"
         calls += 1
         if value.get('route') not in ('direct_answer', 'project_iteration'):
             raise ValueError('intent synthesize route remains invalid after one schema repair')

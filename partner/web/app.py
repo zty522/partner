@@ -30,8 +30,10 @@ def create_app(*, workspace_root: str | None = None) -> Any:
 
     from partner.web.auth import install_auth
     from partner.web.api import register_api_routes
+    from partner.web.job_views import register_job_views
     install_auth(app)
     register_api_routes(app)
+    register_job_views(app)
 
     @app.get("/")
     def root():

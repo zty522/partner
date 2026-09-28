@@ -134,9 +134,15 @@ def _now() -> float:
 
 
 def init(project_root):
-    ws_dir = workspace_dir(project_root)
-    db_path = ws_dir / "jobs.db"
-    repo = JobRepository(db_path)
+    legacy = Path(project_root) / "jobs.db"
+    if legacy.exists():
+        from .runtime_storage import _check_native
+        _check_native(legacy.parent)
+        db_path = legacy
+    else:
+        ws_dir = workspace_dir(project_root)
+        db_path = ws_dir / "jobs.db"
+    repo = JobRepository(db_path, project_root=Path(project_root))
     repo._ensure_schema()
     return repo
 
@@ -144,12 +150,13 @@ def init(project_root):
 def connect_existing(project_root):
     ws_dir = workspace_dir(project_root)
     db_path = ws_dir / "jobs.db"
-    return JobRepository(db_path)
+    return JobRepository(db_path, project_root=Path(project_root))
 
 
 class JobRepository:
-    def __init__(self, db_path):
+    def __init__(self, db_path, project_root=None):
         self.db_path = Path(db_path)
+        self.project_root = Path(project_root).resolve() if project_root is not None else None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._schema_ready = False
 
@@ -157,13 +164,54 @@ class JobRepository:
         if self._schema_ready:
             return
         conn = get_connection(self.db_path)
+        # Phase 1: base tables (or the minimum metadata table for legacy DBs).
+        existing_jobs = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
+        if existing_jobs:
+            conn.execute("CREATE TABLE IF NOT EXISTS schema_meta "
+                         "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            # Phase 2: column migration before any dependent index exists.
+            self._migrate(conn)
         conn.executescript(SCHEMA_SQL)
         self._migrate(conn)
+        # Phase 3: indexes that depend on migrated columns.
+        conn.executescript(SCHEMA_EXTENSION_INDEXES_SQL)
         conn.execute(
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
+        if self.project_root is not None:
+            from .runtime_storage import workspace_incarnation
+            identity = workspace_incarnation(self.project_root)
+            previous = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='workspace_identity'").fetchone()
+            changed = previous is not None and previous["value"] != identity
+            explicit_legacy_db = self.db_path.resolve() == (self.project_root / 'jobs.db').resolve()
+            ephemeral_legacy = (previous is None and not explicit_legacy_db and
+                                str(self.project_root).startswith(('/tmp/', '/var/tmp/')))
+            if changed or ephemeral_legacy:
+                # The native DB outlived a workspace that was deleted and
+                # recreated at the same path. Its queue belongs to the former
+                # incarnation and must never leak into the new workspace.
+                for table in ("ready_jobs", "job_history", "outbox", "jobs"):
+                    conn.execute(f"DELETE FROM {table}")
+                conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('job_history','outbox')")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('workspace_identity',?)",
+                (identity,))
         self._schema_ready = True
+        # Phase 4: verification is available via _verify_schema for startup audits.
+
+    def _verify_schema(self):
+        """Verify the columns and indexes needed by queue and idempotency."""
+        self._ensure_schema()
+        conn = get_connection(self.db_path)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(jobs)")}
+        missing = {"request_id", "request_fingerprint", "lease_owner"} - cols
+        if missing or "idx_jobs_request_id" not in indexes:
+            raise RuntimeError(f"incomplete jobs schema: missing={sorted(missing)}")
+        return True
 
     def _migrate(self, conn):
         existing = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
@@ -179,6 +227,8 @@ class JobRepository:
             ("persona_hint", "TEXT"), ("sender_name", "TEXT"),
             ("flow_id", "TEXT"), ("flow_type", "TEXT"),
             ("title", "TEXT"), ("flow_version", "TEXT"), ("error", "TEXT"),
+            ("priority", "INTEGER NOT NULL DEFAULT 100"),
+            ("lease_owner", "TEXT"), ("lease_expiry", "REAL"),
             ("origin_instance", "TEXT"), ("assigned_instance", "TEXT"),
             ("intake_instance_id", "TEXT"), ("sender_id", "TEXT"),
             ("request_id", "TEXT"), ("request_fingerprint", "TEXT"),
@@ -895,6 +945,10 @@ class JobRepository:
                  now, now, now,
                  json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
                  str(request_id), str(request_fingerprint)),
+            )
+            conn.execute(
+                "INSERT INTO ready_jobs(job_id, next_run_at, priority) VALUES (?, ?, ?)",
+                (job_id, now, priority),
             )
             conn.execute("COMMIT")
             return self.get_record(job_id)

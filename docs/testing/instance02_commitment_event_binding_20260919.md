@@ -98,12 +98,12 @@
 ## 测试
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/     # 14 passed
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/  # 141 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/     # 14 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/  # 141 passed
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  # 136
 git diff --check                                                          # clean
 ```
-新增 `tests/runtime/test_commitment_event_binding.py`（6 项）：`commitment` series 已注册；
+新增 `benchmark/runtime/test_commitment_event_binding.py`（6 项）：`commitment` series 已注册；
 catalog 含 `commitment.bet_record`；`direct_answer` 1.1.0 含 commitment 节点且 1.0.0 仍可解析；
 handler 产出含 token 的 BetRecord + bet 事件链 + timeline 审计行；无 token 时拒绝且不写任何东西；
 record-only bet 的环境不可发布。

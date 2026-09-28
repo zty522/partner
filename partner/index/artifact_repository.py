@@ -165,6 +165,15 @@ class ArtifactRepository:
         ).fetchone()
         return dict(row) if row else None
 
+    def get(self, artifact_id: str) -> dict[str, Any] | None:
+        self._ensure_schema()
+        row = get_connection(self.db_path).execute(
+            """SELECT artifact_id, producer_event, job_id, flow_id, kind, purpose,
+            path, byte_size, sha256, media_type, state, created_at, source_uri
+            FROM artifacts WHERE artifact_id = ?""", (artifact_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def by_hash(self, sha256: str) -> list[dict[str, Any]]:
         self._ensure_schema()
         rows = get_connection(self.db_path).execute(

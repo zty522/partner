@@ -6,6 +6,34 @@ import json
 import re
 
 
+def _minimal_json_repair(value: str) -> Any:
+    """Repair common provider truncation without a mandatory extra package."""
+    candidate = re.sub(r",\s*([}\]])", r"\1", value.strip())
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in candidate:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append("}" if char == "{" else "]")
+        elif char in "}]" and stack and char == stack[-1]:
+            stack.pop()
+    if in_string:
+        candidate += '"'
+    candidate += "".join(reversed(stack))
+    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
+    return json.loads(candidate)
+
+
 def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, Any]]:
     adapter = getattr(ctx, "adapter", None) or getattr(ctx, "model", None)
     if adapter is None:
@@ -67,8 +95,13 @@ def json_object(raw: str) -> dict[str, Any]:
         # Providers occasionally return a truncated quote/comma while the
         # surrounding semantic object is intact.  Repair syntax only; every
         # caller still validates required fields and allowed decisions.
-        from json_repair import repair_json
-        parsed = repair_json(value[start:] if start >= 0 else value, return_objects=True)
+        fragment = value[start:] if start >= 0 else value
+        try:
+            from json_repair import repair_json
+        except ModuleNotFoundError:
+            parsed = _minimal_json_repair(fragment)
+        else:
+            parsed = repair_json(fragment, return_objects=True)
     if not isinstance(parsed, dict):
         raise ValueError("expected a JSON object")
     return parsed
@@ -133,6 +166,16 @@ def event_facts(params: dict, *, max_chars: int = 32000) -> str:
                           {'ok','status','error','summary','requires_human','business_delta','learning_delta'}}
             if isinstance(value.get('semantic_output'), dict) and value['semantic_output'].get('notes_excerpt'):
                 facts[key]['notes_excerpt'] = str(value['semantic_output']['notes_excerpt'])[:2500]
+    # Preserve the deterministic final settlement facts.  The generic compact
+    # projection intentionally omits semantic_output, which previously hid the
+    # apply/reload/rollback result from the final message reviewer.
+    final = outputs.get('final_summary') or {}
+    if isinstance(final, dict) and isinstance(final.get('semantic_output'), dict):
+        semantic = final['semantic_output']
+        facts['final_summary_receipt'] = {k:semantic.get(k) for k in (
+            'message','decision','production_effective','governance_recorded',
+            'matched_verified','runtime_verified','rollback_status',
+            'evidence_verified','selected_issue_id')}
     if prior and not outputs: facts['previous'] = prior
     policy = (
         "纯本地 Event 的真实文件写入、回读和哈希回执也是执行证据，不要求每个动作都经过 shell 或 recent_execution。"

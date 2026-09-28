@@ -8,7 +8,18 @@ def recent_execution_context(workspace, project_id, current_job_id):
     root=Path(workspace)
     rows=[]
     from partner.index.resource_catalog import ResourceCatalog
-    for item in ResourceCatalog(root).query('background',limit=100):
+    catalog = ResourceCatalog(root)
+    indexed = catalog.query('background',limit=100)
+    if not indexed:
+        background = root / 'state/event_runtime/background'
+        for task_path in sorted(background.glob('*/task.json'))[:100] if background.is_dir() else []:
+            try:
+                task_value = json.loads(task_path.read_text())
+                catalog.register(task_path, 'background', str(task_value.get('job_id') or ''), task_value)
+            except (OSError, ValueError, TypeError):
+                continue
+        indexed = catalog.query('background', limit=100)
+    for item in indexed:
         path=Path(item['path'])
         try:
             task=json.loads(path.read_text())
@@ -16,6 +27,8 @@ def recent_execution_context(workspace, project_id, current_job_id):
                 continue
             from partner.index.job_repository import init
             job=init(root).get_record(task['job_id']) or {}
+            if not job:
+                job=json.loads((root/'state/application/jobs'/f"{task['job_id']}.json").read_text())
             if job['project_id']!=project_id:continue
             rows.append((task['created_at'],path.parent,task))
         except (OSError,ValueError,KeyError):continue

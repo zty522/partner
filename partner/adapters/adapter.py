@@ -42,7 +42,7 @@ def _run_subprocess_tree(run_kwargs: dict):
     stderr_f = tempfile.NamedTemporaryFile(mode='w+', suffix='.stderr', delete=False, encoding=encoding, errors=errors)
     
     # Use wrapper script: hermes_chat_wrapper.sh <stdout> <stderr> -- args...
-    wrapper = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'hermes_chat_wrapper.sh')
+    wrapper = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'integrations', 'hermes_chat_wrapper.sh')
     cmd = [wrapper, stdout_f.name, stderr_f.name] + (args if isinstance(args, list) else [args])
     
     try:
@@ -2864,7 +2864,9 @@ class DirectAdapter(AgentAdapter):
     def __init__(self, workspace_path: str, model=None, provider=None):
         self.workspace = workspace_path
         self.model = model
-        self.provider = provider or "deepseek"
+        # Empty means: resolve the single authoritative default in config/api.json.
+        self.provider = provider or ""
+        self.last_usage = {}
     
     def name(self) -> str:
         return "direct"
@@ -2905,7 +2907,7 @@ class DirectAdapter(AgentAdapter):
         for attempt in range(5):
             raw = direct_api.chat(
                 prompt, max_tokens=max_tokens, purpose=purpose,
-                timeout=timeout, workspace=self.workspace)
+                timeout=timeout, workspace=self.workspace, provider=self.provider)
             if raw and raw.strip():
                 return raw
             last = raw
@@ -2920,6 +2922,7 @@ class DirectAdapter(AgentAdapter):
         budget = max_tokens if max_tokens is not None else _env_int("PARTNER_COGNITIVE_MAX_TOKENS", 8192)
         reply = direct_api.chat(message, max_tokens=budget, purpose=purpose,
                                 timeout=timeout, workspace=self.workspace,
+                                provider=self.provider,
                                 task_id=getattr(self,"task_id",""), project_id=getattr(self,"project_id",""),
                                 event_type=getattr(self,"event_type",purpose))
         self.last_usage = direct_api.get_last_usage()

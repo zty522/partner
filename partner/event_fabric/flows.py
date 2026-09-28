@@ -52,6 +52,10 @@ class SuspendedFlow:
     resume_node_id: str
     reason: str
     child_flow_id: str = ""
+    # A repeated controller node is a durable loop boundary.  After its child
+    # terminates the same semantic Event becomes ready again and decides, from
+    # the child's sealed evidence, whether another child is warranted.
+    repeat_owner: bool = False
 
 
 @dataclass
@@ -233,10 +237,12 @@ class EventFlowController:
         )
 
     def suspend_for_child(self, state: EventFlowState, *, resume_node_id: str,
-                          child_flow_id: str, reason: str) -> EventFlowState:
+                          child_flow_id: str, reason: str,
+                          repeat_owner: bool = False) -> EventFlowState:
         state.suspended.append(SuspendedFlow(
             flow_id=state.flow_id, resume_node_id=resume_node_id,
             child_flow_id=child_flow_id, reason=reason,
+            repeat_owner=repeat_owner,
         ))
         state.active_child_flow_id = child_flow_id
         state.ready_node_ids = []
@@ -251,6 +257,19 @@ class EventFlowController:
         row = matches[-1]
         state.active_child_flow_id = ""
         state.status = "running"
+        if row.repeat_owner:
+            # The owner completed before requesting the child.  Re-open only
+            # that node; all prior Event IDs remain in the durable run log and
+            # child records, while the next execution receives a fresh ID.
+            state.completed_node_ids = [n for n in state.completed_node_ids
+                                        if n != row.resume_node_id]
+            state.failed_node_ids = [n for n in state.failed_node_ids
+                                     if n != row.resume_node_id]
+            state.skipped_node_ids = [n for n in state.skipped_node_ids
+                                      if n != row.resume_node_id]
+            state.node_event_ids.pop(row.resume_node_id, None)
+            state.node_summaries.pop(row.resume_node_id, None)
+            state.node_outputs.pop(row.resume_node_id, None)
         state.ready_node_ids = [row.resume_node_id]
         self.store.save(state)
         return state

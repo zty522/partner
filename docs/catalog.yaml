@@ -1,5 +1,5 @@
 version: 1
-updated_at: "2026-09-24"
+updated_at: "2026-09-28"
 authority_order: [canonical, current, reference, historical]
 tiers:
   L0: always-load routing metadata only
@@ -8,8 +8,104 @@ tiers:
   L3: current project state, latest receipt, and task evidence
   L4: raw logs and historical archives; never load by default
 documents:
+  - id: partner_expected_run_v3
+    path: benchmark/studies/expected_runs/v3/EXPECTED_EFFECT_SPEC_V3.md
+    title: Partner 三链实质进展 Expected Run v3
+    tier: L1
+    authority: canonical
+    tags: [benchmark, expected-run, self-evolution, project-iteration, active-learning, qwen, event-flow]
+    instances: ["01", "02", "03", all]
+    max_chars: 16000
+  - id: three_task_rerun_20260928
+    path: docs/testing/three_task_rerun_20260928.md
+    title: 三任务独立 QQ Bot 重跑与边界修复
+    tier: L3
+    authority: current
+    tags: [self-evolution, molecular-generation, active-learning, qq, acceptance, cleanup]
+    instances: ["01", "02", "03", all]
+    max_chars: 10000
+  - id: sprint38_v2_acceptance_20260927
+    path: benchmark/studies/reference_docs/results/sprint38_v2_acceptance_20260927.md
+    title: Sprint 38 与 Expected Run v2 逐条真实验收
+    tier: L3
+    authority: current
+    tags: [sprint38, acceptance, dynamic-iteration, active-learning, self-evolution, web, pdf]
+    instances: [all]
+    max_chars: 14000
+  - id: sprint38_dynamic_iteration_research_reporting
+    path: docs/sprints/sprint_38_动态迭代与研究报告重心校正.md
+    title: Sprint 38 动态迭代、真实 Flow 投影与研究报告重心校正
+    tier: L1
+    authority: current
+    tags: [sprint38, dynamic-iteration, event-flow, research-report, web, pdf, self-evolution]
+    instances: [all]
+    max_chars: 14000
+  - id: partner_expected_run_v2
+    path: benchmark/studies/expected_runs/v2/EXPECTED_EFFECT_SPEC.md
+    title: Partner Expected Run v2 预期效果设计基线
+    tier: L2
+    authority: current
+    tags: [design-baseline, dynamic-iteration, research-report, event-flow, observability]
+    instances: [all]
+    max_chars: 12000
+  - id: observable_partner_run_acceptance_20260927
+    path: docs/testing/observable_partner_run_acceptance_20260927.md
+    title: Partner 可观察完整运行 v17 验收
+    tier: L3
+    authority: current
+    tags: [web, qq, event-flow, report, active-learning, self-evolution, acceptance]
+    instances: ["02", all]
+    max_chars: 12000
+  - id: observable_partner_run
+    path: docs/architecture/observable_partner_run.md
+    title: Partner 可观察完整运行产品合同
+    tier: L1
+    authority: canonical
+    tags: [web, qq, event-flow, active-learning, self-evolution, report, observability]
+    instances: [all]
+    max_chars: 14000
+  - id: frontend_observability_acceptance_20260926
+    path: docs/testing/frontend_observability_acceptance_20260926.md
+    title: Web、QQ 与日志三视图真实验收
+    tier: L3
+    authority: current
+    tags: [web, qq, observability, acceptance, active-learning, self-evolution]
+    instances: ["02", all]
+    max_chars: 9000
+  - id: how_to_view_partner_runs
+    path: docs/operations/how_to_view_partner_runs.md
+    title: 怎样自己查看 Partner 的真实运行
+    tier: L1
+    authority: current
+    tags: [web, qq, observability, event-runtime, runbook]
+    instances: [all]
+    max_chars: 7000
+  - id: event_run_logging
+    path: docs/architecture/event_run_logging.md
+    title: Event 运行日志架构与边界
+    tier: L1
+    authority: canonical
+    tags: [event-runtime, observability, flow, input-output, redaction]
+    instances: [all]
+    max_chars: 7000
+  - id: event_run_logging_acceptance_20260926
+    path: docs/testing/event_run_logging_acceptance_20260926.md
+    title: Event 运行日志与单轮门控真实验收
+    tier: L3
+    authority: current
+    tags: [event-runtime, acceptance, project-cycle, self-evolution, logging, index-migration]
+    instances: ["02", all]
+    max_chars: 8000
+  - id: core_v1_full_closure_acceptance_20260925
+    path: docs/testing/core_v1_full_closure_acceptance_20260925.md
+    title: Partner Core v1 三链与两轮项目完整闭环验收
+    tier: L1
+    authority: current
+    tags: [core-v1, acceptance, project-cycle, active-learning, self-evolution, benchmark, pdf]
+    instances: ["01", "02", all]
+    max_chars: 12000
   - id: core_v1_benchmark_start_20260924
-    path: docs/operations/core_v1_benchmark_start_20260924.md
+    path: benchmark/studies/reference_docs/operations/core_v1_benchmark_start_20260924.md
     title: Core v1 Davis benchmark 启动与 MiniMax 配额阻塞记录
     tier: L3
     authority: current
@@ -57,67 +153,67 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: hermes_commitment_semantics_correction_20260919
-    path: docs/Hermes_Commitment内核语义纠偏与提交提示词_20260919.md
+    path: docs/handoff/hermes_prompts/hermes_Commitment内核语义纠偏与提交提示词_20260919.md
     title: Hermes Commitment内核语义纠偏复测与提交提示词
     tier: L3
     authority: current
     tags: [handoff, commitment-loop, baseline, settlement, benchmark, git]
   - id: hermes_commitment_kernel_implementation_20260919
-    path: docs/Hermes_Commitment内核基础框架实施提示词_20260919.md
+    path: docs/handoff/hermes_prompts/hermes_Commitment内核基础框架实施提示词_20260919.md
     title: Hermes会赌自闭环Commitment内核基础框架实施提示词
     tier: L3
     authority: current
     tags: [handoff, commitment-loop, self-evolution, benchmark, execution-authorized]
   - id: hermes_flash_runtime_acceptance_20260917
-    path: docs/Hermes_实测故障修复与DeepSeekFlash完整验收_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_实测故障修复与DeepSeekFlash完整验收_20260917.md
     title: Hermes实测故障修复与DeepSeekFlash完整验收
     tier: L3
     authority: current
     tags: [handoff, execution-authorized, deepseek, acceptance, benchmark]
   - id: hermes_m0_m3_closure_contract_20260917
-    path: docs/Hermes_M0-M3全阶段收尾合同_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3全阶段收尾合同_20260917.md
     title: Hermes全阶段实现与实际测试修复收尾合同
     tier: L3
     authority: current
     tags: [handoff, execution-authorized, full-stage, acceptance, qq, benchmark]
   - id: hermes_m0_m3_final_closure_directive_20260917
-    path: docs/Hermes_M0-M3最终收敛执行令_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3最终收敛执行令_20260917.md
     title: Hermes M0-M3完整实现与静态交付收敛执行令
     tier: L3
     authority: current
     tags: [handoff, no-execution, full-stage, closure, benchmark, implementation]
   - id: hermes_m0_m3_fifth_correction_20260917
-    path: docs/Hermes_M0-M3第五轮纠偏与全阶段交付提示词_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3第五轮纠偏与全阶段交付提示词_20260917.md
     title: Hermes幂等执行器与评分第五轮纠偏及全阶段交付
     tier: L3
     authority: current
     tags: [handoff, no-execution, full-stage, idempotency, benchmark, evaluation]
   - id: hermes_m0_m3_fourth_correction_20260917
-    path: docs/Hermes_M0-M3第四轮纠偏与完整交付提示词_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3第四轮纠偏与完整交付提示词_20260917.md
     title: Hermes核心提交回归与评测污染纠偏及全阶段交付
     tier: L3
     authority: current
     tags: [handoff, no-execution, full-stage, benchmark, evaluation, regression]
   - id: hermes_m0_m3_full_stage_delivery_20260917
-    path: docs/Hermes_M0-M3阶段完整交付指令_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3阶段完整交付指令_20260917.md
     title: Hermes完整完成M0-M3阶段的总交付指令
     tier: L3
     authority: current
     tags: [handoff, no-execution, implementation, full-stage, benchmark, web, qq]
   - id: hermes_m0_m3_completion_followup_20260917
-    path: docs/Hermes_M0-M3继续补齐提示词_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3继续补齐提示词_20260917.md
     title: Hermes M0-M3空壳审计后的继续补齐提示词
     tier: L3
     authority: current
     tags: [handoff, no-execution, implementation, benchmark, web, qq, audit]
   - id: partner_nature_research_plan_20260917
-    path: docs/Partner_Nature研究与工程完整方案_20260917.md
+    path: docs/research/partner_nature_strategy_20260917.md
     title: Partner面向Nature的研究工程与评测完整方案
     tier: L2
     authority: current
     tags: [research-plan, self-evolution, active-learning, benchmark, web, frontend-retirement]
   - id: hermes_m0_m3_static_implementation_20260917
-    path: docs/Hermes_M0-M3静态实现提示词_20260917.md
+    path: docs/handoff/hermes_prompts/hermes_M0-M3静态实现提示词_20260917.md
     title: Hermes夜间M0-M3静态实现与验收准备提示词
     tier: L3
     authority: current
@@ -179,7 +275,7 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: sprint36_pure_event_runtime_three_surfaces
-    path: docs/sprint36_纯Event生产迁移与三端重构.md
+    path: docs/sprints/sprint_36_纯Event生产迁移与三端重构.md
     title: 纯 Event 生产迁移与三端重构
     tier: L1
     authority: current
@@ -259,7 +355,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 14000
   - id: sprint35_event_flow_convergence
-    path: docs/sprint35_Event流与认知运行时收敛.md
+    path: docs/sprints/sprint_35_Event流与认知运行时收敛.md
     title: Event 流与认知运行时收敛
     tier: L1
     authority: current
@@ -299,7 +395,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 8000
   - id: sprint34_user_narrative_multi_instance_acceptance
-    path: docs/sprint34_用户叙事与多实例有界验收.md
+    path: docs/sprints/sprint_34_用户叙事与多实例有界验收.md
     title: 用户叙事与多实例有界验收
     tier: L1
     authority: current
@@ -315,7 +411,7 @@ documents:
     instances: ["02", all]
     max_chars: 8000
   - id: sprint33_three_cognitive_golden_loops
-    path: docs/sprint33_三条认知黄金链与深上下文验收.md
+    path: docs/sprints/sprint_33_三条认知黄金链与深上下文验收.md
     title: 三条认知黄金链与深上下文验收
     tier: L1
     authority: canonical
@@ -331,7 +427,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 8000
   - id: sprint32_project_cognition
-    path: docs/sprint32_项目认知链与长期伙伴行为.md
+    path: docs/sprints/sprint_32_项目认知链与长期伙伴行为.md
     title: 项目认知链与长期伙伴行为
     tier: L1
     authority: canonical
@@ -347,7 +443,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 9000
   - id: sprint31_cognitive_kernel_runtime_convergence
-    path: docs/sprint31_认知内核与运行时单向收敛.md
+    path: docs/sprints/sprint_31_认知内核与运行时单向收敛.md
     title: 认知内核与运行时单向收敛
     tier: L1
     authority: canonical
@@ -387,7 +483,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 7000
   - id: sprint30_event_fabric_partner_studio
-    path: docs/sprint30_Event_Fabric与Partner_Studio.md
+    path: docs/sprints/sprint_30_Event_Fabric与Partner_Studio.md
     tier: L2
     authority: current
     tags: [sprint30, gui, tui, qq, event-fabric, acceptance]
@@ -410,7 +506,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 7000
   - id: sprint29_unified_project_runtime
-    path: docs/sprint29_统一后台项目运行时与前端重构.md
+    path: docs/sprints/sprint_29_统一后台项目运行时与前端重构.md
     tier: L2
     authority: current
     tags: [sprint29, gui, tui, qq, project-runtime, acceptance]
@@ -449,7 +545,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 8000
   - id: sprint28_frontends_three_loop_acceptance
-    path: docs/sprint28_三端体验与三闭环手动验收.md
+    path: docs/sprints/sprint_28_三端体验与三闭环手动验收.md
     tier: L2
     authority: current
     tags: [sprint28, gui, tui, qq, manual-acceptance, project-progress, active-learning, self-evolution]
@@ -480,7 +576,7 @@ documents:
     instances: ["01", "02", "03", "04", "05", all]
     max_chars: 9000
   - id: sprint27_multi_instance_improvement
-    path: docs/sprint27_多实例真实推进与成熟双学习闭环.md
+    path: docs/sprints/sprint_27_多实例真实推进与成熟双学习闭环.md
     tier: L2
     authority: current
     tags: [sprint27, project-progress, active-learning, self-evolution, candidate, reward]
@@ -502,21 +598,21 @@ documents:
     instances: ["01", "02", "04", "05", all]
     max_chars: 10000
   - id: sprint24_longitudinal_business_improvement
-    path: docs/sprint24_跨日期持续业务改善.md
+    path: docs/sprints/sprint_24_跨日期持续业务改善.md
     tier: L2
     authority: current
     tags: [sprint24, longitudinal, molecular, docking, active-learning]
     instances: ["02", "04", all]
     max_chars: 9000
   - id: sprint25_generic_code_invention
-    path: docs/sprint25_通用代码发明实验室.md
+    path: docs/sprints/sprint_25_通用代码发明实验室.md
     tier: L2
     authority: current
     tags: [sprint25, code-invention, candidate, hidden-test, llm, self-evolution]
     instances: ["05", all]
     max_chars: 9000
   - id: sprint26_multimodal_state_machine
-    path: docs/sprint26_多模态自主操作状态机.md
+    path: docs/sprints/sprint_26_多模态自主操作状态机.md
     tier: L2
     authority: current
     tags: [sprint26, multimodal, browser, edge, privacy, state-machine]
@@ -530,7 +626,7 @@ documents:
     instances: ["01", "02", "04", all]
     max_chars: 9000
   - id: sprint23_evidence_quality_real_self_evolution
-    path: docs/sprint23_证据质量与真实自进化门.md
+    path: docs/sprints/sprint_23_证据质量与真实自进化门.md
     tier: L2
     authority: current
     tags: [sprint23, token-observability, molecular-generation, active-learning, self-evolution, candidate]
@@ -544,7 +640,7 @@ documents:
     instances: [all]
     max_chars: 8000
   - id: sprint22_unified_surfaces_two_project_validation
-    path: docs/sprint22_统一交互入口与双项目纵向验证.md
+    path: docs/sprints/sprint_22_统一交互入口与双项目纵向验证.md
     tier: L2
     authority: current
     tags: [sprint22, gui, tui, qq, molecular-generation, github, literature, active-learning, edge]
@@ -558,7 +654,7 @@ documents:
     instances: [all]
     max_chars: 9000
   - id: sprint21_multimodal_computer_community_reading
-    path: docs/sprint21_多模态计算机操作与社区阅读.md
+    path: docs/sprints/sprint_21_多模态计算机操作与社区阅读.md
     tier: L2
     authority: current
     tags: [sprint21, multimodal, browser, vision, qwen, xiaohongshu, wechat, tencent, alibaba, event-first]
@@ -572,7 +668,7 @@ documents:
     instances: [all]
     max_chars: 9000
   - id: sprint20_experience_guided_policy_hypothesis_engine
-    path: docs/sprint20_经验驱动策略学习与项目假设引擎.md
+    path: docs/sprints/sprint_20_经验驱动策略学习与项目假设引擎.md
     tier: L2
     authority: current
     tags: [sprint20, egpl, llm, hypothesis, candidate, active-learning, self-evolution, event-first]
@@ -600,7 +696,7 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: sprint19_resource_adaptive_behavioral_evolution
-    path: docs/sprint19_资源自适应与行为型代码自进化.md
+    path: docs/sprints/sprint_19_资源自适应与行为型代码自进化.md
     tier: L1
     authority: canonical
     tags: [sprint19, resource-adaptive, candidate, rl, active-learning, production]
@@ -621,7 +717,7 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: product_principles
-    path: docs/product_principles.md
+    path: docs/reference/product_principles.md
     tier: L1
     authority: canonical
     tags: [identity, product, user-experience, continuity, anti-regression]
@@ -635,7 +731,7 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: self_awareness
-    path: docs/self_awareness.md
+    path: docs/reference/self_awareness.md
     tier: L1
     authority: canonical
     tags: [identity, principles, boundaries, evolution]
@@ -831,14 +927,14 @@ documents:
     instances: ["03", "04", "05", all]
     max_chars: 8000
   - id: sprint14_manual_canary_promotion
-    path: docs/sprint14_手动受控Canary与真值门晋升.md
+    path: docs/sprints/sprint_14_手动受控Canary与真值门晋升.md
     tier: L2
     authority: current
     tags: [manual, canary, rl, promotion, truth-audit, instance-04, instance-05]
     instances: ["04", "05", all]
     max_chars: 7000
   - id: external_learning
-    path: docs/external_learning.md
+    path: docs/active_learning/external_learning_status.md
     tier: L2
     authority: current
     tags: [external, literature, github, rl, polar, rlvr, sesa, provenance]
@@ -866,7 +962,7 @@ documents:
     instances: ["03", "04", "05", all]
     max_chars: 5000
   - id: sprint15_harness_shadow_evolution
-    path: docs/sprint15_四Harness统一与Shadow自进化.md
+    path: docs/sprints/sprint_15_四Harness统一与Shadow自进化.md
     tier: L2
     authority: current
     tags: [sprint, harness, episode, shadow, evolution, rl, truth]
@@ -943,14 +1039,14 @@ documents:
     instances: [all]
     max_chars: 6000
   - id: sprint11_execution_iteration
-    path: docs/sprint11_执行型持续迭代.md
+    path: docs/sprints/sprint_11_执行型持续迭代.md
     tier: L2
     authority: current
     tags: [sprint, execution, iteration, code, run, analysis, rl]
     instances: [all]
     max_chars: 9000
   - id: sprint12_single_project_evidence_loop
-    path: docs/sprint12_单项目证据闭环.md
+    path: docs/sprints/sprint_12_单项目证据闭环.md
     tier: L2
     authority: current
     tags: [sprint, molecular, targetdiff, grouped-split, evidence, iteration, rl]
@@ -1146,14 +1242,14 @@ documents:
     instances: [all]
     max_chars: 9000
   - id: sprint17_completion_signal_continuous_learning
-    path: docs/sprint17_完成信号驱动持续学习.md
+    path: docs/sprints/sprint_17_完成信号驱动持续学习.md
     tier: L2
     authority: current
     tags: [sprint, campaign, completion-signal, minimax, active-learning, rl, progress]
     instances: ["04", "05", all]
     max_chars: 9000
   - id: sprint18_active_curriculum_auto_repair_promotion
-    path: docs/sprint18_主动课程自动修复与受限晋升.md
+    path: docs/sprints/sprint_18_主动课程自动修复与受限晋升.md
     tier: L2
     authority: current
     tags: [sprint, active-learning, curriculum, auto-repair, temporal-learning, canary, promotion, rl]
@@ -1168,7 +1264,7 @@ documents:
     max_chars: 12000
     default_load: false
   - id: architecture_review
-    path: docs/architecture_review.md
+    path: docs/architecture/architecture_review_20260807.md
     tier: L2
     authority: current
     tags: [architecture, gaps, priorities]
@@ -1266,7 +1362,7 @@ documents:
     instances: [all]
     max_chars: 6000
   - id: core_v1_three_chain_benchmark_20260924
-    path: docs/testing/core_v1_three_chain_benchmark_20260924.md
+    path: benchmark/studies/reference_docs/results/core_v1_three_chain_benchmark_20260924.md
     title: Core v1 项目、主动学习与自进化三链真实 benchmark
     tier: L1
     authority: current
@@ -1274,7 +1370,7 @@ documents:
     instances: ["01", "02", all]
     max_chars: 12000
   - id: partner_loop_bench_architecture
-    path: docs/architecture/partner_loop_bench.md
+    path: benchmark/studies/reference_docs/architecture/partner_loop_bench.md
     title: Partner-LoopBench 盲化纵向自主闭环评测
     tier: L1
     authority: canonical
@@ -1290,7 +1386,7 @@ documents:
     instances: [all]
     max_chars: 7000
   - id: partner_loop_bench_pilot_20260924
-    path: docs/testing/partner_loop_bench_pilot_20260924.md
+    path: benchmark/studies/reference_docs/results/partner_loop_bench_pilot_20260924.md
     title: Partner-LoopBench 三领域真实 pilot
     tier: L1
     authority: current
@@ -1298,10 +1394,26 @@ documents:
     instances: ["01", all]
     max_chars: 10000
   - id: partner_loop_bench_longitudinal_20260924
-    path: docs/testing/partner_loop_bench_longitudinal_20260924.md
+    path: benchmark/studies/reference_docs/results/partner_loop_bench_longitudinal_20260924.md
     title: Partner-LoopBench 真实执行与纵向记忆验收
     tier: L1
     authority: current
     tags: [testing, benchmark, longitudinal, memory, active-learning, self-evolution]
     instances: ["01", all]
     max_chars: 12000
+  - id: partner_full_loop_alignment_audit_20260924
+    path: docs/testing/partner_full_loop_alignment_audit_20260924.md
+    title: Partner 完整闭环与预期对齐审计
+    tier: L1
+    authority: current
+    tags: [testing, audit, event-flow, core-v1, active-learning, self-evolution, benchmark]
+    instances: [all]
+    max_chars: 18000
+  - id: partner_expected_run_v1
+    path: benchmark/studies/expected_runs/v1/EXPECTED_EFFECT_SPEC.md
+    title: Partner Core v1 完整运行预期效果与验收基线
+    tier: L1
+    authority: canonical
+    tags: [product-contract, event-flow, benchmark, active-learning, self-evolution, messaging, pdf, web]
+    instances: [all]
+    max_chars: 30000

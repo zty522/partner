@@ -91,7 +91,7 @@ control 1 passed/1 failed → candidate 2 passed/0 failed（delta = +1，外部�
 
 ## 测试（要求项 → 实现）
 
-`tests/runtime/test_experience_prior.py`（17）+ `tests/runtime/test_reply_reconciliation.py`（6）：
+`benchmark/runtime/test_experience_prior.py`（17）+ `benchmark/runtime/test_reply_reconciliation.py`（6）：
 
 1. 同类判据是纯函数、不依赖 LLM（含"token 换了键不变"）
 2. prior 只在同类里检索（另造一个异类 bet 不会被读进）
@@ -107,8 +107,8 @@ control 1 passed/1 failed → candidate 2 passed/0 failed（delta = +1，外部�
 12. 影子仓库 sibling 回归（见下）
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/       → 61 passed, exit 0
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/   → 141 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/       → 61 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/   → 141 passed, exit 0
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  → 139
 git diff --check                                                          → exit 0, clean
 ```

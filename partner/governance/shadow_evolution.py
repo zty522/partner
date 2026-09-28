@@ -77,7 +77,7 @@ def run_shadow_evolution(workspace: str, *, project_id: str = "") -> dict[str, A
             "candidate reduces target failure rate without lower business progress or observability",
             "full regression passes and a user-authorized PromotionDecision exists",
         ],
-        "tests": ["tests/test_episode_trace.py", "tests/test_policy_control.py"],
+        "tests": ["benchmark/runtime/test_event_run_log.py", "benchmark/cognition/test_policy_control.py"],
         "project_id": project_id or "partner_self_evolution",
     }).get("experiment") or {})
     result = {

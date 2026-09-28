@@ -66,7 +66,7 @@ refuted_ratio_weighted  = falsified_weighted / evidence_total_weighted
 
 ```
 T 任务        cross_class_transfer_probe（新 task_id ⇒ 新类）
-              target: tests/test_adapter_contracts.py -k "gepa or dgm"；真实补丁（gepa 契约修复）
+              target: benchmark/research/test_adapter_contracts.py -k "gepa or dgm"；真实补丁（gepa 契约修复）
               声明：tests_passed >= 1.0（threshold）且 delta_over_baseline(min_delta=4.0)
 实测两臂      control 3 passed / 4 failed → candidate 6 passed / 1 failed（delta = +3，模块 sha 不同）
 trace token   ccT1_trace_02_1789860001
@@ -131,7 +131,7 @@ evidence_total 2.4 ≥ 2、ratio 1.0、supported_weighted 0 → ABSTAINED；借�
 
 ## 测试（本轮新增 14 项，共 232 项）
 
-`tests/runtime/test_cross_class_prior.py`：
+`benchmark/runtime/test_cross_class_prior.py`：
 ```
 判据：纯函数/确定性/权重是常量；同 action / 同 metric / 同 project 三种权重各就各位；
       任意两项相同取最高不叠加；三项全同（1.0）不作为相似类来源；稳定排序且幂等；
@@ -148,8 +148,8 @@ evidence_total 2.4 ≥ 2、ratio 1.0、supported_weighted 0 → ABSTAINED；借�
 ```
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/      → 91 passed, exit 0
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/   → 141 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/      → 91 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/   → 141 passed, exit 0
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  → 139
 git diff --check                                                          → exit 0, clean
 残留进程 0

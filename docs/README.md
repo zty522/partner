@@ -1,35 +1,63 @@
 # Partner 文档体系
 
-> **2026-09-24 纵向记忆初验**：新增真实隔离 runner 与 `memory_vs_none` 协议。三个 warmup→transfer 对中，无记忆 0/3，相关且哈希绑定的验证记忆 3/3；换成其他领域的有效经验后仍为 0/3。它证明记忆被特异性消费并改变实际动作，但任务是内部构造的 registry 映射，尚不等于开放世界主动学习。详见 [纵向验收](testing/partner_loop_bench_longitudinal_20260924.md)。
+## 目录约定
 
-> **2026-09-24 Partner-LoopBench pilot**：新增与隐藏评价器隔离的自主 subject Flow 和 15 项三领域任务包。修正零提升误报后，项目迭代、主动学习、自进化各一项真实双臂运行均完成；single-turn 与 full Partner 都是 3/3，uplift=0，按最低 0.01 的冻结假设均为 falsified。框架跑通，但尚无自主闭环增益证据，且任务存在天花板效应。详见 [架构](architecture/partner_loop_bench.md) 与 [pilot](testing/partner_loop_bench_pilot_20260924.md)。
+顶层只保留入口和连续账本：`README.md`、`catalog.yaml`、`current_status.md`、
+`change_log.md`、`evolution_journal.md`。新增文档必须进入下列目录，不再把阶段报告或
+交接提示词放到顶层。
 
-> **2026-09-24 Core v1 三链 benchmark 已补齐**：Davis 3 task×2 seed 的六个两臂 Event Flow 全部 confirmed；主动学习 handoff 的 downstream matched comparison 与隔离自进化 repair 也均 confirmed，并由 `benchmark.effect_record` 写入各自效果账。详见 [三链真实 benchmark](testing/core_v1_three_chain_benchmark_20260924.md)。这是一项工程闭环验收，不替代论文规模的跨数据集、跨领域和外部复现。
+| 目录 | 内容 | 命名约定 |
+|---|---|---|
+| `architecture/` | 当前架构与历史架构分析 | 英文 `snake_case.md`，历史文件带日期 |
+| `sprints/` | Sprint 设计与阶段目标 | `sprint_NN_主题.md` |
+| `decisions/` | 架构决策记录 | `NNNN-kebab-case.md` |
+| `testing/` | 验收、benchmark 与失败证据 | `主题_YYYYMMDD.md` |
+| `operations/` | 运维、清理、恢复和操作手册 | `主题_YYYYMMDD.md` |
+| `handoff/` | 给开发 Agent 的交接材料 | 通用交接直接放置，历史 Hermes 提示词进入 `hermes_prompts/` |
+| `research/` | 论文定位、Nature 方案与趋势研究 | `主题_YYYYMMDD.md` |
+| `active_learning/` | 主动学习规范与日记 | 日记进入 `daily/YYYY-MM-DD.md` |
+| `self_evolution/` | 自进化规范、追踪与日记 | 日记进入 `daily/YYYY-MM-DD.md` |
+| `reference/` | 产品原则、自我认知与能力目录 | 稳定英文 `snake_case.md` |
+| `../benchmark/studies/expected_runs/vN/` | 每版完整预期效果与样例 benchmark | 版本目录不可覆盖，新增版本另建目录 |
+| `archive/` | 原始对话和仅供追溯的历史材料 | 写明来源与日期，不作为当前规范 |
+
+文档路径迁移后必须同时修改 Markdown 链接、`catalog.yaml` 和代码内显式引用；历史运行
+目录中的不可变证据不回写。
+
+> **2026-09-28 Expected Run 已归入 benchmark**：v1/v2 保留历史基线，v3 冻结 01 自进化、02 项目迭代和 03 主动学习的实质进展标准。详见 [Expected Run v3](../benchmark/studies/expected_runs/v3/README.md) 与 [benchmark 总览](../benchmark/studies/README.md)。
+
+> **2026-09-27 Sprint 38 已实现并完成条件验收**：项目轮次与自进化候选已改为 LLM 决策、确定性预算门约束的动态循环；真实运行图从 Job 日志投影；网页和 PDF 以研究问题、方法、结果和边界为主体。真实运行已覆盖 1、2、4 轮，最终两轮研究闭环取得 14/14、100 分效果验收。四轮压力样本后两轮执行失败，因此 Expected Run v2 中“同一项目四轮科学成功”仍未证明。详见 [Sprint 38](sprints/sprint_38_动态迭代与研究报告重心校正.md)、[Expected Run v2](../benchmark/studies/expected_runs/v2/README.md) 与 [逐条验收](../benchmark/studies/reference_docs/results/sprint38_v2_acceptance_20260927.md)。
+
+> **2026-09-24 纵向记忆初验**：新增真实隔离 runner 与 `memory_vs_none` 协议。三个 warmup→transfer 对中，无记忆 0/3，相关且哈希绑定的验证记忆 3/3；换成其他领域的有效经验后仍为 0/3。它证明记忆被特异性消费并改变实际动作，但任务是内部构造的 registry 映射，尚不等于开放世界主动学习。详见 [纵向验收](../benchmark/studies/reference_docs/results/partner_loop_bench_longitudinal_20260924.md)。
+
+> **2026-09-24 Partner-LoopBench pilot**：新增与隐藏评价器隔离的自主 subject Flow 和 15 项三领域任务包。修正零提升误报后，项目迭代、主动学习、自进化各一项真实双臂运行均完成；single-turn 与 full Partner 都是 3/3，uplift=0，按最低 0.01 的冻结假设均为 falsified。框架跑通，但尚无自主闭环增益证据，且任务存在天花板效应。详见 [架构](../benchmark/studies/reference_docs/architecture/partner_loop_bench.md) 与 [pilot](../benchmark/studies/reference_docs/results/partner_loop_bench_pilot_20260924.md)。
+
+> **2026-09-24 Core v1 三链 benchmark 已补齐**：Davis 3 task×2 seed 的六个两臂 Event Flow 全部 confirmed；主动学习 handoff 的 downstream matched comparison 与隔离自进化 repair 也均 confirmed，并由 `benchmark.effect_record` 写入各自效果账。详见 [三链真实 benchmark](../benchmark/studies/reference_docs/results/core_v1_three_chain_benchmark_20260924.md)。这是一项工程闭环验收，不替代论文规模的跨数据集、跨领域和外部复现。
 
 > **2026-09-24 Event Flow 生成策略**：当前由 LLM 生成有限候选 Flow，确定性 Compiler 校验，Jev 与潜空间世界模型做 shadow 筛选和预测，Commitment 冻结后才由 Runtime 执行；Settlement 驱动最小子图迭代。真实轨迹成熟后先训练 FlowRanker、NextEventPolicy 和 OutcomeModel，不直接用当前小样本训练端到端 Flow 生成器。详见 [Flow 生成策略](architecture/flow_synthesis_policy.md) 与 [ADR 0108](decisions/0108-hybrid-event-flow-synthesis.md)。
 
 > **2026-09-23 Core v1 已实现**：项目、主动学习、自进化三条 Flow 已统一接入 LLM 候选、潜空间影子预测、Jev 类型化影子判断、Commitment 冻结、真实 Event 执行、独立评价、Settlement 和确定性触发路由。代码已收敛到唯一 `main`，旧 Flow 按版本保留。当前 Jev 和潜模型仍为 shadow，尚不声称真实项目 uplift。先读 [Core v1 架构](architecture/core_v1.md) 与 [ADR 0107](decisions/0107-core-v1-single-main-decision-spine.md)。
 
-> **2026-09-17 最新授权更新**：用户已要求 Hermes 增加实际测试。[全阶段收尾合同](Hermes_M0-M3全阶段收尾合同_20260917.md)已重写为实现→分层实测→修复复测，包含01/02有界验收与真实QQ交付；覆盖此前提示词的“不运行”限制。本条是授权与计划更新，不代表测试已执行或通过。
+> **2026-09-17 最新授权更新**：用户已要求 Hermes 增加实际测试。[全阶段收尾合同](handoff/hermes_prompts/hermes_M0-M3全阶段收尾合同_20260917.md)已重写为实现→分层实测→修复复测，包含01/02有界验收与真实QQ交付；覆盖此前提示词的“不运行”限制。本条是授权与计划更新，不代表测试已执行或通过。
 
-> **2026-09-17 研究与实施计划（未运行验收）**：新增 [Nature研究与工程完整方案](Partner_Nature研究与工程完整方案_20260917.md) 与 [Hermes M0—M3静态实施提示词](Hermes_M0-M3静态实现提示词_20260917.md)。用户确定产品收敛为 Web＋QQ、退役 GUI/TUI；本轮仅写入方案，实际改造待 Hermes 执行。夜间实施限定不运行项目代码、测试、服务或真实消息。以下历史三端与实测记录不代表新计划已经完成。
+> **2026-09-17 研究与实施计划（未运行验收）**：新增 [Nature研究与工程完整方案](research/partner_nature_strategy_20260917.md) 与 [Hermes M0—M3静态实施提示词](handoff/hermes_prompts/hermes_M0-M3静态实现提示词_20260917.md)。用户确定产品收敛为 Web＋QQ、退役 GUI/TUI；本轮仅写入方案，实际改造待 Hermes 执行。夜间实施限定不运行项目代码、测试、服务或真实消息。以下历史三端与实测记录不代表新计划已经完成。
 
 > **2026-09-12 Sprint 36 / ADR 0098**：纯 Event 生产迁移和三端重构已经实现。生产不再经过旧 Harness、
 > PlanExecutor、batch planner、v2 registry 或 desktop inbox；GUI/TUI/QQ 共用 Application Job、
 > UserUpdate、Artifact 和 EventDetail 真值。全仓 `554 passed, 3 skipped`，生产直接回答 canary 9/9 节点通过，
 > 01–05 QQ 均 ready。当前等待用户主观验收三端体验；不借此宣称长期自进化或主动学习业务 uplift 已成熟。
-> 先读 [`sprint36_纯Event生产迁移与三端重构.md`](sprint36_纯Event生产迁移与三端重构.md) 和
+> 先读 [`sprint36_纯Event生产迁移与三端重构.md`](sprints/sprint_36_纯Event生产迁移与三端重构.md) 和
 > [ADR 0098](decisions/0098-sprint36-pure-event-production-cutover.md)。
 
-> **2026-09-11 Sprint 36 / ADR 0097**：已完成下一阶段设计，决定将生产执行权完整从旧 `batch_plan / PlanExecutor / default_registry / Harness` 迁到薄 Event Runtime + EventFlowRunner；旧 Harness 是待退役实现，不是长期兼容层。GUI、TUI 将在新原型通过后删除旧版并重建，QQ 收敛为 Channel Adapter；三端共用 `ApplicationCommand / JobView / UserUpdate / ArtifactView / EventDetail`。当前只完成设计和文档决策，未执行迁移、删除、重启或验收。先读 [`sprint36_纯Event生产迁移与三端重构.md`](sprint36_纯Event生产迁移与三端重构.md) 和 [ADR 0097](decisions/0097-retire-legacy-harness-and-redesign-three-surfaces.md)。
+> **2026-09-11 Sprint 36 / ADR 0097**：已完成下一阶段设计，决定将生产执行权完整从旧 `batch_plan / PlanExecutor / default_registry / Harness` 迁到薄 Event Runtime + EventFlowRunner；旧 Harness 是待退役实现，不是长期兼容层。GUI、TUI 将在新原型通过后删除旧版并重建，QQ 收敛为 Channel Adapter；三端共用 `ApplicationCommand / JobView / UserUpdate / ArtifactView / EventDetail`。当前只完成设计和文档决策，未执行迁移、删除、重启或验收。先读 [`sprint36_纯Event生产迁移与三端重构.md`](sprints/sprint_36_纯Event生产迁移与三端重构.md) 和 [ADR 0097](decisions/0097-retire-legacy-harness-and-redesign-three-surfaces.md)。
 
-> **2026-09-11 Sprint 35 / ADR 0095**：运行架构收敛为版本化 Event Catalog + 可恢复 Event Flow。项目推进、外部主动学习和 Partner 自进化分成三条独立 Flow；Memory、消息、PDF 是受证据约束的旁支；Watchdog 只观察活性。Application Job 已固定 Flow/Catalog 身份，旧 v2/Harness 暂作兼容执行层。依用户要求本轮未运行测试或实例，当前是等待人工检查而非生产通过。先读 [`sprint35_Event流与认知运行时收敛.md`](sprint35_Event流与认知运行时收敛.md)、[`architecture/event_flow_runtime.md`](architecture/event_flow_runtime.md) 与 [ADR 0095](decisions/0095-event-flow-and-cognitive-runtime-convergence.md)。
+> **2026-09-11 Sprint 35 / ADR 0095**：运行架构收敛为版本化 Event Catalog + 可恢复 Event Flow。项目推进、外部主动学习和 Partner 自进化分成三条独立 Flow；Memory、消息、PDF 是受证据约束的旁支；Watchdog 只观察活性。Application Job 已固定 Flow/Catalog 身份，旧 v2/Harness 暂作兼容执行层。依用户要求本轮未运行测试或实例，当前是等待人工检查而非生产通过。先读 [`sprint35_Event流与认知运行时收敛.md`](sprints/sprint_35_Event流与认知运行时收敛.md)、[`architecture/event_flow_runtime.md`](architecture/event_flow_runtime.md) 与 [ADR 0095](decisions/0095-event-flow-and-cognitive-runtime-convergence.md)。
 
-> **2026-09-11 Sprint 33 / ADR 0091**：三条认知链已用真实运行分别验收。项目链能用前轮 cognition 改变下一动作，外部主动学习能深读 GitHub/论文并在 claim 级拒绝幻觉，Partner 自进化能绑定真实 Episode 做同条件重放。但外知识尚未形成带来下游 uplift 的 accepted Candidate，自进化的分子业务结果仍被否证，因此 01–05 长跑保持冻结。全仓 `1123 passed`；证据和下一硬门见 [`sprint33_三条认知黄金链与深上下文验收.md`](sprint33_三条认知黄金链与深上下文验收.md) 与 [ADR 0091](decisions/0091-deep-context-three-golden-loops.md)。
+> **2026-09-11 Sprint 33 / ADR 0091**：三条认知链已用真实运行分别验收。项目链能用前轮 cognition 改变下一动作，外部主动学习能深读 GitHub/论文并在 claim 级拒绝幻觉，Partner 自进化能绑定真实 Episode 做同条件重放。但外知识尚未形成带来下游 uplift 的 accepted Candidate，自进化的分子业务结果仍被否证，因此 01–05 长跑保持冻结。全仓 `1123 passed`；证据和下一硬门见 [`sprint33_三条认知黄金链与深上下文验收.md`](sprints/sprint_33_三条认知黄金链与深上下文验收.md) 与 [ADR 0091](decisions/0091-deep-context-three-golden-loops.md)。
 
-> **2026-09-11 Sprint 32 / ADR 0090**：新增证据约束的项目 cognition 层。Partner 现在会在选择前读取同项目 Receipt、已验证 trajectory、上一轮 belief revision，并把习惯/成长限制在合作约束和待重验能力，不让它们冒充科学事实；终态反思的推荐会被下一 Selection 实际消费一次。项目动作使用事实、联想、反方、发明、综合五角色，终态再做证据审计和信念修订。02 在线 MiniMax canary 十门通过，20 次 API 尝试实际消耗 113,924 tokens；MaxMin 与随后转向的 Pareto 均被真实 RDKit 指标否证，系统未伪称改善或晋升。全仓 `1106 passed`，长期生产仍未启用。详见 [`sprint32_项目认知链与长期伙伴行为.md`](sprint32_项目认知链与长期伙伴行为.md) 与 [ADR 0090](decisions/0090-evidence-bound-project-cognition.md)。
+> **2026-09-11 Sprint 32 / ADR 0090**：新增证据约束的项目 cognition 层。Partner 现在会在选择前读取同项目 Receipt、已验证 trajectory、上一轮 belief revision，并把习惯/成长限制在合作约束和待重验能力，不让它们冒充科学事实；终态反思的推荐会被下一 Selection 实际消费一次。项目动作使用事实、联想、反方、发明、综合五角色，终态再做证据审计和信念修订。02 在线 MiniMax canary 十门通过，20 次 API 尝试实际消耗 113,924 tokens；MaxMin 与随后转向的 Pareto 均被真实 RDKit 指标否证，系统未伪称改善或晋升。全仓 `1106 passed`，长期生产仍未启用。详见 [`sprint32_项目认知链与长期伙伴行为.md`](sprints/sprint_32_项目认知链与长期伙伴行为.md) 与 [ADR 0090](decisions/0090-evidence-bound-project-cognition.md)。
 
-> **2026-09-10 Sprint 31 / ADR 0089**：系统收敛审计后的单向迁移已完成第一轮。成功语义统一为执行、验证、通知、发布四维；WorkItem Runtime 成为唯一继续执行者；桌面消息改为路由后 ACK 的可恢复日志；项目选择固定经过观察、反方、综合三次 LLM 审议。02/04/05 有界黄金链通过，02 新 Application 生产 Job 真实完成并形成 Receipt；该候选未击败基线，正确记为 Reward=-0.1 的有效负实验，而非系统失败或自进化晋升。详见 [`sprint31_认知内核与运行时单向收敛.md`](sprint31_认知内核与运行时单向收敛.md) 与 [ADR 0089](decisions/0089-cognitive-kernel-and-runtime-convergence.md)。
+> **2026-09-10 Sprint 31 / ADR 0089**：系统收敛审计后的单向迁移已完成第一轮。成功语义统一为执行、验证、通知、发布四维；WorkItem Runtime 成为唯一继续执行者；桌面消息改为路由后 ACK 的可恢复日志；项目选择固定经过观察、反方、综合三次 LLM 审议。02/04/05 有界黄金链通过，02 新 Application 生产 Job 真实完成并形成 Receipt；该候选未击败基线，正确记为 Reward=-0.1 的有效负实验，而非系统失败或自进化晋升。详见 [`sprint31_认知内核与运行时单向收敛.md`](sprints/sprint_31_认知内核与运行时单向收敛.md) 与 [ADR 0089](decisions/0089-cognitive-kernel-and-runtime-convergence.md)。
 
 > **2026-09-10 系统收敛审计**：生产长跑已冻结。最新 3.5 小时虽调用 MiniMax 125 次、246,946 tokens，35 个项目动作却全部被旧交付合同判为失败；Sprint 30 的后台静默通知与 manual outcome 的渠道 ACK 要求发生 P0 冲突，形成重复自进化振荡。恢复前先统一成功语义和状态真值，再分别跑通 02/04/05 三条黄金链。当前最高优先级文档是 [`audits/system_convergence_audit_20260910.md`](audits/system_convergence_audit_20260910.md)。
 
@@ -41,14 +69,14 @@
 
 > **2026-09-09 ADR 0086**：网页 Event 统一使用 Partner 专用持久 Edge 的后台模式，旧 `visible/foreground/headless=false` 参数不能再弹窗或抢前台；登录失效只诚实报告。新增 `user_intent_enrichment` 一等 Event，在普通指令规划前用 LLM 形成类型化意图契约，并修复旧 `understand_intent` 实际一直静默降级的问题。详见 [ADR 0086](decisions/0086-background-browser-and-intent-contract-event.md)。
 
-> **2026-09-09 Sprint 28（ADR 0085）**：GUI、TUI、QQ 已共享“📌项目推进 / 🔎外部主动学习 / 🛠Partner 自进化”展示语义；02/04/05 生产通道 canary、中文 PDF 名和 QQ ACK 已通过。消息能说明具体方法、seed、来源、指标和 Candidate，不再只报文件清单；GUI/TUI 改用 heartbeat 与 delivery ledger 判断真实状态，并统一走权威暂停/恢复。全仓 `1056 passed`，仍待用户手工三闭环与 GUI 主观验收，详见 [`sprint28_三端体验与三闭环手动验收.md`](sprint28_三端体验与三闭环手动验收.md) 与 [ADR 0085](decisions/0085-shared-presentation-semantics-and-frontend-acceptance.md)。
+> **2026-09-09 Sprint 28（ADR 0085）**：GUI、TUI、QQ 已共享“📌项目推进 / 🔎外部主动学习 / 🛠Partner 自进化”展示语义；02/04/05 生产通道 canary、中文 PDF 名和 QQ ACK 已通过。消息能说明具体方法、seed、来源、指标和 Candidate，不再只报文件清单；GUI/TUI 改用 heartbeat 与 delivery ledger 判断真实状态，并统一走权威暂停/恢复。全仓 `1056 passed`，仍待用户手工三闭环与 GUI 主观验收，详见 [`sprint28_三端体验与三闭环手动验收.md`](sprints/sprint_28_三端体验与三闭环手动验收.md) 与 [ADR 0085](decisions/0085-shared-presentation-semantics-and-frontend-acceptance.md)。
 
 > ⚠️ **维护纪律**：Partner 自进化/自愈引擎每次触发时自动读取这些文档。
 > 修改任何 Partner 代码后，必须同步更新对应文档。文档是 Partner 自我认知的唯一来源。
 
 > **2026-09-09 Report v3（ADR 0083）**：五实例 PDF 统一嵌入中文无衬线字体、领域化配色、真实指标图、图题、改良表格与页码；QQ 仍保留五阶段真实回执，但去除内部 Event/strategy/路径并避免重复指标。图和正文必须来自同一机器结果；可视化不产生 Reward。详见 [ADR 0083](decisions/0083-report-v3-and-concise-user-messages.md)。
 
-> **2026-09-09 Sprint 27 启动（ADR 0082）**：五实例改用真实业务增量总门；连续两个非正向终态的动作会从即时选择集抑制。01 增加来源绑定草稿，03 增加同预算积分器对照，04 增加学习 Candidate shadow 与下游消费步骤。自进化 Candidate 以后必须通过领域业务 canary，参数变化或减少重复不再足以晋升；缺少后续增益证据的 03/05 自动策略已退出生产映射。启动审计仍为 `ok=false`，详见 [`sprint27_多实例真实推进与成熟双学习闭环.md`](sprint27_多实例真实推进与成熟双学习闭环.md) 与 [ADR 0082](decisions/0082-sprint27-portfolio-improvement-gates.md)。
+> **2026-09-09 Sprint 27 启动（ADR 0082）**：五实例改用真实业务增量总门；连续两个非正向终态的动作会从即时选择集抑制。01 增加来源绑定草稿，03 增加同预算积分器对照，04 增加学习 Candidate shadow 与下游消费步骤。自进化 Candidate 以后必须通过领域业务 canary，参数变化或减少重复不再足以晋升；缺少后续增益证据的 03/05 自动策略已退出生产映射。启动审计仍为 `ok=false`，详见 [`sprint27_多实例真实推进与成熟双学习闭环.md`](sprints/sprint_27_多实例真实推进与成熟双学习闭环.md) 与 [ADR 0082](decisions/0082-sprint27-portfolio-improvement-gates.md)。
 
 > **2026-09-09 长期运行持久化与账本隔离（ADR 0079）**：02 不再因 Task TTL 清理而退回 bootstrap，
 > 方法逐行数据已持久化且 docking 按内容 hash 去重。五真实项目的 research-adoption shadow 匹配实验把指定
@@ -142,7 +170,7 @@
 > 受限网络导致 MiniMax DNS 失败、成功 observation 不释放槽位和中间 done 双终态。MiniMax 单模型门现由
 > 2 个 accepted + 3 个 rejected 实验共同通过；完整 production readiness 仍 blocked。全仓 688 passed。
 > 下一阶段的主动课程、自动修复、跨日期学习和受限晋升已写入
-> [`sprint18_主动课程自动修复与受限晋升.md`](sprint18_主动课程自动修复与受限晋升.md)，状态为
+> [`sprint18_主动课程自动修复与受限晋升.md`](sprints/sprint_18_主动课程自动修复与受限晋升.md)，状态为
 > `Core Implemented / Real Longitudinal Validation Running`。
 > Sprint 18 v2 已定义项目 A（Partner Harness 真实缺陷自动修复）、项目 B（成熟 Harness 机制实际采用）和
 > 项目 C（TargetDiff/分子主动实验跨领域压力测试），以及三日期、统计、canary、rollback 完成门；目前仅
@@ -422,3 +450,7 @@ docs/
 *最后更新: 2026-08-26（四 Harness 统一、Episode v3、Reward Vector 与首个 Shadow；生产自治仍暂停）*
 
 2026-09-13 后台动作候选与当前验收边界：[Event 后台执行记录](operations/event_background_actions_20260913.md)。
+
+## Repository layout
+
+- [Repository and workspace layout](architecture/repository_and_workspace_layout.md)

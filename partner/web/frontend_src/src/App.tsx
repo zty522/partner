@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { ProjectList } from "./pages/ProjectList";
 import { RunConsole } from "./pages/RunConsole";
 import { LearningLibrary } from "./pages/LearningLibrary";
@@ -13,11 +13,13 @@ import { api } from "./lib/api";
 type Tab = "projects" | "run" | "learning" | "evolution" | "capability" | "artifacts" | "config";
 
 export function App() {
-  const [tab, setTab] = useState<Tab>("projects");
+  const deepLinkJob = new URLSearchParams(window.location.search).get("job") || "";
+  const [tab, setTab] = useState<Tab>(deepLinkJob ? "run" : "projects");
   const [auth, setAuth] = useState<{ csrf?: string; subject?: any } | null>(null);
 
   useEffect(() => {
-    api.healthz().catch(() => setAuth(null));
+    api.session().then((r) => setAuth({ csrf: r.csrf_token, subject: r.subject }))
+      .catch(() => setAuth(null));
   }, []);
 
   return (
@@ -34,7 +36,7 @@ export function App() {
       </nav>
       <main>
         {tab === "projects" && <ProjectList />}
-        {tab === "run" && <RunConsole csrf={auth?.csrf} subject={auth?.subject} />}
+        {tab === "run" && <RunConsole csrf={auth?.csrf} subject={auth?.subject} initialJobId={deepLinkJob} />}
         {tab === "learning" && <LearningLibrary />}
         {tab === "evolution" && <EvolutionCompare />}
         {tab === "artifacts" && <ArtifactList />}

@@ -35,7 +35,7 @@ def _repo_root(workspace: str) -> Path:
 
 
 def run_fallback_isolated(workspace: str, candidate: dict[str, Any],
-                           sanity_test: str = "tests/test_matched_execution_truth.py") -> dict[str, Any]:
+                           sanity_test: str = "benchmark/runtime/test_matched_execution_truth.py") -> dict[str, Any]:
     """Lightweight fallback isolated execution.
 
     Returns dict with: ok, applied, exit_code, log_path, diagnostic, sanity_test.
@@ -51,8 +51,8 @@ def run_fallback_isolated(workspace: str, candidate: dict[str, Any],
 
     tmp = Path(tempfile.mkdtemp(prefix="partner_fallback_"))
     try:
-        # Copy partner/ + tests/ + sanity_test to tmp
-        for sub in ("partner", "tests"):
+        # Copy partner/ + benchmark/ + sanity_test to tmp
+        for sub in ("partner", "benchmark"):
             src = repo / sub
             if src.is_dir():
                 shutil.copytree(src, tmp / sub,
@@ -72,9 +72,10 @@ def run_fallback_isolated(workspace: str, candidate: dict[str, Any],
         test_path = tmp / sanity_test
         if not test_path.is_file():
             # fallback to whatever test file actually exists
-            tests_dir = tmp / "tests"
+            tests_dir = tmp / "benchmark"
             if tests_dir.is_dir():
-                found = list(tests_dir.glob("test_*.py"))
+                found = [p for p in tests_dir.rglob("test_*.py")
+                         if "studies" not in p.relative_to(tests_dir).parts]
                 if not found:
                     return {"ok": False, "applied": True, "exit_code": None,
                             "diagnostic": "no test files in tmp",

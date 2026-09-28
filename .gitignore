@@ -108,7 +108,12 @@ release_v0.4.0.md
 /*.pdf
 /capabilities_hermes_learning.md
 /partner/governance/_execute_code.py
+/_execute_code.py
+/.autoevolution.lock
 
-# Locally maintained documentation and tests
+# Locally maintained design records and benchmark assets
 /docs/
-/tests/
+/benchmark/
+
+# Runtime evidence belongs in the external workspace, never in the source tree
+/share/

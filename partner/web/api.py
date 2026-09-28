@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from flask import request, jsonify, abort, session
+    from flask import request, jsonify, abort, session, current_app
     _HAVE_FLASK = True
 except Exception:
     _HAVE_FLASK = False
@@ -26,7 +26,8 @@ logger = logging.getLogger("partner.web.api")
 
 
 def _workspace_root() -> Path:
-    return Path(session.get("workspace") or "/mnt/e/work/partner_workspace")
+    return Path(session.get("workspace") or current_app.config.get("PARTNER_WORKSPACE")
+                or "/mnt/e/work/partner_workspace")
 
 
 def _resolve_caller_subject() -> dict:
@@ -37,7 +38,20 @@ def _resolve_caller_subject() -> dict:
 
 
 def _job_view_url(job_id: str) -> str:
-    return f"/api/jobs/{job_id}"
+    return f"/?job={job_id}"
+
+
+def _authorised_job(workspace: Path, job_id: str) -> dict:
+    sub = _resolve_caller_subject()
+    from partner.index.job_repository import init as _init_repo
+    record = _init_repo(workspace).get_record(job_id)
+    if not record:
+        abort(404, description="job not found")
+    allowed = {str(value) for value in sub.get("allowed_instances") or []}
+    assigned = str(record.get("assigned_instance") or record.get("origin_instance") or "")
+    if assigned and assigned not in allowed:
+        abort(403, description="job belongs to an unauthorised instance")
+    return record
 
 
 def register_api_routes(app: Any) -> None:
@@ -72,11 +86,23 @@ def register_api_routes(app: Any) -> None:
         if request_id and len(request_id) < 8:
             abort(400, description="request_id must be >= 8 chars")
 
+        sync_qq = body.get("sync_qq") is True
+        recipient_ref = str(body.get("recipient_ref") or "")
+        submit_channel = str(body.get("channel") or "web")
+        constraints = dict(body.get("execution_constraints") or {})
+        if sync_qq:
+            from partner.identity.binding import load_bot_binding
+            binding = load_bot_binding(str(_workspace_root()), instance)
+            if len(binding.allowed_user_openids) != 1:
+                abort(409, description="QQ 同步要求该实例恰好绑定一个授权用户")
+            recipient_ref = f"inst{instance}_{binding.allowed_user_openids[0]}"
+            submit_channel = "both"
+            constraints["delivery_channels"] = ["web", "qq"]
         try:
             result = orchestrate_submit(
                 workspace_root=str(_workspace_root()),
                 text=str(body.get("message") or ""),
-                channel=str(body.get("channel") or "web"),
+                channel=submit_channel,
                 sender_id=str(body.get("sender_id") or
                               f"web:{sub.get('subject_id', 'anon')}:{instance}"),
                 sender_name=str(body.get("sender_name") or
@@ -85,11 +111,11 @@ def register_api_routes(app: Any) -> None:
                 project_id=str(body.get("project_id") or ""),
                 mode=str(body.get("mode") or ""),
                 scope=str(body.get("scope") or ""),
-                execution_constraints=body.get("execution_constraints"),
+                execution_constraints=constraints,
                 attachments=body.get("attachments"),
                 report_policy=str(body.get("report_policy") or "milestone"),
                 request_id=request_id,
-                recipient_ref=str(body.get("recipient_ref") or ""),
+                recipient_ref=recipient_ref,
                 subject_allowed_instances=sub.get("allowed_instances") or [],
                 subject_id=str(sub.get("subject_id") or ""),
                 attachments_signature=body.get("attachments_signature"),
@@ -146,35 +172,53 @@ def register_api_routes(app: Any) -> None:
 
     @app.get("/api/jobs/<job_id>")
     def get_job(job_id: str) -> Any:
-        _resolve_caller_subject()
         workspace = _workspace_root()
-        try:
-            from partner.index.job_repository import init as _init_repo
-            repo = _init_repo(workspace)
-            record = repo.get_record(job_id)
-        except Exception as exc:
-            return jsonify({"error": str(exc)}), 500
-        if not record:
-            abort(404, description="job not found")
+        record = _authorised_job(workspace, job_id)
         # Redact metadata.json secret keys.
         record.pop("metadata_json", None)
-        return jsonify({"job": record})
+        record.pop("metadata", None)
+        from partner.runtime.event_run_log import sanitize
+        return jsonify({"job": sanitize(record)})
 
     @app.get("/api/jobs/<job_id>/timeline")
     def job_timeline(job_id: str) -> Any:
-        _resolve_caller_subject()
         workspace = _workspace_root()
+        record = _authorised_job(workspace, job_id)
         try:
             from partner.index.job_repository import init as _init_repo
             repo = _init_repo(workspace)
-            record = repo.get_record(job_id)
             history = repo.history(job_id)
         except Exception as exc:
             return jsonify({"error": str(exc)}), 500
-        if not record:
-            abort(404, description="job not found")
-        return jsonify({"job_id": job_id, "history": history,
+        return jsonify({"job_id": job_id, "history": history, "events": history,
                          "current_status": record.get("status")})
+
+    @app.get("/api/jobs/<job_id>/run-trace")
+    def job_run_trace(job_id: str) -> Any:
+        workspace = _workspace_root()
+        _authorised_job(workspace, job_id)
+        try:
+            from partner.web.run_trace import trace_overview
+            value = trace_overview(workspace, job_id,
+                                   after=int(request.args.get("after", "0")),
+                                   limit=int(request.args.get("limit", "120")),
+                                   view=str(request.args.get("view", "business")))
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        return jsonify(value)
+
+    @app.get("/api/jobs/<job_id>/run-trace/events/<event_id>")
+    def job_run_trace_event(job_id: str, event_id: str) -> Any:
+        workspace = _workspace_root()
+        _authorised_job(workspace, job_id)
+        try:
+            from partner.web.run_trace import event_detail
+            value = event_detail(workspace, job_id, event_id)
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        except FileNotFoundError:
+            abort(404, description="event trace not found")
+        return jsonify(value)
 
     @app.get("/api/jobs/<job_id>/events")
     def job_events(job_id: str) -> Any:
@@ -183,8 +227,8 @@ def register_api_routes(app: Any) -> None:
         Cursor is the rowid in job_history; on each tick the client
         receives any history rows with seq > after.
         """
-        _resolve_caller_subject()
         workspace = _workspace_root()
+        _authorised_job(workspace, job_id)
         after = int(request.args.get("after", "0"))
         from partner.web.sse import make_sse_response
         return make_sse_response(workspace=workspace,
@@ -192,6 +236,7 @@ def register_api_routes(app: Any) -> None:
 
     @app.get("/api/projects")
     def list_projects() -> Any:
+        _resolve_caller_subject()
         workspace = _workspace_root()
         try:
             from partner.projects.dynamic_project_registry import DynamicProjectRegistry
@@ -207,6 +252,7 @@ def register_api_routes(app: Any) -> None:
 
     @app.get("/api/capability_matrix")
     def capability_matrix() -> Any:
+        _resolve_caller_subject()
         p = Path(__file__).resolve().parents[2] / "docs/research/capability_matrix.md"
         if not p.exists():
             return jsonify({"error": "capability matrix not found"}), 404
@@ -214,6 +260,9 @@ def register_api_routes(app: Any) -> None:
 
     @app.get("/api/bindings/<instance_id>")
     def get_binding(instance_id: str) -> Any:
+        sub = _resolve_caller_subject()
+        if instance_id not in set(sub.get("allowed_instances") or []):
+            abort(403, description="instance not allowed")
         workspace = _workspace_root()
         try:
             from partner.identity.binding import load_bot_binding
@@ -297,7 +346,62 @@ def register_api_routes(app: Any) -> None:
                 artifacts = []
         except Exception as exc:
             return jsonify({"error": str(exc), "artifacts": []}), 503
-        return jsonify({"artifacts": artifacts})
+        projected = []
+        for row in artifacts:
+            value = dict(row)
+            value["type"] = value.get("kind") or ""
+            value["size_bytes"] = int(value.get("byte_size") or 0)
+            value["produced_at"] = value.get("created_at")
+            value["download_url"] = f"/api/artifacts/{value.get('artifact_id')}/download"
+            suffix = Path(str(value.get("path") or "")).suffix.lower()
+            value["previewable"] = suffix in {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".md", ".txt", ".json"}
+            value["preview_url"] = f"/api/artifacts/{value.get('artifact_id')}/preview"
+            projected.append(value)
+        return jsonify({"artifacts": projected})
+
+    @app.get("/api/artifacts/<artifact_id>/download")
+    def download_artifact(artifact_id: str) -> Any:
+        _resolve_caller_subject()
+        workspace = _workspace_root()
+        try:
+            from partner.index.artifact_repository import init as _init_art
+            row = _init_art(workspace).get(artifact_id)
+        except Exception as exc:
+            return jsonify({"error": f"artifact index unavailable: {exc}"}), 503
+        if not row:
+            abort(404, description="artifact not found")
+        _authorised_job(workspace, str(row.get("job_id") or ""))
+        path = Path(str(row.get("path") or ""))
+        if not path.is_file():
+            abort(404, description="artifact file missing")
+        from flask import send_file
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.get("/api/artifacts/<artifact_id>/preview")
+    def preview_artifact(artifact_id: str) -> Any:
+        """Display a registered, authorised artifact without exposing paths."""
+        _resolve_caller_subject()
+        workspace = _workspace_root()
+        try:
+            from partner.index.artifact_repository import init as _init_art
+            row = _init_art(workspace).get(artifact_id)
+        except Exception as exc:
+            return jsonify({"error": f"artifact index unavailable: {exc}"}), 503
+        if not row:
+            abort(404, description="artifact not found")
+        _authorised_job(workspace, str(row.get("job_id") or ""))
+        path = Path(str(row.get("path") or ""))
+        if not path.is_file():
+            abort(404, description="artifact file missing")
+        suffix = path.suffix.lower()
+        allowed = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".md", ".txt", ".json"}
+        if suffix not in allowed:
+            abort(415, description="artifact type is not previewable")
+        from flask import send_file
+        return send_file(path, as_attachment=False, download_name=path.name,
+                         mimetype={".md": "text/plain; charset=utf-8",
+                                   ".txt": "text/plain; charset=utf-8",
+                                   ".json": "application/json"}.get(suffix))
 
     @app.get("/api/learning/sources")
     def learning_sources() -> Any:

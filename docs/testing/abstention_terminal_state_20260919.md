@@ -94,7 +94,7 @@ prior 判定    abstain=False，blocked_by=["latest settlement is abstained, not
 回复行        1 条
 ```
 任务声明在同 task_id 内做了第二次尝试（保持同类）：目标改为真实失败的
-`tests/test_adapter_contracts.py -k gepa`（baseline 2 passed / 3 failed），补丁是真实修复
+`benchmark/research/test_adapter_contracts.py -k gepa`（baseline 2 passed / 3 failed），补丁是真实修复
 （candidate 5 passed / 0 failed）→ 真"成功证据"进入该类，`supported > 0` 使弃权条件**结构性失效**。
 两次尝试都记录在 `task.json::attempt_history` 与 `bug_report.md`。
 
@@ -125,7 +125,7 @@ POST   token abstPOST_trace_02_1789839001  job_1bb26b4baecb4ea4  prior=off（反
 ## 测试
 
 ```
-tests/runtime/test_abstention.py（11 项）
+benchmark/runtime/test_abstention.py（11 项）
   规则：纯函数/确定性/阈值是命名常量/不改写入参
   全 falsified → 弃权；比例 < 0.75 → 不弃权；= 0.75 且尾部 falsified → 弃权
   有 supported → 不弃权；证据不足（<2）→ 不弃权；空 prior → 不弃权
@@ -138,8 +138,8 @@ tests/runtime/test_abstention.py（11 项）
 ```
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/      → 77 passed, exit 0
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/   → 141 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/      → 77 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/   → 141 passed, exit 0
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  → 139
 git diff --check                                                          → exit 0, clean
 残留进程 0

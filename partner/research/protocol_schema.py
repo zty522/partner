@@ -38,7 +38,7 @@ SCHEMA_KIND = "research_protocol"
 
 ALLOWED_TOP_KEYS: frozenset[str] = frozenset({
     "schema_version", "kind", "protocol_id", "title", "version",
-    "hypotheses", "primary_metrics", "secondary_metrics",
+    "hypotheses", "primary_metrics", "primary_delta_metrics", "secondary_metrics",
     "allowed_modification_objects", "evaluator_boundaries",
     "budget", "stop_rules", "human_intervention_taxonomy",
     "baseline_protocols", "controls", "expected_direction",
@@ -268,6 +268,10 @@ def validate(payload):
     for idx, m in enumerate(primary):
         _check_metric(idx, m, "primary_metrics")
 
+    primary_delta = payload.get("primary_delta_metrics", []) or []
+    for idx, m in enumerate(primary_delta):
+        _check_metric(idx, m, "primary_delta_metrics")
+
     secondary = payload.get("secondary_metrics", []) or []
     for idx, m in enumerate(secondary):
         _check_metric(idx, m, "secondary_metrics")
@@ -306,6 +310,7 @@ def validate(payload):
         version=payload["version"],
         hypotheses=list(hypotheses),
         primary_metrics=list(primary),
+        primary_delta_metrics=list(primary_delta),
         secondary_metrics=list(secondary),
         allowed_modification_objects=list(mods),
         evaluator_boundaries=list(evaluators),

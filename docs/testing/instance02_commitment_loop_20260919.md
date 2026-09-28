@@ -79,12 +79,12 @@ timeline       : create → commitment_bet_recorded → commitment_bet_settled �
 ## 测试
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/     # 19 passed
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/  # 141 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/     # 19 passed
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/  # 141 passed
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  # 137
 git diff --check                                                          # clean
 ```
-`tests/runtime/test_commitment_event_binding.py` 新增 5 项：两条 flow 都可达 commitment 节点且旧版本
+`benchmark/runtime/test_commitment_event_binding.py` 新增 5 项：两条 flow 都可达 commitment 节点且旧版本
 仍可解析；两个 handler 把同一 bet 从 recorded 推到 settled（只产生 1 份 settlement 与 1 份 experience，
 timeline 两行都不改状态）；重放不产生新结算；`freeze_only()` 后 `run()` 是**续跑**而非冻结字段编辑
 （freeze_hash 与 revision 不变）；有界动作确定性且可比。

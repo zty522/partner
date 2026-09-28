@@ -105,23 +105,6 @@ Partner 同时具备**自我认知与自进化**能力：它盘点自己会什�
 └─────────────────────────────────────────────────────┘
 ```
 
-### 外部知识借鉴
-
-Partner 持续从外部前沿工作学习并转化为自身能力：
-
-| 借鉴来源 | 转化为 |
-|----------|--------|
-| SESA（自进化搜索 Agent） | Skill Bank 技能沉淀机制 |
-| ERA（Nature, AI 科研系统） | 树搜索式的自主实验推进 |
-| Polar（Agentic RL on Any Harness） | API Proxy 架构 |
-| VeriSkill | 技能生成后的验证机制 |
-| DeepSeek Harness | durable/live 事件分离、可重放会话与工具生命周期（仅设计参考） |
-| OpenAI Codex | 原始证据后归约、模型可见/运行时分离与策略边界（仅设计参考） |
-| PocketFlow / CytoBridge / ViSNet / AI2BMD / Amber | 生物信息学工具链集成 |
-
-固定 revision、许可证及“未复制源码”的边界见
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
-
 ## 常用命令
 
 ```bash
@@ -184,17 +167,3 @@ call_agent_skill(agent="my-agent", task="分析这份数据")
 - **安装时验证，而非运行时**：CLI 参数在安装时通过 `--help` 校验
 - **显式停止**：项目执行应通过 `stop_project` 事件明确停止
 
----
-
-## 第三方代码声明 / Third-Party Notices
-
-本项目借鉴了以下开源项目的设计模式和代码：
-
-- **Hermes Agent** (MIT) — https://github.com/nousresearch/hermes-agent
-- **Hermes Desktop** (MIT) — https://github.com/fathah/hermes-desktop
-- **OpenClaw** (MIT) — https://github.com/openclaw/openclaw
-- **OpenClaw Windows Hub** (MIT) — https://github.com/openclaw/openclaw-windows-node
-
-详见 `NOTICE.md`。
-
----

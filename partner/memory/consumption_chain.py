@@ -44,6 +44,7 @@ def usage_recorded(workspace, entry_id: str) -> bool:
     """Return True iff a usage row references ``entry_id``."""
     p = _memory_root(workspace) / "usage_outcomes.jsonl"
     rows = _read_jsonl(p)
+    rows += _read_jsonl(_memory_root(workspace) / "usage.jsonl")
     return any(r.get("memory_id") == entry_id or entry_id in (r.get("memory_ids") or [])
                for r in rows)
 
@@ -61,7 +62,7 @@ def consumption_chain(workspace, entry_id: str) -> list[dict]:
         if row.get("record_id") == entry_id:
             chain.append({"kind": "write", "row": row})
     for row in _read_jsonl(root / "usage_outcomes.jsonl"):
-        if row.get("memory_id") == entry_id:
+        if row.get("memory_id") == entry_id or entry_id in (row.get("memory_ids") or []):
             chain.append({"kind": "recall", "row": row})
     for row in _read_jsonl(root / "usage.jsonl"):
         if entry_id in (row.get("memory_ids") or []):

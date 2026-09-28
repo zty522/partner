@@ -212,6 +212,12 @@ def score(workspace, task_id: str, agent_dir, reference_paths: dict) -> dict:
     return result
 
 
+def run(workspace, task_id: str = "software_pipeline") -> dict:
+    """Legacy smoke entry point; production evaluation calls the phases."""
+    prepare_initial_state(workspace, task_id)
+    return reference_oracle(workspace, task_id)
+
+
 TASK_DEFINITION = {
     "task_id": "sw_pipe_synth_v3",
     "family": FAMILY, "domain": DOMAIN,

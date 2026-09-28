@@ -38,6 +38,9 @@ def validate(plans,sources):
                 if p.get('labels') and len(p['labels'])!=len(p['source_refs']):raise ValueError('labels must match source count')
             if kind=='distribution':
                 if not p.get('value_key'):raise ValueError('distribution requires value_key (exact numeric field) and rows_key (exact array location)')
+                field_name=str(p.get('value_key') or '').lower()
+                if any(token in field_name for token in ('byte','confidence','token','hash','exit_code','duration_ms')):
+                    raise ValueError('operational metadata is not a research-result distribution')
                 data=json_data(source);requested=p.get('rows_key','')
                 try:rows=select(data,requested)
                 except (KeyError,ValueError,TypeError):
@@ -48,15 +51,21 @@ def validate(plans,sources):
                     rows=select(data,canonical)
                     if not isinstance(rows,list):raise ValueError('preview wrapper does not resolve to a real array')
                     p['rows_key']=canonical;p['array_path_resolution']={'requested':requested,'actual':canonical,'scope':'full source array, not prompt sample'}
-                if not isinstance(rows,list) or not rows:raise ValueError('rows_key is not a nonempty array')
+                if not isinstance(rows,list) or not rows:
+                    raise ValueError('rows_key is not a nonempty array')
+                measured_values=[]
                 for index, item in enumerate(rows):
                     try:
-                        float(select(item, p['value_key']))
+                        measured_values.append(float(select(item, p['value_key'])))
                     except (KeyError, TypeError, ValueError, IndexError) as exc:
                         raise ValueError(f"distribution needs a numeric value in every row; field {p['value_key']!r} "
                                          f"is missing/non-numeric in row {index}. Do not plot exception text or "
                                          "mixed event schemas as a numeric distribution; choose a supported field "
                                          "or a real code_excerpt instead") from exc
+                if len(set(measured_values)) < 2:
+                    raise ValueError('distribution requires at least two distinct measured values')
+                if len(measured_values) < 3:
+                    raise ValueError('distribution requires at least three measured rows')
             if kind=='scalar_bar':
                 if source.suffix.lower() not in {'.json', '.jsonl'}:
                     raise ValueError('scalar_bar requires one JSON source')
@@ -69,7 +78,20 @@ def validate(plans,sources):
                     if not __import__('math').isfinite(number):
                         raise ValueError('scalar_bar selector is not finite')
             if kind=='molecule_grid':
-                rows=select(json_data(source),p.get('rows_key','candidates'))
+                data=json_data(source); requested=p.get('rows_key','candidates')
+                try:
+                    rows=select(data,requested)
+                except (KeyError,ValueError,TypeError,IndexError):
+                    canonical='.'.join(x for x in str(requested).split('.')
+                                       if x not in {'items_preview','tail_preview'})
+                    if canonical==requested:raise
+                    rows=select(data,canonical)
+                    if not isinstance(rows,list):
+                        raise ValueError('preview wrapper does not resolve to a real molecule array')
+                    p['rows_key']=canonical
+                    p['array_path_resolution']={
+                        'requested':requested,'actual':canonical,
+                        'scope':'full source array, not prompt sample'}
                 for i in p.get('indices',[0]):rows[int(i)][p.get('smiles_key','canonical_smiles')]
             if kind=='video_frame':float(p['timestamp'])
             if kind=='code_excerpt' and 'start_line' not in p:raise ValueError('code excerpt needs actual start_line/end_line')
@@ -154,9 +176,12 @@ def executable_choices(sources):
                     suffix=baseline[len('baseline_'):]
                     candidates.append({'kind':'scalar_bar','source_refs':[row['source_id']],
                         'values':{'Baseline':baseline,'Candidate':candidate},
-                        'y_label':suffix+'（原数据单位）'})
+                        'y_label':('RMSE' if suffix.lower()=='rmse' else suffix)+'（原数据单位）'})
         for array in row.get('actual_arrays', []):
             for field in array.get('numeric_fields', []):
+                if array.get('count', 0) < 5 or any(token in field.lower() for token in (
+                        'byte','confidence','token','hash','exit_code','duration_ms')):
+                    continue
                 candidates.append({'kind':'distribution', 'source_refs':[row['source_id']],
                                    'rows_key':array['rows_key'], 'value_key':field,
                                    'x_label':field + '（原数据单位）'})
@@ -173,4 +198,17 @@ def executable_choices(sources):
             choices.append({'option_id':candidate['id'], 'filename':row['filename'], 'plan':valid[0]})
             kept += 1
             if kept >= 5: break
-    return choices[:50]
+    # Put direct outcome comparisons ahead of source-code excerpts and generic
+    # distributions.  Otherwise a source-rich learning run can consume the
+    # bounded option list before the actual baseline/candidate evidence is
+    # even offered to the report planner.
+    def priority(choice):
+        plan=choice.get('plan') or {}; name=str(choice.get('filename') or '').lower()
+        metric=str(plan.get('value_key') or '').lower()
+        result_name=any(token in name for token in ('comparison','result','evidence','metrics'))
+        return (0 if plan.get('kind')=='scalar_bar' else
+                1 if result_name and ('delta' in metric or 'rmse' in metric) else
+                2 if result_name else
+                3 if plan.get('kind')=='distribution' else 4,
+                name, str(choice.get('option_id') or ''))
+    return sorted(choices,key=priority)[:50]

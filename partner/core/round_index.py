@@ -1,5 +1,8 @@
 """Round artifact index (M1 / Section 8 / round 5).
 
+MAINTENANCE_ONLY_INDEXING: this module's bounded walk only builds or repairs
+the index; normal Event reads use the resulting index.
+
 Provides indexed read access to ``project_dir/rounds/round_NNN_*``
 without scanning the directory tree.  Round entries are written
 through ``record_round`` whenever a round completes; older code that

@@ -51,8 +51,8 @@ def canonical_payload(*, instance: str, message: str,
                        project_id: str | None, mode: str | None,
                        scope: str | None, sender_id: str, reply_to: str,
                        recipient_ref: str | None,
-                       attachments: list[dict] | None,
-                       execution_constraints: dict) -> dict:
+                       attachments: list[dict] | None = None,
+                       execution_constraints: dict | None = None) -> dict:
     return {
         "instance": instance,
         "message": str(message or "").strip(),
@@ -63,7 +63,7 @@ def canonical_payload(*, instance: str, message: str,
         "reply_to": reply_to,
         "recipient_ref": recipient_ref or "",
         "execution_constraints": json.dumps(
-            execution_constraints, sort_keys=True, separators=(",", ":")
+            execution_constraints or {}, sort_keys=True, separators=(",", ":")
         ),
         "attachments": sorted(
             (json.dumps(a, sort_keys=True, separators=(",", ":"))
@@ -77,8 +77,8 @@ def compute_fingerprint(*, instance: str, message: str,
                          project_id: str | None, mode: str | None,
                          scope: str | None, sender_id: str, reply_to: str,
                          recipient_ref: str | None,
-                         attachments: list[dict] | None,
-                         execution_constraints: dict) -> str:
+                         attachments: list[dict] | None = None,
+                         execution_constraints: dict | None = None) -> str:
     payload = canonical_payload(
         instance=instance, message=message, project_id=project_id,
         mode=mode, scope=scope, sender_id=sender_id, reply_to=reply_to,
@@ -163,7 +163,10 @@ def _ensure_reservations_table(conn) -> None:
 def _row_to_dict(row) -> dict | None:
     if row is None:
         return None
-    return {k: row[k] for k in row.keys()}
+    out = {k: row[k] for k in row.keys()}
+    if "row_id" in out:
+        out.setdefault("reservation_seq", out["row_id"])
+    return out
 
 
 def _new_owner_token(subject_id: str, request_id: str, ts: float) -> str:
@@ -203,9 +206,21 @@ def reserve(*, db_path: str, request_id: str, workspace_root: str,
                     f"request_id={request_id!r} already bound to a "
                     f"different payload (state={existing['state']})"
                 )
+            recovered_failed = existing["state"] == "failed"
+            if recovered_failed:
+                now = _now()
+                new_owner = _new_owner_token(subject_id, request_id, now)
+                conn.execute(
+                    "UPDATE idem_reservations SET state='reserved', owner_token=?, "
+                    "expires_at=?, updated_at=?, job_id=NULL, assigned_instance=NULL "
+                    "WHERE row_id=?", (new_owner, now + ttl_seconds, now, existing["row_id"]))
+                existing = conn.execute(
+                    "SELECT * FROM idem_reservations WHERE row_id=?",
+                    (existing["row_id"],)).fetchone()
             out = _row_to_dict(existing)
             out["result"] = (
-                "submitted" if existing["state"] == "submitted"
+                "created" if recovered_failed
+                else "submitted" if existing["state"] == "submitted"
                 else "in_progress"
             )
             conn.execute("COMMIT")
@@ -290,7 +305,7 @@ def acquire_ownership(db_path: str, request_id: str,
 
 
 def mark_state(db_path: str, request_id: str, *, new_state: str,
-                 workspace_root: str, subject_id: str, owner_token: str,
+                 workspace_root: str = "", subject_id: str = "", owner_token: str = "",
                  job_id: str | None = None,
                  assigned_instance: str | None = None) -> dict:
     if new_state not in RESERVATION_STATES:
@@ -299,14 +314,23 @@ def mark_state(db_path: str, request_id: str, *, new_state: str,
     try:
         _ensure_reservations_table(conn)
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT * FROM idem_reservations "
-            "WHERE workspace_root = ? AND subject_id = ? AND request_id = ?",
-            (workspace_root, subject_id, request_id),
-        ).fetchone()
+        if workspace_root and subject_id:
+            row = conn.execute(
+                "SELECT * FROM idem_reservations WHERE workspace_root = ? "
+                "AND subject_id = ? AND request_id = ?",
+                (workspace_root, subject_id, request_id)).fetchone()
+        else:
+            matches = conn.execute(
+                "SELECT * FROM idem_reservations WHERE request_id = ?",
+                (request_id,)).fetchall()
+            if len(matches) > 1:
+                raise IdempotencyScopeError(
+                    "workspace_root and subject_id required for ambiguous request_id")
+            row = matches[0] if matches else None
         if row is None:
             conn.execute("ROLLBACK")
             raise LookupError(f"no reservation for {request_id!r}")
+        owner_token = owner_token or str(row["owner_token"])
         if row["owner_token"] != owner_token:
             conn.execute("ROLLBACK")
             raise NotYetOwned(

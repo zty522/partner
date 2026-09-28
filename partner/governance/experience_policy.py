@@ -850,7 +850,7 @@ def evaluate_manual_evolution_evidence(workspace: str, *, project_id: str = "") 
             "at least 3 samples per arm", "0 false-success in candidate arm",
             "all cited evidence matches its named source", "full regression remains passing",
         ],
-        "tests": ["tests/test_manual_stable_mode.py", "tests/test_manual_governance.py", "tests/test_policy_control.py"],
+        "tests": ["benchmark/cognition/test_manual_governance.py", "benchmark/cognition/test_policy_control.py"],
         "project_id": target_project,
     })
     return {"ok": bool(experiment.get("ok")), "status": "candidate_ready",

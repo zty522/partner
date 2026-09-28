@@ -47,7 +47,7 @@ def fetch(url,directory):
     return receipt
 
 
-def read_verified(row,limit=12000):
+def read_verified(row,limit=12000,query=''):
     raw=Path(row['raw_path']).read_bytes();text=Path(row['text_path']).read_text()
     if hashlib.sha256(raw).hexdigest()!=row['sha256'] or hashlib.sha256(text.encode()).hexdigest()!=row['text_sha256']:
         raise ValueError('downloaded source changed')
@@ -62,6 +62,21 @@ def read_verified(row,limit=12000):
             section = target.find_parent('dl') or target.find_parent('section') or target
             text = section.get_text('\n', strip=True)
             selection = 'requested_anchor:' + fragment
+    if selection == 'document_start' and query:
+        import re
+        tokens = sorted(set(re.findall(r'[A-Za-z_][A-Za-z0-9_.]{3,}', str(query))),
+                        key=len, reverse=True)
+        for token in tokens:
+            lowered_text = text.lower()
+            class_marker = 'class ' + token.lower().split('.')[-1]
+            index = lowered_text.find(class_marker)
+            if index < 0:
+                index = lowered_text.find(token.lower())
+            if index >= 0:
+                start = max(0, index - limit // 3)
+                text = text[start:start + limit]
+                selection = 'query_token:' + token
+                break
     return {'url':row['url'],'text':text[:limit],'total_chars':full_length,
             'excerpt_only':selection != 'document_start' or len(text)>limit,
             'selection':selection}

@@ -100,4 +100,4 @@ commitment 节点）** 都注册进 registry。注意陷阱：`LEGACY_PRESENTATI
 | lifecycle | `CLOSED`，`settled=True`，`experience_emitted=True` |
 | timeline | seq 2604 `commitment_bet_recorded`、seq 2605 `commitment_bet_settled`（均 `running -> running`），两行都带 token |
 | Job DB | 269 → 270，旧 269 条逐条不变，仅新增该 root Job（无子 Job） |
-| 测试 | `tests/runtime/` 19 passed；`tests/commitment/` 141 passed；事件定义 137；`git diff --check` clean |
+| 测试 | `benchmark/runtime/` 19 passed；`benchmark/commitment/` 141 passed；事件定义 137；`git diff --check` clean |

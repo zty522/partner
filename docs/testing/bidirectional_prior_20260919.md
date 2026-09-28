@@ -42,11 +42,11 @@ max_min_delta / floor_note`（放松分支同样记录 refuted 比例，读的�
 
 ## 第二步：一条真实的 refuted 结算
 
-任务 `refuted_green_baseline_ace`（`benchmarks/real_tasks/refuted_green_baseline_ace/`）：
+任务 `refuted_green_baseline_ace`（`benchmark/studies/real_tasks/refuted_green_baseline_ace/`）：
 
 ```
 target_module   partner/research/adapters/ace.py
-test_target     tests/test_adapter_contracts.py -k test_ace_append_to_memory_writes_real_file
+test_target     benchmark/research/test_adapter_contracts.py -k test_ace_append_to_memory_writes_real_file
                 → 该选择器只命中 1 条测试，且 baseline 中它已经通过
 声明的预期      tests_passed >= 2.0（threshold=2.0），delta_over_baseline(min_delta=1.0)
 候选补丁        给模块 docstring 加一段说明（行为中立）
@@ -119,7 +119,7 @@ settlement    supported，note="improvement_over_baseline delta=1.0>=0.25"
 ## 测试
 
 ```
-tests/runtime/test_experience_prior.py（22 项，其中本轮新增 5 项）
+benchmark/runtime/test_experience_prior.py（22 项，其中本轮新增 5 项）
   test_the_class_vocabulary_is_the_kernel_vocabulary     内核词汇守卫（导入内核元组比对）
   test_all_supported_lowers_and_all_refuted_raises       双向：3 supported → 0.25；3 falsified → 4.0
   test_mixed_history_follows_the_declared_priority       1f/2s → 0.25；1f/1s（平局）→ 2.0；2f/1s → 3.0
@@ -129,8 +129,8 @@ tests/runtime/test_experience_prior.py（22 项，其中本轮新增 5 项）
 ```
 
 ```
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/runtime/      → 66 passed, exit 0
-PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/   → 141 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/runtime/      → 66 passed, exit 0
+PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/   → 141 passed, exit 0
 python3 -c "from partner.events import builtin_definitions; print(len(...))"  → 139
 git diff --check                                                          → exit 0, clean
 残留进程 0

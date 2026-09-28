@@ -1,152 +1,143 @@
-"""Side-band progress reporter.
+"""User-visible lifecycle message Events.
 
-Runs after each completed node in a round-style flow. Translates the node's
-output into a short 1-2 sentence Chinese progress message and enqueues it
-to the same outbound queue that message_critic -> send uses. Does NOT
-go through message_critic (intentional: progress is non-critical and a
-critic failure must not block the round).
-
-The LLM translation is OPTIONAL: if it fails or times out within 5s, we
-fall back to a hardcoded summary so the round never blocks on LLM hang
-(LLM provider quota exhaustion should not freeze business rounds).
+These handlers edit and review messages. Transport is a separate
+``delivery.send_text`` Event, and the runtime records all three in the ledger.
 """
 from __future__ import annotations
 
 from typing import Any
-import json
+import re
 
-from ._llm import call_model
 from partner.event_fabric.catalog import EventDefinition
 
 
-_PROGRESS_PROMPT = """你是 Partner 进度汇报员。Partner刚跑完一个内部 Event，需要你把它的真凭据翻译成一句普通中文发给用户。
-
-【硬规则】
-- 只描述刚才完成的那个节点的**真实产物**（数字、文件名、状态），禁止凭未给信息推断
-- 严格 1 句，最多 80 字；不要换行、不要标题、不要列表
-- 不写「我刚才」「我即将」「接下来会」这类工作流表述，只说事实
-- 不复述所有文件名（除非特别短）
-- 不预测下一步
-- 不提及内部编号 / 哈希（除非该哈希是该节点最关键的产物且不超过 16 字）
-- 如实记录失败/缺口，禁用用失败等掩盖
-
-【节点】{node_id}（{flow_type} flow）
-【事件类型】{event_type}
-【摘要】{summary}
-【可读字段】{fields}
-
-只输出 JSON：{{"progress_text": "..."}}。禁止其它字段。
-"""
+_PHASE_LABELS = {
+    "accepted": "已接收", "flow_planned": "已规划", "flow_started": "开始运行",
+    "event_started": "开始", "event_completed": "完成", "event_failed": "未完成",
+    "event_waiting": "等待", "flow_completed": "流程完成", "flow_failed": "流程未完成",
+    "flow_resumed": "恢复运行",
+}
 
 
-def _extract_readable_fields(value):
-    if not isinstance(value, dict):
-        return {}
-    out = {}
-    for k, v in list(value.items())[:8]:
-        if isinstance(v, (str, int, float, bool)):
-            s = str(v)
-            if len(s) <= 200 and not k.startswith('_'):
-                out[k] = s
-        elif isinstance(v, list):
-            out[k + '_count'] = len(v)
-        elif isinstance(v, dict):
-            sub = _extract_readable_fields(v)
-            if sub:
-                out[k] = sub
-    return out
+def _clean(value: Any, limit: int = 180) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"\b(?:evt|flow|job)_[a-f0-9]{8,}\b", "", text)
+    return text[:limit].strip(" ：:，,")
 
 
-def _try_llm_translation(ctx, params, fields_event, summary, fields):
-    """Try one LLM call with hard 5s timeout via signal.alarm-compatible thread.
-    Returns progress_text or "" on failure."""
-    import threading
-    result = [None]
-    done = threading.Event()
-
-    def _call():
-        try:
-            raw, usage = call_model(
-                ctx, purpose='progress_report',
-                prompt=_PROGRESS_PROMPT.format(
-                    node_id=params.get('completed_node_id') or '',
-                    flow_type=params.get('flow_type') or 'unknown',
-                    event_type=fields_event or 'unknown',
-                    summary=summary or '(无摘要)',
-                    fields=json.dumps(fields, ensure_ascii=False)[:1200] or '(无字段)',
-                ),
-            )
-            from ._llm import json_object
-            parsed = json_object(raw) if raw and raw.strip().startswith('{') else {}
-            result[0] = str(parsed.get('progress_text') or '').strip()
-        except Exception:
-            pass
-        finally:
-            done.set()
-
-    t = threading.Thread(target=_call, daemon=True)
-    t.start()
-    done.wait(timeout=5)
-    return result[0] if result[0] else ''
-
-
-def emit_progress(ctx, params):
-    node_id = str(params.get('completed_node_id') or '')
-    node_output = params.get('node_output') or {}
-    flow_id = str(params.get('flow_id') or '')
-    task_id = str(params.get('task_id') or '')
-    instance_id = str(params.get('instance_id') or '')
-    flow_type = str(params.get('flow_type') or '')
-
-    summary = str(node_output.get('summary', '') or '')[:500]
-    sem = node_output.get('semantic_output') or {}
-    fields = _extract_readable_fields(sem)
-    for alias in ('supported', 'rejected', 'unknown', 'candidates', 'hypotheses'):
-        if alias in sem and isinstance(sem[alias], list):
-            fields[alias + '_count'] = len(sem[alias])
-    fields_event = str(node_output.get('event_type', '') or '')
-
-    # 1. 优先尝试 LLM 翻译 (5s 限时, daemon thread, 不阻塞主线程)
-    text = _try_llm_translation(ctx, params, fields_event, summary, fields)
-    # 2. fallback: hardcoded summary
-    if not text:
-        text = f"已完成 {node_id}" + (f": {summary[:80]}" if summary else '')
-
-    # 3. 写 outbound
-    written_to = ''
-    try:
-        from partner.application.service import PartnerApplicationService
-        workspace = str(getattr(ctx, 'workspace', '') or '')
-        if workspace:
-            svc = PartnerApplicationService(workspace)
-            svc._enqueue_outbound_text(
-                job_id=task_id or 'unknown',
-                sender_id=str(getattr(ctx, 'sender_id', '') or 'progress'),
-                project_id=str(getattr(ctx, 'project_id', '') or ''),
-                content=text,
-                persona_hint=instance_id or "progress",
-            )
-            written_to = workspace
-    except Exception as exc:
-        return {
-            'ok': False, 'status': 'completed',
-            'error': f'progress enqueue failed: {exc.__class__.__name__}: {str(exc)[:120]}',
-            'summary': '进度消息投递失败，已降级',
-            'progress_text': text,
-        }
-
-    return {
-        'ok': True, 'status': 'completed',
-        'progress_text': text,
-        'outbound_written_to': written_to,
-        'source_event': node_id,
-        'summary': text[:120],
-    }
+def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Turn one verified runtime transition into a concise Chinese update."""
+    phase = str(params.get("lifecycle_phase") or "event_completed")
+    flow_name = _clean(params.get("flow_name") or params.get("flow_type"), 60)
+    event_name = _clean(params.get("event_description") or params.get("event_type")
+                        or params.get("node_id"), 90)
+    summary = _clean(params.get("event_summary") or params.get("summary"), 180)
+    next_event = _clean(params.get("next_event_description"), 100)
+    index, total = params.get("event_index"), params.get("event_total")
+    position = f"（第 {index}/{total} 步）" if index and total else ""
+    if phase == "accepted":
+        # The first line is the user's own task label.  Taking a raw character
+        # prefix from a long body can expose half a local path or half a word.
+        request = _clean(str(params.get("request") or "").splitlines()[0], 70)
+        message = f"已收到你的任务：{request}。" if request else "已收到你的任务。"
+        if flow_name:
+            message += f"将按“{flow_name}”流程执行，后续步骤会持续同步到网页和 QQ。"
+    elif phase == "flow_planned":
+        nodes = [_clean(x, 45) for x in params.get("planned_events") or []]
+        nodes = [x for x in nodes if x]
+        preview, omitted = " → ".join(nodes[:8]), max(0, len(nodes) - 8)
+        message = f"已生成“{flow_name or '任务'}”运行计划，共 {len(nodes)} 个 Event"
+        if preview:
+            message += f"：{preview}"
+        if omitted:
+            message += f"，另有 {omitted} 步"
+        message += "。"
+    elif phase in {"flow_started", "flow_resumed"}:
+        message = f"{_PHASE_LABELS[phase]} Flow“{flow_name}”。"
+    elif phase in {"flow_completed", "flow_failed"}:
+        facts=params.get('milestone_facts') if isinstance(params.get('milestone_facts'),dict) else {}
+        if flow_name == 'project_cycle_round' and facts:
+            number=facts.get('round_number') or '?'
+            hypothesis=_clean(facts.get('hypothesis') or facts.get('round_goal'),110)
+            result_text=('获得可核验证据' if facts.get('verified') is True else
+                         '未获得完整可核验证据' if facts.get('verified') is False else '核验状态未知')
+            route=_clean(facts.get('route'),30); reason=_clean(facts.get('reason'),100)
+            next_goal=_clean(facts.get('next_hypothesis') or facts.get('next_round_goal'),100)
+            # A round decision may request active learning, but the learning Flow
+            # has not run yet. Never relay an LLM explanation that describes a
+            # future handoff as already retrieved, frozen, or consumed.
+            if route == 'active_learning':
+                reason = '当前知识缺口需要外部来源核对；是否形成可靠 handoff 以后续主动学习 Flow 的真实终态为准'
+            message=f'第 {number} 轮结算：假设“{hypothesis}”；{result_text}；决定 {route}'
+            if reason: message+=f'，理由：{reason}'
+            if next_goal and route in {'continue_project','active_learning'}: message+=f'；下一步：{next_goal}'
+            message+='。'
+        elif flow_name == 'active_learning' and facts:
+            if phase == 'flow_failed':
+                message = '主动学习未完成：没有形成可供下一项目轮消费的可靠 handoff。'
+                if summary:
+                    message += _clean(summary, 160) + '。'
+            else:
+                urls=facts.get('source_urls') or []
+                status=_clean(facts.get('learning_status'),40)
+                message=f"主动学习完成：{status or '有来源的 handoff 已冻结'}"
+                if urls: message+=f"；来源：{_clean(urls[0],100)}"
+                message+='；改善仍需下一项目轮消费并匹配比较。'
+        else:
+            message = f"{_PHASE_LABELS[phase]}：{flow_name or '当前 Flow'}。"
+            if summary:
+                message += summary + "。"
+    else:
+        label = _PHASE_LABELS.get(phase, "进展")
+        subject = event_name or _clean(params.get("node_id"), 60) or "当前 Event"
+        message = f"{label}{position}：{subject}。"
+        if summary and phase != "event_started":
+            message += summary + "。"
+        if next_event and phase in {"event_completed", "event_waiting", "event_failed"}:
+            message += f"下一步：{next_event}。"
+    message = re.sub(r"。+", "。", message).strip()
+    return {"ok": bool(message), "status": "completed" if message else "failed",
+            "message": message, "summary": message[:300],
+            "semantic_output": {"lifecycle_phase": phase, "message": message}}
 
 
-DEFINITIONS = [EventDefinition(
-    'notification.emit_progress', 'notification',
-    '将刚跑完节点的输出翻译成 1-2 句进度消息并写入 outbound 队列',
-    emit_progress,
-    execution_method='llm',
-)]
+def lifecycle_critic(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Fail closed on empty, internal, misleading, or unbounded updates."""
+    previous = params.get("previous") if isinstance(params.get("previous"), dict) else {}
+    message = _clean(params.get("message") or previous.get("message"), 420)
+    problems: list[str] = []
+    if not message:
+        problems.append("empty_message")
+    if re.search(r"\b(?:sha256|production_effective|exit_code|params)\b", message, re.I):
+        problems.append("internal_field")
+    if len(message) > 400:
+        problems.append("too_long")
+    phase = str(params.get("lifecycle_phase") or "")
+    if phase.endswith("failed") and not any(x in message for x in ("未完成", "失败", "等待")):
+        problems.append("failure_hidden")
+    accepted = not problems
+    return {"ok": accepted, "status": "completed" if accepted else "failed",
+            "accepted": accepted, "problems": problems, "message": message,
+            "summary": "生命周期消息已通过发送前审查" if accepted else "生命周期消息未通过发送前审查",
+            "semantic_output": {"accepted": accepted, "problems": problems, "message": message}}
+
+
+def emit_progress(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility editor for callers from the retired side-band design."""
+    translated = lifecycle_compose(ctx, {
+        **params, "lifecycle_phase": params.get("lifecycle_phase") or "event_completed",
+        "event_summary": (params.get("node_output") or {}).get("summary"),
+        "event_description": params.get("event_description") or params.get("completed_node_id"),
+    })
+    return {**translated, "progress_text": translated.get("message", ""),
+            "source_event": params.get("completed_node_id", "")}
+
+
+DEFINITIONS = [
+    EventDefinition("notification.lifecycle_compose", "notification",
+                    "根据真实运行状态编辑用户可读的生命周期消息", lifecycle_compose),
+    EventDefinition("notification.lifecycle_critic", "notification",
+                    "发送前审查生命周期消息的真实性、可读性和内部字段", lifecycle_critic),
+    EventDefinition("notification.emit_progress", "notification",
+                    "兼容旧调用：仅编辑 Event 进度文本，不执行投递", emit_progress),
+]

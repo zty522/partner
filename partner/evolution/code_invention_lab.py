@@ -64,7 +64,7 @@ def _tests(repo: Path, values: list[str]) -> list[str]:
         value = str(raw or "").replace("\\", "/").lstrip("./")
         file_part, separator, node_part = value.partition("::")
         path = _inside(repo, file_part)
-        if (not file_part.startswith("tests/") or not path.is_file()
+        if (not file_part.startswith("benchmark/") or not path.is_file()
                 or path.suffix != ".py"
                 or (separator and not re.fullmatch(r"[A-Za-z0-9_:.\-\[\]]+", node_part))):
             raise ValueError(f"test_not_preexisting:{value}")

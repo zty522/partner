@@ -530,8 +530,8 @@ def _portfolio_inputs(workspace: str) -> dict[str, dict[str, Any]]:
         code_root / "partner" / "governance" / "campaign.py",
         code_root / "partner" / "governance" / "experience_policy.py",
         code_root / "partner" / "mind" / "executor.py",
-        code_root / "scripts" / "partner_campaign.py",
-        code_root / "tests" / "test_campaign.py",
+        code_root / "scripts" / "campaigns" / "partner_campaign.py",
+        code_root / "benchmark" / "projects" / "test_campaign.py",
     ]
     framework_fingerprint = _bounded_files_fingerprint(code_root, framework_paths)
 

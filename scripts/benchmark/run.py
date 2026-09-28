@@ -14,6 +14,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# Direct ``python scripts/benchmark/run.py`` starts with scripts/benchmark on
+# sys.path. Add the repository root before importing the package entry point.
+REPO = Path(__file__).resolve().parents[2]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 
 def main() -> int:
@@ -51,9 +58,7 @@ def main() -> int:
     saved = sys.argv
     sys.argv = argv
     try:
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from executor import main as _executor_main
+        from scripts.benchmark.executor import main as _executor_main
         return _executor_main()
     finally:
         sys.argv = saved

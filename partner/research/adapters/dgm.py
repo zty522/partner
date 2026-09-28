@@ -98,14 +98,21 @@ def persist_node(workspace: "Path", run_id: str,
     _write_archive(workspace, run_id, nodes)
 
 
-def lineage_edges(workspace: "Path", run_id: str) -> list[tuple[str, str]]:
+def lineage_edges(workspace: "Path | list[DGMLineageNode]",
+                  run_id: str = "") -> list[tuple[str, str]]:
     """Return [(parent_id, child_id), ...] edges from the persisted archive."""
-    nodes = _read_archive(workspace, run_id)
+    if isinstance(workspace, list):
+        nodes = [asdict(node) if isinstance(node, DGMLineageNode) else dict(node)
+                 for node in workspace]
+    else:
+        if not run_id:
+            raise ValueError("run_id is required for a persisted archive")
+        nodes = _read_archive(workspace, run_id)
     out = []
     for n in nodes:
         if n.get("parent_id"):
             out.append((n["parent_id"], n["node_id"]))
-    return sorted(out)
+    return sorted(set(out))
 
 
 def archive(workspace: "Path", run_id: str) -> list[dict]:

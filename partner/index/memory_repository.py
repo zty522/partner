@@ -86,6 +86,17 @@ class MemoryRepository:
             "INSERT OR IGNORE INTO schema_meta(key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
+        from .runtime_storage import workspace_incarnation
+        identity = workspace_incarnation(self.repo_root)
+        previous = conn.execute(
+            "SELECT value FROM schema_meta WHERE key='workspace_identity'").fetchone()
+        if previous is None or previous["value"] != identity:
+            conn.execute("DELETE FROM memory_records")
+            conn.execute("DELETE FROM jsonl_offsets")
+            conn.execute("DELETE FROM sqlite_sequence WHERE name='memory_records'")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta(key,value) VALUES('workspace_identity',?)",
+                (identity,))
         self._schema_ready = True
 
     @property

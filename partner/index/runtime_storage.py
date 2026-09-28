@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import subprocess
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,23 @@ NATIVE_DEFAULT_ROOT = Path("/home/os/.local/share/partner/runtime")
 FORMAT_VERSION = 1
 
 DRVFS_HINTS = ("9p", "drvfs", "v9fs")
+
+
+def workspace_incarnation(project_root: Path) -> str:
+    """Stable while a workspace exists; changes if the path is recreated."""
+    root = Path(project_root).expanduser().resolve()
+    marker = root / ".partner_workspace_identity"
+    try:
+        return marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        token = uuid.uuid4().hex
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token + "\n")
+            return token
+        except FileExistsError:
+            return marker.read_text(encoding="utf-8").strip()
 
 
 def _mount_table_hint(path: Path) -> str:

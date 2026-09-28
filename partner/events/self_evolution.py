@@ -65,7 +65,7 @@ def _llm(ctx: Any, params: dict[str, Any], purpose: str, instruction: str) -> di
     for relative in list(contract.get('target_files') or [])[:3] + list(contract.get('reproducer_tests') or [])[:3]:
         relative = str(relative).split('::',1)[0]
         path = (root / relative).resolve()
-        if root in path.parents and relative.startswith(('partner/','tests/')) and path.suffix == '.py' and path.is_file():
+        if root in path.parents and relative.startswith(('partner/','benchmark/')) and path.suffix == '.py' and path.is_file():
             from partner.index.resource_catalog import ResourceCatalog
             sources[relative] = ResourceCatalog(_workspace(ctx)).read(path,max_bytes=20000,purpose=purpose)['text']
     params = {'actual_source_read_now':sources, 'request':params.get('request'), **params}
@@ -141,15 +141,15 @@ def candidate_propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             from partner.index.resource_catalog import ResourceCatalog
             context[str(relative)] = ResourceCatalog(_workspace(ctx)).read(path,max_bytes=20000,purpose='candidate_source')['text']
     # Enumerate existing pytest files so the LLM can pick reproducible ones
-    test_dir = root / 'tests'
+    test_dir = root / 'benchmark'
     from partner.index.resource_catalog import ResourceCatalog
     catalog=ResourceCatalog(_workspace(ctx))
     test_paths=[Path(r['path']) for r in catalog.query('code',scope='tests',limit=200)]
-    test_files=sorted(p.name for p in test_paths if p.parent==test_dir and p.name.startswith('test_'))
-    integration_files=sorted(p.name for p in test_paths if p.parent==test_dir/'integration' and p.name.startswith('test_'))
+    test_files=sorted(str(p.relative_to(root)) for p in test_paths
+        if test_dir in p.parents and 'studies' not in p.relative_to(test_dir).parts
+        and p.name.startswith('test_'))
     tests_catalog = "Existing pytest files you MAY pick as reproducer_tests / regression_tests:\n"
-    tests_catalog += "  tests/ (top-level):\n    " + "\n    ".join(test_files) + "\n"
-    tests_catalog += "  tests/integration/ (longer runs):\n    " + "\n    ".join(integration_files) + "\n"
+    tests_catalog += "  benchmark reliability checks (grouped by subsystem):\n    " + "\n    ".join(test_files) + "\n"
     tests_catalog += ("\nRULES:\n"
         "  - reproducer_tests MUST come from this catalog. Do NOT invent test paths.\n"
         "  - regression_tests MUST come from this catalog AND must be disjoint from reproducer_tests.\n"

@@ -25,6 +25,8 @@ _log = logging.getLogger("partner.web.auth")
 DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = (
     "http://127.0.0.1:8765",
     "http://localhost:8765",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
 )
 
 
@@ -84,6 +86,20 @@ def install_auth(app: Any) -> None:
 
     @app.before_request
     def _csrf():
+        local_auto = os.environ.get("PARTNER_WEB_LOCAL_AUTOLOGIN", "").lower() in {
+            "1", "true", "yes", "on"}
+        if local_auto and request.remote_addr in {"127.0.0.1", "::1"} and not session.get("subject"):
+            session["subject"] = {
+                "subject_id": "local-operator", "display_name": "本机管理员",
+                "allowed_instances": ["01", "02", "03", "04", "05"],
+            }
+            session["csrf_token"] = secrets.token_urlsafe(16)
+        origin = request.headers.get("Origin", "")
+        allowed = tuple(value.strip() for value in os.environ.get(
+            "PARTNER_WEB_ALLOWED_ORIGINS", ",".join(DEFAULT_ALLOWED_ORIGINS)).split(",")
+                        if value.strip())
+        if origin and origin not in allowed:
+            abort(403, description="origin not allowed")
         # CSRF: only non-GET requests must carry a custom header that
         # browser forms cannot forge.
         if request.method in {"GET", "HEAD", "OPTIONS"}:
@@ -114,6 +130,13 @@ def install_auth(app: Any) -> None:
         # GET: redirect to the static frontend login page.
         from flask import redirect
         return redirect("/static/index.html#/login", code=302)
+
+    @app.get("/api/session")
+    def current_session() -> Any:
+        claims = session.get("subject")
+        if not claims:
+            abort(401, description="not authenticated")
+        return jsonify({"subject": claims, "csrf_token": session.get("csrf_token", "")})
 
     @app.post("/logout")
     def logout() -> Any:

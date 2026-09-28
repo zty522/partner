@@ -427,7 +427,7 @@ def apply_one(candidate: dict[str, Any], repo_root: Path | str, *, dry_run: bool
                          detail=f"applied at {post_commit[:12]}")
 
 
-_SAFE_TARGET_PATTERN = re.compile(r"^(partner/[A-Za-z0-9_.\-/]+\.py|tests/[A-Za-z0-9_.\-/]+\.py)$")
+_SAFE_TARGET_PATTERN = re.compile(r"^(partner/[A-Za-z0-9_.\-/]+\.py|benchmark/[A-Za-z0-9_.\-/]+\.py)$")
 
 
 def _is_safe_target(target_file: str) -> bool:
@@ -454,7 +454,7 @@ def _generate_diagnostic_diff_for_candidate(candidate: dict[str, Any]) -> tuple[
         evidence_refs (or a known-safe fallback),
       * adds exactly one # self_evolve_annotation: ... comment,
       * never deletes existing code,
-      * stays within _SAFE_TARGET_PATTERN (partner/<pkg>.py or tests/<pkg>.py).
+      * stays within _SAFE_TARGET_PATTERN (partner/<pkg>.py or benchmark/<pkg>.py).
     The annotation is a real, meaningful partner-code signal that the apply
     path can git apply + commit, so promotion produces an applied commit and
     an evolution event — the real-world impact loop partner needs.
@@ -467,7 +467,7 @@ def _generate_diagnostic_diff_for_candidate(candidate: dict[str, Any]) -> tuple[
         evidence_refs = list(candidate.get("evidence_refs") or [])
         for ref in evidence_refs:
             ref_str = str(ref)
-            for prefix in ("partner/", "tests/"):
+            for prefix in ("partner/", "benchmark/"):
                 idx = ref_str.find(prefix)
                 if idx > 0:
                     rel = ref_str[idx:]

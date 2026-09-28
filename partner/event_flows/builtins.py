@@ -402,7 +402,11 @@ _updated=[]
 for _flow in DEFINITIONS:
     if _flow.name.startswith('pdf_report'):
         _nodes=[Node('decide','presentation.report_decide'),
-            Node('sources','presentation.report_sources_collect',('decide',)),
+            Node('summaries','presentation.run_summary_collect',('decide',)),
+            Node('flow_graph','presentation.flow_graph_project',('summaries',)),
+            Node('flow_graph_render','visualization.flow_graph_render',('flow_graph',)),
+            Node('flow_graph_verify','visualization.flow_graph_verify',('flow_graph_render',)),
+            Node('sources','presentation.report_sources_collect',('flow_graph_verify',)),
             Node('outline','presentation.report_outline',('sources',)),
             Node('visual_plan','presentation.visual_plan',('outline',)),
             Node('visuals','visualization.render',('visual_plan',)),
@@ -411,13 +415,13 @@ for _flow in DEFINITIONS:
             Node('claims','presentation.claim_verify',('draft',)),
             Node('render','presentation.pdf_render',('claims','draft')),
             Node('quality','presentation.pdf_quality_review',('render',)),
-            Node('compose','presentation.message_compose',('quality',)),
+            Node('compose','presentation.summary_message_compose',('quality','summaries')),
             Node('message_critic','presentation.message_critic',('compose',)),
             Node('send','delivery.send_pdf',('quality','render','message_critic')),
             Node('verify','delivery.verify',('send',))]
         if _flow.name=='pdf_report_reissue':
             _nodes=[replace(n,depends_on=('sources',)) if n.node_id=='visual_plan' else replace(n,depends_on=('visual_verify',)) if n.node_id=='claims' else replace(n,depends_on=('claims',)) if n.node_id=='render' else n for n in _nodes if n.node_id not in {'draft','outline'}]
-        _flow=replace(_flow,version='2.0.0',nodes=tuple(_nodes))
+        _flow=replace(_flow,version='2.1.0',nodes=tuple(_nodes))
     else:
         _gate=next((n.node_id for n in _flow.nodes if n.event_type=='presentation.notification_decide'),'')
         if _gate:

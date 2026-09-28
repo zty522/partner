@@ -12,10 +12,10 @@
 
 | # | 命令 | 退出码 | 结果 |
 |---|---|---|---|
-| 1 | `PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider tests/commitment/` | 0 | **109 passed in 4.95s**（上一轮 79；本轮新增/改写 30） |
+| 1 | `PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider benchmark/commitment/` | 0 | **109 passed in 4.95s**（上一轮 79；本轮新增/改写 30） |
 | 2 | `python3 -c "from partner.events import builtin_definitions; builtin_definitions()"` | 0 | 135 条定义、无重名，含 3 条 `commitment.*` |
-| 3 | `python3 benchmarks/commitment_loop/run_benchmark.py --workspace benchmark_runs/_ws_v2 --out benchmark_runs/commitment_loop/skeleton_v2` | 0 | 9 次运行（3 臂 × 3 seed），`infrastructure_only: true` |
-| 4 | `python3 benchmarks/commitment_loop/molecular_vertical_sample.py --workspace benchmark_runs/_slice_ws_v2 --out benchmark_runs/commitment_loop/isolated_slice_v2` | 0 | 新 schema 切片，观察到改善但不可发布 |
+| 3 | `python3 benchmark/studies/commitment_loop/run_benchmark.py --workspace benchmark_runs/_ws_v2 --out benchmark_runs/commitment_loop/skeleton_v2` | 0 | 9 次运行（3 臂 × 3 seed），`infrastructure_only: true` |
+| 4 | `python3 benchmark/studies/commitment_loop/molecular_vertical_sample.py --workspace benchmark_runs/_slice_ws_v2 --out benchmark_runs/commitment_loop/isolated_slice_v2` | 0 | 新 schema 切片，观察到改善但不可发布 |
 
 ## 四个问题的根因与修复位置
 

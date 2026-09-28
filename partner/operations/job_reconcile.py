@@ -76,4 +76,70 @@ def reconcile_stale_jobs(workspace: str | Path, *, older_than_seconds: float,
     return report
 
 
-__all__ = ["reconcile_stale_jobs"]
+def reconcile_orphan_flows(workspace: str | Path, *, apply: bool = False,
+                           actor: str = "flow_reconcile") -> dict[str, Any]:
+    """Close nonterminal Flow projections whose authoritative Job is terminal.
+
+    Candidate discovery uses the native SQLite history index, never a scan of
+    every historical Flow JSON.  The JSON remains the detailed state record
+    and is updated only after the indexed parent Job proves terminal.
+    """
+    from partner.index.resource_catalog import ResourceCatalog
+
+    root = Path(workspace).expanduser().resolve()
+    jobs = init(root)
+    store = EventFlowStore(root)
+    indexed = []
+    for row in ResourceCatalog(root).query("flow", limit=500):
+        try:
+            metadata = json.loads(row.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if metadata.get("status") in {"running", "suspended"}:
+            indexed.append({**row, **metadata})
+    candidates = []
+    skipped = []
+    now = datetime.now(timezone.utc).isoformat()
+    for row in indexed:
+        job_id = str(row.get("task_id") or "")
+        job = jobs.get_record(job_id) if job_id else None
+        if job and str(job.get("status") or "") not in TERMINAL:
+            skipped.append({"flow_id":row.get("flow_id"), "job_id":job_id,
+                            "reason":"parent_job_nonterminal"})
+            continue
+        candidate = {"flow_id":row.get("flow_id"), "flow_status":row.get("status"),
+                     "job_id":job_id, "job_status":job.get("status") if job else "missing"}
+        candidates.append(candidate)
+        if not apply:
+            continue
+        try:
+            flow = store.load(str(row["flow_id"]))
+        except (OSError, ValueError, TypeError):
+            candidate["apply_error"] = "flow_projection_missing_or_invalid"
+            continue
+        if flow.status in TERMINAL:
+            continue
+        flow.status = "cancelled"
+        flow.waiting_task_id = ""
+        flow.next_check_at = 0.0
+        flow.active_child_flow_id = ""
+        flow.recovery_history.append({
+            "at":now, "kind":"orphan_flow_projection_reconciled",
+            "actor":actor, "parent_job_status":job.get("status") if job else "missing",
+            "evidence_preserved":True,
+        })
+        store.save(flow)
+    report = {"schema_version":1, "mode":"apply" if apply else "dry_run",
+              "indexed_nonterminal_seen":len(indexed),
+              "candidate_count":len(candidates), "skipped_count":len(skipped),
+              "candidates":candidates, "skipped":skipped, "completed_at":now}
+    directory = root / "state/maintenance/flow_reconciliation"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = directory / f"{stamp}_{report['mode']}.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report["report_path"] = str(path)
+    return report
+
+
+__all__ = ["reconcile_stale_jobs", "reconcile_orphan_flows"]

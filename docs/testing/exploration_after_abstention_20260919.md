@@ -105,7 +105,7 @@ Job DB 行数：339
 
 ## 测试（本轮新增 16 项，共 248 项）
 
-`tests/runtime/test_exploration_after_abstention.py`：
+`benchmark/runtime/test_exploration_after_abstention.py`：
 ```
 常量与判据；预算是 1/4 且不侵蚀声明预算；无预算/窗口/待结算/无变体/关闭各自的拒绝原因；
 变体选择（声明顺序第一个未尝试；全试过 → None；池空 → None；变体不参与类键）；

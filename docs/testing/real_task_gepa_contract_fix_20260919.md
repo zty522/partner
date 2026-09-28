@@ -11,7 +11,7 @@
 
 ```
 cd /mnt/e/work/partner && PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider \
-    tests/test_adapter_contracts.py -k gepa
+    benchmark/research/test_adapter_contracts.py -k gepa
 → 3 failed, 2 passed
   ImportError: cannot import name 'propose' from 'partner.research.adapters.gepa'  (×3)
 ```
@@ -22,7 +22,7 @@ cd /mnt/e/work/partner && PYTHONPATH=. python3 -m pytest -q -p no:cacheprovider 
 
 候选补丁 = 在**真实仓库之外**声明的 `patch.diff`（7.4 KB），补上模块级 API、让
 `GepaError` 继承 `ValueError`、其余行为不变。任务定义在
-`benchmarks/real_tasks/fix_gepa_contract/`（`task.json` + `patch.diff` + `bug_report.md`）。
+`benchmark/studies/real_tasks/fix_gepa_contract/`（`task.json` + `patch.diff` + `bug_report.md`）。
 
 ## 三个条件如何满足
 
@@ -83,8 +83,8 @@ bet revision         1（freeze_hash 未变，链完整）
 ## 测试
 
 ```
-tests/runtime/test_real_task_adapter.py  6 passed（新增）
-tests/                                  178 passed
+benchmark/runtime/test_real_task_adapter.py  6 passed（新增）
+benchmark/                                  178 passed
 git diff --check                        clean
 ```
 新增测试覆盖：control 臂测出真实失败、补丁两臂差额 = +1；影子仓库**不写真实项目**（sha 前后一致）且

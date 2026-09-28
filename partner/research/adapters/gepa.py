@@ -55,6 +55,36 @@ class GepaBudgetExceeded(GepaError):
     pass
 
 
+def propose(*, parent: GepaCandidate | None, change_summary: str,
+            diff_fingerprint: str, notes: str = "") -> GepaCandidate:
+    """Stateless compatibility constructor used by small bounded experiments."""
+    if not change_summary:
+        raise ValueError("change_summary must be non-empty")
+    if not diff_fingerprint:
+        raise ValueError("diff_fingerprint must be non-empty")
+    return GepaCandidate(
+        candidate_id="gepa_" + uuid.uuid4().hex[:12],
+        parent_id=parent.candidate_id if parent else None,
+        change_summary=change_summary, diff_fingerprint=diff_fingerprint,
+        notes=notes,
+    )
+
+
+def record_fitness(candidate: GepaCandidate, *, fitness_signal: float,
+                   notes: str = "") -> GepaCandidate:
+    """Attach one deterministic fitness observation to an immutable candidate."""
+    if not 0.0 <= fitness_signal <= 1.0:
+        raise ValueError("fitness_signal must be in [0, 1]")
+    return replace(candidate, fitness_score=float(fitness_signal), evaluations=1,
+                   notes=notes or candidate.notes)
+
+
+def pareto_front(candidates: list[GepaCandidate]) -> list[GepaCandidate]:
+    """Stable one-objective front ordered by fitness then smaller diff."""
+    return sorted(candidates, key=lambda c: (-(c.fitness_score or 0.0),
+                                             len(c.diff_fingerprint), c.candidate_id))
+
+
 class GepaOptimizer:
     """Reflective candidate search loop.
 
@@ -180,4 +210,5 @@ class GepaOptimizer:
         return sorted(edges)
 
 
-__all__ = ["GepaCandidate", "GepaOptimizer", "GepaError", "GepaBudgetExceeded"]
+__all__ = ["GepaCandidate", "GepaOptimizer", "GepaError", "GepaBudgetExceeded",
+           "propose", "record_fitness", "pareto_front"]

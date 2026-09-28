@@ -30,6 +30,35 @@ def write_json(path: Path, value: dict) -> None:
     register_runtime(path, value)
 
 
+def _business_data_checks(checks: list[dict]) -> list[dict]:
+    """Artifacts strong enough to recover an execution terminal.
+
+    Plain logs, prose and source files prove activity, not completion of a
+    scientific action.  Recovery therefore requires parseable structured data.
+    """
+    suffixes = {'.json', '.jsonl', '.csv', '.tsv', '.parquet', '.npz', '.npy',
+                '.sdf', '.pdb', '.pdbqt'}
+    return [row for row in checks if row.get('valid')
+            and Path(str(row.get('path') or '')).suffix.lower() in suffixes
+            and Path(str(row.get('path') or '')).name != 'execution_contract.json']
+
+
+def _unbounded_workspace_scan(command: str, workspace: str) -> bool:
+    """Reject recursive scans rooted at the whole runtime workspace.
+
+    The resource catalogue and the project context are the discovery layer.
+    Walking ``partner_workspace`` recursively is both needlessly expensive on
+    9p-backed storage and likely to mix unrelated jobs into one Event.
+    """
+    root = re.escape(str(Path(workspace).resolve()).rstrip('/'))
+    return bool(
+        re.search(rf"\bos\.walk\(\s*['\"]{root}/?['\"]", command)
+        or re.search(rf"\bglob\.glob\(\s*f?['\"]{root}/?\*\*", command)
+        or re.search(rf"\bfind\s+['\"]?{root}/?['\"]?(?:\s|$)", command)
+        or re.search(rf"\brglob\(.*{root}", command)
+    )
+
+
 def run_command(command: str, cwd: str, seconds: float, output_path: Path | None = None) -> dict:
     if seconds <= 0:
         return {'exit_code': None, 'timed_out': True, 'output': '', 'executed': False}
@@ -70,8 +99,10 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
     match = re.search(r'工作目录\s*[=:：]\s*([^\n]+)', prompt)
     work = Path(match.group(1) if match else adapter.workspace).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    audit = work / '.execution'
-    audit.mkdir(exist_ok=True)
+    audit_match = re.search(r'运行时审计目录\s*[=:：]\s*([^\n]+)', prompt)
+    audit_root = Path(audit_match.group(1) if audit_match else work).resolve()
+    audit = audit_root / '.execution'
+    audit.mkdir(parents=True, exist_ok=True)
     checkpoint = audit / 'checkpoint.json'
     saved = json.loads(checkpoint.read_text()) if checkpoint.exists() else {}
     if saved.get('state') == 'completed':
@@ -93,6 +124,20 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
         '结束时写真实结果、证据路径和下一步。不要把思考过程当答案。')
     deadline = time.monotonic() + seconds
     history = saved.get('commands', [])
+    # The cycle can freeze an early arm and explicitly forbid future-round
+    # work.  Enforce that boundary below the model so a long overall request
+    # cannot tempt the action agent to start candidate or learning work early.
+    baseline_only = (bool(re.search(r'"forbidden_future_round_execution"\s*:\s*true',prompt,re.I))
+                     and bool(re.search(r'"round_number"\s*:\s*1',prompt,re.I))
+                     and bool(re.search(r'baseline',prompt,re.I)))
+    current_job_match = re.search(r'Job ID=([^；;\s]+)', prompt)
+    current_job_id = current_job_match.group(1) if current_job_match else ''
+    allowed_refs_match = re.search(r'运行器允许的跨 Job 证据路径=(\[[^\n]*\])', prompt)
+    try:
+        allowed_cross_job_refs = [str(Path(value).resolve()) for value in
+                                  json.loads(allowed_refs_match.group(1))] if allowed_refs_match else []
+    except (ValueError, TypeError):
+        allowed_cross_job_refs = []
     for turn in range(max_turns):
         feedback_path = getattr(adapter, 'execution_feedback_path', '')
         if feedback_path and Path(feedback_path).is_file():
@@ -125,10 +170,51 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
                 raw = text
                 break
             raw = ''
+            # A provider hard-timeout/empty response is not repaired by
+            # replaying the same large prompt three times.  Fall through to
+            # the compact frozen-action rescue immediately.  Only a length
+            # truncation benefits from another full-context attempt.
+            if usage.get('finish_reason') != 'length':
+                break
             if attempt < 2:
                 time.sleep(max(0, min(2 ** attempt, deadline - time.monotonic() - 3)))
         if not raw:
-            break
+            # Once commands have produced a parseable artifact, an empty
+            # provider response is a missing terminal narration rather than
+            # a reason to spend another three 90-second calls.  The narrow
+            # recovery below still requires a successful command receipt and
+            # a valid artifact; downstream verify/Settlement judge meaning.
+            if history:
+                from partner.runtime.artifact_checks import inspect_artifacts
+                if _business_data_checks(inspect_artifacts(work)):
+                    break
+            # Long context may consume a provider response before the first
+            # command. Retry once with the frozen action only, preserving the
+            # contract while dropping unrelated project memory.
+            selected = re.search(r'已选动作=(\{[^\n]+\})', prompt)
+            compact = (
+                '执行已经冻结的单一项目动作。不要解释或规划，立即给出一个完整的 '
+                '<bash>...</bash> 命令；命令必须生成真实、可解析的业务产物。\n'
+                + ('冻结动作=' + selected.group(1) + '\n' if selected else '')
+                + f'工作目录={work}\n禁止修改 Partner 框架或凭据；失败时返回明确错误。'
+            )
+            remaining = deadline - time.monotonic() - 3
+            if remaining > 5:
+                for rescue_attempt in range(3):
+                    remaining = deadline - time.monotonic() - 3
+                    if remaining <= 5:
+                        break
+                    rescue = direct_api.chat(compact, max_tokens=4096, purpose='action',
+                        timeout=min(60, remaining), workspace=adapter.workspace,
+                        task_id=getattr(adapter,"task_id",""), project_id=getattr(adapter,"project_id",""),
+                        event_type="project.action_execute")
+                    raw = re.sub(r'<(think|analysis)>.*?</\1>', '', rescue or '', flags=re.S | re.I).strip()
+                    if raw:
+                        break
+                    if rescue_attempt < 2:
+                        time.sleep(min(2 ** rescue_attempt, max(0, deadline-time.monotonic()-3)))
+            if not raw:
+                break
         blocks = adapter._extract_commands(raw)
         if any(re.search(r"(?im)^\s*</?(?:parameter|invoke|bash|command)\b", block) for block in blocks):
             blocks = []
@@ -157,6 +243,39 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
             return raw
         results = []
         for command in blocks:
+            if _unbounded_workspace_scan(command, adapter.workspace):
+                conversation += (
+                    '\n此命令未执行：禁止递归扫描整个 partner_workspace。'
+                    '请使用上游给出的项目根目录、已验真产物索引或 ResourceCatalog，'
+                    '然后只读取命中的具体文件。')
+                write_json(checkpoint, {'state':'running','commands':history,
+                                        'conversation':conversation,'inflight':None})
+                continue
+            foreign_paths = re.findall(
+                r'(/[^\s\'";|]+/state/event_runtime/work/(job_[A-Za-z0-9_-]+)/[^\s\'";|]+)',
+                command)
+            forbidden_foreign = [path for path, job_id in foreign_paths
+                if current_job_id and job_id != current_job_id
+                and not any(str(Path(path).resolve()).startswith(ref) for ref in allowed_cross_job_refs)]
+            output_paths = [Path(value).expanduser() for value in re.findall(
+                r'(?:--output\s+|OUTPUT_DIR\s*=\s*)["\']?(/[^\s"\']+)', command)]
+            outside_outputs = [str(path) for path in output_paths
+                               if not path.resolve().is_relative_to(work)]
+            if forbidden_foreign or outside_outputs:
+                conversation += ('\n此命令未执行：跨 Job 证据或业务输出目录不符合本 Event 的冻结边界。'
+                    f' forbidden_foreign={forbidden_foreign[:3]} outside_outputs={outside_outputs[:3]}。'
+                    f'只读取明确列入 evidence_refs 的跨 Job 文件，并把新业务产物写入 {work}。')
+                write_json(checkpoint, {'state':'running','commands':history,
+                                        'conversation':conversation,'inflight':None})
+                continue
+            if baseline_only and re.search(
+                    r'--arm\s+candidate|ensure_edge\s*\(|\bcurl\b|\bwget\b|\bgit\s+clone\b|https?://',
+                    command, re.I):
+                conversation += ('\n此命令未执行：冻结的第1轮只允许 baseline，且明确禁止提前执行 candidate、'
+                                 '外部检索或主动学习。请结束当前 baseline 动作；后续工作由父 Flow 调度。')
+                write_json(checkpoint, {'state':'running','commands':history,
+                                        'conversation':conversation,'inflight':None})
+                continue
             if re.search(r'\bpython(?:\d(?:\.\d+)?)?\b[^\n|]+\.py[^\n|]*\|\s*head\b',command):
                 conversation += ('\n此命令未执行：Python计算脚本不能接head管道，head提前退出会关闭输出并可能中断计算。'
                     '执行器已经保存完整日志并限制回传长度。请直接运行脚本，或将输出重定向到日志，结束后另用tail查看；不要因输出警告就判断计算失败。')
@@ -204,7 +323,7 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
     # the downstream verification and settlement Events.
     from partner.runtime.artifact_checks import inspect_artifacts
     checks = inspect_artifacts(work)
-    valid = [row for row in checks if row.get('valid')]
+    valid = _business_data_checks(checks)
     successful = [row for row in history
                   if row.get('executed') and not row.get('timed_out')
                   and row.get('exit_code') == 0]
@@ -227,4 +346,6 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
                            'artifact_checks':checks})
     if deadline - time.monotonic() <= 3:
         raise TimeoutError('action wall-clock deadline exhausted; command receipts and checkpoint preserved')
+    if not history:
+        raise RuntimeError('action model returned no executable response after bounded retries; checkpoint preserved')
     raise RuntimeError('action model-turn budget exhausted; command receipts and checkpoint preserved')

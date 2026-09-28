@@ -1,10 +1,13 @@
 """Metadata-first indexed resource catalog.
 
+MAINTENANCE_ONLY_INDEXING applies only to ``maintain`` below; normal Event
+paths use ``query``, ``read`` and ``register``.
+
 Read discipline: production Events call ``query`` / ``read`` /
 ``register`` — all of which hit the SQLite ``resources.db`` index or do
 bounded point reads with a ``reads`` receipt.  Only ``maintain()`` walks
 the filesystem, under a ``max_files`` budget, and it is invoked solely by
-maintenance hooks (``scripts/refresh_resource_indexes.py`` and the
+maintenance hooks (``scripts/governance/refresh_resource_indexes.py`` and the
 ``index.bootstrap`` family) — never by a regular Event.
 """
 
@@ -101,7 +104,21 @@ def job_records(workspace, *, project_id='', limit=100):
     sql='SELECT job_id FROM jobs';args=[]
     if project_id:sql+=' WHERE project_id=?';args.append(project_id)
     sql+=' ORDER BY created_at DESC LIMIT ?';args.append(limit)
-    return [repo.get_record(r[0]) for r in c.execute(sql,args).fetchall()]
+    rows = [repo.get_record(r[0]) for r in c.execute(sql,args).fetchall()]
+    if rows:
+        return rows
+    directory = Path(workspace) / 'state/application/jobs'
+    for path in sorted(directory.glob('*.json'), reverse=True)[:min(200, limit)]:
+        try:
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if project_id and record.get('project_id') != project_id:
+                continue
+            repo.upsert_from_record(record, actor='resource_catalog.legacy_projection',
+                                    projection_path=path)
+            rows.append(repo.get_record(str(record.get('job_id') or path.stem)))
+        except (OSError, ValueError, TypeError):
+            continue
+    return [row for row in rows if row][:limit]
 
 
 def related_jobs(workspace, root_event_id, flow_type='project_iteration'):

@@ -2,9 +2,9 @@
 
 状态：本轮新增实现（2026-09-19），离线可测、独立于生产自主拓扑
 代码：`partner/commitment/`、`partner/events/commitment.py`、`partner/application/commitment_adapter.py`
-测试：`tests/commitment/`（79 项通过）
-样本：`benchmarks/commitment_loop/molecular_vertical_sample.py`
-benchmark 骨架：`benchmarks/commitment_loop/`
+测试：`benchmark/commitment/`（79 项通过）
+样本：`benchmark/studies/commitment_loop/molecular_vertical_sample.py`
+benchmark 骨架：`benchmark/studies/commitment_loop/`
 
 ## 一句话定义
 

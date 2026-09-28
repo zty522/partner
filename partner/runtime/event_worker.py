@@ -147,6 +147,27 @@ class EventWorker:
         temporary.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, path)
 
+    def _write_terminal_trace(self, job: JobRecord) -> None:
+        """Project the authoritative terminal Job/Flow state for operators."""
+        try:
+            state = self.store.load(job.flow_id)
+            from partner.runtime.event_run_log import EventRunLog
+            final_outputs = {
+                node_id: state.node_outputs.get(node_id, {})
+                for node_id in (state.completed_node_ids[-3:] + state.failed_node_ids[-3:])
+            }
+            EventRunLog(self.root, job.job_id).terminal(
+                status=job.status, flow_id=state.flow_id,
+                flow_type=state.flow_type, error=job.error,
+                completed_nodes=state.completed_node_ids,
+                failed_nodes=state.failed_node_ids,
+                skipped_nodes=state.skipped_node_ids,
+                final_outputs=final_outputs,
+            )
+        except Exception:
+            # The projection cannot change the business terminal state.
+            logger.exception("terminal run trace projection failed for %s", job.job_id)
+
     def _queue_jobs(self):
         """Discover new jobs each poll without rereading immutable history.
 
@@ -363,40 +384,25 @@ class EventWorker:
                 return job
         return None
 
-    def _emit_progress_message(self, *, job, flow_state, node_id, node_output):
-        import sys; sys.stderr.write("[TRACE_EMIT] ENTER node=" + node_id + " flow_type=" + str(flow_state.flow_type) + chr(10)); sys.stderr.flush()
-        """Run notification.emit_progress after a round node completes.
+    def _publish_lifecycle(self, *, job, ctx, flow_state, phase, **facts):
+        """Run the audited compose -> critic -> delivery Event pipeline.
 
-        Translates the just-completed node's output into a short Chinese
-        progress message and writes it to the outbound queue. Failures
-        are caught at the caller; this helper raises only on truly
-        unexpected errors (e.g. invalid flow_type).
+        Notifications are an observability projection and fail open: a broken
+        user channel is recorded in its own Event without changing the domain
+        Event's result.
         """
-        from partner.events.emit_progress import emit_progress
-        # EventContext is defined in this module (line 44); do not import it
-        # from partner.event_fabric (it is not exported there — that import
-        # raised ImportError and silently swallowed the whole emit_progress call).
-        ctx = EventContext(
-            workspace=str(self.root),
-            instance_workspace=str(self.root / "instances" / (
-                job.assigned_instance or job.origin_instance or self.instance_id)),
-            instance_id=job.assigned_instance or job.origin_instance or self.instance_id,
-            project_id=job.project_id,
-            job_id=job.job_id,
-            channel=job.channel or "local",
-            sender_id=job.sender_id or "",
-            intake_instance_id=str(getattr(job, "intake_instance_id", "") or ""),
-            adapter=self.adapter,
-        )
-        params = {
-            "completed_node_id": node_id,
-            "node_output": node_output,
-            "flow_id": flow_state.flow_id,
-            "task_id": flow_state.task_id or job.job_id,
-            "instance_id": ctx.instance_id,
-            "flow_type": flow_state.flow_type,
-        }
-        import sys as _sys; _result = emit_progress(ctx, params); _sys.stderr.write("[TRACE_EMIT] EXIT ok=" + str(_result.get("ok")) + " text=" + str(_result.get("progress_text",""))[:80] + chr(10)); _sys.stderr.flush()
+        try:
+            from partner.runtime.lifecycle_notifications import publish_lifecycle
+            return publish_lifecycle(
+                workspace=self.root, ctx=ctx, lifecycle_phase=phase,
+                root_event_id=flow_state.root_event_id,
+                flow_name=flow_state.flow_type, flow_type=flow_state.flow_type,
+                intent_contract=job.intent_contract,
+                is_child_flow=bool(job.suspended_flows), **facts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lifecycle notification failed for %s/%s: %s",
+                           flow_state.flow_id, facts.get("node_id", ""), exc)
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     def _apply_control(self, job: JobRecord, state: Any) -> bool:
         path = self.root / "state/application/controls" / f"{job.job_id}.json"
@@ -617,14 +623,88 @@ class EventWorker:
             initial = enrich(ctx, initial, state.node_outputs)
         from partner.runtime.wait_notifications import dispatch_if_due
         await dispatch_if_due(self,job,state,ctx)
+        # Announce every newly entered Flow once, including dynamically
+        # inserted active-learning, benchmark, report and evolution children.
+        if not state.run_context.get("lifecycle_flow_started"):
+            descriptions = []
+            for flow_node in definition.nodes:
+                event_def = self.catalog.get(flow_node.event_type)
+                descriptions.append(event_def.description if event_def else flow_node.event_type)
+            if not state.run_context.get("lifecycle_plan_announced"):
+                await asyncio.to_thread(
+                    self._publish_lifecycle, job=job, ctx=ctx, flow_state=state,
+                    phase="flow_planned", planned_events=descriptions)
+                state.run_context["lifecycle_plan_announced"] = True
+            await asyncio.to_thread(
+                self._publish_lifecycle, job=job, ctx=ctx, flow_state=state,
+                phase="flow_started")
+            state.run_context["lifecycle_flow_started"] = True
+            self.store.save(state)
+        node_spec = definition.node(node_id)
+        event_def = self.catalog.get(node_spec.event_type)
+        event_index = next((i for i, item in enumerate(definition.nodes, 1)
+                            if item.node_id == node_id), 0)
+        lifecycle_facts = {
+            "node_id": node_id, "event_type": node_spec.event_type,
+            "event_description": event_def.description if event_def else node_spec.event_type,
+            "event_index": event_index, "event_total": len(definition.nodes),
+        }
+        await asyncio.to_thread(
+            self._publish_lifecycle, job=job, ctx=ctx, flow_state=state,
+            phase="event_started", **lifecycle_facts)
         pending=asyncio.create_task(self.runner.run_ready_node(state,definition,node_id,ctx,initial))
         while not pending.done():
             done,_=await asyncio.wait({pending},timeout=30)
             if not done: await dispatch_if_due(self,job,state,ctx)
         result=await pending
+        next_description = ""
+        for next_node_id in result.flow_state.ready_node_ids[:1]:
+            try:
+                next_spec = definition.node(next_node_id)
+                next_event = self.catalog.get(next_spec.event_type)
+                next_description = (next_event.description if next_event else next_spec.event_type)
+            except (KeyError, AttributeError):
+                pass
         if result.output.get("status") == "waiting":
+            if result.output.get("first_wait", True):
+                await asyncio.to_thread(
+                    self._publish_lifecycle, job=job, ctx=ctx, flow_state=result.flow_state,
+                    phase="event_waiting", event_summary=result.output.get("summary")
+                    or result.output.get("error"), next_event_description=next_description,
+                    **lifecycle_facts)
             self._save_job(job)
             return False
+        await asyncio.to_thread(
+            self._publish_lifecycle, job=job, ctx=ctx, flow_state=result.flow_state,
+            phase="event_completed" if result.output.get("ok") else "event_failed",
+            event_summary=result.output.get("summary") or result.output.get("error"),
+            next_event_description=next_description,
+            **lifecycle_facts)
+        if result.flow_state.status in {"completed", "failed", "cancelled"}:
+            milestone_facts = {}
+            if result.flow_state.flow_type == 'project_cycle_round':
+                flow_outputs=result.flow_state.node_outputs
+                design=((flow_outputs.get('design') or {}).get('semantic_output') or {})
+                verify=((flow_outputs.get('verify') or {}).get('semantic_output') or {})
+                guard=((flow_outputs.get('budget_guard') or {}).get('semantic_output') or {})
+                milestone_facts={'round_number':guard.get('round_number') or design.get('round_number'),
+                    'hypothesis':design.get('hypothesis'),'round_goal':design.get('round_goal'),
+                    'verified':verify.get('verified'),'route':guard.get('route'),
+                    'reason':guard.get('reason'),'next_hypothesis':guard.get('next_hypothesis'),
+                    'next_round_goal':guard.get('next_round_goal'),
+                    'guard_reasons':guard.get('guard_reasons') or []}
+            elif result.flow_state.flow_type == 'active_learning':
+                handoff=((result.flow_state.node_outputs.get('handoff') or {}).get('semantic_output') or {})
+                milestone_facts={'learning_status':handoff.get('status'),
+                    'source_urls':handoff.get('source_urls') or [],
+                    'required_next_evidence':handoff.get('required_next_evidence')}
+            await asyncio.to_thread(
+                self._publish_lifecycle, job=job, ctx=ctx, flow_state=result.flow_state,
+                phase="flow_completed" if result.flow_state.status == "completed" else "flow_failed",
+                event_summary=((str(result.output.get("summary") or "当前流程").rstrip("。") + "；全部 Event 已完成")
+                               if result.flow_state.status == "completed"
+                               else str(result.output.get("error") or result.flow_state.status)),
+                milestone_facts=milestone_facts)
         if self._apply_control(job, result.flow_state):
             return True
         if node_id == 'init' and result.output.get('ok'):
@@ -767,6 +847,7 @@ class EventWorker:
                 job.error = f"checkpoint_crashed: {type(exc).__name__}: {exc}"
                 try:
                     self._save_job(job)
+                    self._write_terminal_trace(job)
                 except Exception:
                     pass
                 return
@@ -778,11 +859,12 @@ class EventWorker:
                 self._maybe_continue_iteration(job)
                 from partner.runtime.iteration_receipts import write_request_receipts
                 write_request_receipts(self.root, job.root_event_id)
+                self._write_terminal_trace(job)
                 return
 
     def _maybe_start_report(self, job: JobRecord, *, supersedes_report: str = '',
                             revision_source: str = '', review_feedback: str = '',
-                            reissue_source: str = '') -> None:
+                            reissue_source: str = '') -> str | None:
         """When a project_iteration flow completes with the selector's
         ``complete`` route, enqueue a PDF_REPORT job so the final milestone
         becomes a real Chinese PDF (report_decide → draft → pdf_render)."""
@@ -891,8 +973,9 @@ class EventWorker:
         report_job = JobRecord(
             job_id=f"job_{uuid.uuid4().hex[:16]}",
             project_id=job.project_id, title=job.title,
-            request=(f"【生成报告】项目「{job.project_id}」本次有界运行已结束，"
-                     f"整理真实结论与证据生成中文 PDF 报告。"),
+            request=(f"【生成报告】项目「{job.project_id}」本次有界运行已结束。"
+                     f"由 Event 分别生成结果总结和运行总结，整理真实结论与证据形成中文 PDF，"
+                     f"并在交付消息中明确包含结果总结和运行总结。"),
             route="enqueue_work", channel=job.channel, sender_id=job.sender_id,
             persona_hint=job.persona_hint, origin_instance=job.origin_instance,
             assigned_instance=job.assigned_instance,
@@ -902,6 +985,9 @@ class EventWorker:
             attachments=job.attachments,
             root_event_id=job.root_event_id,
             intent_contract={"notification_kind": "final", "force": True,
+                             "source_job_id": job.job_id,
+                             "execution_constraints": dict(
+                                 (job.intent_contract or {}).get("execution_constraints") or {}),
                              "supersedes_report": supersedes_report,
                              "revision_source": revision_source, "review_feedback": review_feedback,
                              "reissue_source": reissue_source,
@@ -928,6 +1014,7 @@ class EventWorker:
         report_job.flow_type = flow_state.flow_type
         report_job.ready_event_ids = list(flow_state.ready_node_ids)
         self._enqueue_followup(report_job)
+        return report_job.job_id
 
     def _enqueue_followup(self, job):
         # New work has no lease; it must be claimed independently by a worker.

@@ -1,6 +1,6 @@
 """Real identity binding for Partner (M1 / Section 10).
 
-This module answers three questions that ``scripts/partner_submit.py``,
+This module answers three questions that ``scripts/messaging/partner_submit.py``,
 ``partner/web/api.py``, and the QQ adapter must agree on:
 
 1. Given an ``instance_id`` (01..05), which QQ bot account owns it?
