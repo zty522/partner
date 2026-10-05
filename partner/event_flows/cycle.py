@@ -115,7 +115,8 @@ CYCLE_V1 = Flow('project_cycle', '1.1.0', (
     Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
     Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
     Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
-    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('message_sanitize', 'message.sanitizer', ('deduplicate',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('message_sanitize',), continue_on_failure=True),
     Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
     Node('report', 'cycle.report_request', ('text_ack',)),
     Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True),
@@ -171,7 +172,8 @@ CYCLE_V2 = Flow('project_cycle', '2.0.0', (
     Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
     Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
     Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
-    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('message_sanitize', 'message.sanitizer', ('deduplicate',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('message_sanitize',), continue_on_failure=True),
     Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
     Node('report', 'cycle.report_request', ('text_ack',),
          when_output='initialize.report_required'),
@@ -189,9 +191,11 @@ CYCLE_V2 = Flow('project_cycle', '2.0.0', (
     Node('final_compose', 'presentation.message_compose', ('final_notify',), continue_on_failure=True),
     Node('final_critic', 'presentation.message_critic', ('final_compose',), continue_on_failure=True),
     Node('final_deduplicate', 'presentation.message_deduplicate', ('final_critic',), continue_on_failure=True),
-    Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_message_sanitize', 'message.sanitizer', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_send', 'delivery.send_text', ('final_message_sanitize',), continue_on_failure=True),
     Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
-    Node('finish', 'cycle.finish', ('final_ack',)),
+    Node('token_aggregate', 'metrics.token_aggregate', ('final_ack',), continue_on_failure=True),
+    Node('finish', 'cycle.finish', ('token_aggregate',)),
 ), 'Settlement-driven project rounds, conditional learning, then Partner-only post-run evolution audit.')
 
 CYCLE = Flow('project_cycle', '3.2.0', (
@@ -210,10 +214,15 @@ CYCLE = Flow('project_cycle', '3.2.0', (
     Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
     Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
     Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
-    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('message_sanitize', 'message.sanitizer', ('deduplicate',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('message_sanitize',), continue_on_failure=True),
     Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
     Node('report', 'cycle.report_request', ('text_ack',), when_output='initialize.report_required'),
-    Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,
+    Node('pdf_fact_check', 'pdf.fact_adjudicate', ('report',), continue_on_failure=True,
+         when_output='initialize.report_required'),
+    Node('pdf_format', 'pdf.format_five_section', ('pdf_fact_check',), continue_on_failure=True,
+         when_output='initialize.report_required'),
+    Node('report_ack', 'cycle.delivery_settle', ('pdf_format',), continue_on_failure=True,
          when_output='initialize.report_required'),
     Node('channel_verify', 'cycle.cross_channel_verify', ('report_ack',), continue_on_failure=True),
     Node('experience', 'cycle.memory_update', ('channel_verify',), parameters={'kind': 'lesson'}),
@@ -224,9 +233,11 @@ CYCLE = Flow('project_cycle', '3.2.0', (
     Node('final_compose', 'presentation.message_compose', ('final_notify',), continue_on_failure=True),
     Node('final_critic', 'presentation.message_critic', ('final_compose',), continue_on_failure=True),
     Node('final_deduplicate', 'presentation.message_deduplicate', ('final_critic',), continue_on_failure=True),
-    Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_message_sanitize', 'message.sanitizer', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_send', 'delivery.send_text', ('final_message_sanitize',), continue_on_failure=True),
     Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
-    Node('finish', 'cycle.finish', ('final_ack',)),
+    Node('token_aggregate', 'metrics.token_aggregate', ('final_ack',), continue_on_failure=True),
+    Node('finish', 'cycle.finish', ('token_aggregate',)),
 ), 'A recoverable settlement-driven loop followed by delivery, memory, Partner audit and evolution.')
 
 # Run a requested deterministic benchmark before open-ended research rounds.
@@ -257,6 +268,13 @@ for _node in CYCLE.nodes:
         _node = replace(_node, depends_on=('semantic_claim_audit',))
     _cycle_34_nodes.append(_node)
 _cycle_34_nodes.insert(1, Node('research_preflight', 'cycle.research_preflight', ('initialize',)))
+# 添加语料资格冻结节点
+_cycle_34_nodes.insert(2, Node('corpus_eligibility', 'corpus.eligibility_freeze', ('research_preflight',)))
+# 修改 benchmark 依赖
+for i, node in enumerate(_cycle_34_nodes):
+    if node.node_id == 'benchmark':
+        _cycle_34_nodes[i] = replace(node, depends_on=('corpus_eligibility',))
+        break
 report_ack_index = next(i for i, node in enumerate(_cycle_34_nodes) if node.node_id == 'report_ack')
 _cycle_34_nodes.insert(report_ack_index + 1,
                        Node('semantic_claim_audit', 'cycle.semantic_claim_audit', ('report_ack',),
@@ -295,10 +313,15 @@ CYCLE_V3 = Flow('project_cycle', '3.0.0', (
     Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
     Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
     Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
-    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('message_sanitize', 'message.sanitizer', ('deduplicate',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('message_sanitize',), continue_on_failure=True),
     Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
     Node('report', 'cycle.report_request', ('text_ack',), when_output='initialize.report_required'),
-    Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,
+    Node('pdf_fact_check', 'pdf.fact_adjudicate', ('report',), continue_on_failure=True,
+         when_output='initialize.report_required'),
+    Node('pdf_format', 'pdf.format_five_section', ('pdf_fact_check',), continue_on_failure=True,
+         when_output='initialize.report_required'),
+    Node('report_ack', 'cycle.delivery_settle', ('pdf_format',), continue_on_failure=True,
          when_output='initialize.report_required'),
     Node('experience', 'cycle.memory_update', ('report_ack',), parameters={'kind': 'lesson'}),
     Node('growth', 'cycle.memory_update', ('experience',), parameters={'kind': 'growth'}),
@@ -312,9 +335,11 @@ CYCLE_V3 = Flow('project_cycle', '3.0.0', (
     Node('final_compose', 'presentation.message_compose', ('final_notify',), continue_on_failure=True),
     Node('final_critic', 'presentation.message_critic', ('final_compose',), continue_on_failure=True),
     Node('final_deduplicate', 'presentation.message_deduplicate', ('final_critic',), continue_on_failure=True),
-    Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_message_sanitize', 'message.sanitizer', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_send', 'delivery.send_text', ('final_message_sanitize',), continue_on_failure=True),
     Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
-    Node('finish', 'cycle.finish', ('final_ack',)),
+    Node('token_aggregate', 'metrics.token_aggregate', ('final_ack',), continue_on_failure=True),
+    Node('finish', 'cycle.finish', ('token_aggregate',)),
 ), 'Historical v3 cycle retained for pinned Jobs.')
 
 # Public semantic names.  ``project_cycle`` remains versioned for recovery of
@@ -333,7 +358,8 @@ META_CYCLE = Flow('meta_cycle', '2.0.0', (
     Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
     Node('critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
     Node('deduplicate', 'presentation.message_deduplicate', ('critic',), continue_on_failure=True),
-    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('message_sanitize', 'message.sanitizer', ('deduplicate',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('message_sanitize',), continue_on_failure=True),
     Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
     Node('report', 'cycle.report_request', ('text_ack',), when_output='meta_initialize.report_required'),
     Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,

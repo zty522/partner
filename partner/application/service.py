@@ -6,6 +6,7 @@ No legacy inbox, batch planner, or Harness participates in production.
 """
 
 from __future__ import annotations
+from partner.application.improvement_mode_router import route_improvement_mode
 
 import fcntl
 import json
@@ -1595,3 +1596,8 @@ def _intent_ctx(root, persona_hint, project_id, channel, sender_id):
     ctx.adapter = DirectAdapter(workspace_path=str(root))
     ctx.event_deadline = None
     return ctx
+
+
+def _route_improvement_mode(params: dict) -> dict:
+    """路由改进模式到专用 Flow"""
+    return route_improvement_mode(params)

@@ -39,6 +39,16 @@ def builtin_definitions() -> list[EventDefinition]:
     from .v4_benchmark import DEFINITIONS as v4_benchmark
     from .v5_research import DEFINITIONS as v5_research
     from .meta_cycle import DEFINITIONS as meta_cycle
+    from .long_run_controller import long_run_controller_event
+    from .pdf_fact_adjudicator import pdf_fact_adjudicator_event
+    from .corpus_eligibility import corpus_eligibility_event
+    from .learning_source_recovery import learning_source_recovery_event
+    from .evolution_candidate_merger import evolution_candidate_merger_event
+    from .fair_scheduler import fair_scheduler_event
+    from .token_aggregator import token_aggregator_event
+    from .model_service_adapter import model_service_adapter_event
+    from .pdf_five_section import pdf_five_section_event
+    from .message_sanitizer import message_sanitize_event
     return [*interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
@@ -46,7 +56,13 @@ def builtin_definitions() -> list[EventDefinition]:
             *emit_progress,
             *improvement, *acceptance, *local_learning, *commitment, *core_v1,
             *benchmark, *candidate, *loop_bench, *v4_benchmark, *v5_research,
-            *meta_cycle]
+            *meta_cycle,
+            long_run_controller_event, pdf_fact_adjudicator_event,
+            corpus_eligibility_event, learning_source_recovery_event,
+            evolution_candidate_merger_event, fair_scheduler_event,
+            token_aggregator_event, model_service_adapter_event,
+            pdf_five_section_event,
+            message_sanitize_event]
 
 
 __all__ = ["builtin_definitions"]
