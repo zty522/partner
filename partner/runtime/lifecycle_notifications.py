@@ -12,7 +12,10 @@ from partner.runtime.event_run_log import EventRunLog
 
 
 _STANDARD_MILESTONE_NODES = {
-    "assess", "report_ack", "seal", "final_ack",
+    # These are semantic boundaries, rather than Event chatter: one message
+    # says what the research concluded, one reports benchmark/evolution
+    # settlement, and the ACK nodes close delivery.
+    "assess", "benchmark_settle", "evolution_gate", "report_ack", "final_ack",
 }
 
 
@@ -34,17 +37,18 @@ def notification_mode(intent_contract: dict[str, Any] | None) -> str:
 
 
 def should_publish(*, mode: str, lifecycle_phase: str, node_id: str = "",
-                   is_child_flow: bool = False) -> bool:
+                   is_child_flow: bool = False, flow_name: str = "") -> bool:
     if mode in {"audit", "debug"}:
         return True
     if lifecycle_phase in {"accepted", "flow_failed", "event_failed"}:
         return True
     if lifecycle_phase == "flow_planned":
-        return not is_child_flow
+        return False
     if lifecycle_phase == "flow_started":
         return False
     if lifecycle_phase == "flow_completed":
-        return True
+        return bool(is_child_flow and flow_name in {
+            'project_cycle_round', 'active_learning', 'autonomous_evolution'})
     return lifecycle_phase == "event_completed" and node_id in _STANDARD_MILESTONE_NODES
 
 
@@ -106,10 +110,24 @@ def _run_event(*, workspace, ctx, event_type: str, params: dict[str, Any],
 def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
                       root_event_id: str = "", **facts: Any) -> dict[str, Any]:
     """Publish one update through three independently recorded Events."""
+    contract = facts.get("intent_contract")
+    benchmark = (contract or {}).get("benchmark") if isinstance(contract, dict) else {}
+    is_v4 = ((isinstance(benchmark, dict) and
+              benchmark.get("protocol_id") == "v4_longitudinal_closed_loop_v1") or
+             str(facts.get("flow_name") or facts.get("flow_type") or "") in
+             {"v4_benchmark_suite", "v4_benchmark_episode"})
+    if (is_v4 and
+            lifecycle_phase not in {"flow_failed", "event_failed"}):
+        # v4 owns its user narrative with dedicated compose/send Events.
+        # Runtime lifecycle prose would expose child-flow mechanics and even
+        # turn deliberately suppressed milestones into noisy QQ messages.
+        return {"ok": True, "suppressed": True, "mode": "dedicated_v4_events",
+                "reason": "v4 benchmark uses dedicated user-message Events"}
     mode = notification_mode(facts.get("intent_contract"))
     if not should_publish(mode=mode, lifecycle_phase=lifecycle_phase,
                           node_id=str(facts.get("node_id") or ""),
-                          is_child_flow=bool(facts.get("is_child_flow"))):
+                          is_child_flow=bool(facts.get("is_child_flow")),
+                          flow_name=str(facts.get('flow_name') or facts.get('flow_type') or '')):
         return {"ok": True, "suppressed": True, "mode": mode,
                 "reason": "notification density policy"}
     token = uuid.uuid4().hex[:12]
@@ -143,6 +161,13 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
             and str(getattr(ctx, "channel", "")) in {"qq", "both"}
             and "qq" not in channels):
         channels.append("qq")
+    # Audit density belongs in the Web event explorer.  Broadcasting every
+    # Event start/finish to QQ produced hundreds of low-information messages
+    # per run.  QQ keeps only root lifecycle, failures and explicit milestone
+    # messages composed by the business Flow.
+    if (mode in {'audit', 'debug'} and lifecycle_phase in
+            {'event_started', 'event_completed', 'flow_started'}):
+        channels = ['web']
     constraints["delivery_channels"] = channels
     contract["execution_constraints"] = constraints
     sent = _run_event(

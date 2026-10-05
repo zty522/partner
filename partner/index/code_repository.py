@@ -23,7 +23,7 @@ from typing import Any, Iterable
 from .runtime_storage import workspace_dir
 from .sqlite_base import get_connection
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS code_watermark (
 
 DEFAULT_INCLUDE = (
     "partner",
-    "tests",
+    "benchmark",
     "scripts",
     "shells",
     "config",
@@ -130,10 +130,31 @@ DEFAULT_EXCLUDE = (
 )
 
 
-def init(repo_root: Path, *, repo_id: str = "partner") -> "CodeRepository":
-    ws_dir = workspace_dir(repo_root)
+def resolve_source_root(project_root: Path) -> Path:
+    """Resolve the live Partner checkout without indexing workspace snapshots.
+
+    Runtime callers pass ``partner_workspace`` because that identity owns the
+    native index database.  The source checkout is its sibling ``partner``.
+    Synthetic/test repositories continue to index themselves.
+    """
+    project_root = Path(project_root).expanduser().resolve()
+    configured = os.environ.get("PARTNER_REPO_ROOT", "").strip()
+    candidates = [Path(configured).expanduser() if configured else None,
+                  project_root.parent / "partner", project_root]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        candidate = candidate.resolve()
+        if (candidate / "partner").is_dir() and (candidate / "pyproject.toml").is_file():
+            return candidate
+    return project_root
+
+
+def init(project_root: Path, *, repo_id: str = "partner") -> "CodeRepository":
+    project_root = Path(project_root).expanduser().resolve()
+    ws_dir = workspace_dir(project_root)
     db_path = ws_dir / "code.db"
-    repo = CodeRepository(db_path, repo_root, repo_id=repo_id)
+    repo = CodeRepository(db_path, resolve_source_root(project_root), repo_id=repo_id)
     repo._ensure_schema()
     return repo
 
@@ -288,17 +309,31 @@ class CodeRepository:
         )
         conn.execute("DELETE FROM file_keywords WHERE repo_id = ? AND path = ?",
                      (self.repo_id, rel))
+        module_prefix = rel.replace("/", ".").removesuffix(".py")
+        conn.execute(
+            "DELETE FROM symbol_calls WHERE repo_id = ? AND source_symbol LIKE ?",
+            (self.repo_id, module_prefix + ".%"),
+        )
         symbols: list[dict[str, Any]] = []
         keywords: set[str] = set()
+        parents = {child: parent for parent in ast.walk(tree)
+                   for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                qualified = self._qualified(node, rel, tree)
+                qualified = self._qualified(node, rel, parents)
+                ancestor = parents.get(node)
+                is_method = False
+                while ancestor is not None:
+                    if isinstance(ancestor, ast.ClassDef):
+                        is_method = True
+                        break
+                    ancestor = parents.get(ancestor)
                 start, end = node.lineno, int(node.end_lineno or node.lineno)
                 offset = self._byte_offset(lines, start)
                 length = self._byte_length(lines, start, end)
                 excerpt = ast.get_docstring(node) or ""
                 symbols.append({
-                    "qualified_name": qualified, "kind": "function",
+                    "qualified_name": qualified, "kind": "method" if is_method else "function",
                     "signature": _signature(node), "start_line": start,
                     "end_line": end, "byte_offset": offset, "byte_length": length,
                     "sha256": sha, "doc_excerpt": excerpt[:600],
@@ -313,7 +348,7 @@ class CodeRepository:
                             (self.repo_id, qualified, sub.func.id),
                         )
             elif isinstance(node, ast.ClassDef):
-                qualified = self._qualified(node, rel, tree)
+                qualified = self._qualified(node, rel, parents)
                 start, end = node.lineno, int(node.end_lineno or node.lineno)
                 offset = self._byte_offset(lines, start)
                 length = self._byte_length(lines, start, end)
@@ -326,18 +361,6 @@ class CodeRepository:
                     "sha256": sha, "doc_excerpt": excerpt[:600],
                 })
                 keywords.update(_keywords_for(excerpt))
-                for sub in node.body:
-                    if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        method_qn = f"{qualified}.{sub.name}"
-                        symbols.append({
-                            "qualified_name": method_qn, "kind": "method",
-                            "signature": _signature(sub),
-                            "start_line": int(sub.lineno),
-                            "end_line": int(sub.end_lineno or sub.lineno),
-                            "byte_offset": self._byte_offset(lines, int(sub.lineno)),
-                            "byte_length": self._byte_length(lines, int(sub.lineno), int(sub.end_lineno or sub.lineno)),
-                            "sha256": sha, "doc_excerpt": (ast.get_docstring(sub) or "")[:600],
-                        })
         for sym in symbols:
             conn.execute(
                 """INSERT INTO symbols
@@ -379,10 +402,15 @@ class CodeRepository:
         )
 
     @staticmethod
-    def _qualified(node: ast.AST, rel: str, tree: ast.Module) -> str:
-        # build module:rel dotted path
+    def _qualified(node: ast.AST, rel: str, parents: dict[ast.AST, ast.AST]) -> str:
         module = rel.replace("/", ".").removesuffix(".py")
-        return f"{module}.{node.name}"
+        names = [str(node.name)]
+        parent = parents.get(node)
+        while parent is not None:
+            if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.append(parent.name)
+            parent = parents.get(parent)
+        return ".".join([module, *reversed(names)])
 
     @staticmethod
     def _byte_offset(lines: list[str], start_line: int) -> int:

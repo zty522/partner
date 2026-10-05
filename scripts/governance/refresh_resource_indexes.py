@@ -9,7 +9,10 @@ from partner.index.job_repository import init as jobs
 
 def refresh(workspace, repo, external=False):
     catalog=ResourceCatalog(workspace)
-    for name, scope in (('partner', 'partner'), ('benchmark', 'tests'), ('scripts', 'scripts')):
+    retired_tests=catalog.purge_scope('code','tests')
+    if retired_tests:
+        print('retired_scope tests',retired_tests,flush=True)
+    for name, scope in (('partner', 'partner'), ('benchmark', 'benchmark'), ('scripts', 'scripts')):
         print(name,catalog.maintain(repo/name,'code',scope=scope,max_files=15000),flush=True)
     print('docs',catalog.maintain(repo/'docs','document',max_files=10000),flush=True)
     for directory,kind in [('state/event_flows','flow'),('state/improvement_evidence','bundle'),

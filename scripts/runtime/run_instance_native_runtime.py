@@ -105,7 +105,7 @@ def _spawn_readmission(root: Path) -> subprocess.Popen:
     log_dir.mkdir(parents=True, exist_ok=True)
     output = (log_dir / "readmission.out.log").open("ab", buffering=0)
     return subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve().parent / "run_native_readmission.py"),
+        [sys.executable, str(Path(__file__).resolve().parent.parent / "campaigns" / "run_native_readmission.py"),
          "--workspace", str(root), "--interval", "20"],
         cwd=str(Path(__file__).resolve().parents[2]),
         stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
@@ -117,6 +117,8 @@ def main() -> int:
     parser.add_argument("--workspace", default="/mnt/e/work/partner_workspace")
     parser.add_argument("--watchdog-seconds", type=float, default=5)
     parser.add_argument("--instances", nargs="+", choices=ALL_INSTANCES, help="Explicit channel hosts for bounded acceptance")
+    parser.add_argument("--bounded-acceptance", action="store_true",
+                        help="Run channel hosts and shared workers only; do not start native continuation/readmission daemons")
     args = parser.parse_args()
     root = Path(args.workspace).resolve()
     enabled = args.instances or _enabled(root)
@@ -134,8 +136,8 @@ def main() -> int:
     # ADR 0100: instances are pure transports; workers are separate processes.
     instances = {iid: _spawn_instance(root, iid) for iid in enabled}
     workers = {i: _spawn_worker(root, i) for i in range(n_workers)}
-    bridge = _spawn_bridge(root)
-    readmission = _spawn_readmission(root)
+    bridge = None if args.bounded_acceptance else _spawn_bridge(root)
+    readmission = None if args.bounded_acceptance else _spawn_readmission(root)
     retiring = set()
 
     print(json.dumps({
@@ -165,15 +167,16 @@ def main() -> int:
                 if slot not in workers and not stopping:
                     workers[slot] = _spawn_worker(root, slot)
             # Watchdog: respawn the terminal bridge if it ever dies.
-            if bridge.poll() is not None and not stopping:
+            if bridge is not None and bridge.poll() is not None and not stopping:
                 time.sleep(1)
                 bridge = _spawn_bridge(root)
-            if readmission.poll() is not None and not stopping:
+            if readmission is not None and readmission.poll() is not None and not stopping:
                 time.sleep(1)
                 readmission = _spawn_readmission(root)
             time.sleep(max(1, args.watchdog_seconds))
     finally:
-        for process in list(instances.values()) + list(workers.values()) + [bridge, readmission]:
+        auxiliaries = [process for process in (bridge, readmission) if process is not None]
+        for process in list(instances.values()) + list(workers.values()) + auxiliaries:
             if process.poll() is None:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -181,10 +184,10 @@ def main() -> int:
                     pass
         deadline = time.time() + 10
         while time.time() < deadline and any(
-            p.poll() is None for p in list(instances.values()) + list(workers.values()) + [bridge, readmission]
+            p.poll() is None for p in list(instances.values()) + list(workers.values()) + auxiliaries
         ):
             time.sleep(0.2)
-        for process in list(instances.values()) + list(workers.values()) + [bridge, readmission]:
+        for process in list(instances.values()) + list(workers.values()) + auxiliaries:
             if process.poll() is None:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

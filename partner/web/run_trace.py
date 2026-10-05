@@ -81,6 +81,8 @@ def _cycle_outcome(workspace: Path, job_id: str,
                    rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     cycle = workspace / "state" / "cycles" / job_id
     assessment = _read_json(cycle / "assessment.json")
+    frozen_state = _read_json(cycle / 'final_run_state.json')
+    narrative = _read_json(cycle / 'run_narrative.json')
     dynamic_effects = sorted((cycle / 'iterations').glob('learning_effect_*.json'))
     downstream = (_read_json(dynamic_effects[-1]) if dynamic_effects else
                   _read_json(cycle / "learning_downstream_two.json"))
@@ -124,10 +126,35 @@ def _cycle_outcome(workspace: Path, job_id: str,
         effect = baseline - candidate
     relative = effect / baseline * 100 if isinstance(effect, (int, float)) and baseline else None
 
+    # Embedded benchmark children keep their deterministic result in the
+    # Event ledger/run directory rather than a project iteration artifact.
+    # Project the authoritative aggregate so a successful experiment cannot
+    # vanish from the Web result merely because the parent later times out.
+    benchmark_aggregate = {}
+    benchmark_settlement = {}
+    for row in rows or []:
+        if row.get('phase') != 'finished':
+            continue
+        output = row.get('output') if isinstance(row.get('output'), dict) else {}
+        semantic = output.get('semantic_output') if isinstance(output.get('semantic_output'), dict) else {}
+        if row.get('event_type') == 'benchmark.aggregate':
+            benchmark_aggregate = semantic
+        elif row.get('event_type') == 'benchmark.settlement':
+            benchmark_settlement = semantic
+    if benchmark_aggregate:
+        bench_compare = benchmark_aggregate.get('comparison') or {}
+        baseline = bench_compare.get('baseline_value', baseline)
+        candidate = bench_compare.get('candidate_value', candidate)
+        effect = bench_compare.get('effect', effect)
+        relative = effect / baseline * 100 if isinstance(effect, (int, float)) and baseline else None
+
     def acknowledged(name: str, *, pdf: bool = False) -> bool:
         value = _read_json(cycle / name)
         return value.get("delivery_state") in {"sent","web_visible"} and (
             not pdf or value.get("pdf_delivered") is True or value.get("delivery_state") == "web_visible")
+
+    improvement_text_ack = acknowledged('improvement_message_ack.json')
+    improvement_pdf_ack = acknowledged('improvement_report_ack.json', pdf=True)
 
     # Web delivery is a durable projection receipt written by the delivery
     # Event.  Do not report it as successful merely because the web UI exists.
@@ -159,8 +186,9 @@ def _cycle_outcome(workspace: Path, job_id: str,
     if dynamic_learning_records and not dynamic_learning_valid:
         learning_status='failed'
         learning_consumed=False
-    return {
-        "headline": (f"候选将测试 RMSE 从 {baseline:.4f} 降至 {candidate:.4f}"
+    outcome = {
+        "headline": (str(narrative.get('headline')) if narrative.get('headline') else
+                     f"候选将测试 RMSE 从 {baseline:.4f} 降至 {candidate:.4f}"
                      if isinstance(baseline, (int, float)) and isinstance(candidate, (int, float))
                      else str(assessment.get("summary") or "尚无可展示的项目结论")),
         "project": {"status": "improved" if downstream.get("improved") is True else "completed",
@@ -196,14 +224,54 @@ def _cycle_outcome(workspace: Path, job_id: str,
                       "production_effective": final.get("production_effective") is True,
                       "issue": final.get("selected_issue_id") or "",
                       "summary": final.get("message") or ""},
-        "delivery": {"web": bool(web_receipts) or acknowledged('text_ack.json') or acknowledged('final_ack.json'),
+        "delivery": {"web": bool(web_receipts) or acknowledged('text_ack.json') or acknowledged('final_ack.json') or improvement_text_ack or improvement_pdf_ack,
                      "web_receipt_count": len(web_receipts),
-                     "text": acknowledged("text_ack.json"),
-                     "report": acknowledged("report_ack.json", pdf=True),
-                     "final": acknowledged("final_ack.json")},
-        "report": {"status": report.get("status") or "not_run", "flow_id": report.get("flow_id") or ""},
+                     "text": acknowledged("text_ack.json") or improvement_text_ack,
+                     "report": acknowledged("report_ack.json", pdf=True) or improvement_pdf_ack,
+                     "final": acknowledged("final_ack.json") or improvement_text_ack},
+        "report": {"status": report.get("status") or ('completed' if (workspace / 'state/event_runtime/work' / job_id / 'report_manifest.json').is_file() else "not_run"), "flow_id": report.get("flow_id") or ""},
         "completion": completion,
     }
+    if benchmark_aggregate:
+        guardrails = benchmark_aggregate.get('guardrails') or {}
+        hard_rows = [item for item in guardrails.get('guardrails') or []
+                     if isinstance(item, dict) and item.get('hard')]
+        outcome['project'].update({
+            'status': 'improved' if benchmark_settlement.get('decision') == 'confirmed' else 'measured',
+            'baseline': baseline, 'candidate': candidate, 'effect': effect,
+            'split_reused': (benchmark_aggregate.get('integrity') or {}).get('baseline', {}).get('valid') is True
+                            and (benchmark_aggregate.get('integrity') or {}).get('candidate', {}).get('valid') is True,
+            'leakage_check': ('passed' if any(row.get('id') == 'no_target_leakage' and row.get('status') == 'pass'
+                                                    for row in hard_rows) else 'failed'),
+            'benchmark': {'settlement': benchmark_settlement,
+                          'expectation': benchmark_aggregate.get('expectation') or {},
+                          'guardrails': guardrails},
+        })
+    if frozen_state:
+        research = frozen_state.get('research_outcome') or {}
+        learned = frozen_state.get('learning_outcome') or {}
+        evolved = frozen_state.get('evolution_outcome') or {}
+        outcome['final_state_hash'] = frozen_state.get('final_state_hash')
+        outcome['authoritative_status'] = research.get('status') or frozen_state.get('workstream_type')
+        outcome['project'].update({
+            'status': research.get('status') or outcome['project']['status'],
+            'rounds': research.get('round_count', outcome['project']['rounds']),
+            'authoritative_conclusion': research.get('authoritative_conclusion') or '',
+            'benchmark': research.get('benchmark') or {},
+        })
+        outcome['learning'].update({
+            'status': learned.get('status') or outcome['learning']['status'],
+            'consumed': learned.get('consumed') is True,
+            'improved': learned.get('downstream_improved') is True,
+            'run_count': learned.get('run_count', 0),
+        })
+        outcome['evolution'].update({
+            'decision': evolved.get('status') or outcome['evolution']['decision'],
+            'production_effective': evolved.get('production_effective') is True,
+            'real_experiment_executed': evolved.get('real_experiment_executed') is True,
+            'matched_verified': evolved.get('valid_matched_experiment') is True,
+        })
+    return outcome
 
 
 def trace_overview(workspace: str | Path, job_id: str, *, after: int = 0,

@@ -8,6 +8,29 @@ from partner.event_fabric.catalog import EventDefinition
 from ._llm import call_model, json_object
 
 
+def _conditional_support_clause(request: str) -> bool:
+    """Return true when learning/evolution is only a contingent project branch.
+
+    A request such as ``推进项目并在机制失败时自进化`` still has one primary
+    workstream: project research.  Treating the contingent recovery action as
+    a second, unconditional objective sends the job directly to ``meta_cycle``
+    and bypasses the evidence gate that is supposed to decide whether the
+    branch may run.  This small lexical check is deliberately limited to
+    explicit conditional markers; an unconditional request to both advance a
+    project and improve Partner remains ``mixed``.
+    """
+    text = str(request or "")
+    project_primary = "项目" in text and any(
+        term in text for term in ("推进", "研究", "实验", "分析", "执行", "完成")
+    )
+    support = any(term in text for term in ("自进化", "主动学习", "学习"))
+    conditional = any(term in text for term in (
+        "如果", "若", "假如", "一旦", "必要时", "需要时", "不足时", "失败时",
+        "出现问题时", "遇到问题时", "在机制失败时", "在知识不足时",
+    ))
+    return project_primary and support and conditional
+
+
 def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
     request = str(params.get("request") or "").strip()
     upstream = params.get("upstream") if isinstance(params.get("upstream"), dict) else {}
@@ -41,6 +64,12 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
             "route 只能为 direct_answer 或 project_iteration：用户仅问概念、解释差别且无需读取当前外部材料时选 direct_answer；"
             "查询已有任务进展且下方已有运行器读取的真实记录时选 direct_answer，不为状态查询再开研究或取证迭代；缺失部分如实说尚不能确认。"
             "需要新的外部文件读取、检索、计算、修改或推进任务时选 project_iteration。"
+            "同时判断 workstream_type，只能是 project_research、active_learning、self_improvement、mixed："
+            "主要目标是推进用户项目选 project_research；主要目标是阅读外部/本地资料并形成可消费新知识选 active_learning；"
+            "主要目标是检查、修复或改进 Partner 自身代码/Event/Flow/消息/报告机制选 self_improvement；"
+            "原始请求明确同时要求项目推进、主动学习和 Partner 自身改进时选 mixed。"
+            "若主动学习或自进化只出现在‘知识不足时/机制失败时/必要时’等条件从句中，它只是项目 Flow 的候选旁支，"
+            "workstream_type 必须仍选 project_research；后续由证据门判断是否触发，不能提前选 mixed。"
             "派发目标 dispatch_target 必须从下列候选中选一个：\n"
             "  - direct_answer：直接答，不入队\n"
             "  - browser_video_learning：用户想学一条具体视频（payload.url 必填）\n"
@@ -54,7 +83,7 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
             "report_policy=none 时，warm_reply 不得说生成报告或 PDF；JSON 验收产物应称为记录或文件。"
             "这是意图摘要，不是研究方案：每个数组最多4项，每项一句话，整个 JSON 不超过1500汉字。"
             "只输出 JSON，字段 assumptions,goal,constraints,success_criteria,evidence_requirements,"
-              "knowledge_gaps,route,dispatch_target,warm_reply,payload,execution_constraints,report_policy,reason。"
+              "knowledge_gaps,route,workstream_type,dispatch_target,warm_reply,payload,execution_constraints,report_policy,reason。"
         ),
     }
     prompt = (
@@ -94,6 +123,16 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
         calls += 1
         if value.get('route') not in ('direct_answer', 'project_iteration'):
             raise ValueError('intent synthesize route remains invalid after one schema repair')
+    if role == 'synthesize' and value.get('route') == 'project_iteration':
+        allowed = {'project_research', 'active_learning', 'self_improvement', 'mixed'}
+        if value.get('workstream_type') not in allowed:
+            value['workstream_type'] = 'project_research'
+            value['workstream_type_repaired'] = True
+        elif (value.get('workstream_type') != 'project_research'
+              and _conditional_support_clause(request)):
+            value['workstream_type'] = 'project_research'
+            value['conditional_support_branch'] = True
+            value['workstream_type_repaired'] = True
     return {"ok": True, "status": "completed", "semantic_output": value,
             "summary": str(value.get("goal") or value.get("reason") or "意图审议完成"),
             "token_usage": usage, "model_output": raw, "model_calls": calls}

@@ -82,6 +82,12 @@ def build_flow_registry() -> EventFlowRegistry:
     from .loop_bench import DEFINITIONS as loop_bench_definitions
     for definition in loop_bench_definitions:
         registry.register(definition)
+    from .v4_benchmark import DEFINITIONS as v4_benchmark_definitions
+    for definition in v4_benchmark_definitions:
+        registry.register(definition)
+    from .v5_research import DEFINITIONS as v5_research_definitions
+    for definition in v5_research_definitions:
+        registry.register(definition)
     from .benchmark import BENCHMARK_SUBJECT_V1, BENCHMARK_SUBJECT_V1_1
     for historical in (BENCHMARK_SUBJECT_V1, BENCHMARK_SUBJECT_V1_1):
         registry._versions[(historical.name, historical.version)] = historical
@@ -91,6 +97,13 @@ def build_flow_registry() -> EventFlowRegistry:
     from .cycle import _improvement_flow_definitions
     for definition in _improvement_flow_definitions(local_learning=False):
         registry._versions[(definition.name,definition.version)] = definition
+    # 1.6.0 was the last user-facing active-learning graph before the child
+    # round version fix.  Preserve it for jobs pinned before a worker restart;
+    # new jobs select 1.7.0 and children select 1.1.0.
+    from dataclasses import replace as _replace
+    current_learning = registry.get('learning_improvement_cycle')
+    registry._versions[(current_learning.name, '1.6.0')] = _replace(
+        current_learning, version='1.6.0')
     for definition in cycle_historical:
         registry._versions[(definition.name, definition.version)] = definition
     # Preserve the previous production graph for already pinned requests.

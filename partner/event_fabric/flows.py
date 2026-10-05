@@ -12,6 +12,7 @@ from typing import Any
 import json
 import os
 import uuid
+import hashlib
 
 
 def _now() -> str:
@@ -184,6 +185,39 @@ class EventFlowController:
         if node_id not in target:
             target.append(node_id)
         semantic = summary.get("semantic_output") or {}
+        # A project-round blueprint is an executable contract, not prose.  The
+        # registered definition is a safe superset; after the independent
+        # critic freezes the sequence, nodes omitted by that contract are
+        # durably skipped.  Required execution/evaluation nodes are enforced
+        # by cycle.round_blueprint_critic before this transition.
+        if (state.flow_type == "project_cycle_round" and node_id == "design_critic"
+                and status == "completed" and isinstance(semantic, dict)):
+            sequence = [str(value) for value in semantic.get("event_sequence") or []]
+            selected = set(sequence)
+            event_to_nodes: dict[str, list[str]] = {}
+            for planned in definition.nodes:
+                event_to_nodes.setdefault(planned.event_type, []).append(planned.node_id)
+            selected_nodes = {
+                candidate
+                for event_type in selected
+                for candidate in event_to_nodes.get(event_type, [])
+            }
+            selected_nodes.update({"input_resolve", "design", "design_critic"})
+            for planned in definition.nodes:
+                if (planned.node_id not in selected_nodes
+                        and planned.node_id not in state.completed_node_ids
+                        and planned.node_id not in state.skipped_node_ids
+                        and planned.node_id not in state.failed_node_ids):
+                    state.skipped_node_ids.append(planned.node_id)
+            materialized = ["cycle.input_resolve", "cycle.round_design",
+                            "cycle.round_blueprint_critic", *sequence]
+            plan_material = json.dumps(materialized, ensure_ascii=False,
+                                       separators=(",", ":")).encode("utf-8")
+            state.run_context.update({
+                "materialized_event_sequence": sequence,
+                "planned_flow_hash": "sha256:" + hashlib.sha256(plan_material).hexdigest(),
+                "flow_materialized": True,
+            })
         if isinstance(semantic, dict) and semantic.get("primary_route"):
             state.selected_route = str(semantic["primary_route"])
         if (status == "completed" or current.continue_on_failure) and not state.active_child_flow_id:
@@ -206,6 +240,14 @@ class EventFlowController:
         if not state.ready_node_ids and not state.active_child_flow_id:
             unhandled = [n for n in state.failed_node_ids if not definition.node(n).continue_on_failure]
             state.status = "failed" if unhandled else "completed"
+            if state.run_context.get("flow_materialized"):
+                executed = set(state.completed_node_ids) | set(state.failed_node_ids)
+                actual = [node.event_type for node in definition.nodes
+                          if node.node_id in executed]
+                state.run_context["actual_event_sequence"] = actual
+                state.run_context["actual_flow_hash"] = "sha256:" + hashlib.sha256(
+                    json.dumps(actual, ensure_ascii=False,
+                               separators=(",", ":")).encode("utf-8")).hexdigest()
         self.store.save(state)
         return state
 

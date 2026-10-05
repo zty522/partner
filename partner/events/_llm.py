@@ -44,8 +44,12 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
     retry_budget = None
     # One attempt here means one HTTP call for DirectAdapter; no nested retries.
     deadline = getattr(ctx, "event_deadline", None)
-    for attempt in range(3):
-        remaining = deadline - time.monotonic() - 2 if deadline else 90
+    deep = (purpose.startswith(('intent_', 'cycle_', 'learning_', 'autoevolution_',
+                                'self_evolution_', 'report_', 'message_factcheck'))
+            or purpose in {'project_plan_propose', 'project_outcome_reflect'})
+    attempts = 1 if purpose == 'cycle_partner_audit' else 2
+    for attempt in range(attempts):
+        remaining = deadline - time.monotonic() - 2 if deadline else (180 if deep else 90)
         if remaining <= 0:
             raise TimeoutError("cognitive Event deadline exhausted")
         try:
@@ -55,8 +59,19 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
                 if isinstance(adapter, DirectAdapter):
                     # A larger output budget also needs bounded generation time;
                     # retaining the 8k timeout made 16k truncation retries futile.
-                    options["timeout"] = min(180 if (retry_budget or 8192) > 8192 else 150 if purpose.startswith(("report_", "autoevolution_")) else 90, remaining)
-                raw = adapter.chat_once(prompt, purpose=purpose, **options)
+                    call_cap = 120 if purpose == 'cycle_partner_audit' else (
+                        180 if deep or (retry_budget or 8192) > 8192 else 90)
+                    options["timeout"] = min(call_cap,
+                                             remaining)
+                active_prompt = prompt
+                if attempt and len(active_prompt) > 36000:
+                    # A provider timeout is not repaired by replaying the same
+                    # oversized request.  Preserve the contract header and the
+                    # newest evidence tail for one compact recovery call.
+                    active_prompt = (active_prompt[:14000]
+                                     + '\n[中间重复上下文已由运行器压缩]\n'
+                                     + active_prompt[-20000:])
+                raw = adapter.chat_once(active_prompt, purpose=purpose, **options)
             elif callable(adapter):
                 raw = adapter(prompt, purpose=purpose)
             elif hasattr(adapter, "chat"):
@@ -77,10 +92,10 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
                 last_error = usage.get("error") or "model returned an empty result after removing reasoning"
         except Exception as exc:
             last_error = str(exc)[:200]
-        if attempt < 2:
+        if attempt < attempts - 1:
             delay = 2 ** (attempt + 1) + random.uniform(0, 1.5)
             time.sleep(max(0, min(delay, deadline - time.monotonic() - 2)) if deadline else delay)
-    raise RuntimeError(f"model failed after 3 attempts: {last_error}")
+    raise RuntimeError(f"model failed after {attempts} attempts: {last_error}")
 
 
 def json_object(raw: str) -> dict[str, Any]:

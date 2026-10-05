@@ -15,6 +15,20 @@ def _semantic(params: Mapping[str, Any], node: str) -> dict[str, Any]:
 
 
 def propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    contract = params.get("intent_contract") if isinstance(params.get("intent_contract"), Mapping) else {}
+    if contract.get("mode") == "benchmark_subject":
+        view = contract.get("benchmark_subject_view") if isinstance(
+            contract.get("benchmark_subject_view"), Mapping) else {}
+        arm = str(view.get("arm_id") or "")
+        candidate = {"id": arm, "event_type": "benchmark_subject.arm_execute",
+                     "description": f"execute frozen {arm} arm",
+                     "parameters": {}, "expected_observation": "frozen arm evidence",
+                     "disproof": "missing or invalid arm evidence", "risk": "protocol_frozen",
+                     "success_criteria": ["arm evidence contract passes"]}
+        return {"ok": True, "status": "completed",
+                "semantic_output": {"hypotheses": [], "candidates": [candidate],
+                                    "source": "frozen_benchmark_protocol"},
+                "summary": f"loaded frozen {arm} candidate"}
     result = hypothesis_propose(ctx, params)
     semantic = dict(result.get("semantic_output") or {})
     rows = semantic.get("hypotheses") if isinstance(semantic.get("hypotheses"), list) else []
@@ -38,6 +52,14 @@ def propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    contract = params.get("intent_contract") if isinstance(params.get("intent_contract"), Mapping) else {}
+    if contract.get("mode") == "benchmark_subject":
+        proposed = _semantic(params, "propose").get("candidates") or []
+        return {"ok": True, "status": "completed",
+                "semantic_output": {"accepted": [str(row.get("id")) for row in proposed],
+                                    "accepted_candidates": list(proposed),
+                                    "source": "frozen_benchmark_protocol"},
+                "summary": f"validated {len(proposed)} frozen candidates"}
     result = hypothesis_critic(ctx, params)
     semantic = dict(result.get("semantic_output") or {})
     proposed = _semantic(params, "propose").get("candidates") or []
@@ -50,6 +72,16 @@ def critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def select(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    contract = params.get("intent_contract") if isinstance(params.get("intent_contract"), Mapping) else {}
+    if contract.get("mode") == "benchmark_subject":
+        candidates = _semantic(params, "critic").get("accepted_candidates") or []
+        selected = dict(candidates[0]) if candidates else {
+            "id": "abstain", "event_type": "core.abstain",
+            "description": "frozen benchmark candidate missing"}
+        return {"ok": bool(candidates), "status": "completed" if candidates else "failed",
+                "semantic_output": {"candidates": list(candidates), "selected": selected,
+                                    "source": "frozen_benchmark_protocol"},
+                "summary": f"selected frozen candidate {selected.get('id')}"}
     result = action_select(ctx, params)
     semantic = dict(result.get("semantic_output") or {})
     candidates = _semantic(params, "propose").get("candidates") or []
@@ -80,4 +112,3 @@ DEFINITIONS = [
     EventDefinition("candidate.select", "candidate", "依据冻结标准选择一个候选", select,
                     execution_method="llm", evidence_contract=("selected_candidate",)),
 ]
-

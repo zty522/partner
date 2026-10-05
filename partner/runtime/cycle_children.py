@@ -8,19 +8,38 @@ def start_child(worker, job, parent, output):
     if not request:
         return
     # Only the new bounded parent can request these fixed child types.
-    if parent.flow_type not in {'project_cycle', 'self_improvement_cycle', 'learning_improvement_cycle',
-                                'autonomous_evolution'} or request['flow'] not in {
+    if parent.flow_type not in {'project_cycle', 'project_research_cycle', 'meta_cycle',
+                                'self_improvement_cycle', 'learning_improvement_cycle',
+                                'self_improvement_round', 'learning_improvement_round',
+                                'project_cycle_round',
+                                'autonomous_evolution', 'v4_benchmark_suite'} or request['flow'] not in {
             'project_cycle_round', 'pdf_report', 'active_learning', 'autonomous_evolution',
-            'autonomous_evolution_attempt'}:
+            'autonomous_evolution_attempt', 'benchmark_experiment', 'v4_benchmark_episode',
+            'self_improvement_round', 'learning_improvement_round',
+            'project_research_cycle', 'learning_improvement_cycle',
+            'self_improvement_cycle'}:
         raise ValueError('invalid cycle child request')
     node = request['owner_node']
     definition = worker.flows.get(parent.flow_type, version=parent.definition_version)
     repeat_owner = bool(request.get('repeat_owner'))
     following = node if repeat_owner else next(
         n.node_id for n in definition.nodes if node in n.depends_on)
+    run_context = dict(parent.run_context)
+    if request['flow'] == 'benchmark_experiment':
+        benchmark = dict((request.get('context') or {}).get('benchmark') or {})
+        run_context.update({
+            'run_mode': 'benchmark',
+            'benchmark_run_id': str(benchmark.get('run_id') or ''),
+            'benchmark_protocol_id': str(benchmark.get('protocol_id') or ''),
+            'benchmark_arm_id': '',
+            'checkpoint_policy_ref': str(benchmark.get('checkpoint_policy_ref') or 'protocol'),
+            'evaluation_visibility': 'hidden_until_terminal',
+            'catalog_version': parent.catalog_version,
+        })
     child = worker.controller.start(worker.flows.get(request['flow']),
         catalog_version=parent.catalog_version, task_id=job.job_id,
-        project_id=job.project_id, instance_id=job.assigned_instance or job.origin_instance)
+        project_id=job.project_id, instance_id=job.assigned_instance or job.origin_instance,
+        run_context=run_context)
     child.root_event_id = job.root_event_id
     worker.store.save(child)
     worker.controller.suspend_for_child(parent, resume_node_id=following,
@@ -47,6 +66,7 @@ def merge_child(worker, parent, child, suspension):
     path = worker.root / 'state/cycles' / parent.task_id / (record_name + '.json')
     record = {'flow_id': child.flow_id, 'flow_type': child.flow_type,
               'status': child.status, 'instance_id': child.instance_id,
+              'run_context': child.run_context,
               'node_outputs': child.node_outputs, 'node_event_ids': child.node_event_ids,
               'files': list(dict.fromkeys(files))}
     write_json(path, record)

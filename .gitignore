@@ -110,6 +110,7 @@ release_v0.4.0.md
 /partner/governance/_execute_code.py
 /_execute_code.py
 /.autoevolution.lock
+/.partner_workspace_identity
 
 # Locally maintained design records and benchmark assets
 /docs/

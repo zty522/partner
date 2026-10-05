@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from partner.runtime.action_execution import write_json
 
 REPO = Path(__file__).resolve().parents[2]
@@ -418,8 +419,25 @@ def perform_runtime_reload(workspace, applied_receipt):
     return record
 
 
-def perform_runtime_verify(workspace, applied_receipt):
-    """Re-import the modified module under a fresh interpreter to confirm it loads."""
+def _module_name(relative):
+    """Translate one Python source path without ``str.rstrip`` truncation.
+
+    ``rstrip('.py')`` removes any trailing combination of p/y/dot characters;
+    ``job_repository.py`` consequently became ``job_repositor`` in the first
+    v3 production replay.
+    """
+    path = Path(str(relative))
+    if path.suffix != '.py':
+        raise ValueError('runtime verification only accepts Python targets')
+    parts = path.with_suffix('').parts
+    if parts and parts[-1] == '__init__':
+        parts = parts[:-1]
+    return '.'.join(parts)
+
+
+def perform_runtime_verify(workspace, applied_receipt, *, frozen=None,
+                           evaluator_command=''):
+    """Verify imports and replay frozen behavior in fresh interpreters."""
     import subprocess as _sp
     import sys as _sys
     workspace = Path(workspace).resolve()
@@ -427,9 +445,7 @@ def perform_runtime_verify(workspace, applied_receipt):
     targets = sorted((applied_receipt or {}).get('files') or [])
     results = []
     for relative in targets:
-        module = relative.replace('/', '.').rstrip('.py')
-        if module.endswith('.__init__'):
-            module = module[:-len('.__init__')]
+        module = _module_name(relative)
         try:
             env = os.environ.copy()
             existing_path = env.get('PYTHONPATH', '')
@@ -441,10 +457,49 @@ def perform_runtime_verify(workspace, applied_receipt):
                             'stdout':run.stdout[-500:],'stderr':run.stderr[-500:]})
         except Exception as exc:
             results.append({'module':module,'ok':False,'error':str(exc)})
-    ok = all(r['ok'] for r in results) and bool(results)
+    replays = []
+    env = os.environ.copy()
+    existing_path = env.get('PYTHONPATH', '')
+    env['PYTHONPATH'] = str(REPO) + (os.pathsep + existing_path if existing_path else '')
+    # Copy the frozen reproducer outside the frozen repository so imports can
+    # only resolve against the newly applied production source.
+    if frozen and frozen.get('repo') and frozen.get('test_file'):
+        source = Path(frozen['repo']) / str(frozen['test_file'])
+        if source.is_file():
+            replay_dir = workspace / 'state/runtime_verify' / ('verify_' + uuid.uuid4().hex[:12])
+            replay_dir.mkdir(parents=True, exist_ok=True)
+            test_path = replay_dir / 'test_frozen_reproducer.py'
+            shutil.copy2(source, test_path)
+            run = _sp.run([_sys.executable, '-m', 'pytest', '-q', str(test_path), '--tb=short'],
+                          cwd=REPO, env=env, capture_output=True, text=True, timeout=300)
+            replays.append({'kind':'frozen_reproducer','ok':run.returncode == 0,
+                            'exit_code':run.returncode,'command':['pytest',str(test_path)],
+                            'stdout':run.stdout[-3000:],'stderr':run.stderr[-1000:]})
+    if evaluator_command:
+        import shlex
+        parts = shlex.split(str(evaluator_command))
+        allowed = (parts[:2] == ['pytest', '-q'] and len(parts) >= 3
+                   and all(not token.startswith(('/', '..')) for token in parts[2:]))
+        targets_ok = all(
+            (token.startswith('benchmark/') or token.startswith('-'))
+            for token in parts[2:]
+        )
+        if not allowed or not targets_ok:
+            replays.append({'kind':'independent_evaluator','ok':False,
+                            'error':'evaluator command outside frozen pytest boundary'})
+        else:
+            run = _sp.run([_sys.executable, '-m', *parts], cwd=REPO, env=env,
+                          capture_output=True, text=True, timeout=600)
+            replays.append({'kind':'independent_evaluator','ok':run.returncode == 0,
+                            'exit_code':run.returncode,'command':parts,
+                            'stdout':run.stdout[-5000:],'stderr':run.stderr[-1000:]})
+    ok = (all(r['ok'] for r in results) and bool(results)
+          and bool(replays) and all(r.get('ok') for r in replays))
     record = {
         'action':'runtime_verify',
         'results':results,
+        'production_replays':replays,
+        'production_replay_passed':bool(replays) and all(r.get('ok') for r in replays),
         'all_ok':ok,
         'production_effective':ok,
         'created_at':time.time(),

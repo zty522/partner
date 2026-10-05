@@ -10,8 +10,6 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 _usage_local = threading.local()
-_http_session = requests.Session()
-_http_session.trust_env = False
 
 
 def get_last_usage() -> dict:
@@ -74,7 +72,7 @@ def _resolve_api_json(provider: str = "") -> dict:
         if not (str(primary.get("api_key") or "").strip() and str(primary.get("base_url") or "").strip()):
             return {}
         out = {}
-        for k in ("api_key", "model", "base_url"):
+        for k in ("api_key", "model", "base_url", "cognitive_model"):
             v = str(primary.get(k) or "").strip()
             if v:
                 out[k] = v
@@ -84,6 +82,8 @@ def _resolve_api_json(provider: str = "") -> dict:
         # the operator deliberately enables it.
         if isinstance(primary.get("enable_thinking"), bool):
             out["enable_thinking"] = primary["enable_thinking"]
+        if isinstance(primary.get("cognitive_thinking"), bool):
+            out["cognitive_thinking"] = primary["cognitive_thinking"]
         # base_url 剥掉尾部 /v1：chat() 内部固定拼 /v1/chat/completions，
         # 避免双 /v1 404。
         b = out.get("base_url", "")
@@ -95,8 +95,17 @@ def _resolve_api_json(provider: str = "") -> dict:
         return {}
 
 def _direct_session() -> requests.Session:
-    """Process-local direct, proxy-free connection pool."""
-    return _http_session
+    """Create one proxy-free session per request.
+
+    A hard timeout leaves its HTTP thread alive until the socket timeout.  A
+    process-global Session then lets the next Event reuse that in-flight or
+    half-closed TLS connection, which caused cascades of SSL EOF/reset errors
+    after one slow Qwen call.  Requests are infrequent and correctness matters
+    more than keep-alive here, so every attempt owns and closes its connection.
+    """
+    session = requests.Session()
+    session.trust_env = False
+    return session
 
 
 def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, timeout: int):
@@ -114,10 +123,13 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
     def _do():
         read_timeout = max(60, min(timeout, 180))
         hdrs = dict(headers)
-        hdrs.setdefault("Connection", "keep-alive")
-        return _direct_session().post(
-            url, headers=hdrs, json=payload,
-            timeout=(min(15, timeout), read_timeout), proxies=proxies)
+        hdrs["Connection"] = "close"
+        session = _direct_session()
+        try:
+            return session.post(url, headers=hdrs, json=payload,
+                timeout=(min(15, timeout), read_timeout), proxies=proxies)
+        finally:
+            session.close()
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(_do)
@@ -166,11 +178,16 @@ def select_model_and_tokens(cfg: dict, purpose: str = "", max_tokens=None) -> tu
             "deepseek" if configured_model.startswith("deepseek") else DEFAULT_PROVIDER
         )).lower()
         # minimax 没有"长生成"专属模型；batch_plan/action/report 都用同一型号。
-        provider_default = (
-            cfg.get("model") or os.environ.get("MINIMAX_LONG_GEN_MODEL") or "MiniMax-M3"
-            if provider == "minimax"
-            else os.environ.get("DEEPSEEK_LONG_GEN_MODEL") or "deepseek-v4-pro"
-        )
+        if provider == "minimax":
+            provider_default = (cfg.get("model") or
+                                os.environ.get("MINIMAX_LONG_GEN_MODEL") or "MiniMax-M3")
+        elif provider == "deepseek":
+            provider_default = (os.environ.get("DEEPSEEK_LONG_GEN_MODEL") or
+                                "deepseek-v4-pro")
+        else:
+            # Qwen and every other explicitly configured provider must never
+            # receive a DeepSeek model name at its own endpoint.
+            provider_default = cfg.get("model") or model
         model = (cfg.get("long_gen_model")
                  or (cfg.get("batch_plan_model") if purpose == "batch_plan" else "")
                  or provider_default)
@@ -230,6 +247,22 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
     }
     if selected_provider == "qwen" and isinstance(cfg.get("enable_thinking"), bool):
         payload["enable_thinking"] = cfg["enable_thinking"]
+    cognitive_purposes = {
+        'intent_observe', 'intent_counter_read', 'intent_synthesize',
+        'cycle_round_design', 'cycle_round_blueprint_critic', 'project_outcome_reflect',
+        'cycle_iteration_next_decide', 'cycle_partner_audit',
+        'learning_query_design', 'learning_source_select', 'learning_source_read',
+        'learning_claim_crosscheck', 'learning_synthesize', 'learning_local_compare',
+        'learning_local_idea_record', 'autoevolution_audit',
+        'self_evolution_issue_diagnose', 'self_evolution_candidate_critic',
+        'report_draft', 'message_factcheck',
+    }
+    if (selected_provider == 'qwen' and purpose in cognitive_purposes
+            and cfg.get('cognitive_thinking') is True):
+        payload['enable_thinking'] = True
+        cognitive_model = str(cfg.get('cognitive_model') or '').strip()
+        if cognitive_model:
+            payload['model'] = cognitive_model
     # Keep extended reasoning for investigation and initial causal design.
     # Code serialization and source-grounded contract checks use the output
     # budget directly; independent review remains a separate model call.
@@ -281,7 +314,7 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                 "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
                 "total_tokens": int(usage.get("total_tokens") or 0),
-                "model": model, "provider": selected_provider,
+                "model": str(payload.get('model') or model), "provider": selected_provider,
                 "finish_reason": finish_reason,
                 "thinking_requested": (
                     "disabled" if payload.get("enable_thinking") is False else
@@ -290,7 +323,12 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
                 ),
             }
             logger.info(f"[DirectAPI] {purpose} OK in {elapsed:.1f}s, prompt={len(prompt)}chars response={len(resp_content)}chars")
-            _log_api_call(**call_meta, model=model, base_url=api_base, purpose=purpose, status="ok",
+            thinking_requested = (
+                "disabled" if payload.get("enable_thinking") is False else
+                "enabled" if payload.get("enable_thinking") is True else
+                payload.get('thinking', {}).get('type', 'default'))
+            _log_api_call(**call_meta, model=str(payload.get('model') or model), base_url=api_base,
+                          purpose=purpose, status="ok", thinking_requested=thinking_requested,
                           elapsed_ms=int(elapsed * 1000), prompt_chars=len(prompt),
                           response_chars=len(resp_content), finish_reason=finish_reason,
                           prompt_tokens=int(usage.get("prompt_tokens") or 0),

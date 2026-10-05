@@ -59,6 +59,12 @@ def _unbounded_workspace_scan(command: str, workspace: str) -> bool:
     )
 
 
+def _job_id_from_prompt(prompt: str) -> str:
+    """Extract only Partner's canonical job identifier from surrounding prose."""
+    match = re.search(r'Job ID=(job_[A-Za-z0-9_-]+)', str(prompt or ''))
+    return match.group(1) if match else ''
+
+
 def run_command(command: str, cwd: str, seconds: float, output_path: Path | None = None) -> dict:
     if seconds <= 0:
         return {'exit_code': None, 'timed_out': True, 'output': '', 'executed': False}
@@ -94,7 +100,14 @@ def run_command(command: str, cwd: str, seconds: float, output_path: Path | None
             'output_path':str(output_path) if output_path else '', 'output_truncated':total>24000}
 
 
-def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, command_seconds: float = 180) -> str:
+def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int | None = None,
+            command_seconds: float = 180) -> str:
+    # Four model turns were routinely consumed by input inspection and one
+    # format repair before a scientific action began.  Scale the cognitive
+    # allowance with the frozen wall budget while retaining a hard ceiling;
+    # completed command receipts remain the actual replay boundary.
+    if max_turns is None:
+        max_turns = max(6, min(16, 3 + int(float(seconds) // 90)))
     from partner.adapters import direct_api
     match = re.search(r'工作目录\s*[=:：]\s*([^\n]+)', prompt)
     work = Path(match.group(1) if match else adapter.workspace).resolve()
@@ -130,8 +143,11 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
     baseline_only = (bool(re.search(r'"forbidden_future_round_execution"\s*:\s*true',prompt,re.I))
                      and bool(re.search(r'"round_number"\s*:\s*1',prompt,re.I))
                      and bool(re.search(r'baseline',prompt,re.I)))
-    current_job_match = re.search(r'Job ID=([^；;\s]+)', prompt)
-    current_job_id = current_job_match.group(1) if current_job_match else ''
+    # Job IDs are embedded in Chinese prose.  The former delimiter based
+    # expression also consumed a trailing Chinese full stop (for example
+    # ``job_xxx。需要记录``), so paths owned by the *current* job were rejected
+    # as foreign.  Match the actual identifier grammar instead.
+    current_job_id = _job_id_from_prompt(prompt)
     allowed_refs_match = re.search(r'运行器允许的跨 Job 证据路径=(\[[^\n]*\])', prompt)
     try:
         allowed_cross_job_refs = [str(Path(value).resolve()) for value in
@@ -154,7 +170,11 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
         if remaining <= 0:
             break
         raw = ''
-        for attempt in range(3):
+        # One normal generation plus, only for a length-truncated response,
+        # one schema-preserving retry.  The former 3 x 32 loop spent most of a
+        # long run asking the model to restate shell syntax instead of making
+        # research decisions.
+        for attempt in range(2):
             remaining = deadline - time.monotonic() - 3
             if remaining <= 0:
                 break
@@ -176,7 +196,7 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
             # truncation benefits from another full-context attempt.
             if usage.get('finish_reason') != 'length':
                 break
-            if attempt < 2:
+            if attempt < 1:
                 time.sleep(max(0, min(2 ** attempt, deadline - time.monotonic() - 3)))
         if not raw:
             # Once commands have produced a parseable artifact, an empty
@@ -200,7 +220,8 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
             )
             remaining = deadline - time.monotonic() - 3
             if remaining > 5:
-                for rescue_attempt in range(3):
+                # Compact recovery is the single permitted format repair.
+                for rescue_attempt in range(1):
                     remaining = deadline - time.monotonic() - 3
                     if remaining <= 5:
                         break
@@ -211,8 +232,6 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int = 32, 
                     raw = re.sub(r'<(think|analysis)>.*?</\1>', '', rescue or '', flags=re.S | re.I).strip()
                     if raw:
                         break
-                    if rescue_attempt < 2:
-                        time.sleep(min(2 ** rescue_attempt, max(0, deadline-time.monotonic()-3)))
             if not raw:
                 break
         blocks = adapter._extract_commands(raw)

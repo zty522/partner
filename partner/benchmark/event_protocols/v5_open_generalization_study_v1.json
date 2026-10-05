@@ -1,0 +1,21 @@
+{
+  "protocol_id": "v5_open_generalization_study_v1",
+  "version": "1.0.0",
+  "status": "machine_pilot_complete_external_validation_required",
+  "flow": "v5_research_study",
+  "hypotheses": ["H1_cross_project_generalization", "H2_retention", "H3_self_evolution_net_benefit", "H4_cost_effect"],
+  "event_sequence": [
+    "protocol.freeze", "environment.snapshot", "corpus.audit", "message.start",
+    "knowledge.extract", "ablation.execute", "longitudinal.audit",
+    "self_evolution.audit", "human.annotation", "reproducibility.audit",
+    "statistics", "settlement", "report", "reproduction.bundle",
+    "message.final", "delivery", "delivery.ack", "close"
+  ],
+  "paper_claim_hard_gates": [
+    "two independent blinded human annotations",
+    "agreement statistic and adjudication",
+    "two distinct machine environments",
+    "two distinct calendar dates"
+  ],
+  "truth_boundary": "A successful local machine run is not publication_claim_ready until every external gate is evidenced."
+}

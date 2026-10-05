@@ -60,6 +60,7 @@ class EventContext:
     # ADR 0100: which QQ Bot originally accepted this Job.  Has a default
     # so the dataclass stays usable for legacy callers that don't set it.
     intake_instance_id: str = ""
+    job_deadline_epoch: float = 0.0
 
     @property
     def task_id(self) -> str:
@@ -329,21 +330,31 @@ class EventWorker:
                     rows.append((job, path))
             rows.sort(key=lambda pair: pair[0].created_at)
             for job, _path in rows:
+                # Claim before reading mutable Flow state.  On 9p/NTFS the
+                # writer's temporary-file replace can expose a brief missing
+                # target to an unlocked observer.  The old read-before-claim
+                # order let a second worker turn that harmless window into a
+                # permanent ``flow_missing`` terminal on the active Job.
+                if not self._try_acquire_lock(job.job_id):
+                    continue
+                self._lock_held = job.job_id
                 try:
                     state = self.store.load(job.flow_id)
                 except (FileNotFoundError, ValueError, OSError) as exc:
-                    # A queued Job whose flow state file is missing/corrupt
-                    # (stale queue from an earlier run, or a crash between
-                    # flow save and job enqueue) must not take down the whole
-                    # shared worker.  Isolate it as failed and continue.
+                    # We own the authoritative lease, so no other worker can
+                    # be inside a checkpoint for this Job.  A missing Flow is
+                    # now a real stale/corrupt queue record rather than an
+                    # unlocked observation race.
                     logger.error(
                         "isolate job %s: flow %s missing/corrupt: %s",
                         job.job_id, job.flow_id, exc,
                     )
                     self._isolate_broken_job(job, f"flow_missing:{job.flow_id}")
+                    self._release_claim()
                     continue
                 control = self.root / "state/application/controls" / f"{job.job_id}.json"
                 if state.next_check_at > time.time() and not control.exists():
+                    self._release_claim()
                     continue
                 if state.waiting_task_id and not control.exists():
                     from partner.runtime.background_actions import BackgroundActions, TERMINAL
@@ -352,12 +363,9 @@ class EventWorker:
                     if task_path.exists() and manager.inspect(state.waiting_task_id)['status'] not in TERMINAL:
                         # No flow writes before acquiring its claim: another
                         # worker may already be collecting the terminal result.
+                        self._release_claim()
                         continue
-                # O_EXCL lock (atomic on 9p/NTFS where os.rename isn't) —
-                # exactly one worker wins the claim; the rest skip it.
-                if self._try_acquire_lock(job.job_id):
-                    self._lock_held = job.job_id
-                    return job
+                return job
             return None
         scheduler = self.root / "state/instance_scheduler.json"
         if scheduler.is_file():
@@ -476,6 +484,23 @@ class EventWorker:
         if job.flow_type != state.flow_type:
             job.flow_type = state.flow_type
             self._save_job(job)
+        constraints = ((job.intent_contract or {}).get('execution_constraints') or {})
+        hard_deadline = float(constraints.get('run_until_epoch') or 0)
+        if not hard_deadline and constraints.get('run_duration_seconds'):
+            try:
+                from datetime import datetime
+                hard_deadline = (datetime.fromisoformat(str(job.created_at).replace('Z', '+00:00')).timestamp()
+                                 + int(constraints['run_duration_seconds']))
+            except (TypeError, ValueError, AttributeError):
+                hard_deadline = 0
+        if (hard_deadline and time.time() >= hard_deadline
+                and state.status not in {'completed', 'failed', 'cancelled'}
+                and not state.current_event_id):
+            state.status = 'cancelled'
+            state.run_context['deadline_exceeded'] = True
+            state.run_context['hard_deadline_epoch'] = hard_deadline
+            self.store.save(state)
+            job.error = 'hard run deadline reached before complete finalization'
         if state.status in {"completed", "failed", "cancelled"}:
             if job.suspended_flows:
                 suspended = dict(job.suspended_flows.pop())
@@ -512,6 +537,10 @@ class EventWorker:
                 job.flow_type = parent.flow_type
                 job.benchmark_arm_id = str(parent.run_context.get("benchmark_arm_id") or "")
                 job.status = "running"
+                # The child failure remains in its sealed Flow record.  Once
+                # the parent has resumed and selected a recovery route it is
+                # no longer the Job's current error.
+                job.error = ""
                 job.ready_event_ids = list(parent.ready_node_ids)
                 self._save_job(job)
                 return True
@@ -597,6 +626,15 @@ class EventWorker:
             intake_instance_id=str(getattr(job, "intake_instance_id", "") or ""),
             adapter=self.adapter,
         )
+        constraints = ((job.intent_contract or {}).get("execution_constraints") or {})
+        ctx.job_deadline_epoch = float(constraints.get("run_until_epoch") or 0)
+        if not ctx.job_deadline_epoch and constraints.get("run_duration_seconds"):
+            try:
+                from datetime import datetime
+                created_epoch = datetime.fromisoformat(str(job.created_at).replace("Z", "+00:00")).timestamp()
+                ctx.job_deadline_epoch = created_epoch + int(constraints["run_duration_seconds"])
+            except (TypeError, ValueError, AttributeError):
+                pass
         initial = {
             "request": job.request, "channel": job.channel,
             "sender_id": job.sender_id, "origin_instance": job.origin_instance,
@@ -610,7 +648,8 @@ class EventWorker:
         # The system under test receives only the protocol's public arm view.
         # Hidden evaluator labels and expected outputs remain in the parent.
         if (state.run_context.get("run_mode") == "benchmark"
-                and state.flow_type != "benchmark_experiment"):
+                and state.flow_type not in {"benchmark_experiment", "v4_benchmark_suite",
+                                            "v5_research_study"}):
             public = initial.get("benchmark_subject_view")
             initial["intent_contract"] = {
                 "original_request": job.request,
@@ -649,9 +688,14 @@ class EventWorker:
             "event_description": event_def.description if event_def else node_spec.event_type,
             "event_index": event_index, "event_total": len(definition.nodes),
         }
-        await asyncio.to_thread(
-            self._publish_lifecycle, job=job, ctx=ctx, flow_state=state,
-            phase="event_started", **lifecycle_facts)
+        lifecycle_key = f"{state.flow_id}:{node_id}"
+        if state.run_context.get("lifecycle_active_event") != lifecycle_key:
+            await asyncio.to_thread(
+                self._publish_lifecycle, job=job, ctx=ctx, flow_state=state,
+                phase="event_started", **lifecycle_facts)
+            state.run_context["lifecycle_active_event"] = lifecycle_key
+            state.run_context.pop("lifecycle_waiting_event", None)
+            self.store.save(state)
         pending=asyncio.create_task(self.runner.run_ready_node(state,definition,node_id,ctx,initial))
         while not pending.done():
             done,_=await asyncio.wait({pending},timeout=30)
@@ -666,12 +710,15 @@ class EventWorker:
             except (KeyError, AttributeError):
                 pass
         if result.output.get("status") == "waiting":
-            if result.output.get("first_wait", True):
+            if (result.output.get("first_wait", True)
+                    and result.flow_state.run_context.get("lifecycle_waiting_event") != lifecycle_key):
                 await asyncio.to_thread(
                     self._publish_lifecycle, job=job, ctx=ctx, flow_state=result.flow_state,
                     phase="event_waiting", event_summary=result.output.get("summary")
                     or result.output.get("error"), next_event_description=next_description,
                     **lifecycle_facts)
+                result.flow_state.run_context["lifecycle_waiting_event"] = lifecycle_key
+                self.store.save(result.flow_state)
             self._save_job(job)
             return False
         await asyncio.to_thread(
@@ -680,16 +727,28 @@ class EventWorker:
             event_summary=result.output.get("summary") or result.output.get("error"),
             next_event_description=next_description,
             **lifecycle_facts)
+        result.flow_state.run_context.pop("lifecycle_active_event", None)
+        result.flow_state.run_context.pop("lifecycle_waiting_event", None)
+        self.store.save(result.flow_state)
         if result.flow_state.status in {"completed", "failed", "cancelled"}:
             milestone_facts = {}
             if result.flow_state.flow_type == 'project_cycle_round':
                 flow_outputs=result.flow_state.node_outputs
                 design=((flow_outputs.get('design') or {}).get('semantic_output') or {})
+                execute=(flow_outputs.get('execute') or {})
                 verify=((flow_outputs.get('verify') or {}).get('semantic_output') or {})
+                reflect=((flow_outputs.get('reflect') or {}).get('semantic_output') or {})
                 guard=((flow_outputs.get('budget_guard') or {}).get('semantic_output') or {})
                 milestone_facts={'round_number':guard.get('round_number') or design.get('round_number'),
                     'hypothesis':design.get('hypothesis'),'round_goal':design.get('round_goal'),
                     'verified':verify.get('verified'),'route':guard.get('route'),
+                    'execution_status':execute.get('status'),
+                    'execution_summary':execute.get('summary'),
+                    'execution_error':execute.get('error'),
+                    'artifacts':[row.get('path') for row in verify.get('evidence') or []
+                                 if isinstance(row,dict) and row.get('valid')][:3],
+                    'finding':reflect.get('lesson') or reflect.get('result'),
+                    'information_gain':guard.get('information_gain'),
                     'reason':guard.get('reason'),'next_hypothesis':guard.get('next_hypothesis'),
                     'next_round_goal':guard.get('next_round_goal'),
                     'guard_reasons':guard.get('guard_reasons') or []}
@@ -729,7 +788,11 @@ class EventWorker:
         # parent is resumed and can report the child outcome.
         if result.flow_state.status in {"completed", "failed", "cancelled"} and job.suspended_flows:
             job.status = "running"
-        if result.flow_state.status == "failed":
+            if result.flow_state.status != "running":
+                # Parent recovery owns the next state; do not expose a stale
+                # child error as the status of a running Job.
+                job.error = ""
+        if result.flow_state.status == "failed" and not job.suspended_flows:
             job.error = str(result.output.get("error") or "event_flow_failed")
         elif result.flow_state.status == "completed" and not job.suspended_flows:
             # A historical failure that the flow later recovered from must not

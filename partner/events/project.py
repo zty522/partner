@@ -580,6 +580,58 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     "artifact_count": 0, "artifact_checks": [],
                     "command_receipts": [], "verified_artifacts": []}}
     before = _artifact_snapshot(work)
+    constraints = ((params.get('intent_contract') or {}).get('execution_constraints') or {})
+    benchmark_inputs = constraints.get('benchmark_inputs') or {}
+    round_number = int((params.get('intent_contract') or {}).get('round_number') or 1)
+    if constraints.get('benchmark_embedded') and benchmark_inputs and round_number == 1:
+        # Research-boundary rounds around a frozen benchmark do not need an
+        # open-ended coding agent.  Emit a typed, reproducible state artifact
+        # from the declared dataset/feature/protocol; the benchmark child still
+        # performs the actual baseline/candidate computation independently.
+        import csv
+        import hashlib
+        dataset = Path(str(benchmark_inputs.get('dataset_path') or ''))
+        runner = Path(str(benchmark_inputs.get('arm_runner_path') or ''))
+        if dataset.is_file() and runner.is_file():
+            with dataset.open('r', encoding='utf-8', errors='replace', newline='') as handle:
+                reader = csv.reader(handle)
+                columns = next(reader, [])
+                row_count = sum(1 for _ in reader)
+            handoff_refs = ((((params.get('flow_outputs') or {}).get('design') or {})
+                             .get('semantic_output') or {}).get('learning_handoff_refs') or [])
+            state = {
+                'schema_version': 1,
+                'kind': 'benchmark_research_state',
+                'round_number': round_number,
+                'research_question': str(params.get('request') or '')[:4000],
+                'protocol_id': constraints.get('benchmark_protocol_id'),
+                'declared_feature': benchmark_inputs.get('declared_feature'),
+                'dataset': {'path': str(dataset.resolve()), 'rows': row_count,
+                            'columns': columns,
+                            'sha256': hashlib.sha256(dataset.read_bytes()).hexdigest()},
+                'arm_runner': {'path': str(runner.resolve()),
+                               'sha256': hashlib.sha256(runner.read_bytes()).hexdigest()},
+                'guardrails': constraints.get('benchmark_guardrail_results') or {},
+                'learning_handoff_refs': handoff_refs,
+                'learning_consumed': bool(round_number > 1 and handoff_refs),
+                'decision_effect': ('freeze data/split/feature boundary before execution'
+                                    if round_number == 1 else
+                                    'apply the cited handoff to leakage review and interpretation'),
+                'claim_boundary': ('This artifact freezes inputs and risks; it does not claim '
+                                   'a model improvement. Only benchmark Settlement may do so.'),
+            }
+            from partner.runtime.action_execution import write_json
+            typed_path = work / f'benchmark_research_state_round_{round_number}.json'
+            write_json(typed_path, state)
+            typed_reply = (
+                f'【业务产物】{typed_path} [bytes={typed_path.stat().st_size}]\n'
+                f'【执行动作】基于冻结数据、特征、评价器与护栏生成第{round_number}轮研究状态。\n'
+                '【真实发现】已核验输入哈希、行数、字段和学习交接引用；尚未提前声称指标改善。\n'
+                '【未解决】实际效应由后续 baseline/candidate 与 Settlement 裁决。')
+        else:
+            typed_reply = ''
+    else:
+        typed_reply = ''
     prompt = (
         "你正在执行 Partner 的一个有界项目 Event，不是在写计划或报告。\n"
         f"项目={project_id}\n用户目标={request}\n"
@@ -633,6 +685,11 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     prompt += ('\n你已经处于project.action_execute Event内。selected_event是上层动作意图，不能将它当作Python函数或命令。'
         '禁止在本动作内调用其他Event，也不需要查找Event分发入口、list_registered_events或CLI。'
         '直接使用真实Python库、shell工具及下方给出的底层只读浏览器接口完成已选业务动作。')
+    prompt += ('\n当前行动本身已经由 Partner 统一 Model Gateway 中配置的模型执行。若任务需要语义判断，'
+               '直接在本次模型响应中完成并把依据写入业务产物；禁止生成脚本自行查找 OPENAI_API_KEY、'
+               'ANTHROPIC_API_KEY 或猜测模型供应商，也禁止绕过 config/api.json 新建第二套模型配置。'
+               '确需后续独立模型裁决时，生成类型化 model_request.json 交给后续 LLM Event，不能把“未发现其他厂商环境变量”'
+               '报告成 Partner 没有可用模型。')
     prompt += ('\n浏览器只读能力可在本Event内调用底层工具：from partner.social_video.integration import ensure_edge; '
         f"browser=ensure_edge({str(_workspace(ctx))!r},'video'); result=browser('read_page',{{'url':实际发现的HTTPS地址}})。"
         '返回正文、链接、真实截图和阻塞状态，保存原始JSON，不把搜索页当完整文章。'
@@ -647,10 +704,21 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     attached_context_refs = [str(row.get('input') or '') for row in
         ((((params.get('flow_outputs') or {}).get('inspect') or {}).get('semantic_output') or {})
          .get('local_input_context') or []) if isinstance(row, dict)]
+    eligible_rows = ((((params.get('flow_outputs') or {}).get('input_eligibility') or {})
+                     .get('semantic_output') or {}).get('eligible_inputs') or [])
+    eligible_refs = [str(row.get('path') or '') for row in eligible_rows
+                     if isinstance(row, dict) and row.get('path')]
     explicit_refs = [str(path) for path in (
         list(params.get('evidence_refs') or [])
         + list((params.get('intent_contract') or {}).get('evidence_refs') or [])
-        + attachment_refs + attached_context_refs) if str(path)]
+        + attachment_refs + attached_context_refs + eligible_refs) if str(path)]
+    if eligible_refs:
+        prompt += ('\n语料准入Event已冻结以下研究输入，当前实验必须直接消费这些路径，不得回退到项目目录中'
+                   '未经准入的同名文件、日志或临时产物：' +
+                   json.dumps(eligible_refs[:30], ensure_ascii=False) +
+                   '。结果产物必须记录实际消费的输入路径与SHA256，并在工作目录写入'
+                   'input_consumption.json（字段 consumed_inputs，每项含path,sha256,purpose）；'
+                   '若未消费这些合格输入，后续Verify必须拒绝科学主张。')
     prompt += ('\n运行器允许的跨 Job 证据路径=' + json.dumps(
         list(dict.fromkeys(explicit_refs))[:40], ensure_ascii=False)
         + '。未列出的其他 Job 目录禁止读取；历史索引只用于发现，不能直接作为本轮证据。')
@@ -660,7 +728,9 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     molecular_outputs = (_deterministic_molecular_selection_canary(_workspace(ctx), work, request)
                          if project_id == 'molecular_generation'
                          and 'molecular_selection_canary_v1' in request else [])
-    if molecular_outputs:
+    if typed_reply:
+        pass
+    elif molecular_outputs:
         typed_reply = ('\n'.join(
             f"【业务产物】{path} [bytes={path.stat().st_size}]" for path in molecular_outputs)
             + "\n【执行动作】Event 在冻结数据、方法、seed 和评价器下执行分子选择 baseline/candidate。\n"
@@ -778,7 +848,20 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     handoff=read_request(work)
     receipts = list((runtime_work / '.execution').glob('command_*.json'))
     executed = bool(typed_reply) or any(json.loads(p.read_text()).get('exit_code') == 0 for p in receipts)
-    artifact_files = [c['path'] for c in checks if c['valid']]
+    def is_domain_artifact(row):
+        """Exclude runtime/audit paperwork from project progress evidence."""
+        path = Path(str(row.get('path') or ''))
+        lowered = path.name.lower()
+        if not row.get('valid') or '.execution' in path.parts:
+            return False
+        if lowered in {'execution_contract.json', '执行结果.md', 'checkpoint.json'}:
+            return False
+        if any(token in lowered for token in (
+                'event_log', 'run_log', 'flow_graph', 'receipt', 'ack_wait')):
+            return False
+        return True
+    domain_checks = [c for c in checks if is_domain_artifact(c)]
+    artifact_files = [c['path'] for c in domain_checks]
     from partner.index.resource_catalog import ResourceCatalog
     catalog=ResourceCatalog(_workspace(ctx))
     for artifact in files:
@@ -796,7 +879,8 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                 "execution_contract": contract,
                                 "execution_contract_path": str(contract_path),
                                 "artifact_count": len(artifact_files),
-                                "artifact_checks":checks, "command_receipts":[str(p) for p in receipts],
+                                "artifact_checks":domain_checks, "all_artifact_checks":checks,
+                                "command_receipts":[str(p) for p in receipts],
                                 "declared_artifacts": declared,
                                 "verified_artifacts": artifact_files,
                                 "fabrication_detected": any(not Path(p).is_file() for p in declared)}}
@@ -837,6 +921,72 @@ def action_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "evidence_refs":[str(manager.directory / row["task_id"] / "task.json")] + ([str(result)] if result.exists() else [])}
 
 
+def input_consumption_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Prove that the action consumed admitted inputs rather than nearby noise."""
+    import hashlib
+    from partner.runtime.action_execution import write_json
+    eligible = ((((params.get('flow_outputs') or {}).get('input_eligibility') or {})
+                 .get('semantic_output') or {}).get('eligible_inputs') or [])
+    frozen = {str(row.get('path')): str(row.get('sha256') or '') for row in eligible
+              if isinstance(row, dict) and row.get('path')}
+    work_value = str(getattr(ctx, 'working_dir', '') or '').strip()
+    work = (Path(work_value) if work_value else
+            Path(_workspace(ctx)) / 'state/event_runtime/work' /
+            str(getattr(ctx, 'job_id', 'project')))
+    declared_path = work / 'input_consumption.json'
+    declared = {}
+    if declared_path.is_file():
+        try:
+            declared = json.loads(declared_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError, TypeError):
+            declared = {}
+    rows = declared.get('consumed_inputs') if isinstance(declared, dict) else []
+    if not isinstance(rows, list):
+        rows = []
+    verified, rejected = [], []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_path = str(row.get('path') or '')
+        path = Path(raw_path)
+        expected = frozen.get(raw_path)
+        if not expected or not path.is_file():
+            rejected.append({'path': raw_path, 'reason': 'not an admitted current-round input'})
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        declared_hash = str(row.get('sha256') or '')
+        if actual != expected or declared_hash != expected:
+            rejected.append({'path': raw_path, 'reason': 'hash does not match frozen admission'})
+            continue
+        if not str(row.get('purpose') or '').strip():
+            rejected.append({'path': raw_path, 'reason': 'missing consumption purpose'})
+            continue
+        verified.append({'path': raw_path, 'sha256': actual,
+                         'purpose': str(row.get('purpose'))[:500]})
+    request = str((params.get('intent_contract') or {}).get('original_request') or
+                  params.get('request') or '')
+    corpus_required = bool(re.search(
+        r'论文|文献|内容|来源|corpus|paper|literature|source', request, re.I))
+    valid = bool(verified) if corpus_required else (bool(verified) or not frozen)
+    value = {
+        'consumption_valid': valid,
+        'corpus_required': corpus_required,
+        'eligible_count': len(frozen),
+        'verified_consumed_inputs': verified,
+        'rejected_consumption_claims': rejected,
+        'receipt_path': str(declared_path),
+        'rule': 'an admitted path, matching frozen hash and declared purpose is required for corpus claims',
+    }
+    audit_path = work / 'input_consumption_audit.json'
+    write_json(audit_path, value)
+    return {
+        'ok': True, 'status': 'completed', 'semantic_output': value,
+        'evidence_refs': [str(audit_path)] + ([str(declared_path)] if declared_path.is_file() else []),
+        'summary': ('已验证实际消费的准入输入' if valid else
+                    '执行未证明消费任何准入输入，科学主张将被拒绝'),
+    }
+
+
 def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
     from partner.runtime.artifact_checks import check_file
@@ -872,23 +1022,61 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     root_ok = (not required_root or all(Path(row["path"]).resolve().is_relative_to(required_root)
                                        for row in evidence))
     scientific_contract_violations = _matched_split_violations(params, evidence)
-    verified = bool(prior.get('business_delta') and evidence and novel and contract_ok and root_ok
+    execution_verified = bool(prior.get('business_delta') and evidence and novel and contract_ok and root_ok
                     and not foreign_job_refs and not scientific_contract_violations and all(
         row['valid'] and row['sha256'] == expected.get(row['path']) for row in evidence))
+    contract_params = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}
+    eligibility = contract_params.get('input_eligibility') if isinstance(
+        contract_params.get('input_eligibility'), dict) else {}
+    if not eligibility:
+        eligibility = ((((params.get('flow_outputs') or {}).get('input_eligibility') or {})
+                        .get('semantic_output')) or {})
+    corpus_required = bool(re.search(
+        r'论文|文献|内容|来源|corpus|paper|literature|source',
+        str(contract_params.get('original_request') or params.get('request') or ''), re.I))
+    consumption = ((((params.get('flow_outputs') or {}).get('input_consumption') or {})
+                    .get('semantic_output')) or {})
+    corpus_eligible = ((eligibility.get('corpus_ready') is True
+                        and consumption.get('consumption_valid') is True)
+                       if corpus_required else True)
+    adequacy = ((((params.get('flow_outputs') or {}).get('input_adequacy') or {})
+                .get('semantic_output')) or {})
+    metric_protocol_ready = adequacy.get('adequate_for_declared_metrics') is not False
+    comparison_required = bool(contract_params.get('comparison_required'))
+    if not comparison_required:
+        comparison_required = bool(((((params.get('flow_outputs') or {}).get('design') or {})
+                                     .get('semantic_output')) or {}).get('comparison_required'))
+    matched = _learning_matched_evidence(params, evidence)
+    comparison_complete = bool(matched) or not comparison_required
+    scientific_claim_supported = bool(execution_verified and corpus_eligible
+                                      and metric_protocol_ready and comparison_complete)
     from partner.runtime.implementation_evidence import inspect_implementations
     implementations = inspect_implementations(prior.get("files") or [])
-    learning_matched = _learning_matched_evidence(params, evidence)
-    return {"ok": True, "status": "completed", "business_delta":verified,
-            "semantic_output":{"verified":verified, "evidence":evidence, "implementation_evidence":implementations,
+    learning_matched = matched
+    layers = {
+        'execution_verified': execution_verified,
+        'artifact_verified': bool(evidence and all(row.get('valid') for row in evidence)),
+        'input_eligible': corpus_eligible,
+        'metric_protocol_ready': metric_protocol_ready,
+        'comparison_complete': comparison_complete,
+        'scientific_claim_supported': scientific_claim_supported,
+    }
+    return {"ok": True, "status": "completed", "business_delta":execution_verified,
+            "semantic_output":{"verified":execution_verified, "scientific_claim_supported": scientific_claim_supported,
+                "verification_layers": layers, "evidence":evidence, "implementation_evidence":implementations,
                 "execution":sem, "new_content":novel,
                 "execution_contract": contract, "execution_contract_ok": contract_ok,
+                "input_consumption": consumption,
+                "input_adequacy": adequacy,
                 "required_output_root_ok": root_ok,
                 "provenance_violations": sorted(set(foreign_job_refs)),
                 "scientific_contract_violations": scientific_contract_violations,
                 "learning_matched_evidence": learning_matched,
-                "limitation":"解析和执行来源核验不等于科学结论成立"},
+                "limitation":"执行与产物核验不等于输入合格、比较完成或科学主张成立"},
             "evidence_refs":[r['path'] for r in evidence if r['valid']],
-            "summary":"执行产物已通过格式、哈希和执行来源检查" if verified else "未获得可验证的业务数据，不计为推进"}
+            "summary":("科学主张已通过分层核验" if scientific_claim_supported else
+                       "执行产物已核验，但输入资格、匹配比较或科学主张仍未通过")
+                      if execution_verified else "未获得可验证的业务数据，不计为推进"}
 
 
 def _learning_matched_evidence(params: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1152,6 +1340,7 @@ DEFINITIONS = [
     EventDefinition("project.state_inspect", "project", "重建项目真实状态和证据边界", state_inspect, reads_existing_artifact=True),
     EventDefinition("project.plan_propose", "project", "单步plan+event流: proposer+attacker+selector 合一", plan_propose, execution_method="llm"),
     EventDefinition("project.action_execute", "project", "执行一个经过选择的有界项目能力", action_execute, idempotent=False),
+    EventDefinition("project.input_consumption_verify", "project", "独立核验执行确实消费了准入且哈希冻结的输入", input_consumption_verify, reads_existing_artifact=True),
     EventDefinition("project.outcome_verify", "project", "核验业务动作及其证据", outcome_verify, reads_existing_artifact=True),
     EventDefinition("project.outcome_reflect", "project", "根据终态修订项目认识", outcome_reflect, execution_method="llm"),
     EventDefinition("project.continuation_propose", "project", "形成不重复的下一项目任务", continuation_propose, execution_method="llm"),

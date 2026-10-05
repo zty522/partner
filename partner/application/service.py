@@ -46,6 +46,32 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _duration_constraints_from_text(text: str) -> dict[str, object]:
+    """Extract only an explicit wall-clock continuation request.
+
+    This is transport semantics, like ``/benchmark``: the model still plans
+    every Event, but it must not silently turn “持续三小时” into a fixed number
+    of rounds.  Chinese numerals are deliberately limited to common operator
+    phrasing so ordinary prose is not treated as a runtime command.
+    """
+    raw = str(text or '')
+    numerals = {'半': 0.5, '一': 1, '两': 2, '二': 2, '三': 3, '四': 4,
+                '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+    match = re.search(
+        r'(?:持续|连续|接着|一直)?\s*(?P<count>\d+(?:\.\d+)?|半|一|两|二|三|四|五|六|七|八|九|十)\s*'
+        r'(?P<unit>小时|个小时|分钟)(?:持续|连续|运行|执行|推进|迭代)?', raw)
+    if not match or not re.search(r'(持续|连续|一直|运行|执行|推进|迭代)', raw):
+        return {}
+    token = match.group('count')
+    count = numerals.get(token, float(token) if re.fullmatch(r'\d+(?:\.\d+)?', token) else 0)
+    seconds = int(count * (3600 if '小时' in match.group('unit') else 60))
+    if not 300 <= seconds <= 86400:
+        return {}
+    return {'continuation_mode': 'until_deadline',
+            'run_duration_seconds': seconds,
+            'finalization_reserve_seconds': min(600, max(60, seconds // 10))}
+
+
 def _root(value: str | os.PathLike) -> Path:
     path = Path(value).expanduser().resolve()
     if path.parent.name == "instances":
@@ -531,6 +557,8 @@ class PartnerApplicationService:
                             job.completed_event_ids = list(flow.completed_node_ids)
                             if mapped == "failed":
                                 job.error = "event_flow_failed:" + ",".join(flow.failed_node_ids)
+                            elif mapped == "running" and raw.get('suspended_flows'):
+                                job.error = ""
                             self._save(job)
                             self._append_event("event_flow_status_projected", job, flow_id=flow_id)
                             changed.append(job_id)
@@ -890,12 +918,21 @@ class PartnerApplicationService:
     ) -> Submission:
         clean = str(text or "").replace("\x00", "").strip()
         incoming_constraints = dict(execution_constraints or {})
+        # A user may request a duration from QQ/Web without knowing the API
+        # schema. Structured fields remain authoritative when both are given.
+        inferred_duration = _duration_constraints_from_text(clean)
+        incoming_constraints = {**inferred_duration, **incoming_constraints}
         # Explicit slash syntax is a transport-level flag, not an LLM intent
         # guess.  Web/API callers should prefer mode=benchmark plus the same
         # structured fields.
         if clean.startswith("/benchmark"):
             first = clean.splitlines()[0].split()
-            mode = "benchmark"
+            # A benchmark can either be the whole Job (legacy/standalone) or
+            # an auditable child of the real project cycle.  The latter is
+            # selected explicitly so the marker cannot silently discard
+            # project iteration, learning, reporting and Partner evolution.
+            mode = ("project_iteration" if incoming_constraints.get("benchmark_embedded")
+                    else "benchmark")
             if len(first) > 1 and not incoming_constraints.get("benchmark_protocol_id"):
                 incoming_constraints["benchmark_protocol_id"] = first[1].strip()
         if not clean and not attachments:
@@ -936,7 +973,14 @@ class PartnerApplicationService:
         }
 
         ctx_for_llm = _intent_ctx(self.root, persona_hint, project_id, channel, sender_id)
-        if mode == "benchmark":
+        # Message intake has one shared wall-clock budget across all intent
+        # passes.  Without this, three passes could each consume two 180-second
+        # provider timeouts before an explicit project request was even queued.
+        import time as _time
+        ctx_for_llm.event_deadline = _time.monotonic() + 75
+        benchmark_requested = mode == "benchmark" or bool(
+            incoming_constraints.get('benchmark_embedded'))
+        if benchmark_requested:
             # A structured benchmark marker already freezes the route and
             # protocol. Running three open-ended intent calls here adds cost
             # and makes an explicit experiment depend on an unrelated model
@@ -967,8 +1011,39 @@ class PartnerApplicationService:
                 }
                 synth_out = intent_synthesize(ctx_for_llm, synth_params)
             except Exception as exc:  # noqa: BLE001
-                return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
-                                  f"意图审议失败：{type(exc).__name__}: {exc}")
+                # Explicit project/mode requests remain executable when the
+                # enrichment model is temporarily unavailable.  Freeze a
+                # conservative contract from transport-authoritative fields;
+                # never guess a project or silently turn a vague message into
+                # work.  The degradation is preserved for run audit/reporting.
+                explicit_dispatch = project_id or conversation_project or (
+                    "partner_" + mode if mode in {"self_improvement", "learning_improvement"} else "")
+                if not explicit_dispatch:
+                    return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
+                                      f"意图审议失败：{type(exc).__name__}: {exc}")
+                fallback = {
+                    "route": "project_iteration",
+                    "dispatch_target": explicit_dispatch,
+                    "warm_reply": "已收到明确项目任务；意图模型暂不可用，已按原始消息和结构化约束保守启动。",
+                    "payload": {"mode": mode} if mode else {},
+                    "reason": "explicit_transport_contract_with_intent_model_degraded",
+                    "goal": [clean[:2000]],
+                    "constraints": ["保留原始请求与结构化执行约束，不扩张授权"],
+                    "success_criteria": ["依据原始请求产生真实执行、证据、结算与交付终态"],
+                    "knowledge_gaps": [],
+                    "workstream_type": ("active_learning" if mode == "learning_improvement" else
+                                        "self_improvement" if mode == "self_improvement" else
+                                        "project_research"),
+                    "intent_degraded": True,
+                    "intent_error": f"{type(exc).__name__}: {exc}"[:600],
+                    "intent_fallback_source": "explicit project_id/mode + original request + validated constraints",
+                }
+                observe_out = {"ok": False, "status": "degraded", "model_calls": 0,
+                               "semantic_output": fallback}
+                counter_out = {"ok": False, "status": "degraded", "model_calls": 0,
+                               "semantic_output": fallback}
+                synth_out = {"ok": True, "status": "completed", "model_calls": 0,
+                             "semantic_output": fallback}
 
         synth_sem = (synth_out or {}).get("semantic_output") or {}
         route = str(synth_sem.get("route") or "").strip()
@@ -983,15 +1058,18 @@ class PartnerApplicationService:
         # Improvement modes are explicit operator intents, not subject to the
         # LLM's direct_answer heuristic.  Force the bounded project path so the
         # dedicated improvement flow is always selected.
-        if mode in {"self_improvement", "learning_improvement"} and scope == "partner":
+        if mode in {"self_improvement", "learning_improvement"}:
             route = "project_iteration"
+            dispatch_target = "partner_" + mode
         if mode == "project_iteration":
             route = "project_iteration"
             instance_project = (PROJECTS.get(persona_hint) or (persona_hint, ""))[0]
             dispatch_target = (project_id or
                                (dispatch_target if dispatch_target not in {"", "direct_answer"} else "") or
                                instance_project or "project_iteration")
-        if mode == "benchmark":
+        benchmark_requested = mode == "benchmark" or bool(
+            incoming_constraints.get('benchmark_embedded'))
+        if benchmark_requested:
             route = "project_iteration"
             dispatch_target = project_id or dispatch_target or persona_hint or "benchmark"
 
@@ -1076,6 +1154,11 @@ class PartnerApplicationService:
         intent_contract['mode'] = mode
         intent_contract['scope'] = scope
         intent_contract['dispatch_target'] = dispatch_target
+        # New three-pass intent synthesis always emits a workstream.  Keep an
+        # empty value for legacy/programmatic callers that supply the old
+        # contract so already-pinned API expectations retain project_cycle.
+        intent_contract['workstream_type'] = str(
+            synth_sem.get('workstream_type') or '')
         intent_contract['warm_reply'] = warm_reply
         # Development rollout is scoped to explicitly configured instances.
         # This only changes a new project request; it never schedules work itself.
@@ -1089,16 +1172,23 @@ class PartnerApplicationService:
             synthesized_constraints = {}
         synthesized_constraints = {
             key: value for key, value in synthesized_constraints.items()
-            if key in {'max_rounds'}
+            if key in {'max_rounds', 'run_duration_seconds', 'run_until_epoch',
+                       'continuation_mode', 'finalization_reserve_seconds'}
+            and value is not None
         }
         explicit_round_budget = ('max_rounds' in incoming_constraints
                                  or 'max_rounds' in synthesized_constraints)
+        explicit_deadline_budget = any(
+            key in incoming_constraints or key in synthesized_constraints
+            for key in ('run_duration_seconds', 'run_until_epoch'))
         constraint_input = dict(synthesized_constraints)
         if (persona_hint in cycle_policy.get('instances', [])
                 and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}):
-            defaults = {'evolution_cycle': True, 'max_rounds': 2,
+            defaults = {'evolution_cycle': True,
                         'evolution_apply': cycle_policy.get('apply') is True,
                         'action_seconds': cycle_policy.get('action_seconds', 300)}
+            if not explicit_deadline_budget:
+                defaults['max_rounds'] = 2
             constraint_input = {**defaults, **constraint_input, **incoming_constraints}
         else:
             constraint_input = {**constraint_input, **incoming_constraints}
@@ -1123,7 +1213,9 @@ class PartnerApplicationService:
         benchmark_run_id = ""
         benchmark_protocol_id = ""
         checkpoint_policy_ref = ""
-        if mode == "benchmark":
+        benchmark_requested = mode == "benchmark" or bool(
+            intent_contract['execution_constraints'].get('benchmark_embedded'))
+        if benchmark_requested:
             benchmark_protocol_id = str(
                 intent_contract['execution_constraints'].get('benchmark_protocol_id') or "")
             if not benchmark_protocol_id:
@@ -1133,7 +1225,9 @@ class PartnerApplicationService:
             checkpoint_policy_ref = str(
                 intent_contract['execution_constraints'].get('checkpoint_policy') or "protocol")
             intent_contract['benchmark'] = {
-                'run_id': benchmark_run_id, 'run_mode': 'benchmark',
+                'run_id': benchmark_run_id,
+                'run_mode': ('embedded' if intent_contract['execution_constraints'].get(
+                    'benchmark_embedded') else 'benchmark'),
                 'protocol_id': benchmark_protocol_id,
                 'protocol_version': str(intent_contract['execution_constraints'].get(
                     'benchmark_protocol_version') or ''),
@@ -1150,13 +1244,23 @@ class PartnerApplicationService:
         mode = intent_contract.get('mode') or ''
         scope = intent_contract.get('scope') or ''
         if mode == 'benchmark':
-            flow_name = 'benchmark_experiment'
-        elif mode == 'self_improvement' and scope == 'partner':
+            flow_name = ('v4_benchmark_suite'
+                         if benchmark_protocol_id == 'v4_longitudinal_closed_loop_v1'
+                         else 'v5_research_study'
+                         if benchmark_protocol_id == 'v5_open_generalization_study_v1'
+                         else 'benchmark_experiment')
+        elif mode == 'self_improvement':
             flow_name = 'self_improvement_cycle'
             dispatch_target = 'partner_self_improvement'
-        elif mode == 'learning_improvement' and scope == 'partner':
+        elif mode == 'learning_improvement':
             flow_name = 'learning_improvement_cycle'
             dispatch_target = 'partner_learning_improvement'
+        elif intent_contract.get('workstream_type') == 'active_learning':
+            flow_name = 'learning_improvement_cycle'
+        elif intent_contract.get('workstream_type') == 'self_improvement':
+            flow_name = 'self_improvement_cycle'
+        elif intent_contract.get('workstream_type') == 'mixed':
+            flow_name = 'meta_cycle'
         elif dispatch_target in {"browser_video_learning", "xhs_authoring"}:
             flow_name = dispatch_target
         elif dispatch_target == "direct_answer":
@@ -1170,8 +1274,14 @@ class PartnerApplicationService:
         # ``evolution_cycle`` decides whether Partner may evolve itself.
         cycle_constraints = intent_contract['execution_constraints']
         if (cycle_constraints.get('evolution_cycle')
-                or explicit_round_budget) and mode in {'', 'project_iteration'}:
-            flow_name = 'project_cycle'
+                or explicit_round_budget or explicit_deadline_budget
+                or cycle_constraints.get('continuation_mode') == 'until_deadline'
+                ) and mode in {'', 'project_iteration'}:
+            if intent_contract.get('workstream_type') not in {
+                    'active_learning', 'self_improvement', 'mixed'}:
+                flow_name = ('project_research_cycle'
+                             if intent_contract.get('workstream_type') == 'project_research'
+                             else 'project_cycle')
 
         try:
             received = self.fabric.create(
@@ -1196,11 +1306,12 @@ class PartnerApplicationService:
                 intent_contract_path="",
                 intent_contract=intent_contract,
                 intent_model_calls=sum(out.get('model_calls', 1) for out in (observe_out, counter_out, synth_out)),
-                run_mode='benchmark' if mode == 'benchmark' else 'normal',
+                run_mode=('benchmark' if mode == 'benchmark' else
+                          'project_benchmark' if benchmark_requested else 'normal'),
                 benchmark_run_id=benchmark_run_id,
                 benchmark_protocol_id=benchmark_protocol_id,
                 checkpoint_policy_ref=checkpoint_policy_ref,
-                evaluation_visibility='hidden_until_terminal' if mode == 'benchmark' else '',
+                evaluation_visibility=('hidden_until_terminal' if benchmark_requested else ''),
             )
             job.root_event_id = received.event_id
             self.fabric.complete(received, EventSummary(

@@ -261,6 +261,7 @@ def environment_preflight(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     registry = build_flow_registry()
     catalog = build_catalog(workspace=ctx.workspace)
     flow_errors: list[str] = []
+    smoke: dict[str, Any] = {'executed': False}
     try:
         subject = registry.get(protocol.subject_flow)
         parent = registry.get("benchmark_experiment")
@@ -269,10 +270,38 @@ def environment_preflight(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             protocol=protocol, parent=parent, subject=subject, catalog=catalog))
     except KeyError:
         flow_errors.append(f"missing_subject_flow:{protocol.subject_flow}")
+    runner = Path(str(supplied.get('arm_runner_path') or '')).expanduser().resolve()
+    dataset = Path(str(supplied.get('dataset_path') or '')).expanduser().resolve()
+    if runner.is_file() and dataset.is_file() and runner.name == 'davis_target_feature_arm.py':
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='partner-benchmark-preflight-') as temporary:
+            output_path = Path(temporary) / 'validate.json'
+            command = [sys.executable, str(runner), '--arm', 'candidate',
+                       '--dataset', str(dataset), '--output', str(output_path), '--validate-only']
+            environment = dict(os.environ)
+            environment['PARTNER_DECLARED_FEATURE'] = str(supplied.get('declared_feature') or '')
+            environment['PARTNER_BENCHMARK_TASK_ID'] = str(supplied.get('task_id') or '')
+            try:
+                completed = subprocess.run(command, cwd=temporary, text=True,
+                                           capture_output=True, env=environment,
+                                           timeout=60, check=False)
+                smoke = {'executed': True, 'argv': command, 'cwd': temporary,
+                         'returncode': completed.returncode,
+                         'stdout': completed.stdout[-4000:], 'stderr': completed.stderr[-4000:],
+                         'artifact_valid': output_path.is_file()}
+                if completed.returncode != 0 or not output_path.is_file():
+                    flow_errors.append('arm_runner_smoke_failed')
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                smoke = {'executed': True, 'error': f'{type(exc).__name__}: {exc}'}
+                flow_errors.append('arm_runner_smoke_failed')
+    elif runner.is_file() and dataset.is_file():
+        smoke = {'executed': False,
+                 'reason': 'runner has not declared the validate-only adapter contract'}
     valid = not missing and not invalid_paths and not flow_errors
     record = {"valid": valid, "required_inputs": list(protocol.required_inputs),
               "missing_inputs": missing, "flow_errors": flow_errors,
               "invalid_paths": invalid_paths,
+              "arm_runner_smoke": smoke,
               "catalog_version": catalog.version, "checked_at": _now()}
     output = _write(ctx, params, "preflight.json", record)
     return {"ok": valid, "status": "completed" if valid else "failed",

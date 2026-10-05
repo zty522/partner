@@ -144,7 +144,7 @@ def candidate_propose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     test_dir = root / 'benchmark'
     from partner.index.resource_catalog import ResourceCatalog
     catalog=ResourceCatalog(_workspace(ctx))
-    test_paths=[Path(r['path']) for r in catalog.query('code',scope='tests',limit=200)]
+    test_paths=[Path(r['path']) for r in catalog.query('code',scope='benchmark',limit=200)]
     test_files=sorted(str(p.relative_to(root)) for p in test_paths
         if test_dir in p.parents and 'studies' not in p.relative_to(test_dir).parts
         and p.name.startswith('test_'))

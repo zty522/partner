@@ -157,8 +157,22 @@ def _install(worker_module):
         if getattr(self, '_lease_lost', False):
             return  # Leave ownership for explicit recovery; cancelled await may still run.
         if getattr(self, '_db_lease_job_id', None):
-            init_jobs(self.root).release_owned(self._db_lease_job_id,
-                owner=self._db_lease_owner, fencing_token=self._db_lease_token)
+            repo = init_jobs(self.root)
+            job_id = self._db_lease_job_id
+            # A supervisor scale-down asks the worker to stop at the next
+            # persisted Event boundary.  The Job is still ``running`` at that
+            # point.  Merely dropping the lease leaves it absent from
+            # ``ready_jobs`` and it can remain stranded forever.  Convert a
+            # boundary-safe running Job back to queued before releasing it.
+            current = repo.get_record(job_id) or {}
+            ready = current.get('ready_event_ids') or []
+            if (current.get('status') == 'running'
+                    and not current.get('cancel_requested')
+                    and not current.get('current_event_id') and ready):
+                repo.schedule(job_id, next_run_at=time.time())
+            else:
+                repo.release_owned(job_id,
+                    owner=self._db_lease_owner, fencing_token=self._db_lease_token)
         self._lock_held = None
         self._db_lease_token = None
         self._db_lease_owner = None

@@ -4,12 +4,14 @@ import time
 
 
 def validate_constraints(value):
-    allowed = {'run_until_epoch', 'max_rounds', 'proposal_only', 'read_only_paths',
+    allowed = {'run_until_epoch', 'run_duration_seconds', 'continuation_mode',
+               'finalization_reserve_seconds', 'max_rounds', 'proposal_only', 'read_only_paths',
                'evolution_cycle', 'evolution_apply', 'action_seconds', 'local_learning_root',
+               'local_learning_files',
                'method_arm', 'method_arm_label', 'benchmark_protocol_id',
                'benchmark_protocol_version', 'benchmark_inputs',
                'benchmark_guardrail_results', 'benchmark_allow_external_judges',
-               'checkpoint_policy', 'delivery_channels'}
+               'benchmark_embedded', 'checkpoint_policy', 'delivery_channels'}
     allowed.update({'max_evolution_attempts', 'notification_mode',
                     'observation_job_ids', 'max_observation_steps',
                     'max_opportunities', 'learning_record_root'})
@@ -21,6 +23,14 @@ def validate_constraints(value):
         root=result['local_learning_root']
         if not isinstance(root,str) or not Path(root).is_absolute():
             raise ValueError('local_learning_root must be an absolute local path')
+    if 'local_learning_files' in result:
+        from pathlib import Path
+        files = result['local_learning_files']
+        if (not isinstance(files, list) or len(files) > 12
+                or any(not isinstance(path, str) or not Path(path).is_absolute()
+                       for path in files)):
+            raise ValueError('local_learning_files must be at most 12 absolute paths')
+        result['local_learning_files'] = list(dict.fromkeys(files))
     if 'learning_record_root' in result:
         from pathlib import Path
         root = result['learning_record_root']
@@ -39,7 +49,7 @@ def validate_constraints(value):
             if not 1 <= count <= ceiling:
                 raise ValueError(f'{key} must be 1..{ceiling}')
             result[key] = count
-    for key in ('evolution_cycle', 'evolution_apply'):
+    for key in ('evolution_cycle', 'evolution_apply', 'benchmark_embedded'):
         if key in result and not isinstance(result[key], bool):
             raise ValueError(key + ' must be boolean')
     if 'delivery_channels' in result:
@@ -62,6 +72,22 @@ def validate_constraints(value):
         if not math.isfinite(deadline) or deadline <= 0:
             raise ValueError('invalid observation deadline')
         result['run_until_epoch'] = deadline
+    if 'run_duration_seconds' in result:
+        duration = int(result['run_duration_seconds'])
+        if not 300 <= duration <= 86400:
+            raise ValueError('run duration must be 300..86400 seconds')
+        result['run_duration_seconds'] = duration
+    if 'finalization_reserve_seconds' in result:
+        reserve = int(result['finalization_reserve_seconds'])
+        if not 60 <= reserve <= 3600:
+            raise ValueError('finalization reserve must be 60..3600 seconds')
+        result['finalization_reserve_seconds'] = reserve
+    if ('continuation_mode' in result and
+            result['continuation_mode'] not in {'bounded_rounds', 'until_deadline'}):
+        raise ValueError('continuation_mode must be bounded_rounds or until_deadline')
+    if result.get('continuation_mode') == 'until_deadline' and not (
+            result.get('run_duration_seconds') or result.get('run_until_epoch')):
+        raise ValueError('until_deadline requires run_duration_seconds or run_until_epoch')
     if 'max_rounds' in result:
         rounds = int(result['max_rounds'])
         if not 1 <= rounds <= 50:

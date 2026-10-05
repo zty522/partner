@@ -21,23 +21,41 @@ def classify_preflight(receipt, plan):
     names = {c.get('name') for c in cases}
     if not expected or not expected.issubset(names):
         return value
+    expectations = {
+        str(row.get('test_name')): str(row.get('kind'))
+        for row in plan.get('expectations', [])
+    }
     for case in cases:
-        category = ('no_import' if case.find('error') is not None else
-                    'skipped' if case.find('skipped') is not None else
-                    'inconclusive' if case.find('failure') is not None else 'ok')
+        failure = case.find('failure')
+        error = case.find('error')
+        if error is not None:
+            category = 'no_import'
+        elif case.find('skipped') is not None:
+            category = 'skipped'
+        elif failure is None:
+            category = 'ok'
+        else:
+            detail = (failure.get('message', '') + '\n' + (failure.text or ''))
+            infrastructure = any(x in detail for x in (
+                'AttributeError', 'ImportError', 'ModuleNotFoundError', 'NameError',
+                'TypeError', 'fixture ', 'unittest/mock.py'))
+            behavioral = ('AssertionError' in detail or 'assert ' in detail
+                          or 'Failed:' in detail)
+            category = ('target_failure'
+                        if expectations.get(str(case.get('name'))) == 'repair'
+                        and behavioral and not infrastructure else 'inconclusive')
         value['kind_classifications'].append({'test': case.get('name'), 'kind': category})
         value['summary'][category] += 1
         if case.find('error') is not None or case.find('skipped') is not None:
             value['classification'] = 'test_invalid'
             return value
-        failure = case.find('failure')
         if failure is not None:
             detail = (failure.get('message', '') + '\n' + (failure.text or ''))
             if any(x in detail for x in ('AttributeError', 'ImportError', 'ModuleNotFoundError',
                                           'NameError', 'TypeError', 'fixture ', 'unittest/mock.py')):
                 value['classification'] = 'test_invalid'
                 return value
-            if 'AssertionError' not in detail and 'assert ' not in detail:
+            if 'AssertionError' not in detail and 'assert ' not in detail and 'Failed:' not in detail:
                 value['classification'] = 'inconclusive'
                 return value
             # A preservation test must already pass in the baseline.

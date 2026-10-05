@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "protocol_id": "v4_longitudinal_closed_loop_v1",
+  "version": "1.3.0",
+  "suite_kind": "longitudinal_multi_episode",
+  "subject_flows": [
+    "v4_benchmark_suite",
+    "v4_benchmark_episode"
+  ],
+  "episode_order": "preregistered",
+  "allowed_arm_differences": [
+    "memory_visibility",
+    "learning_consumption",
+    "bounded_repair_permission",
+    "settled_memory_candidate_selection",
+    "typed_memory_value_visibility"
+  ],
+  "evaluator_visibility": "sealed_until_episode_terminal",
+  "checkpoints": [
+    "SUITE_FREEZE",
+    "EPISODE_INTAKE",
+    "PLAN_FREEZE",
+    "ARM_EXECUTE",
+    "CHECKPOINT_EVALUATE",
+    "EPISODE_SETTLEMENT",
+    "MEMORY_CONSUMPTION_AUDIT",
+    "TRANSFER_EVALUATE",
+    "SUITE_SETTLEMENT",
+    "REPORT",
+    "DELIVERY_ACK"
+  ],
+  "termination": {
+    "max_episodes_required": true,
+    "budget_required": true,
+    "stop_on_hard_gate_failure": true,
+    "stop_after_consecutive_no_novel_candidate": false,
+    "fixed_schedule_reason": "preregistered benchmark must retain all positive and negative controls"
+  },
+  "evaluators": {
+    "deterministic_primary": true,
+    "llm_soft_judge": "labeled_optional",
+    "jev": "labeled_optional",
+    "hidden_tests": true
+  },
+  "status": "v4.3_generalization_retention_accepted",
+  "hierarchy": "suite_to_episode_to_arm_events",
+  "reference_episode_count": 12,
+  "real_pilot_episode_count": 6,
+  "execution_modes": {
+    "reference": "deterministic protocol and infrastructure regression",
+    "real": "LLM-planned bounded execution over real data, local sources and natural historical defects"
+  },
+  "real_executor_contracts": [
+    "davis_target_feature_v1",
+    "local_source_qa_v1",
+    "settled_memory_qa_v1",
+    "natural_terminal_projection_v1",
+    "historical_incident_guard_v1",
+    "age_group_calibration_v1",
+    "multi_source_synthesis_v1",
+    "settled_structured_memory_v1",
+    "memory_guided_age_calibration_v1",
+    "typed_memory_recall_v1",
+    "real_artifact_identity_v1"
+  ],
+  "real_v41_suite_count": 3,
+  "real_v41_episode_count": 21,
+  "v41_requirements": [
+    "at_least_two_episodes_per_track",
+    "at_least_three_real_executor_families",
+    "preregistered_negative_control",
+    "one_last_episode_milestone_per_track",
+    "stratified_cross_suite_statistics"
+  ],
+  "v43_requirements": [
+    "exactly_20_or_50_episodes",
+    "development_holdout_id_disjointness",
+    "two_holdout_sources",
+    "two_holdout_defects",
+    "preregistered_retention_checkpoints",
+    "settled_learning_changes_project_metric",
+    "dual_blind_machine_rubrics",
+    "human_annotation_claim_boundary",
+    "expired_running_lease_recovery"
+  ],
+  "real_v43_suite_count": 2,
+  "real_v43_episode_count": 70,
+  "max_confirmed_retention_lag": 49
+}

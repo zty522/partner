@@ -18,7 +18,7 @@ from .runtime_storage import workspace_dir
 from .job_repository import init as init_jobs
 from .history_repository import init as init_history
 from .document_repository import init as init_documents
-from .code_repository import init as init_code
+from .code_repository import init as init_code, resolve_source_root
 from .memory_repository import init as init_memory
 from .artifact_repository import init as init_artifacts
 from .source_repository import init as init_sources
@@ -82,7 +82,7 @@ def bootstrap(workspace_root: Path, *, force: bool = False) -> IndexReport:
 
     # 3) documents
     try:
-        partner_root = workspace_root.parent if (workspace_root / "partner").exists() else workspace_root
+        partner_root = resolve_source_root(workspace_root)
         catalog = partner_root / "docs" / "catalog.yaml"
         if not catalog.exists():
             catalog = workspace_root / "docs" / "catalog.yaml"

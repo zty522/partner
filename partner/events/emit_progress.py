@@ -63,12 +63,20 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                          '未获得完整可核验证据' if facts.get('verified') is False else '核验状态未知')
             route=_clean(facts.get('route'),30); reason=_clean(facts.get('reason'),100)
             next_goal=_clean(facts.get('next_hypothesis') or facts.get('next_round_goal'),100)
+            action=_clean(facts.get('execution_summary'),120)
+            error=_clean(facts.get('execution_error'),120)
+            finding=_clean(facts.get('finding') or facts.get('information_gain'),120)
+            artifacts=[str(v).rsplit('/',1)[-1] for v in facts.get('artifacts') or []]
             # A round decision may request active learning, but the learning Flow
             # has not run yet. Never relay an LLM explanation that describes a
             # future handoff as already retrieved, frozen, or consumed.
             if route == 'active_learning':
                 reason = '当前知识缺口需要外部来源核对；是否形成可靠 handoff 以后续主动学习 Flow 的真实终态为准'
             message=f'第 {number} 轮结算：假设“{hypothesis}”；{result_text}；决定 {route}'
+            if action: message+=f'；实际动作：{action}'
+            if error: message+=f'；执行阻塞：{error}'
+            if artifacts: message+=f"；证据：{_clean('、'.join(artifacts),100)}"
+            if finding: message+=f'；本轮认识：{finding}'
             if reason: message+=f'，理由：{reason}'
             if next_goal and route in {'continue_project','active_learning'}: message+=f'；下一步：{next_goal}'
             message+='。'
@@ -96,6 +104,8 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if next_event and phase in {"event_completed", "event_waiting", "event_failed"}:
             message += f"下一步：{next_event}。"
     message = re.sub(r"。+", "。", message).strip()
+    if len(message) > 390:
+        message = message[:389].rstrip('；，。：: ') + '。'
     return {"ok": bool(message), "status": "completed" if message else "failed",
             "message": message, "summary": message[:300],
             "semantic_output": {"lifecycle_phase": phase, "message": message}}

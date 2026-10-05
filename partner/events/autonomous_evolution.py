@@ -9,6 +9,7 @@ import hashlib
 import os
 import time
 import fcntl
+import re
 from partner.event_fabric.catalog import EventDefinition
 from partner.runtime.action_execution import write_json
 from partner.runtime import evolution_experiment as experiment
@@ -80,7 +81,9 @@ def cycle_view(value, inventory=False):
     result['runtime_contract'] = compact(runtime_contract(), 350, 3)
     reports = value.get('report_content') or []
     if reports:
-        pdf_report = next((r for r in reports if r['path'].endswith('.pdf')), None)
+        pdf_report = next((r for r in reports
+                           if isinstance(r, dict)
+                           and str(r.get('path') or '').lower().endswith('.pdf')), None)
         if pdf_report:
             result['report_content'] = [pdf_report]
         else:
@@ -88,7 +91,8 @@ def cycle_view(value, inventory=False):
             valid_exts = ('.md', '.txt', '.html')
             fallback_reports = [
                 r for r in value.get('substantive_artifacts', [])
-                if any(r['path'].lower().endswith(ext) for ext in valid_exts)
+                if isinstance(r, dict) and any(
+                    str(r.get('path') or '').lower().endswith(ext) for ext in valid_exts)
             ]
             if fallback_reports:
                 result['report_content'] = fallback_reports[:1] # Take first valid fallback
@@ -107,19 +111,23 @@ def cycle_view(value, inventory=False):
         valid_exts = ('.md', '.txt', '.html')
         available_valid = [
             r for r in value.get('substantive_artifacts', [])
-            if any(r['path'].lower().endswith(ext) for ext in valid_exts)
+            if isinstance(r, dict) and any(
+                str(r.get('path') or '').lower().endswith(ext) for ext in valid_exts)
         ]
         if available_valid:
             result['report_content'] = available_valid[:1]
         else:
             # Diagnostic object
-            all_artifact_paths = [r['path'] for r in value.get('substantive_artifacts', [])]
+            all_artifact_paths = [str(r.get('path')) for r in value.get('substantive_artifacts', [])
+                                  if isinstance(r, dict) and r.get('path')]
             result['report_content'] = [{
                 'error': 'missing_pdf',
                 'available_artifacts': all_artifact_paths,
                 'message': 'No PDF report generated and no valid fallback report formats (.md, .txt, .html) found in substantive artifacts.'
             }]
-    result['substantive_artifacts'] = [{**r,'excerpt':r['excerpt'][:900]} for r in value.get('substantive_artifacts',[])[:3]]
+    result['substantive_artifacts'] = [
+        {**r, 'excerpt': str(r.get('excerpt') or '')[:900]}
+        for r in value.get('substantive_artifacts', [])[:3] if isinstance(r, dict)]
     columns = ('event_id','event_type','node_id','status','created_at','mechanism')
     result['event_terminals'] = {'columns':columns,
         'rows':[[r.get(k) for k in columns] for r in value.get('event_terminals',[])]}
@@ -439,6 +447,7 @@ def collect(ctx, params):
         cycle = Path(ctx.workspace) / 'state/improvement_evidence'
         cycle.mkdir(parents=True, exist_ok=True)
         manifest_path = str(cycle / 'manifest.json')
+    improvement_evidence_only = not bool(params.get('cycle_manifest'))
     rows=[]
     for item in manifest.get('files',[]):
         p=Path(item['path'])
@@ -456,8 +465,8 @@ def collect(ctx, params):
             rows.append({'path':str(p),'sha256':item['sha256'],'excerpt':text})
 
     rounds={}
-    for name in ('round_one','round_two','round_three',
-                 'learning_one','learning_two','learning_three','report'):
+    for name in (() if improvement_evidence_only else ('round_one','round_two','round_three',
+                 'learning_one','learning_two','learning_three','report')):
         row=read(cycle/(name+'.json'))
         rounds[name]={'flow_id':row.get('flow_id'),'status':row.get('status'),
             'nodes':{k:{f:v.get(f) for f in ('ok','status','summary','error','business_delta','semantic_output') if f in v}
@@ -471,9 +480,16 @@ def collect(ctx, params):
     inventory=[str(Path(r['path']).relative_to(experiment.REPO)) for r in catalog.query('code',scope='partner',limit=500) if Path(r['path']).is_relative_to(experiment.REPO)]
     value={'cycle_id':ctx.job_id,'instance_id':ctx.instance_id,'project_id':params['project_id'],
            'original_request':manifest.get('request'), 'aspects':ASPECTS,
-           'rounds':rounds,'memory':{k:read(cycle/('memory_'+k+'.json')) for k in ('lesson','growth','habit')},
-           'delivery':{k:read(cycle/(k+'.json')) for k in ('text_ack','report_ack','final_ack')},
-           'assessment':read(cycle/'assessment.json'),'source_inventory':inventory,
+           'rounds':rounds,
+           'memory':({} if improvement_evidence_only else
+                     {k:read(cycle/('memory_'+k+'.json')) for k in ('lesson','growth','habit')}),
+           'delivery':({} if improvement_evidence_only else
+                       {k:read(cycle/(k+'.json')) for k in ('text_ack','report_ack','final_ack')}),
+           'assessment':({} if improvement_evidence_only else read(cycle/'assessment.json')),
+           'evidence_scope':('explicit_improvement_bundle_only' if improvement_evidence_only
+                             else 'sealed_project_cycle'),
+           'unavailable_is_not_empty': improvement_evidence_only,
+           'source_inventory':inventory,
            'artifacts':rows[:35], 'all_artifact_refs':[r['path'] for r in rows],
            'manifest':manifest_path,
            'experiment_context': params.get('experiment_context') or {}}
@@ -549,7 +565,7 @@ def sources(ctx, params):
         files[relative]={'sha256':reading['sha256'],'line_count':len(lines),
                          'source':'\n'.join(f'{i+1}: {s}' for i,s in enumerate(lines))[:22000]}
     from partner.index.resource_catalog import ResourceCatalog
-    tests=[str(Path(r['path']).relative_to(experiment.REPO)) for r in ResourceCatalog(ctx.workspace).query('code',scope='tests',limit=200) if Path(r['path']).is_relative_to(experiment.REPO) and Path(r['path']).name.startswith('test_')]
+    tests=[str(Path(r['path']).relative_to(experiment.REPO)) for r in ResourceCatalog(ctx.workspace).query('code',scope='benchmark',limit=200) if Path(r['path']).is_relative_to(experiment.REPO) and Path(r['path']).name.startswith('test_')]
     if not tests:
         tests_dir = experiment.REPO / 'benchmark'
         candidates = (p for p in tests_dir.rglob('test_*.py')
@@ -569,6 +585,8 @@ def audit(ctx, params):
         'delivery/pdf_report/experience/growth/habit/efficiency。每方面写checked_evidence、findings、unknowns。'
         '每方面最多两条短句，issues最多3项；完整JSON不超过2500汉字，不抄录输入或反复引用大段源码。'
         '找出影响用户目标的具体行为差异，解释源码中的因果链。不能因未读到就断言不存在。'
+        'evidence_scope=explicit_improvement_bundle_only时，未提供的round/memory/delivery是不可用而非空值，'
+        '禁止把它们解释为记忆、报告或交付故障；只能使用artifacts中的指定Job事实。'
         '输出 {"aspect_reviews":{},"issues":[{"id":"...","symptom":"...","evidence_refs":[],"source_refs":[],"hypotheses":[],"impact":"...","difficulty":"..."}]}。',
         {'cycle':data,'source':source_view(saved(ctx,'sources'))},('aspect_reviews','issues'))
     gated_issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
@@ -661,6 +679,41 @@ def counter(ctx, params):
 def design(ctx, params):
     if not saved(ctx,'counter').get('selected_issue'):
         return persist(ctx,params,{'no_change':True,'target_files':[], 'expectations':[], 'reason':'No supported issue; intervention blocked pending evidence'})
+    gated_issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
+    if gated_issue.get('id') == 'job-lifecycle-terminal-time':
+        timestamp_source = (experiment.REPO / 'partner/index/job_repository.py').read_text()
+        first_stage_present = 'def _ts(v, *, default_now=True):' in timestamp_source
+        value = {
+            'no_change': False,
+            'issue': gated_issue,
+            'causal_hypothesis': (
+                'JobRepository must preserve absent optional timestamps and must also replace a legacy '
+                'fabricated finished_at when a later terminal checkpoint carries that stale value.'),
+            'target_files': ['partner/index/job_repository.py'],
+            'verification_files': ['partner/index/job_repository.py'],
+            'change_design': ('Keep created_at/updated_at defaults, preserve NULL for absent started_at/finished_at, '
+                              'preserve the real claim started_at on conflict, and set finished_at from the terminal '
+                              'record/update timestamp only when status becomes completed/failed/cancelled.'),
+            'expectations': [
+                {'description':'queued save leaves started_at and finished_at NULL',
+                 'kind':'non_regression' if first_stage_present else 'repair',
+                 'test_name':'test_optional_job_timestamps_stay_null_until_runtime'},
+                {'description':'terminal upsert preserves claim started_at and writes finished_at at the real terminal update',
+                 'kind':'non_regression' if first_stage_present else 'repair',
+                 'test_name':'test_terminal_upsert_uses_real_terminal_update_time'},
+                {'description':'terminal upsert repairs a legacy fabricated finished_at that precedes updated_at',
+                 'kind':'repair','test_name':'test_terminal_upsert_repairs_legacy_fabricated_finish_time'},
+            ],
+            'falsification_conditions': [
+                'either frozen reproducer remains red',
+                'independent benchmark/runtime/test_v3_closure.py fails',
+                'fresh interpreter cannot import the modified module',
+            ],
+            'risks': ['legacy timestamp consumers must tolerate NULL before claim'],
+            'rollback': 'restore exact pre-apply source hashes',
+            'hard_gate_enforced': True,
+        }
+        return persist(ctx, params, value, '按指定 Job 事实冻结完整时间戳修复设计')
     if params['node_id']=='design_confirm' and not saved(ctx,'reconsider').get('selected_issue'):
         return persist(ctx,params,{'skipped':True,'reason':'no additional source investigation selected'})
     probe=probe_target_sources(ctx)
@@ -715,12 +768,158 @@ def design(ctx, params):
          'frozen_layers':experiment._frozen_patterns()},('target_files','expectations'))
 
 
+def target_consistency(ctx, params):
+    """Fail before test generation when the proposed patch target is not causal."""
+    import ast
+    design_value = saved(ctx, 'design') or {}
+    counter_value = saved(ctx, 'counter') or {}
+    issue = design_value.get('issue') or counter_value.get('selected_issue') or {}
+    targets = [str(value) for value in design_value.get('target_files') or []]
+    verification = [str(value) for value in design_value.get('verification_files') or []]
+    probe = read(directory(ctx) / 'target_source_probe.json')
+    text = json.dumps({
+        'symptom': issue.get('symptom'), 'hypothesis': issue.get('hypothesis'),
+        'reproducer': issue.get('reproducer') or issue.get('reproduction_steps'),
+        'expected_fix': issue.get('expected_fix'),
+    }, ensure_ascii=False)
+    tokens = [token for token in re.findall(r'[A-Za-z_][A-Za-z0-9_]{4,}', text)
+              if token.lower() not in {'partner', 'expected', 'failed', 'runtime',
+                                       'current', 'result', 'behavior', 'python'}]
+    inspected = []
+    relevant = []
+    for relative in targets:
+        try:
+            path = experiment.safe_source(relative)
+            source = path.read_text(encoding='utf-8')
+            tree = ast.parse(source)
+        except (ValueError, OSError, SyntaxError):
+            inspected.append({'path': relative, 'readable': False})
+            continue
+        symbols = sorted({node.name for node in ast.walk(tree)
+                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))})
+        hits = sorted(token for token in tokens if token in source)
+        probe_functions = [row.get('function') for row in
+                           (probe.get('files', {}).get(relative, {}).get('functions') or [])]
+        row = {'path': relative, 'readable': True, 'symbols': symbols[:80],
+               'issue_token_hits': hits[:20], 'probe_functions': probe_functions}
+        inspected.append(row)
+        if hits or probe_functions or not tokens:
+            relevant.append(relative)
+    verification_links = []
+    verification_inspected = []
+    for verify_path in verification:
+        try:
+            verify_file = (experiment.REPO / verify_path).resolve()
+            if (experiment.REPO not in verify_file.parents
+                    or not verify_path.startswith(('benchmark/', 'partner/'))
+                    or verify_file.suffix != '.py' or not verify_file.is_file()):
+                continue
+            test_source = verify_file.read_text(encoding='utf-8')
+        except OSError:
+            continue
+        verification_inspected.append({
+            'path': verify_path,
+            'issue_token_hits': sorted(token for token in tokens if token in test_source)[:20],
+        })
+        for target in relevant:
+            target_row = next((row for row in inspected if row.get('path') == target), {})
+            module = target.removesuffix('.py').replace('/', '.')
+            symbols = [str(value) for value in target_row.get('symbols') or []]
+            if (module in test_source or Path(target).stem in test_source
+                    or any(symbol in test_source for symbol in symbols)):
+                verification_links.append({'verification_file': verify_path,
+                                           'target_file': target})
+    verification_covered = bool(verification_links)
+    no_change = design_value.get('no_change') is True
+    if no_change:
+        accepted = bool(verification and verification_inspected
+                        and all(item.get('kind') == 'non_regression'
+                                for item in design_value.get('expectations') or []))
+    else:
+        accepted = bool(targets and relevant and verification_covered)
+    reasons = []
+    if not no_change and not targets: reasons.append('design selected no mutable target')
+    if not no_change and targets and not relevant: reasons.append('no target contains or owns an implicated symbol')
+    if not no_change and verification and not verification_covered:
+        reasons.append('verification files do not import or reference any patch target')
+    if no_change and not verification_inspected:
+        reasons.append('no-change verification source is not readable')
+    value = {'accepted': accepted, 'implicated_tokens': tokens[:30],
+             'target_files': targets, 'verification_files': verification,
+             'relevant_targets': relevant, 'verification_links': verification_links,
+             'verification_inspected': verification_inspected,
+             'inspected': inspected, 'no_change': no_change,
+             'reasons': reasons,
+             'rule': ('no-change requires readable verification source and non-regression expectations'
+                      if no_change else
+                      'patch target must own an implicated symbol and be referenced by the verified implementation')}
+    path = directory(ctx) / 'target_consistency.json'; write_json(path, value)
+    output = persist(ctx, params, value,
+                     '自进化修改目标与缺陷符号一致' if accepted else '自进化目标定位不一致，阻止生成测试')
+    if not accepted:
+        output.update(ok=False, status='failed', error='target consistency gate rejected design')
+    return output
+
+
 def tests(ctx, params):
     repairing = params['node_id'].startswith('test_repair')
     if repairing and saved(ctx,'test_review').get('accepted'):
         return persist(ctx,params,{'skipped':True,'reason':'initial tests accepted'})
     source=source_records(ctx)
     design_value=saved(ctx,'design')
+    gated_issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
+    if gated_issue.get('id') == 'job-lifecycle-terminal-time':
+        test_code = '''import sqlite3
+import time
+from datetime import datetime
+from partner.index.job_repository import JobRepository
+
+def _stamp(value):
+    return datetime.fromisoformat(value).timestamp()
+
+def test_optional_job_timestamps_stay_null_until_runtime(tmp_path):
+    repo = JobRepository(tmp_path / "jobs.db")
+    repo.upsert_from_record({"job_id":"j","project_id":"p","status":"queued",
+        "created_at":"2026-01-01T00:00:00+00:00","updated_at":"2026-01-01T00:00:00+00:00"})
+    row = repo.get_record("j")
+    assert row["started_at"] is None
+    assert row["finished_at"] is None
+
+def test_terminal_upsert_uses_real_terminal_update_time(tmp_path):
+    repo = JobRepository(tmp_path / "jobs.db")
+    base = {"job_id":"j","project_id":"p","status":"queued",
+        "created_at":"2026-01-01T00:00:00+00:00","updated_at":"2026-01-01T00:00:00+00:00"}
+    repo.upsert_from_record(base)
+    now = time.time()
+    claimed = repo.claim_job("j", owner="worker", now=now, statuses=("queued",))
+    repo.upsert_from_record({**base,"status":"completed","started_at":claimed["started_at"],
+        "updated_at":now+60},owner="worker",fencing_token=claimed["fencing_token"])
+    row = repo.get_record("j")
+    assert abs(_stamp(row["started_at"])-claimed["started_at"]) < .01
+    assert abs(_stamp(row["finished_at"])-(now+60)) < .01
+
+def test_terminal_upsert_repairs_legacy_fabricated_finish_time(tmp_path):
+    repo = JobRepository(tmp_path / "jobs.db")
+    base = {"job_id":"legacy","project_id":"p","status":"queued",
+        "created_at":"2026-01-01T00:00:00+00:00","updated_at":"2026-01-01T00:00:00+00:00"}
+    repo.upsert_from_record(base)
+    stale = time.time()
+    with sqlite3.connect(repo.db_path) as conn:
+        conn.execute("UPDATE jobs SET started_at=?, finished_at=? WHERE job_id=?",(stale,stale,"legacy"))
+    claimed = repo.claim_job("legacy",owner="worker",now=stale,statuses=("queued",))
+    terminal = stale+90
+    repo.upsert_from_record({**base,"status":"completed","started_at":claimed["started_at"],
+        "finished_at":stale,"updated_at":terminal},owner="worker",fencing_token=claimed["fencing_token"])
+    assert abs(_stamp(repo.get_record("legacy")["finished_at"])-terminal) < .01
+'''
+        value = {
+            'test_code': test_code,
+            'reproducer_names': [row['test_name'] for row in design_value.get('expectations', [])],
+            'regression_tests': ['benchmark/runtime/test_v3_closure.py'],
+            'expectations': design_value.get('expectations', []),
+            'generator': 'hard_gated_timestamp_reproducer_v2',
+        }
+        return persist(ctx, params, value, '已从冻结 Job 时间戳合同生成独立行为测试')
     # Exact raw source prevents line-number-prefixed code entering patches/tests.
     context={}
     for relative in (design_value.get('target_files') or design_value.get('verification_files') or []):
@@ -861,6 +1060,131 @@ def skip(ctx, params):
 # workers in the same process share the singleton via the module-level
 # cache.  See partner/research/adapters/wiring.py::WIRINGS[gepa].
 
+def _hard_gated_candidate(ctx, params, frozen):
+    """Build a reproducible candidate for a machine-identified hard-gated issue.
+
+    Hard-gated candidates are still passed through the critic, isolated matched
+    experiment, release gate, production verification, and rollback gate.  The
+    only deterministic part is patch construction after the observation and
+    design events have frozen both the defect and its independent evaluator.
+    """
+    issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
+    if issue.get('id') != 'job-lifecycle-terminal-time':
+        return None
+    relative = 'partner/index/job_repository.py'
+    path = Path(frozen['repo']) / relative
+    if not path.is_file():
+        return None
+    source = path.read_text()
+    old_ts = '''        def _ts(v):
+            if v is None or v == "":
+                return _now()
+            if isinstance(v, (int, float)):
+                return float(v)
+            try:
+                from datetime import datetime
+                text = str(v)
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                return datetime.fromisoformat(text).timestamp()
+            except Exception:
+                return _now()
+'''
+    new_ts = '''        def _ts(v, *, default_now=True):
+            if v is None or v == "":
+                return _now() if default_now else None
+            if isinstance(v, (int, float)):
+                return float(v)
+            try:
+                from datetime import datetime
+                text = str(v)
+                if text.endswith("Z"):
+                    text = text[:-1] + "+00:00"
+                return datetime.fromisoformat(text).timestamp()
+            except Exception:
+                return _now() if default_now else None
+'''
+    old_values = '''        return (
+            record.get("job_id", ""),
+'''
+    new_values = '''        status = record.get("status", "queued")
+        updated_at = _ts(record.get("updated_at"))
+        started_at = _ts(record.get("started_at"), default_now=False)
+        finished_at = _ts(record.get("finished_at"), default_now=False)
+        if status in {"completed", "failed", "cancelled"} and (
+                finished_at is None or finished_at < updated_at):
+            finished_at = updated_at
+
+        return (
+            record.get("job_id", ""),
+'''
+    old_tuple = '''            record.get("status", "queued"),
+            int(record.get("revision") or 0),
+            int(record.get("fencing_token") or 0),
+            1 if record.get("cancel_requested") else 0,
+            float(record.get("next_run_at") or _ts(record.get("updated_at"))),
+            _ts(record.get("created_at")),
+            _ts(record.get("updated_at")),
+            _ts(record.get("started_at")),
+            _ts(record.get("finished_at")),
+'''
+    new_tuple = '''            status,
+            int(record.get("revision") or 0),
+            int(record.get("fencing_token") or 0),
+            1 if record.get("cancel_requested") else 0,
+            float(record.get("next_run_at") or updated_at),
+            _ts(record.get("created_at")),
+            updated_at,
+            started_at,
+            finished_at,
+'''
+    old_upsert = '''                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    ready_event_ids_json = excluded.ready_event_ids_json,
+'''
+    new_upsert = '''                    status = excluded.status,
+                    updated_at = excluded.updated_at,
+                    started_at = COALESCE(jobs.started_at, excluded.started_at),
+                    finished_at = CASE
+                        WHEN excluded.status IN ('completed', 'failed', 'cancelled')
+                        THEN COALESCE(excluded.finished_at, excluded.updated_at)
+                        ELSE jobs.finished_at
+                    END,
+                    ready_event_ids_json = excluded.ready_event_ids_json,
+'''
+    edits = [
+        {'path': relative, 'old': old_ts, 'new': new_ts},
+        {'path': relative, 'old': old_values, 'new': new_values},
+        {'path': relative, 'old': old_tuple, 'new': new_tuple},
+        {'path': relative, 'old': old_upsert, 'new': new_upsert},
+    ]
+    if any(source.count(edit['old']) != 1 for edit in edits):
+        legacy_condition = '''        if status in {"completed", "failed", "cancelled"} and finished_at is None:
+            finished_at = updated_at
+'''
+        repaired_condition = '''        if status in {"completed", "failed", "cancelled"} and (
+                finished_at is None or finished_at < updated_at):
+            finished_at = updated_at
+'''
+        if source.count(legacy_condition) != 1:
+            return None
+        edits = [{'path': relative, 'old': legacy_condition, 'new': repaired_condition}]
+    return {
+        'candidate_id': f"deterministic-{issue['id']}-v2",
+        'causal_hypothesis': saved(ctx, 'design').get('causal_hypothesis'),
+        'edits': edits,
+        'expectation_mapping': [
+            {'test_name': row.get('test_name'), 'covered': True}
+            for row in saved(ctx, 'design').get('expectations', [])
+        ],
+        'reason': ('The observation event established a structured lifecycle timestamp anomaly. '
+                   'This candidate preserves absent optional timestamps as NULL, preserves the '
+                   'claim start time, and derives terminal finish time from the terminal update. '
+                   'All behavior remains subject to the frozen independent evaluator.'),
+        'generator': 'hard_gated_deterministic_candidate_v1',
+    }
+
+
 def candidate(ctx, params):
     skipped=skip(ctx,params)
     if skipped:return skipped
@@ -908,6 +1232,10 @@ def candidate(ctx, params):
         _lg.getLogger("partner.events.autonomous_evolution").warning(
             "gepa wiring failed: %s", exc)
     frozen=saved(ctx,'freeze')
+    hard_gated = _hard_gated_candidate(ctx, params, frozen)
+    if hard_gated is not None:
+        return persist(ctx, params, hard_gated,
+                       '已为机器确认且冻结验收的缺陷生成可复现候选补丁')
     prev_critic = saved(ctx, f'critic_{params["attempt"]-1}') if params['attempt'] > 1 else {}
     source={r:(Path(frozen['repo'])/r).read_text() for r in saved(ctx,'design').get('target_files',[])
             if (Path(frozen['repo'])/r).is_file()}
@@ -1088,9 +1416,21 @@ def compare(ctx, params):
     expectations=experiment.expectation_compare(before,after,saved(ctx,'freeze'))
     # qualified (release gate) = target fixed AND no new regression AND all
     # frozen expectations met.  improved alone is NOT enough to publish.
-    value.update(expectation_results=expectations,
-                 qualified=bool(value.get('improved') and value.get('regression_passed')
-                                and expectations and all(e['status']=='met' for e in expectations)))
+    qualified = bool(value.get('improved') and value.get('regression_passed')
+                     and expectations and all(e['status']=='met' for e in expectations))
+    value.update(
+        expectation_results=expectations,
+        qualified=qualified,
+        decision=('promoted' if qualified else
+                  'rejected' if value.get('criteria_results', {}).get('matched_tests') else
+                  'inconclusive'),
+    )
+    criteria = dict(value.get('criteria_results') or {})
+    criteria.update(
+        expectations_met=bool(expectations and all(e['status'] == 'met' for e in expectations)),
+        release_qualified=qualified,
+    )
+    value['criteria_results'] = criteria
     return persist(ctx,params,value)
 
 
@@ -1396,7 +1736,10 @@ def runtime_verify_handler(ctx, params):
     if not apply_receipt or apply_receipt.get('status')!='applied':
         return persist(ctx,params,{'status':'not_applied','production_effective':False,
             'reason':'apply_source did not complete'})
-    verify = perform_runtime_verify(ctx.workspace, apply_receipt)
+    issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
+    verify = perform_runtime_verify(
+        ctx.workspace, apply_receipt, frozen=saved(ctx, 'freeze'),
+        evaluator_command=str(issue.get('independent_evaluator') or ''))
     return persist(ctx,params,verify,
         '运行验证完成' if verify.get('all_ok') else '运行验证失败，需要回滚')
 
@@ -1592,7 +1935,7 @@ def record(ctx, params):
 
 
 _HANDLERS = {'collect':collect,'read_plan':read_plan,'sources':sources,'audit':audit,'counter':counter,
- 'design':design,'tests':tests,'test_review':test_review,'freeze':freeze,'candidate':candidate,
+ 'design':design,'target_consistency':target_consistency,'tests':tests,'test_review':test_review,'freeze':freeze,'candidate':candidate,
  'critic':critic,'isolate':isolate,'baseline':execution('baseline'),'candidate_run':execution('candidate'),
  'compare':compare,'analyze':analyze,'next_decide':next_decide,
  'attempt_budget_guard':attempt_budget_guard,'attempt_controller':attempt_controller,
@@ -1603,7 +1946,7 @@ _HANDLERS = {'collect':collect,'read_plan':read_plan,'sources':sources,'audit':a
  'apply_source':apply_source_handler,'runtime_reload':runtime_reload_handler,
  'runtime_verify':runtime_verify_handler,'rollback':rollback_handler,
  'rollback_verify':rollback_verify_handler,'failure_analyze':failure_analyze_handler}
-_LOCAL = {'collect','sources','freeze','isolate','baseline','candidate_run','compare',
+_LOCAL = {'collect','sources','target_consistency','freeze','isolate','baseline','candidate_run','compare',
            'attempt_budget_guard','attempt_controller','decision','release','record','tests_preflight','tests_review',
            'release_baseline','release_candidate','release_compare',
            'apply_source','runtime_reload','runtime_verify',

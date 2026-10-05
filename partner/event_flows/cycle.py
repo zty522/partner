@@ -1,5 +1,6 @@
 """One user-authorized two-round cycle, with an obligatory post-delivery audit."""
 from partner.event_fabric.flows import EventFlowDefinition as Flow, FlowNode as Node
+from dataclasses import replace
 
 ROUND_V1 = Flow('project_cycle_round', '1.0.0', (
     Node('recall', 'memory.context_recall'),
@@ -25,7 +26,70 @@ ROUND_V2 = Flow('project_cycle_round', '2.0.0', (
     Node('core_settlement', 'core.settlement', ('reflect',), parameters={'evaluated_node': 'verify'}),
 ), 'One designed project round with Core commitment and settlement; no autonomous continuation.')
 
-ROUND = Flow('project_cycle_round', '3.0.0', (
+ROUND_V3_2 = Flow('project_cycle_round', '3.2.0', (
+    Node('input_resolve', 'cycle.input_resolve'),
+    Node('design', 'cycle.round_design', ('input_resolve',)),
+    Node('design_critic', 'cycle.round_blueprint_critic', ('design',)),
+    Node('recall', 'memory.context_recall', ('design_critic',)),
+    Node('inspect', 'project.state_inspect', ('recall',)),
+    Node('plan', 'project.plan_propose', ('inspect',)),
+    Node('core_state', 'core.state_build', ('plan',), parameters={'domain': 'project'}),
+    Node('core_forecast', 'core.latent_forecast', ('core_state',)),
+    Node('core_jev', 'core.jev_evaluate', ('core_state',)),
+    Node('core_commit', 'core.commitment_freeze', ('core_forecast', 'core_jev')),
+    Node('execute', 'project.action_execute', ('core_commit',), continue_on_failure=True),
+    Node('verify', 'project.outcome_verify', ('execute',), continue_on_failure=True),
+    Node('reflect', 'project.outcome_reflect', ('verify',), continue_on_failure=True),
+    Node('core_settlement', 'core.settlement', ('reflect',), parameters={'evaluated_node': 'verify'}),
+    Node('learning_effect', 'cycle.iteration_learning_effect', ('core_settlement',)),
+    Node('next_decide', 'cycle.iteration_next_decide', ('learning_effect',)),
+    Node('budget_guard', 'cycle.iteration_budget_guard', ('next_decide',)),
+), 'One materially planned project iteration: an independent critic freezes the executable Event subset before runtime execution.')
+
+ROUND = Flow('project_cycle_round', '3.3.0', (
+    Node('input_resolve', 'cycle.input_resolve'),
+    Node('input_eligibility', 'cycle.input_eligibility', ('input_resolve',)),
+    Node('design', 'cycle.round_design', ('input_eligibility',)),
+    Node('design_critic', 'cycle.round_blueprint_critic', ('design',)),
+    Node('recall', 'memory.context_recall', ('design_critic',)),
+    Node('inspect', 'project.state_inspect', ('recall',)),
+    Node('plan', 'project.plan_propose', ('inspect',)),
+    Node('core_state', 'core.state_build', ('plan',), parameters={'domain': 'project'}),
+    Node('core_forecast', 'core.latent_forecast', ('core_state',)),
+    Node('core_jev', 'core.jev_evaluate', ('core_state',)),
+    Node('core_commit', 'core.commitment_freeze', ('core_forecast', 'core_jev')),
+    Node('execute', 'project.action_execute', ('core_commit',), continue_on_failure=True),
+    Node('verify', 'project.outcome_verify', ('execute',), continue_on_failure=True),
+    Node('reflect', 'project.outcome_reflect', ('verify',), continue_on_failure=True),
+    Node('core_settlement', 'core.settlement', ('reflect',), parameters={'evaluated_node': 'verify'}),
+    Node('learning_effect', 'cycle.iteration_learning_effect', ('core_settlement',)),
+    Node('next_decide', 'cycle.iteration_next_decide', ('learning_effect',)),
+    Node('problem_update', 'cycle.problem_portfolio_update', ('next_decide',)),
+    Node('budget_guard', 'cycle.iteration_budget_guard', ('problem_update',)),
+), 'One project iteration with corpus eligibility, a frozen Event blueprint and run-level problem-portfolio continuation.')
+ROUND_V3_3 = ROUND
+_round_34_nodes = []
+for _node in ROUND.nodes:
+    if _node.node_id == 'verify':
+        _round_34_nodes.append(Node('input_consumption', 'project.input_consumption_verify',
+                                    ('execute',), continue_on_failure=True))
+        _node = replace(_node, depends_on=('input_consumption',))
+    _round_34_nodes.append(_node)
+ROUND = replace(ROUND, version='3.4.0', nodes=tuple(_round_34_nodes),
+                description='A corpus-gated iteration that independently proves admitted-input consumption before outcome verification.')
+ROUND_V3_4 = ROUND
+_round_35_nodes = []
+for _node in ROUND.nodes:
+    if _node.node_id == 'design':
+        _round_35_nodes.append(Node('input_adequacy', 'cycle.input_adequacy',
+                                    ('input_eligibility',)))
+        _node = replace(_node, depends_on=('input_adequacy',))
+    _round_35_nodes.append(_node)
+ROUND = replace(ROUND, version='3.5.0', nodes=tuple(_round_35_nodes),
+                description='A corpus-gated iteration that checks metric adequacy and proves real input consumption.')
+
+# Immutable recovery definitions for Jobs pinned before executable blueprints.
+ROUND_V3 = Flow('project_cycle_round', '3.0.0', (
     Node('design', 'cycle.round_design'),
     Node('recall', 'memory.context_recall', ('design',)),
     Node('inspect', 'project.state_inspect', ('recall',)),
@@ -41,7 +105,7 @@ ROUND = Flow('project_cycle_round', '3.0.0', (
     Node('learning_effect', 'cycle.iteration_learning_effect', ('core_settlement',)),
     Node('next_decide', 'cycle.iteration_next_decide', ('learning_effect',)),
     Node('budget_guard', 'cycle.iteration_budget_guard', ('next_decide',)),
-), 'One dynamically numbered project iteration with an LLM decision and deterministic budget guard.')
+), 'Historical dynamic project iteration retained for pinned Jobs.')
 
 CYCLE_V1 = Flow('project_cycle', '1.1.0', (
     Node('round_one', 'cycle.round_request', parameters={'round_number': 1}),
@@ -130,7 +194,100 @@ CYCLE_V2 = Flow('project_cycle', '2.0.0', (
     Node('finish', 'cycle.finish', ('final_ack',)),
 ), 'Settlement-driven project rounds, conditional learning, then Partner-only post-run evolution audit.')
 
-CYCLE = Flow('project_cycle', '3.0.0', (
+CYCLE = Flow('project_cycle', '3.2.0', (
+    Node('initialize', 'cycle.initialize'),
+    Node('iterate', 'cycle.iteration_controller', ('initialize',)),
+    Node('benchmark', 'cycle.benchmark_request', ('iterate',)),
+    Node('benchmark_settle', 'cycle.benchmark_settle', ('benchmark',), continue_on_failure=True),
+    Node('assess', 'cycle.assess', ('benchmark_settle',)),
+    Node('seal', 'cycle.seal', ('assess',)),
+    Node('partner_audit', 'cycle.partner_audit', ('seal',)),
+    Node('evolution_gate', 'cycle.evolution_gate', ('partner_audit',)),
+    Node('evolve', 'cycle.evolution_request', ('evolution_gate',)),
+    Node('final_state', 'cycle.final_state_freeze', ('evolve',)),
+    Node('narrative', 'cycle.run_narrative', ('final_state',)),
+    Node('notify', 'presentation.notification_decide', ('narrative',)),
+    Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
+    Node('message_critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
+    Node('deduplicate', 'presentation.message_deduplicate', ('message_critic',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
+    Node('report', 'cycle.report_request', ('text_ack',), when_output='initialize.report_required'),
+    Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,
+         when_output='initialize.report_required'),
+    Node('channel_verify', 'cycle.cross_channel_verify', ('report_ack',), continue_on_failure=True),
+    Node('experience', 'cycle.memory_update', ('channel_verify',), parameters={'kind': 'lesson'}),
+    Node('growth', 'cycle.memory_update', ('experience',), parameters={'kind': 'growth'}),
+    Node('habit', 'cycle.memory_update', ('growth',), parameters={'kind': 'habit'}),
+    Node('final_summary', 'cycle.final_summary', ('habit',), continue_on_failure=True),
+    Node('final_notify', 'presentation.notification_decide', ('final_summary',)),
+    Node('final_compose', 'presentation.message_compose', ('final_notify',), continue_on_failure=True),
+    Node('final_critic', 'presentation.message_critic', ('final_compose',), continue_on_failure=True),
+    Node('final_deduplicate', 'presentation.message_deduplicate', ('final_critic',), continue_on_failure=True),
+    Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
+    Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
+    Node('finish', 'cycle.finish', ('final_ack',)),
+), 'A recoverable settlement-driven loop followed by delivery, memory, Partner audit and evolution.')
+
+# Run a requested deterministic benchmark before open-ended research rounds.
+# In 3.2 it followed ``iterate``; a deadline run could therefore spend the
+# whole work window on research and start its required baseline/candidate only
+# after the wall clock had expired.  Preserve 3.2 for pinned Jobs and make the
+# new ordering explicit in the versioned graph.
+CYCLE_V3_2 = CYCLE
+_cycle_33_nodes = []
+for _node in CYCLE.nodes:
+    if _node.node_id == 'benchmark':
+        _node = replace(_node, depends_on=('initialize',))
+    elif _node.node_id == 'benchmark_settle':
+        _node = replace(_node, depends_on=('benchmark',))
+    elif _node.node_id == 'iterate':
+        _node = replace(_node, depends_on=('benchmark_settle',))
+    elif _node.node_id == 'assess':
+        _node = replace(_node, depends_on=('iterate',))
+    _cycle_33_nodes.append(_node)
+CYCLE = replace(CYCLE, version='3.3.0', nodes=tuple(_cycle_33_nodes),
+                description='Required benchmark first, then a deadline-aware research and finalization loop.')
+CYCLE_V3_3 = CYCLE
+_cycle_34_nodes = []
+for _node in CYCLE.nodes:
+    if _node.node_id == 'benchmark':
+        _node = replace(_node, depends_on=('research_preflight',))
+    elif _node.node_id == 'channel_verify':
+        _node = replace(_node, depends_on=('semantic_claim_audit',))
+    _cycle_34_nodes.append(_node)
+_cycle_34_nodes.insert(1, Node('research_preflight', 'cycle.research_preflight', ('initialize',)))
+report_ack_index = next(i for i, node in enumerate(_cycle_34_nodes) if node.node_id == 'report_ack')
+_cycle_34_nodes.insert(report_ack_index + 1,
+                       Node('semantic_claim_audit', 'cycle.semantic_claim_audit', ('report_ack',),
+                            continue_on_failure=True))
+CYCLE = replace(CYCLE, version='3.4.0', nodes=tuple(_cycle_34_nodes),
+                description='Run-level research contract, corpus-gated rounds, problem portfolio and semantic delivery audit.')
+CYCLE_V3_4 = CYCLE
+# Claims must be audited and, when necessary, repaired before either QQ/Web
+# text or the PDF child is allowed to render and send them.  The previous 3.4
+# graph audited only after both channels had already delivered the content.
+_cycle_35_nodes = []
+for _node in CYCLE.nodes:
+    if _node.node_id == 'semantic_claim_audit':
+        continue
+    if _node.node_id == 'notify':
+        _node = replace(_node, depends_on=('semantic_claim_reaudit',))
+    elif _node.node_id == 'channel_verify':
+        _node = replace(_node, depends_on=('report_ack',))
+    _cycle_35_nodes.append(_node)
+_narrative_index = next(i for i, node in enumerate(_cycle_35_nodes)
+                        if node.node_id == 'narrative')
+_cycle_35_nodes[_narrative_index + 1:_narrative_index + 1] = [
+    Node('semantic_claim_audit', 'cycle.semantic_claim_audit', ('narrative',),
+         continue_on_failure=True),
+    Node('semantic_claim_repair', 'cycle.semantic_claim_repair', ('semantic_claim_audit',)),
+    Node('semantic_claim_reaudit', 'cycle.semantic_claim_audit', ('semantic_claim_repair',)),
+]
+CYCLE = replace(CYCLE, version='3.5.0', nodes=tuple(_cycle_35_nodes),
+                description='Audit and repair outward claims before delivery; then verify all rendered channels.')
+
+CYCLE_V3 = Flow('project_cycle', '3.0.0', (
     Node('initialize', 'cycle.initialize'),
     Node('iterate', 'cycle.iteration_controller', ('initialize',)),
     Node('assess', 'cycle.assess', ('iterate',)),
@@ -158,7 +315,31 @@ CYCLE = Flow('project_cycle', '3.0.0', (
     Node('final_send', 'delivery.send_text', ('final_deduplicate',), continue_on_failure=True),
     Node('final_ack', 'cycle.delivery_settle', ('final_send',), continue_on_failure=True),
     Node('finish', 'cycle.finish', ('final_ack',)),
-), 'A recoverable settlement-driven loop followed by delivery, memory, Partner audit and evolution.')
+), 'Historical v3 cycle retained for pinned Jobs.')
+
+# Public semantic names.  ``project_cycle`` remains versioned for recovery of
+# already-pinned Jobs; new intake uses an explicit top-level workstream.
+PROJECT_RESEARCH_CYCLE_V1_1 = replace(
+    CYCLE_V3_2, name='project_research_cycle', version='1.1.0',
+    description='Historical project research graph with benchmark after iteration.')
+PROJECT_RESEARCH_CYCLE = replace(
+    CYCLE, name='project_research_cycle', version='1.4.0',
+    description='Project research with pre-delivery claim repair, corpus gating, problem portfolio and post-run Partner audit.')
+META_CYCLE = Flow('meta_cycle', '2.0.0', (
+    Node('meta_initialize', 'meta.initialize'),
+    Node('coordinate', 'meta.coordinate', ('meta_initialize',)),
+    Node('finalize', 'meta.finalize', ('coordinate',)),
+    Node('notify', 'presentation.notification_decide', ('finalize',)),
+    Node('compose', 'presentation.message_compose', ('notify',), continue_on_failure=True),
+    Node('critic', 'presentation.message_critic', ('compose',), continue_on_failure=True),
+    Node('deduplicate', 'presentation.message_deduplicate', ('critic',), continue_on_failure=True),
+    Node('send', 'delivery.send_text', ('deduplicate',), continue_on_failure=True),
+    Node('text_ack', 'cycle.delivery_settle', ('send',), continue_on_failure=True),
+    Node('report', 'cycle.report_request', ('text_ack',), when_output='meta_initialize.report_required'),
+    Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,
+         when_output='meta_initialize.report_required'),
+    Node('finish', 'meta.finish', ('report_ack',)),
+), 'Explicit coordinator that runs project, learning and evolution as separate child workstreams and merges terminal evidence.')
 
 def evolution_flow(expanded=False, repair_tests=False, preflight_revision=False):
     nodes = []
@@ -256,7 +437,7 @@ EVOLUTION_ATTEMPT = Flow('autonomous_evolution_attempt', '1.0.0', (
 ), 'One isolated self-evolution candidate with matched evidence and a guarded next decision.')
 
 
-AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.0.0', (
+AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.1.0', (
     Node('collect', 'autoevolution.collect'),
     Node('read_plan', 'autoevolution.read_plan', ('collect',)),
     Node('sources', 'autoevolution.sources', ('read_plan',)),
@@ -266,7 +447,8 @@ AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.0.0', (
     Node('reconsider', 'autoevolution.read_plan', ('design',)),
     Node('sources_extra', 'autoevolution.sources', ('reconsider',)),
     Node('design_confirm', 'autoevolution.design', ('sources_extra',)),
-    Node('tests', 'autoevolution.tests', ('design_confirm',)),
+    Node('target_consistency', 'autoevolution.target_consistency', ('design_confirm',)),
+    Node('tests', 'autoevolution.tests', ('target_consistency',)),
     Node('tests_preflight', 'autoevolution.tests_preflight', ('tests',)),
     Node('tests_review', 'autoevolution.tests_review', ('tests_preflight',)),
     Node('test_repair_v2', 'autoevolution.test_repair_v2', ('tests_review',)),
@@ -285,6 +467,13 @@ AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.0.0', (
     Node('rollback_verify', 'autoevolution.rollback_verify', ('rollback',)),
     Node('record', 'autoevolution.record', ('rollback_verify',)),
 ), 'Dynamic self-evolution attempts; each attempt is isolated and the LLM may revise until a guard stops it.')
+
+AUTONOMOUS_EVOLUTION_V3 = replace(
+    AUTONOMOUS_EVOLUTION, version='3.0.0',
+    nodes=tuple(
+        replace(node, depends_on=('design_confirm',)) if node.node_id == 'tests' else node
+        for node in AUTONOMOUS_EVOLUTION.nodes if node.node_id != 'target_consistency'),
+    description='Historical v3 autonomous evolution retained for pinned Jobs.')
 
 
 
@@ -308,7 +497,14 @@ def _improvement_flow_definitions(local_learning=True):
         ("experiment_request", "improvement.experiment_request", ("opportunity_select",)),
         ("outcome_settle", "improvement.outcome_settle", ("experiment_request",)),
         ("memory_consolidate", "improvement.memory_consolidate", ("outcome_settle",)),
-        ("finish", "improvement.finish", ("memory_consolidate",)),
+        ("iterate_more", "improvement.iteration_controller", ("memory_consolidate",)),
+        ("narrative", "improvement.narrative", ("iterate_more",)),
+        ("send_message", "delivery.send_text", ("narrative",)),
+        ("improvement_message_ack", "cycle.delivery_settle", ("send_message",)),
+        ("render", "improvement.report", ("improvement_message_ack",)),
+        ("send_report", "delivery.send_pdf", ("render",)),
+        ("improvement_report_ack", "cycle.delivery_settle", ("send_report",)),
+        ("finish", "improvement.finish", ("improvement_report_ack",)),
     )
     # 02 learning_improvement: no observe steps; recall is the root.
     learning_nodes = (
@@ -327,33 +523,73 @@ def _improvement_flow_definitions(local_learning=True):
             ('local_read','improvement.local_read',('recall',)),
             ('local_compare','improvement.local_compare',('local_read',)),
             ('local_ideas','improvement.local_idea_record',('local_compare',)),
-            ('evidence_seal','improvement.evidence_seal',('local_ideas',)),
-            *learning_nodes[2:])
+            ('learning_commitment','improvement.learning_commitment',('local_ideas',)),
+            ('learning_evaluate','improvement.learning_downstream_evaluate',('learning_commitment',)),
+            ('learning_settlement','improvement.learning_settlement',('learning_evaluate',)),
+            ('evidence_seal','improvement.evidence_seal',('learning_settlement',)),
+            *learning_nodes[2:-1],
+            ('iterate_more','improvement.iteration_controller',('memory_consolidate',)),
+            ('narrative','improvement.narrative',('iterate_more',)),
+            ('send_message','delivery.send_text',('narrative',)),
+            ('improvement_message_ack','cycle.delivery_settle',('send_message',)),
+            ('render','improvement.report',('improvement_message_ack',)),
+            ('send_report','delivery.send_pdf',('render',)),
+            ('improvement_report_ack','cycle.delivery_settle',('send_report',)),
+            ('finish','improvement.finish',('improvement_report_ack',)))
 
     def build(nodes, name, version, description):
         flow_nodes = []
         for entry in nodes:
             nid, ev = entry[0], entry[1]
             deps = entry[2] if len(entry) == 3 else ()
-            flow_nodes.append(FlowNode(nid, 'improvement.' + ev.split('.')[1], deps))
+            flow_nodes.append(FlowNode(nid, ev, deps))
         return Flow(name, version, tuple(flow_nodes), description)
 
-    self_flow = build(self_nodes, 'self_improvement_cycle', '1.1.0',
+    self_flow = build(self_nodes, 'self_improvement_cycle', '1.4.0' if local_learning else '1.1.0',
         'Internal-mechanism improvement driven by runtime observation; feeds shared autonomous_evolution child.')
-    learning_flow = build(learning_nodes, 'learning_improvement_cycle', '1.3.0' if local_learning else '1.1.0',
+    learning_flow = build(learning_nodes, 'learning_improvement_cycle', '1.7.0' if local_learning else '1.1.0',
         'External-learning driven improvement; feeds shared autonomous_evolution child.')
-    return [self_flow, learning_flow]
+    def through_memory(nodes):
+        rows = []
+        for entry in nodes:
+            if entry[0] in {'iterate_more', 'narrative', 'send_message',
+                             'improvement_message_ack', 'render', 'send_report',
+                             'improvement_report_ack', 'finish'}:
+                continue
+            rows.append(entry)
+        rows.append(('finish', 'improvement.finish', ('memory_consolidate',)))
+        return tuple(rows)
+    # v1.0.0 is the historical single-pass graph.  Giving the current child
+    # the same version let the historical registry entry silently replace its
+    # active-learning nodes for pinned child execution.
+    self_round = build(through_memory(self_nodes), 'self_improvement_round',
+        '1.1.0' if local_learning else '1.0.0',
+        'One evidence and matched-experiment self-improvement round without user delivery.')
+    learning_round = build(through_memory(learning_nodes), 'learning_improvement_round',
+        '1.1.0' if local_learning else '1.0.0',
+        'One novel-source active-learning round without user delivery.')
+    return [self_flow, learning_flow, self_round, learning_round]
 
 
-_SELF_IMPROVEMENT_DEFS, _LEARNING_IMPROVEMENT_DEFS = None, None
+_IMPROVEMENT_DEFS = None
 def get_improvement_flow_definitions():
-    global _SELF_IMPROVEMENT_DEFS, _LEARNING_IMPROVEMENT_DEFS
-    if _SELF_IMPROVEMENT_DEFS is None:
-        _SELF_IMPROVEMENT_DEFS, _LEARNING_IMPROVEMENT_DEFS = _improvement_flow_definitions()
-    return _SELF_IMPROVEMENT_DEFS, _LEARNING_IMPROVEMENT_DEFS
+    global _IMPROVEMENT_DEFS
+    if _IMPROVEMENT_DEFS is None:
+        _IMPROVEMENT_DEFS = _improvement_flow_definitions()
+    return list(_IMPROVEMENT_DEFS)
 def _resolved_definitions():
-    return [ROUND, CYCLE, EVOLUTION_ATTEMPT, AUTONOMOUS_EVOLUTION, *get_improvement_flow_definitions()]
+    return [ROUND, CYCLE, PROJECT_RESEARCH_CYCLE, META_CYCLE,
+            EVOLUTION_ATTEMPT, AUTONOMOUS_EVOLUTION, *get_improvement_flow_definitions()]
 
 DEFINITIONS = _resolved_definitions()
 DEFINITIONS_BY_VERSION = {'2.0.0': evolution_flow_v2()}
-HISTORICAL = [ROUND_V1, ROUND_V2, CYCLE_V1, CYCLE_V2, evolution_flow(), evolution_flow(expanded=True), evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]
+HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
+              CYCLE_V1, CYCLE_V2, CYCLE_V3, CYCLE_V3_2, CYCLE_V3_3, CYCLE_V3_4,
+              replace(CYCLE_V3, name='project_research_cycle', version='1.0.0'),
+              PROJECT_RESEARCH_CYCLE_V1_1,
+              replace(CYCLE_V3_4, name='project_research_cycle', version='1.3.0'),
+              replace(CYCLE_V3, name='meta_cycle', version='1.0.0'),
+              replace(CYCLE, name='meta_cycle', version='1.1.0'),
+              AUTONOMOUS_EVOLUTION_V3,
+              evolution_flow(), evolution_flow(expanded=True),
+              evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]

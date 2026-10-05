@@ -17,6 +17,50 @@ import json
 import os
 
 
+def _compact_payload(obj):
+    """Content-addressed compaction for large repeated payloads."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+
+    try:
+        serialized = json.dumps(obj, sort_keys=True, separators=(',', ':'))
+    except TypeError:
+        return obj
+
+    digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+    # Only compact if large (>1KB) to avoid overhead on small objects
+    if len(serialized) > 1024:
+        return {'$ref': f'sha256:{digest}', '_original_size': len(serialized)}
+    return obj
+
+
+
+def _compact_payload(obj):
+    """Content-addressed compaction for large repeated payloads."""
+    if not isinstance(obj, (dict, list)):
+        return obj
+
+    # Serialize to canonical JSON string for hashing
+    try:
+        serialized = json.dumps(obj, sort_keys=True, separators=(',', ':'))
+    except TypeError:
+        return obj # Non-serializable, leave as is
+
+    digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+    # In a real implementation, we'd check a global registry per run context.
+    # For this isolated test/modification, we replace large objects with refs if they exceed size threshold
+    # and assume a sidecar index exists or is managed by the caller.
+    # To make this safe for production without breaking consumers immediately,
+    # we only compact if the object is large (>1KB) and we mark it.
+
+    if len(serialized) > 1024:
+        return {'': f'sha256:{digest}', '_original_size': len(serialized)}
+    return obj
+
+
+
 _SECRET_PARTS = ("api_key", "apikey", "authorization", "access_token",
                  "refresh_token", "token", "password", "passwd", "secret", "cookie")
 _MAX_STRING = 20_000

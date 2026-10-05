@@ -39,7 +39,10 @@ def question_formulate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def source_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     return _llm(ctx, params, "learning_source_plan",
-        "为问题设计多源检索计划，优先论文原文、官方文档和源代码。字段 queries,source_types,primary_sources,crosscheck_rule,download_plan。")
+        "为问题设计多源检索计划，优先论文原文、官方文档和源代码。字段 "
+        "queries,source_types,primary_sources,crosscheck_rule,download_plan。queries每项必须有text；"
+        "primary_sources若给URL，必须是可直接读取的精确http(s) URL，不得是通配模式、搜索语法或"
+        "需要再点击的列表页。本地路径只能来自本轮已验证的输入清单；禁止从记忆猜测历史job路径，禁止通配符。")
 
 
 def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -53,18 +56,39 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     queries = previous.get("queries") or params.get("queries") or []
     if isinstance(queries, str):
         queries = [queries]
+    query_texts = [str(row.get('text') or row.get('query') or '') if isinstance(row, dict)
+                   else str(row) for row in queries]
+    query_texts = [row for row in query_texts if row.strip()]
     sources: list[dict[str, str]] = []
     # Plans commonly separate canonical URLs into ``download_plan`` while
     # ``primary_sources`` contains local evidence.  Both are authoritative
     # planner outputs; ignoring download_plan made a valid plan retrieve zero
     # sources and then incorrectly continue the parent cycle.
     proposed = list(previous.get('primary_sources') or params.get('sources') or [])
-    proposed.extend(previous.get('download_plan') or [])
+    download_plan = previous.get('download_plan') or []
+    if isinstance(download_plan, dict):
+        download_plan = download_plan.get('steps') or []
+    proposed.extend(download_plan)
+    local_proposed: list[Path] = []
+    # The parent research Flow may hand over the current round's already
+    # admitted, hash-bound sources.  They are a reliable fallback when a web
+    # provider is unavailable and avoid guessing stale paths from memory.
+    for raw in params.get('evidence_refs') or []:
+        path = Path(str(raw)).expanduser()
+        if path.is_file() and '*' not in str(path):
+            local_proposed.append(path)
     for row in proposed:
-        url = row.get('url') if isinstance(row,dict) else str(row)
-        if url and url.startswith(('https://','http://')): sources.append({'url':url})
+        value = (row.get('url') or row.get('target') or '') if isinstance(row,dict) else str(row)
+        value = str(value).strip()
+        if value.startswith(('https://','http://')) and '*' not in value:
+            sources.append({'url': value})
+        elif value.startswith('/') and '*' not in value:
+            candidate = Path(value).expanduser()
+            if candidate.is_file():
+                local_proposed.append(candidate)
+    local_proposed = list(dict.fromkeys(path.resolve() for path in local_proposed))
     if not local_value and not sources and hasattr(adapter, "search_web"):
-        for query in list(queries)[:4]:
+        for query in query_texts[:4]:
             for row in adapter.search_web(str(query))[:5]:
                 if str(getattr(row,'url','')).startswith(('https://','http://')):
                     sources.append({'url':str(row.url),'title':str(row.title),'query':str(query)})
@@ -73,7 +97,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "使用真实联网检索能力执行以下查询，优先论文原文、官方文档和源码仓库。"
             "不要凭模型记忆补 URL。只输出 JSON：{\"sources\":[{\"query\":\"\","
             "\"title\":\"\",\"url\":\"https://...\",\"snippet\":\"\"}]}。\n查询="
-            + json.dumps(list(queries)[:4], ensure_ascii=False)
+            + json.dumps(query_texts[:4], ensure_ascii=False)
             + "\n工作目录：" + str(getattr(ctx, "working_dir", "") or str(ctx.workspace)+"/state/event_runtime/source_search") + "/" + str(params.get("flow_id") or "standalone")
         )
         try:
@@ -84,7 +108,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         except (RuntimeError, ValueError, TypeError):
             pass
     if not local_value and not sources and hasattr(adapter, "search_web"):
-        for query in list(queries)[:4]:
+        for query in query_texts[:4]:
             for row in adapter.search_web(str(query))[:5]:
                 if str(getattr(row, "url", "")).startswith(("https://", "http://")):
                     sources.append({"query": str(query), "title": str(row.title),
@@ -95,8 +119,42 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     work = Path(getattr(ctx,'working_dir', '') or Path(ctx.workspace)/'state/event_runtime/work'/str(getattr(ctx,'job_id','learning')))
     directory = work / 'sources' / str(params.get('flow_id') or 'standalone')
     downloaded, failures = [], []
+    if local_proposed and not local_value:
+        # Exact paths emitted from the current Event context are admissible;
+        # guessed, wildcarded historical paths were filtered above.
+        local_root = Path('/')
+        local_value = '/'
+        constraints = {**constraints, 'local_learning_files': [str(p) for p in local_proposed]}
     if local_value and local_root.is_dir():
-        preferred = [local_root / name for name in ('manifest.json', 'README.md', 'run_arm.py')]
+        # Local learning is index first.  Callers may freeze an explicit file
+        # set; the curated external catalog is the fallback for the shared
+        # ``external`` corpus.  This avoids recursively scanning hundreds of
+        # historical files on every Event while still reading real sources.
+        preferred: list[Path] = []
+        declared = constraints.get('local_learning_files') or []
+        if isinstance(declared, str):
+            declared = [declared]
+        for raw in declared:
+            candidate = Path(str(raw)).expanduser().resolve()
+            try:
+                candidate.relative_to(local_root.resolve())
+            except ValueError:
+                continue
+            preferred.append(candidate)
+        catalog_path = Path(ctx.workspace) / 'share/mind/external/catalog.json'
+        if not preferred and catalog_path.is_file():
+            try:
+                catalog = json.loads(catalog_path.read_text(encoding='utf-8'))
+                catalog_root = Path(str(catalog.get('external_root') or '')).resolve()
+                if catalog_root == local_root.resolve():
+                    preferred.extend(Path(str(row.get('path') or '')) for row in
+                                     (catalog.get('sources') or [])[:6]
+                                     if isinstance(row, dict) and row.get('exists'))
+            except (OSError, ValueError, TypeError):
+                pass
+        if not preferred:
+            preferred = [local_root / name for name in
+                         ('manifest.json', 'README.md', 'run_arm.py')]
         for source in preferred:
             if not source.is_file() or source.stat().st_size > 2_000_000:
                 continue

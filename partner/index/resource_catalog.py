@@ -38,9 +38,15 @@ class ResourceCatalog:
         path=Path(path).resolve();c=get_connection(self.db)
         if not path.is_file():
             c.execute('DELETE FROM files WHERE path=?',(str(path),));return
-        st=path.stat();old=c.execute('SELECT mtime,size FROM files WHERE path=?',(str(path),)).fetchone()
+        st=path.stat();metadata_json=json.dumps(metadata or {})
+        old=c.execute('SELECT mtime,size,kind,scope,metadata FROM files WHERE path=?',
+                      (str(path),)).fetchone()
         if old and old['mtime']==st.st_mtime_ns and old['size']==st.st_size:
-            c.execute('UPDATE files SET kind=?,scope=?,metadata=? WHERE path=?',(kind,str(scope),json.dumps(metadata or {}),str(path)))
+            if (old['kind']==kind and old['scope']==str(scope)
+                    and (old['metadata'] or '{}')==metadata_json):
+                return
+            c.execute('UPDATE files SET kind=?,scope=?,metadata=? WHERE path=?',
+                      (kind,str(scope),metadata_json,str(path)))
             return
         body='';sha=''
         if path.suffix.lower() in {'.py','.md','.txt','.json','.yaml','.yml','.csv'} and st.st_size<=max_bytes:
@@ -48,7 +54,7 @@ class ResourceCatalog:
             if len(raw)<=max_bytes:
                 body=raw.decode('utf-8',errors='replace');sha=hashlib.sha256(raw).hexdigest()
         c.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?)',
-            (str(path),kind,str(scope),st.st_mtime_ns,st.st_size,sha,body,json.dumps(metadata or {})))
+            (str(path),kind,str(scope),st.st_mtime_ns,st.st_size,sha,body,metadata_json))
 
     def query(self,kind,*,scope=None,terms=(),limit=20):
         clauses=['kind=?'];args=[kind]
@@ -80,8 +86,19 @@ class ResourceCatalog:
                 self.register(path,kind,scope);seen.add(str(path.resolve()));count+=1
         c=get_connection(self.db)
         for row in c.execute('SELECT path FROM files WHERE kind=? AND scope=?',(kind,str(scope))).fetchall():
-            if Path(row['path']).is_relative_to(root) and row['path'] not in seen:c.execute('DELETE FROM files WHERE path=?',(row['path'],))
+            indexed=Path(row['path'])
+            if not indexed.exists() or (indexed.is_relative_to(root) and row['path'] not in seen):
+                c.execute('DELETE FROM files WHERE path=?',(row['path'],))
         c.execute("INSERT OR REPLACE INTO maintenance VALUES (?,datetime('now'))",(str(root),))
+        return count
+
+    def purge_scope(self,kind,scope):
+        """Remove one retired derived scope during an explicit migration."""
+        c=get_connection(self.db)
+        row=c.execute('SELECT COUNT(*) AS n FROM files WHERE kind=? AND scope=?',
+                      (kind,str(scope))).fetchone()
+        count=int(row['n'])
+        c.execute('DELETE FROM files WHERE kind=? AND scope=?',(kind,str(scope)))
         return count
 
 

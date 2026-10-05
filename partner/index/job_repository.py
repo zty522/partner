@@ -259,9 +259,9 @@ class JobRepository:
         )
 
     def _record_to_row(self, record):
-        def _ts(v):
+        def _ts(v, *, default_now=True):
             if v is None or v == "":
-                return _now()
+                return _now() if default_now else None
             if isinstance(v, (int, float)):
                 return float(v)
             try:
@@ -271,7 +271,7 @@ class JobRepository:
                     text = text[:-1] + "+00:00"
                 return datetime.fromisoformat(text).timestamp()
             except Exception:
-                return _now()
+                return _now() if default_now else None
 
         def _js(v):
             if v is None:
@@ -287,6 +287,14 @@ class JobRepository:
             if isinstance(v, (dict, list)):
                 return json.dumps(v, ensure_ascii=False, sort_keys=True)
             return str(v)
+
+        status = record.get("status", "queued")
+        updated_at = _ts(record.get("updated_at"))
+        started_at = _ts(record.get("started_at"), default_now=False)
+        finished_at = _ts(record.get("finished_at"), default_now=False)
+        if status in {"completed", "failed", "cancelled"} and (
+                finished_at is None or finished_at < updated_at):
+            finished_at = updated_at
 
         return (
             record.get("job_id", ""),
@@ -313,15 +321,15 @@ class JobRepository:
             record.get("report_policy"),
             record.get("error"),
             int(record.get("priority") or 100),
-            record.get("status", "queued"),
+            status,
             int(record.get("revision") or 0),
             int(record.get("fencing_token") or 0),
             1 if record.get("cancel_requested") else 0,
-            float(record.get("next_run_at") or _ts(record.get("updated_at"))),
+            float(record.get("next_run_at") or updated_at),
             _ts(record.get("created_at")),
-            _ts(record.get("updated_at")),
-            _ts(record.get("started_at")),
-            _ts(record.get("finished_at")),
+            updated_at,
+            started_at,
+            finished_at,
             _js(record.get("ready_event_ids")),
             _js(record.get("completed_event_ids")),
             _js(record.get("suspended_flows")),
@@ -396,6 +404,12 @@ class JobRepository:
                     priority = COALESCE(jobs.priority, 100),
                     status = excluded.status,
                     updated_at = excluded.updated_at,
+                    started_at = COALESCE(jobs.started_at, excluded.started_at),
+                    finished_at = CASE
+                        WHEN excluded.status IN ('completed', 'failed', 'cancelled')
+                        THEN COALESCE(excluded.finished_at, excluded.updated_at)
+                        ELSE jobs.finished_at
+                    END,
                     ready_event_ids_json = excluded.ready_event_ids_json,
                     completed_event_ids_json = excluded.completed_event_ids_json,
                     suspended_flows_json = excluded.suspended_flows_json,
@@ -502,7 +516,7 @@ class JobRepository:
                 WHERE status IN ({placeholders})
                   AND cancel_requested = 0
                   AND next_run_at <= ?
-                  AND (lease_owner IS NULL OR (status != 'running' AND (lease_expiry IS NULL OR lease_expiry < ?)))
+                  AND (lease_owner IS NULL OR lease_expiry IS NULL OR lease_expiry < ?)
                 ORDER BY priority ASC, next_run_at ASC, created_at ASC
                 LIMIT 1""",
                 (*statuses, now, now),
@@ -539,6 +553,14 @@ class JobRepository:
             conn.execute("ROLLBACK")
             raise
 
+    def is_ready(self, job_id: str) -> bool:
+        """Return whether the scheduling index currently contains ``job_id``."""
+        self._ensure_schema()
+        row = get_connection(self.db_path).execute(
+            "SELECT 1 FROM ready_jobs WHERE job_id = ? LIMIT 1", (str(job_id),)
+        ).fetchone()
+        return row is not None
+
     def claim_job(self, job_id, *, owner, instance_id="", now=None,
                   statuses=("queued", "dispatched", "running")):
         """Atomically claim a SPECIFIC job_id.
@@ -564,7 +586,7 @@ class JobRepository:
                 WHERE job_id = ?
                   AND status IN ({placeholders})
                   AND cancel_requested = 0
-                  AND (lease_owner IS NULL OR (status != 'running' AND (lease_expiry IS NULL OR lease_expiry < ?)))""",
+                  AND (lease_owner IS NULL OR lease_expiry IS NULL OR lease_expiry < ?)""",
                 (job_id, *statuses, now),
             ).fetchone()
             if row is None:
@@ -784,7 +806,7 @@ class JobRepository:
         return True
 
     def list_by_status(self, statuses, *, limit=100, job_id="", flow_id="",
-                       root_event_id=""):
+                       root_event_id="", order_by="queue"):
         """List jobs by status, with optional **SQL-level** scoping.
 
         ``job_id`` / ``flow_id`` / ``root_event_id`` are applied inside the WHERE
@@ -804,12 +826,14 @@ class JobRepository:
             if value:
                 clauses.append(f"{column} = ?")
                 params.append(str(value))
+        order = ("updated_at DESC, created_at DESC" if order_by == "updated_desc"
+                 else "priority ASC, created_at ASC")
         rows = get_connection(self.db_path).execute(
             "SELECT job_id, project_id, status, priority, assigned_instance, "
             "flow_id, root_event_id, "
             "next_run_at, created_at, updated_at, fencing_token, cancel_requested "
             "FROM jobs WHERE " + " AND ".join(clauses) +
-            " ORDER BY priority ASC, created_at ASC LIMIT ?",
+            " ORDER BY " + order + " LIMIT ?",
             (*params, int(limit)),
         ).fetchall()
         return [dict(r) for r in rows]

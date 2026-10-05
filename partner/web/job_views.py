@@ -33,7 +33,7 @@ def register_job_views(app: Any) -> None:
             from partner.index.job_repository import init as _init_repo
             repo = _init_repo(ws)
             statuses = [status] if status else ["queued", "dispatched", "running", "paused", "completed", "failed", "cancelled"]
-            rows = repo.list_by_status(statuses, limit=limit)
+            rows = repo.list_by_status(statuses, limit=limit, order_by="updated_desc")
         except Exception as exc:
             return jsonify({"error": str(exc)}), 503
         allowed = {str(value) for value in sub.get("allowed_instances") or []}

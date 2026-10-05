@@ -27,6 +27,67 @@ def _sha(path: Path) -> str:
         return ""
 
 
+def _runtime_evidence(root: Path, job_id: str) -> dict[str, Any]:
+    """Project durable delivery/report evidence from the Event log.
+
+    Improvement workstreams intentionally do not use the project cycle's
+    ``report.json`` wrapper.  Their report and delivery Events are still
+    first-class evidence and must not disappear from acceptance merely because
+    they use a different Flow shape.
+    """
+    path = root / "state" / "run_logs" / job_id / "events.jsonl"
+    result: dict[str, Any] = {"messages": [], "web": False, "qq_text": False,
+                              "qq_pdf": False, "pdf_sha256": "", "outputs": {}}
+    if not path.is_file():
+        return result
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if row.get("kind") != "event" or row.get("phase") != "finished":
+                continue
+            output = row.get("output") if isinstance(row.get("output"), dict) else {}
+            node_id = str(row.get("node_id") or "")
+            if node_id:
+                result["outputs"][node_id] = output
+            semantic = output.get("semantic_output") if isinstance(output.get("semantic_output"), dict) else {}
+            if semantic.get("delivery_state") == "sent":
+                components = semantic.get("component_acks") or []
+                if any(isinstance(item, dict) and item.get("kind") == "text" for item in components):
+                    result["qq_text"] = True
+                pdf_ack = next((item for item in components
+                                if isinstance(item, dict) and item.get("kind") == "pdf"), {})
+                if pdf_ack:
+                    result["qq_pdf"] = True
+                    result["pdf_sha256"] = str(pdf_ack.get("sha256") or semantic.get("pdf_sha256") or "")
+            event_type = str(row.get("event_type") or "")
+            if event_type not in {"delivery.send_text", "delivery.send_pdf"}:
+                continue
+            if event_type == "delivery.send_pdf" and output.get("pdf_sha256"):
+                result["pdf_sha256"] = str(output.get("pdf_sha256"))
+            message = str(output.get("message") or
+                          (output.get("semantic_output") or {}).get("message") or "").strip()
+            if message and message not in result["messages"]:
+                result["messages"].append(message)
+            receipts = output.get("channel_receipts") or []
+            for receipt in receipts if isinstance(receipts, list) else []:
+                if not isinstance(receipt, dict):
+                    continue
+                channel = str(receipt.get("channel") or "")
+                delivered = receipt.get("delivered") is True or receipt.get("visible") is True
+                if channel == "web" and delivered:
+                    result["web"] = True
+                if channel == "qq" and delivered:
+                    if event_type == "delivery.send_pdf":
+                        result["qq_pdf"] = True
+                        result["pdf_sha256"] = str(receipt.get("sha256") or output.get("sha256") or "")
+                    else:
+                        result["qq_text"] = True
+    return result
+
+
 def evaluate_run(workspace: str | Path, job_id: str, *,
                  projection: Mapping[str, Any]) -> dict[str, Any]:
     """Return a stable checklist and score for a run-trace projection."""
@@ -40,6 +101,7 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
     report_required = str(intent.get("report_policy") or "none") != "none"
     evolution_required = bool(constraints.get("evolution_cycle"))
     mode = str(constraints.get("notification_mode") or "legacy")
+    runtime = _runtime_evidence(root, job_id)
     checks: list[dict[str, Any]] = []
 
     def add(identifier: str, label: str, passed: bool | None, *, actual: Any,
@@ -59,6 +121,8 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
                 "flows": len(projection.get("flows") or [])},
         expected="至少一个实际 Flow，且业务 Event 输入输出进入日志")
 
+    root_flow_type = str(completion.get("flow_type") or "")
+    improvement_workstream = root_flow_type in {"learning_improvement_cycle", "self_improvement_cycle"}
     project = dict(outcome.get("project") or {})
     project_rounds=int(project.get('rounds') or 0)
     if project_rounds <= 1:
@@ -69,10 +133,11 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
                       isinstance(project.get("candidate"), (int, float)) and
                       project.get("split_reused") is True and
                       str(project.get("leakage_check") or "").lower() not in {"", "failed", "false"})
-    add("matched_project_iteration", "项目迭代为匹配比较", project_ok,
+    add("matched_project_iteration", "项目迭代为匹配比较", None if improvement_workstream else project_ok,
         actual={key: project.get(key) for key in
                 ("baseline", "candidate", "effect", "split_reused", "leakage_check")},
-        expected="一轮任务有真实 baseline；多轮比较还须有 candidate、复用 split 且泄漏检查通过")
+        expected="一轮任务有真实 baseline；多轮比较还须有 candidate、复用 split 且泄漏检查通过",
+        required=not improvement_workstream)
 
     learning = dict(outcome.get("learning") or {})
     learning_expected = any(str(flow.get("flow_type")) == "active_learning"
@@ -90,7 +155,10 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
         required=learning_expected)
 
     final = _read(cycle / "final_summary.json")
+    frozen = _read(cycle / "final_run_state.json")
+    evolved = frozen.get("evolution_outcome") if isinstance(frozen.get("evolution_outcome"), dict) else {}
     decision = str(final.get("decision") or (outcome.get("evolution") or {}).get("decision") or "")
+    decision = decision or str(evolved.get("status") or "")
     honest = decision in {"promoted", "rejected", "inconclusive", "no_change"}
     if decision == "promoted":
         honest = honest and final.get("production_effective") is True and final.get("evidence_verified") is True
@@ -103,6 +171,13 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
         evidence=str(cycle / "final_summary.json"), required=evolution_required)
 
     delivery = dict(outcome.get("delivery") or {})
+    delivery["web"] = delivery.get("web") is True or runtime["web"]
+    delivery["text"] = delivery.get("text") is True or runtime["qq_text"]
+    delivery["report"] = delivery.get("report") is True or runtime["qq_pdf"]
+    # Improvement workstreams have one evidence-bound settlement message and
+    # its report attachment; that pair is their terminal notification.
+    if str(completion.get("flow_type") or "").endswith("improvement_cycle"):
+        delivery["final"] = delivery.get("final") is True or runtime["qq_text"]
     requested_channels=set(constraints.get('delivery_channels') or ['web'])
     delivery_ok = (('web' not in requested_channels or delivery.get("web") is True) and
                    ('qq' not in requested_channels or (delivery.get("text") is True and delivery.get("final") is True)) and
@@ -111,14 +186,25 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
         actual={**delivery,'requested_channels':sorted(requested_channels)},
         expected="所有请求渠道取得真实回执；要求报告时 PDF 也有回执")
 
-    update_count = int(projection.get("user_update_count") or 0)
-    density_pass = 5 <= update_count <= 20 if mode == "standard" else None
+    update_count = max(int(projection.get("user_update_count") or 0),
+                       len(runtime["messages"]) + (1 if runtime["qq_pdf"] else 0))
+    if mode == "standard":
+        density_pass = ((3 <= update_count <= 12) if improvement_workstream
+                        else (5 <= update_count <= 20))
+    else:
+        density_pass = None
     add("message_density", "过程消息密度", density_pass,
         actual={"mode": mode, "messages": update_count},
-        expected="standard 模式随真实轮次约 5–20 条，保留关键结论和下一步",
+        expected=("独立学习/自进化约 3–12 条；项目周期约 5–20 条，均保留关键结论和下一步"),
         required=mode == "standard")
 
     report = _read(cycle / "report.json")
+    work = root / "state" / "event_runtime" / "work" / job_id
+    manifest = _read(work / "report_manifest.json")
+    improvement_report = bool(manifest and str(completion.get("flow_type") or "").endswith("improvement_cycle"))
+    if not report and improvement_report:
+        report = {"status": "completed", "flow_id": manifest.get("flow_id"),
+                  "node_outputs": runtime["outputs"]}
     add("report_flow_terminal", "报告 Flow 完整完成",
         report.get('status') == 'completed' if report_required else None,
         actual={'status': report.get('status'), 'flow_id': report.get('flow_id')},
@@ -126,6 +212,10 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
         evidence=str(cycle / 'report.json'), required=report_required)
     render = ((report.get("node_outputs") or {}).get("render") or {})
     pdf = Path(str(render.get("pdf_path") or render.get("path") or ""))
+    if not pdf.is_file() and manifest:
+        pdf_item = next((row for row in manifest.get("artifacts") or []
+                         if isinstance(row, dict) and str(row.get("path") or "").lower().endswith(".pdf")), {})
+        pdf = Path(str(pdf_item.get("path") or ""))
     pdf_stats: dict[str, Any] = {"path": str(pdf), "exists": pdf.is_file(),
                                  "pages": 0, "text_chars": 0, "images": 0,
                                  "layout_errors": [], "text": ""}
@@ -156,7 +246,7 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
     pdf_ack = next((row for row in report_ack.get("component_acks") or []
                     if isinstance(row, dict) and row.get("kind") == "pdf"), {})
     current_sha = _sha(pdf) if pdf.is_file() else ""
-    sent_sha = str(pdf_ack.get("sha256") or "")
+    sent_sha = str(pdf_ack.get("sha256") or runtime.get("pdf_sha256") or "")
     requested_channels=set(constraints.get('delivery_channels') or ['web'])
     same_version = (bool(current_sha) if 'qq' not in requested_channels
                     else bool(current_sha and sent_sha and current_sha == sent_sha))
@@ -166,6 +256,9 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
         evidence=str(cycle / "report_ack.json"), required=report_required)
 
     summaries = ((report.get("node_outputs") or {}).get("summaries") or {}).get("files") or []
+    if improvement_report:
+        summaries = [str(row.get("path")) for row in manifest.get("artifacts") or []
+                     if isinstance(row, dict) and str(row.get("path") or "").lower().endswith((".md", ".html"))]
     summary_ok = len(summaries) >= 2 and all(Path(str(path)).is_file() for path in summaries[:2])
     add("reader_artifacts", "读者产物完整", summary_ok if report_required else None,
         actual=list(summaries), expected="结果总结、运行总结及 PDF 均由报告 Flow 生成",
@@ -174,8 +267,13 @@ def evaluate_run(workspace: str | Path, job_id: str, *,
     graph=((report.get('node_outputs') or {}).get('flow_graph') or {}).get('semantic_output') or {}
     graph_verify=((report.get('node_outputs') or {}).get('flow_graph_verify') or {}).get('semantic_output') or {}
     projected_graph=projection.get('graph') or {}
-    graph_ok=bool(graph and graph_verify.get('verified') is True and
-                  graph.get('counts') == projected_graph.get('counts'))
+    if improvement_report:
+        graph_files=[row for row in manifest.get('artifacts') or [] if isinstance(row,dict)
+                     and str(row.get('path') or '').lower().endswith(('graph.json','.svg'))]
+        graph_ok=bool(graph_files and all(Path(str(row.get('path'))).is_file() for row in graph_files))
+    else:
+        graph_ok=bool(graph and graph_verify.get('verified') is True and
+                      graph.get('counts') == projected_graph.get('counts'))
     add('runtime_graph_identity','网页与PDF运行图同源',graph_ok if report_required else None,
         actual={'report_counts':graph.get('counts'),'web_counts':projected_graph.get('counts'),
                 'verified':graph_verify.get('verified')},

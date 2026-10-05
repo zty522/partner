@@ -16,9 +16,11 @@ def _outbound_name(ctx, params):
     if notification_id:
         identity += '.notification.' + ''.join(
             c for c in notification_id if c.isalnum() or c in '_-')[:40]
-    elif ((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle'):
-        # A cycle sends text and PDF under one Job. Each Flow/Event needs its
-        # own receipt: a previous .sent file must never acknowledge new text.
+    elif params.get('flow_id') and params.get('node_id'):
+        # A Flow can send several text/PDF milestones even when self-evolution
+        # is disabled.  Each Event needs an immutable receipt: reusing
+        # ``<job>.json`` overwrote the earlier ACK and let a later delivery
+        # appear to have no history.
         identity += '.' + str(params.get('flow_id') or 'flow') + '.' + str(params.get('node_id') or 'send')
     return identity + '.json'
 
@@ -53,7 +55,37 @@ def _qq_recipient(ctx: Any, params: dict[str, Any]) -> str:
     # still safe because the QQ destination is the explicit ``sender_id``.
     # A Web request, however, carries a synthetic browser identity and must
     # never be treated as an OpenID.
-    return sender if channel in {"", "qq", "both"} else ""
+    if channel not in {"", "qq", "both"} or not sender:
+        return ""
+    # The application boundary normally verifies the recipient.  Delivery is
+    # nevertheless a security/reliability boundary of its own: a historical
+    # v4 run queued a synthetic label (``codex-v4-final``), which could only be
+    # rejected later by QQ.  When this is a real Partner workspace, require the
+    # recipient to occur in this instance's authenticated C2C allow-list.
+    workspace = Path(str(getattr(ctx, "workspace", "") or ""))
+    instance_id = str(params.get("origin_instance") or
+                      getattr(ctx, "instance_id", "") or "")
+    binding_path = workspace / "instances" / instance_id / "state" / "record" / "bot_id.json"
+    production_workspace = (workspace / ".partner_workspace_identity").is_file()
+    if production_workspace or binding_path.is_file():
+        try:
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            allowed = {str(value).strip() for value in
+                       binding.get("allowed_user_openids") or [] if str(value).strip()}
+        except (OSError, TypeError, ValueError):
+            return ""
+        # QQ callbacks carry the bare OpenID.  Web submissions may carry the
+        # canonical instance-scoped form after application-level verification.
+        candidate = sender
+        prefix = f"inst{instance_id}_"
+        if candidate.startswith(prefix):
+            candidate = candidate[len(prefix):]
+        if candidate not in allowed:
+            return ""
+        return candidate
+    # Unit-sized/local contexts without a Partner workspace keep the explicit
+    # sender contract; they do not claim production QQ delivery.
+    return sender
 
 
 def channel_route(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -129,11 +161,16 @@ def _job_status_line(ctx: Any, params: dict[str, Any], flow_outputs: dict[str, A
 
 
 def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    if (((params.get('intent_contract') or {}).get('execution_constraints') or {})
+            .get('suppress_user_delivery') is True):
+        return {'ok': True, 'status': 'completed', 'suppressed': True,
+                'delivered': False, 'summary': '父协调 Flow 统一负责最终用户消息'}
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
     flow_outputs = params.get("flow_outputs") if isinstance(params.get("flow_outputs"), dict) else {}
     composed = next((value for key, value in reversed(list(flow_outputs.items()))
                      if key in {"final_critic", "message_critic", "critic",
-                                "final_compose", "compose"} and isinstance(value, dict)), {})
+                                "final_compose", "compose", "narrative"}
+                     and isinstance(value, dict)), {})
     dedup = next((value for key, value in reversed(list(flow_outputs.items()))
                   if key in {"final_deduplicate", "deduplicate", "dedup"}
                   and isinstance(value, dict)), {})
@@ -180,7 +217,8 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})
     if decision.get('notify') is False:
         return {'ok':True,'status':'completed','suppressed':True,'delivered':False,'summary':'通知决策要求仅保存本地记录'}
-    if ((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle') and not composed.get('ok'):
+    if (((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle')
+            and not composed.get('ok') and not bool(params.get('message_reviewed'))):
         return {'ok':False,'status':'failed','error':'cycle message did not pass review; no transport request made'}
     if not text:
         return {"ok": False, "status": "failed", "error": "empty user message"}
@@ -255,6 +293,10 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def send_pdf(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    if (((params.get('intent_contract') or {}).get('execution_constraints') or {})
+            .get('suppress_user_delivery') is True):
+        return {'ok': True, 'status': 'completed', 'suppressed': True,
+                'delivered': False, 'summary': '父协调 Flow 统一负责最终 PDF 交付'}
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
     upstream = params.get("upstream") if isinstance(params.get("upstream"), dict) else {}
     # PDF_REPORT 链：send 的直接 previous 可能是 quality（无 path），

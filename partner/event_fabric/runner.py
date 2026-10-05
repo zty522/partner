@@ -56,8 +56,9 @@ class EventFlowRunner:
         # A dynamic project iteration freezes its design as the first Event.
         # Bind that immutable output into every later Event's contract without
         # allowing one Event handler to invoke or mutate another Event.
-        if state.flow_type == 'project_cycle_round' and node_id != 'design':
-            blueprint = ((state.node_outputs.get('design') or {}).get('semantic_output') or {})
+        if state.flow_type == 'project_cycle_round' and node_id not in {'design', 'design_critic'}:
+            blueprint = (((state.node_outputs.get('design_critic') or {}).get('semantic_output'))
+                         or ((state.node_outputs.get('design') or {}).get('semantic_output') or {}))
             if blueprint:
                 contract = dict(params.get('intent_contract') or {})
                 contract['round_blueprint'] = blueprint
@@ -117,22 +118,26 @@ class EventFlowRunner:
                         flow_type=state.flow_type, node_id=node.node_id,
                         event_id=event.event_id, event_type=node.event_type,
                         inputs=params, status="running", attempt=attempt)
+        event_timeout = max(1, int(event_definition.timeout_seconds))
+        job_deadline = float(getattr(ctx, "job_deadline_epoch", 0) or 0)
+        if job_deadline:
+            event_timeout = max(1, min(event_timeout, int(max(1, job_deadline - time.time()))))
         if hasattr(ctx, "__dict__"):
-            ctx.event_deadline = time.monotonic() + max(1, int(event_definition.timeout_seconds))
+            ctx.event_deadline = time.monotonic() + event_timeout
         try:
             if iscoroutinefunction(event_definition.handler):
                 invocation = event_definition.handler(ctx, params)
             else:
                 invocation = asyncio.to_thread(event_definition.handler, ctx, params)
             value = await asyncio.wait_for(
-                invocation, timeout=max(1, int(event_definition.timeout_seconds)))
+                invocation, timeout=event_timeout)
             if isawaitable(value):
                 value = await value
             output = dict(value or {})
         except asyncio.TimeoutError:
             output = {
                 "ok": False, "status": "failed",
-                "error": f"Event exceeded {event_definition.timeout_seconds}s timeout",
+                "error": f"Event exceeded {event_timeout}s effective timeout",
                 "failure_class": "runtime",
                 "mechanism": f"event_timeout/{node.event_type}",
             }
