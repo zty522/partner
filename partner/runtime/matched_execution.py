@@ -56,6 +56,16 @@ def isolate(workspace, candidate, repo=None):
         if not file.startswith('benchmark/') or not file.endswith('.py'):
             raise ValueError('only existing pytest tests can be executed')
         hashes[file] = file_hash(inside(repo, file))
+    extra_tests = dict(candidate.get('extra_tests') or {})
+    extra_names = []
+    extra_hashes = {}
+    for fname, code in extra_tests.items():
+        fname = str(fname)
+        if not fname.startswith('benchmark/') or not fname.endswith('.py') or '..' in fname:
+            raise ValueError('extra test must live under benchmark/*.py without traversal')
+        code = str(code)
+        extra_names.append(fname)
+        extra_hashes[fname] = hashlib.sha256(code.encode()).hexdigest()
     source_hashes = {p: file_hash(inside(repo, p)) for p in targets}
     directory = root(workspace) / 'state/event_runtime/isolated' / ('experiment_' + uuid4().hex)
     directory.mkdir(parents=True)
@@ -83,10 +93,14 @@ def isolate(workspace, candidate, repo=None):
     applied, reason = _apply_exact_unified_diff(directory / 'candidate', patch, targets)
     if not applied:
         raise ValueError('candidate patch not applied: ' + reason)
+    for fname, code in extra_tests.items():
+        target = directory / 'candidate' / fname
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code, encoding='utf-8')
     expectations = list(candidate.get('expectations') or [])
     manifest = {'experiment_id': directory.name, 'created_at': time.time(), 'tests': tests,
                 'regression_tests': regression, 'test_hashes': hashes, 'source_hashes': source_hashes,
-                'expectations': expectations,
+                'expectations': expectations, 'extra_tests': extra_names, 'extra_test_hashes': extra_hashes,
                 'patch_sha256': hashlib.sha256(patch.encode()).hexdigest(), 'timeout': 120,
                 'production_effective': False}
     write_json(directory / 'manifest.json', manifest)
@@ -111,6 +125,8 @@ def execute(workspace, experiment_id, kind):
     for p, expected in manifest['test_hashes'].items():
         if file_hash(inside(repo, p)) != expected: raise ValueError('frozen test changed')
     tests = manifest['tests'] + manifest['regression_tests']
+    if kind == 'candidate' and manifest.get('extra_tests'):
+        tests = tests + list(manifest['extra_tests'])
     command = [sys.executable, '-m', 'pytest', '-q', *tests, '--tb=short', '--junitxml=' + str(directory / (kind + '.xml'))]
     start = time.time()
     # No application credentials are passed to isolated candidate processes.

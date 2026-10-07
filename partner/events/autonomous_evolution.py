@@ -1113,6 +1113,9 @@ def freeze(ctx, params):
         
         value = experiment.freeze(directory(ctx), plan, plan['expectations'])
         value.update(ready=True, plan_sha256=digest, preflight=review.get('preflight'))
+        if plan.get('test_code'):
+            value['test_code'] = str(plan.get('test_code'))
+            value['test_file'] = str(plan.get('test_file') or 'benchmark/test_autonomous_cycle_reproducer.py')
         
         # v5 fix: freeze 只冻结实验与测试质量，ready 由 experiment.freeze 成功决定。
         # candidate 节点在本节点之后才运行，不得因当前轮候选尚未生成而把 ready 置 False
@@ -1148,11 +1151,13 @@ def freeze(ctx, params):
         _plan = plan if isinstance(plan, dict) else {}
         fallback = {
             'repo': frozen_repo,
-            'test_file': 'benchmark/test_autonomous_cycle_reproducer.py',
+            'test_file': str(_plan.get('test_file') or 'benchmark/test_autonomous_cycle_reproducer.py'),
             'reproducer_tests': list(_plan.get('reproducer_names') or []),
             'regression_tests': list(_plan.get('regression_tests') or []),
             'expectations': list(_plan.get('expectations') or []),
         }
+        if _plan.get('test_code'):
+            fallback['test_code'] = str(_plan.get('test_code'))
         if known_issue:
             value = {'ready': False, 'reason': str(exc), 'degraded': 'diagnostic',
                      'degradation_reason': f'freeze rejected ({str(exc)}); known issue present, candidate targets it directly',
@@ -1479,7 +1484,10 @@ def isolate(ctx, params):
     from partner.runtime.matched_execution import isolate as make
     try:
         patch,targets,corrections=experiment.patch_from_edits(frozen,saved(ctx,f'candidate_{n}')['edits'])
-        value=make(ctx.workspace,{'unified_diff':patch,**{k:frozen[k] for k in ('reproducer_tests','regression_tests','expectations')}},repo=frozen['repo'])
+        kwargs={'unified_diff':patch,**{k:frozen[k] for k in ('reproducer_tests','regression_tests','expectations')}}
+        if frozen.get('test_code'):
+            kwargs['extra_tests']={str(frozen.get('test_file') or 'benchmark/test_autonomous_cycle_reproducer.py'):str(frozen['test_code'])}
+        value=make(ctx.workspace,kwargs,repo=frozen['repo'])
         value.update(ready=True,target_files=targets,patch_corrections=corrections)
         (directory(ctx)/f'candidate_{n}.patch').write_text(patch)
     except (ValueError,OSError,KeyError,SyntaxError) as exc:

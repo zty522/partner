@@ -212,6 +212,8 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         text = status_line + "\n\n" + raw
     else:
         text = raw
+    from partner.events.message_sanitizer import sanitize_message
+    text = sanitize_message(text)
     channel = str(params.get("channel") or getattr(ctx, "channel", "local"))
     channels = _delivery_channels(ctx, params)
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})

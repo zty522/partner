@@ -1203,6 +1203,9 @@ def _learning_matched_evidence(params: dict[str, Any], evidence: list[dict[str, 
     handoff_path = Path(str(contract.get('learning_handoff_path') or ''))
     if not handoff_path.is_file():
         return {}
+    job_id = str(getattr(ctx, 'job_id', '') or '')
+    if job_id and 'job_' in str(handoff_path) and job_id not in str(handoff_path):
+        return {}
     for row in evidence:
         path = Path(str(row.get('path') or ''))
         if not row.get('valid') or path.suffix.lower() != '.json' or not path.is_file():

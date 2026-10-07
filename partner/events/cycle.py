@@ -324,6 +324,15 @@ def input_resolve(ctx, params):
                     candidates.append(str(row.get('path') or ''))
     except Exception:
         pass
+    job_id = str(getattr(ctx, "job_id", "") or "")
+    def _same_job(text):
+        if '/state/event_runtime/work/job_' not in text:
+            return True
+        m = re.search(r'/work/(job_[a-f0-9]{16})/', text)
+        return bool(m) and m.group(1) == job_id
+    before = len(candidates)
+    candidates = [c for c in candidates if _same_job(c)]
+    filtered_cross_job = before - len(candidates)
     resolved = []
     for raw in dict.fromkeys(candidates):
         path = Path(raw)
@@ -341,7 +350,7 @@ def input_resolve(ctx, params):
         if len(resolved) >= 30:
             break
     value = {'schema_version': 1, 'resolved_inputs': resolved,
-             'resolved_count': len(resolved),
+             'resolved_count': len(resolved), 'filtered_cross_job': filtered_cross_job,
              'input_hashes': [row['sha256'] for row in resolved],
              'unresolved_explicit_refs': [raw for raw in explicit if not Path(raw).is_file()],
              'rule': 'hypotheses may only treat these hash-bound inputs as available'}
@@ -382,6 +391,16 @@ def input_eligibility(ctx, params):
             'reason': 'eligibility model did not classify this indexed input',
             'limitations': ['not admitted by the frozen corpus gate'],
         }
+        job_id = str(getattr(ctx, "job_id", "") or "")
+        def _same_job(text):
+            if '/state/event_runtime/work/job_' not in text:
+                return True
+            m = re.search(r'/work/(job_[a-f0-9]{16})/', text)
+            return bool(m) and m.group(1) == job_id
+        if not _same_job(path):
+            decision['eligible'] = False
+            decision['reason'] = 'cross-job artifact excluded from admission'
+            decision['limitations'] = (decision.get('limitations') or []) + ['cross-job artifact']
         decision['eligible'] = bool(decision.get('eligible')) and Path(path).is_file()
         decisions.append(decision)
     eligible = [row for row in decisions if row.get('eligible')]

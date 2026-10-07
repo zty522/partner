@@ -65,7 +65,10 @@ class EventFlowRunner:
                 contract['round_number'] = blueprint.get('round_number', contract.get('round_number'))
                 refs = list(blueprint.get('learning_handoff_refs') or [])
                 if refs:
-                    contract['learning_handoff_path'] = refs[0]
+                    job_id = str(getattr(state, 'job_id', '') or state.task_id or '')
+                    in_job = [r for r in refs if job_id and job_id in str(r)]
+                    chosen = (in_job or refs)[0]
+                    contract['learning_handoff_path'] = chosen
                     contract['learning_handoff_refs'] = refs
                 params['intent_contract'] = contract
         resuming_wait = bool(state.current_event_id and state.waiting_task_id)

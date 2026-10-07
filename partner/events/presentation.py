@@ -1088,6 +1088,10 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "若来源含 learning_summary.json，只能按其中的 run_count、claims、source_urls、consumed、improved 描述主动学习；run_count=0 时明确写‘未执行’，不得写‘已完成主动学习’。"
         "Event 完成只代表编排节点结束；只有 verified=true 且存在领域证据才可写项目取得实质进展。执行失败时报告标题和核心结论应突出具体阻塞，不得只写‘流程完成’。"
         "正文控制在1000至1800汉字加必要表格，图题由系统加入，正文不重复图题。禁止逐项抄 Event 日志；Event/Flow 执行摘要放短附录。不要夸张标题、名人身份铺陈或流水账。证据索引只列实际引用的来源。\n"
+        "禁止输出任何 LaTeX/数学标记（$$、\\left、\\right、上标下标等），正文一律纯文本 Markdown。"
+        "JSON 数据文件（*.json）禁止整段原文节选；需要引用时用一句话概括其内容（如'第1轮基线快照：冻结的初始状态与假设'）。"
+        "只有真正的源代码（*.py）才可节选，且必须选择有代表性的实现片段并附一句简短说明。"
+        "证据索引每行格式：[E01] 文件名 — 一句话用途说明（不超过20字）。\n"
         "2) 若【业务证据文件】为空，报告必须以 # 项目未推进 为标题，主体 200 字内说明："
         "本项目迭代 N 轮未产生任何可核验的业务文件，未推进、未决策、未达成任何结果。"
         "禁止虚构产物、虚构数字、虚构结论。\n"
@@ -1107,7 +1111,11 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         + "\n只写有来源支撑的阶段结论，不把计算候选说成已经证实有效的药物。"
     ))
     working = Path(str(getattr(ctx, "working_dir", "") or getattr(ctx, "project_dir", "") or "."))
-    raw = localize_prose(_markdown_body(raw),params.get("flow_outputs") or {})
+    raw = _markdown_body(raw)
+    raw = re.sub(r'\$\$.+?\$\$', '', raw, flags=re.DOTALL)
+    raw = re.sub(r'\$+', '', raw)
+    raw = re.sub(r'\\(?:left|right|[a-zA-Z]{1,12})', '', raw)
+    raw = localize_prose(raw,params.get("flow_outputs") or {})
     working.mkdir(parents=True, exist_ok=True)
     title = str(params.get("chinese_filename") or "项目进展报告").removesuffix(".md")
     if (params.get('intent_contract') or {}).get('supersedes_report'):
