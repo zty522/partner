@@ -1000,8 +1000,14 @@ class PartnerApplicationService:
             synth_out = {"ok": True, "status": "completed", "model_calls": 0,
                          "semantic_output": explicit}
         else:
+            observe_out = counter_out = synth_out = None
             try:
+                # Each intent pass gets its own wall-clock budget.  A slow
+                # observe/counter_read must not eat the synthesize budget and
+                # turn an explicit project request into a rejected submission.
+                ctx_for_llm.event_deadline = _time.monotonic() + 150
                 observe_out = intent_observe(ctx_for_llm, dict(intent_params_base))
+                ctx_for_llm.event_deadline = _time.monotonic() + 150
                 counter_out = intent_counter_read(ctx_for_llm, {
                     **intent_params_base,
                     "upstream": {"understand_1": observe_out},
@@ -1010,6 +1016,7 @@ class PartnerApplicationService:
                     **intent_params_base,
                     "upstream": {"understand_1": observe_out, "understand_2": counter_out},
                 }
+                ctx_for_llm.event_deadline = _time.monotonic() + 150
                 synth_out = intent_synthesize(ctx_for_llm, synth_params)
             except Exception as exc:  # noqa: BLE001
                 # Explicit project/mode requests remain executable when the
@@ -1019,6 +1026,17 @@ class PartnerApplicationService:
                 # work.  The degradation is preserved for run audit/reporting.
                 explicit_dispatch = project_id or conversation_project or (
                     "partner_" + mode if mode in {"self_improvement", "learning_improvement"} else "")
+                # intent_observe already confirmed an explicit project route:
+                # keep the request executable from its conservative contract
+                # instead of rejecting a clear task because the enrichment
+                # (synthesize) call was slow or unavailable.
+                if not explicit_dispatch and observe_out:
+                    obs_sem = (observe_out or {}).get("semantic_output") or {}
+                    if str(obs_sem.get("route") or "") == "project_iteration":
+                        obs_target = str(obs_sem.get("dispatch_target") or "").strip()
+                        if obs_target and obs_target != "direct_answer":
+                            explicit_dispatch = obs_target
+                            _intent_fallback_via_observe = True
                 if not explicit_dispatch:
                     return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
                                       f"意图审议失败：{type(exc).__name__}: {exc}")
@@ -1037,12 +1055,16 @@ class PartnerApplicationService:
                                         "project_research"),
                     "intent_degraded": True,
                     "intent_error": f"{type(exc).__name__}: {exc}"[:600],
-                    "intent_fallback_source": "explicit project_id/mode + original request + validated constraints",
+                    "intent_fallback_source": ("observe-confirmed project route + original request + validated constraints"
+                                               if explicit_dispatch and (locals().get("_intent_fallback_via_observe"))
+                                               else "explicit project_id/mode + original request + validated constraints"),
                 }
-                observe_out = {"ok": False, "status": "degraded", "model_calls": 0,
-                               "semantic_output": fallback}
-                counter_out = {"ok": False, "status": "degraded", "model_calls": 0,
-                               "semantic_output": fallback}
+                observe_out = observe_out if (observe_out or {}).get("status") == "completed" else {
+                    "ok": False, "status": "degraded", "model_calls": 0,
+                    "semantic_output": fallback}
+                counter_out = counter_out if (counter_out or {}).get("status") == "completed" else {
+                    "ok": False, "status": "degraded", "model_calls": 0,
+                    "semantic_output": fallback}
                 synth_out = {"ok": True, "status": "completed", "model_calls": 0,
                              "semantic_output": fallback}
 
