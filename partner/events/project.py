@@ -1115,7 +1115,7 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if not comparison_required:
         comparison_required = bool(((((params.get('flow_outputs') or {}).get('design') or {})
                                      .get('semantic_output')) or {}).get('comparison_required'))
-    matched = _learning_matched_evidence(params, evidence)
+    matched = _learning_matched_evidence(ctx, params, evidence)
     comparison_complete = bool(matched) or not comparison_required
     scientific_claim_supported = bool(execution_verified and corpus_eligible
                                       and metric_protocol_ready and comparison_complete)
@@ -1192,7 +1192,7 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                       if execution_verified else "未获得可验证的业务数据，不计为推进"}
 
 
-def _learning_matched_evidence(params: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+def _learning_matched_evidence(ctx: Any, params: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """Project comparison projection used by the later learning settlement.
 
     The learning handoff has to be physically available to the round and the

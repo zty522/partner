@@ -38,8 +38,26 @@ def sanitize_message(text: str) -> str:
     result = re.sub(r'\bFlow\b', '流程', result)
     result = re.sub(r'\bEvent\b', '步骤', result)
 
+    # 大小写不敏感的内部术语映射（优先于通用词，避免半译残留）
+    ci_map = {
+        r'\binput_eligible\b': '输入资格', r'\binput_eligibility\b': '输入审核',
+        r'\bverification_layers\b': '验证结果', r'\btransfer_mapping\b': '学习成果映射',
+        r'\bNameError\b': '代码错误', r'\bautonomous_evolution\b': '自进化',
+        r'\bsettlement\b': '阶段总结', r'\bfrozen\b': '已冻结',
+        r'\bconsumed\b': '已消费', r'\bimproved\b': '有改善',
+        r'\bproject_research_cycle\b': '研究流程', r'\bproject_cycle_round\b': '研究轮次',
+        r'\binput_consumption\b': '输入消费', r'\biteration_artifact\b': '迭代产物',
+        r'\blearning_effect\b': '学习效果', r'\boutcome_verify\b': '结果核验',
+    }
+    for pattern, repl in ci_map.items():
+        result = re.sub(pattern, repl, result, flags=re.IGNORECASE)
+    result = re.sub(r'\bRound\s*(\d+)\b', r'第 \1 轮', result, flags=re.IGNORECASE)
+    result = re.sub(r'\brun_narrative\b', '运行记录', result, flags=re.IGNORECASE)
+    result = re.sub(r'\blearning_summary\b', '学习总结', result, flags=re.IGNORECASE)
+    result = re.sub(r'\bassessment\.json\b', '评估记录', result, flags=re.IGNORECASE)
+
     # 内部步骤进度短语折叠
-    result = re.sub(r'完成（第\s*\d+\s*/\s*\d+\s*步）[：:][^\n]*', '进度：内部流程步骤已完成。', result)
+    result = re.sub(r'(?:未)?完成（第\s*\d+\s*/\s*\d+\s*步）[：:][^\n]*', '进度：内部流程步骤已完成。', result)
     
     # 过滤 Event 名称（常见内部 Event）
     event_names = [

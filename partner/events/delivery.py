@@ -373,6 +373,8 @@ def send_pdf(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     qq_recipient = _qq_recipient(ctx, params)
     if not qq_recipient:
         return {'ok':False,'status':'failed','error':'QQ recipient identity is missing; no transport request was made'}
+    from partner.events.message_sanitizer import sanitize_message
+    text_msg = sanitize_message(text_msg)
     payload = {"schema_version": 4, "job_id": getattr(ctx, "job_id", ""),
                "to_user": qq_recipient,
                "content": text_msg, "image_artifacts":[{'path':a['path'],'sha256':a['sha256'],'id':a['id']} for a in assets[:1]],

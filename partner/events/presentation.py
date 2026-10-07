@@ -281,6 +281,7 @@ def message_critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     limit=400 if (params.get('flow_outputs') or {}).get('answer') or (params.get('intent_contract') or {}).get('message_detail')=='detailed' else 180
     instructions += f'本条消息上限{limit}字。以用户能一眼读懂为准；非详细问答不出现代码调用、params、patch_application或字段清单。格式检查中任何超限或违规为true时，必须返回accepted=false及消除该问题的revised_message，不能只口头判定通过。数字超限时删除次要数值，不通过改写成中文数字规避。\n'
     usage = {}; reviews = []; accepted = False; start_attempt = 0; cached_audit = None
+    tool_payload = False; plain_language_violations = []
     checkpoint = None
     if params.get('flow_id') and getattr(ctx, 'workspace', None) and getattr(ctx, 'job_id', None):
         import hashlib
