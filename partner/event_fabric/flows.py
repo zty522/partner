@@ -209,8 +209,14 @@ class EventFlowController:
                         and planned.node_id not in state.skipped_node_ids
                         and planned.node_id not in state.failed_node_ids):
                     state.skipped_node_ids.append(planned.node_id)
-            materialized = ["cycle.input_resolve", "cycle.round_design",
-                            "cycle.round_blueprint_critic", *sequence]
+            prefix_ids = {"input_resolve", "input_eligibility",
+                          "design", "design_critic"}
+            materialized = [node.event_type for node in definition.nodes
+                            if node.node_id in prefix_ids
+                            and node.node_id in state.completed_node_ids]
+            materialized = materialized + [
+                event_type for event_type in sequence
+                if event_type not in materialized]
             plan_material = json.dumps(materialized, ensure_ascii=False,
                                        separators=(",", ":")).encode("utf-8")
             state.run_context.update({

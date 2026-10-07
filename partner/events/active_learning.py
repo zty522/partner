@@ -283,9 +283,14 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             from partner.runtime.action_execution import write_json
             write_json(target / 'receipt.json', receipt)
             downloaded.append(receipt)
+    # A declared local learning root is a user-frozen source: when it yields
+    # files, consume them directly and do not run network fetches for the
+    # default download plan.  The "no local substitution" rule below applies
+    # only to the un-declared fallback path.
+    declared_local_mode = bool(local_value and local_root.is_dir() and downloaded)
     # Fetch external URLs with real HTTP; expand arXiv/GitHub as needed.
     # Never fall back to local cache when an external URL was planned but failed.
-    for row in list(unique.values())[:10]:
+    for row in ([] if declared_local_mode else list(unique.values())[:10]):
         url = row['url']
         kind = row.get('source_kind') or _classify_source_kind(url)
         # arXiv: expand abs→pdf
@@ -311,7 +316,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # v2 rule: if external URLs were planned but all failed, do NOT succeed with local-only
     external_planned = any(r.get('source_kind') in ('paper', 'code', 'doc') for r in unique.values())
     external_fetched = any(r.get('source_kind') in ('paper', 'code', 'doc') for r in downloaded)
-    if external_planned and not external_fetched and failures:
+    if not declared_local_mode and external_planned and not external_fetched and failures:
         return {"ok": False, "status": "failed",
                 "error": f"all {len(failures)} external URLs failed; refusing to substitute local cache",
                 "semantic_output": {"sources": downloaded, "retrieval_failures": failures,
