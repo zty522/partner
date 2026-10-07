@@ -978,17 +978,38 @@ def input_consumption_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]
     if not isinstance(rows, list):
         rows = []
     verified, rejected = [], []
+    hash_index = {str(h): p for p, h in frozen.items() if h}
     for row in rows:
         if not isinstance(row, dict):
             continue
         raw_path = str(row.get('path') or '')
         path = Path(raw_path)
+        declared_hash = str(row.get('sha256') or '')
         expected = frozen.get(raw_path)
         if not expected or not path.is_file():
+            # The executor may declare the consumed path using a different
+            # copy/location of the same admitted content (e.g. a re-located
+            # transfer file whose body still names the original job path).
+            # Accept it when the declared content hash matches a frozen
+            # admission exactly; the admission contract is about the content,
+            # not the path spelling.
+            if declared_hash and declared_hash in hash_index:
+                try:
+                    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    actual = ''
+                if actual == declared_hash:
+                    verified.append({
+                        'path': raw_path,
+                        'normalized_to': hash_index[declared_hash],
+                        'sha256': actual,
+                        'purpose': str(row.get('purpose'))[:500],
+                        'content_match': True,
+                    })
+                    continue
             rejected.append({'path': raw_path, 'reason': 'not an admitted current-round input'})
             continue
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
-        declared_hash = str(row.get('sha256') or '')
         if actual != expected or declared_hash != expected:
             rejected.append({'path': raw_path, 'reason': 'hash does not match frozen admission'})
             continue
