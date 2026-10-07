@@ -85,8 +85,10 @@ for _node in ROUND.nodes:
                                     ('input_eligibility',)))
         _node = replace(_node, depends_on=('input_adequacy',))
     _round_35_nodes.append(_node)
-ROUND = replace(ROUND, version='3.5.0', nodes=tuple(_round_35_nodes),
-                description='A corpus-gated iteration that checks metric adequacy and proves real input consumption.')
+ROUND_V3_5 = ROUND  # 历史版本别名
+_round_36_nodes = ROUND.nodes  # 节点序列不变，交接信息随 next_decide 输出传递
+ROUND = replace(ROUND, version='3.6.0', nodes=tuple(_round_36_nodes),
+                description='v3.6.0: iteration_next_decide 输出扩展 round_handoff 字段，实现内容级轮间传承；round_design 消费 next_decide 完整输出而非 budget_guard。')
 
 # Immutable recovery definitions for Jobs pinned before executable blueprints.
 ROUND_V3 = Flow('project_cycle_round', '3.0.0', (
@@ -348,8 +350,8 @@ PROJECT_RESEARCH_CYCLE_V1_1 = replace(
     CYCLE_V3_2, name='project_research_cycle', version='1.1.0',
     description='Historical project research graph with benchmark after iteration.')
 PROJECT_RESEARCH_CYCLE = replace(
-    CYCLE, name='project_research_cycle', version='1.4.0',
-    description='Project research with pre-delivery claim repair, corpus gating, problem portfolio and post-run Partner audit.')
+    CYCLE, name='project_research_cycle', version='1.5.0',
+    description='Project research with message sanitization, PDF fact adjudication, and token aggregation.')
 META_CYCLE = Flow('meta_cycle', '2.0.0', (
     Node('meta_initialize', 'meta.initialize'),
     Node('coordinate', 'meta.coordinate', ('meta_initialize',)),

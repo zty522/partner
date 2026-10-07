@@ -85,7 +85,11 @@ from partner.event_fabric.catalog import EventDefinition
 
 def message_sanitize_handler(ctx: Any, params: dict) -> dict:
     """消息清洗 Event 处理器"""
-    text = params.get('text', '')
+    # 从上游节点（deduplicate）的输出中读取消息文本
+    # runner.py 将上游输出放在 params['previous'] 中
+    previous = params.get('previous', {})
+    text = previous.get('message', '') or params.get('message', '') or params.get('text', '')
+    
     cleaned = sanitize_message(text)
     return {
         'ok': True,

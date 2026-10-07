@@ -104,6 +104,7 @@ def freeze(directory, tests, expectations):
 def patch_from_edits(frozen, edits):
     repo = Path(frozen['repo'])
     targets = {}
+    corrections = {}
     for edit in edits:
         relative = str(edit['path'])
         safe_source(relative)
@@ -113,8 +114,31 @@ def patch_from_edits(frozen, edits):
             raise ValueError('empty or unchanged edit')
         source = targets.get(relative, (repo/relative).read_text())
         if source.count(old) != 1:
-            raise ValueError('old snippet must occur exactly once: ' + relative)
-        targets[relative] = source.replace(old, new, 1)
+            # v5 fix: 容错匹配——LLM 生成的 old 常有注释行漂移/缩进微差/截断。
+            # 精确匹配失败时用 difflib 找唯一 best match（相似度 >= 0.85 且显著优于次优），
+            # 用实际源码块替换后应用，并记录校正信息供审计；匹配不上或歧义则照旧拒绝。
+            src_lines = source.splitlines()
+            old_lines = old.splitlines()
+            n_old = len(old_lines)
+            if n_old == 0 or len(src_lines) < n_old:
+                raise ValueError('old snippet must occur exactly once: ' + relative)
+            scored = []
+            for i in range(len(src_lines) - n_old + 1):
+                seg = "\n".join(src_lines[i:i + n_old])
+                ratio = difflib.SequenceMatcher(None, old, seg).ratio()
+                scored.append((ratio, i))
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            best_ratio, best_i = scored[0]
+            if best_ratio < 0.85:
+                raise ValueError('old snippet must occur exactly once (no close match): ' + relative)
+            if len(scored) > 1 and best_ratio - scored[1][0] < 0.08:
+                raise ValueError('old snippet ambiguous match: ' + relative)
+            actual = "\n".join(src_lines[best_i:best_i + n_old])
+            targets[relative] = source.replace(actual, new, 1)
+            corrections[relative] = {'old_as_given': old, 'old_actual': actual,
+                                     'ratio': round(best_ratio, 3)}
+        else:
+            targets[relative] = source.replace(old, new, 1)
     if not 1 <= len(targets) <= 3:
         raise ValueError('one to three source files per candidate')
     patch = ''
@@ -122,7 +146,7 @@ def patch_from_edits(frozen, edits):
         compile(content,relative,'exec')
         patch += ''.join(difflib.unified_diff((repo/relative).read_text().splitlines(True),
             content.splitlines(True), fromfile='a/'+relative,tofile='b/'+relative))
-    return patch, list(targets)
+    return patch, list(targets), corrections
 
 
 def expectation_compare(before, after, frozen):
@@ -308,13 +332,19 @@ def activate(directory, isolated, frozen, targets, authorized):
 
 # (2026-09-16) v2 self-evolution helpers
 
-def apply_source(directory, isolated, frozen, targets, authorized):
-    """Backup-then-write source files. Idempotent. Records before/after hashes."""
+def apply_source(directory, isolated, frozen, targets, authorized, dry_run=False):
+    """Backup-then-write source files. Idempotent. Records before/after hashes.
+    
+    v12 fix: Added dry_run parameter. When dry_run=True, validates candidate files
+    exist, syntax is valid, and source_hashes match frozen, but does NOT write to
+    production or create rollback backup. Returns {'status':'dry_run_passed', ...}
+    on success, or explicit failure reason.
+    """
     directory = Path(directory)
     receipt = directory / 'apply.json'
-    if receipt.exists():
+    if receipt.exists() and not dry_run:
         return json.loads(receipt.read_text())
-    if not authorized:
+    if not authorized and not dry_run:
         return {'status':'not_authorized','production_effective':False}
     # Re-check live source hash before any write (paranoia against concurrent edits).
     for relative in targets:
@@ -322,6 +352,28 @@ def apply_source(directory, isolated, frozen, targets, authorized):
             return {'status':'rebase_required','production_effective':False,
                     'reason':f'live source changed: {relative}'}
     candidate_repo = Path(isolated['directory'])/'candidate'
+    
+    # v12 fix: dry_run mode - validate without writing
+    if dry_run:
+        # Check candidate files exist
+        for relative in targets:
+            candidate_path = candidate_repo / relative
+            if not candidate_path.is_file():
+                return {'status':'dry_run_failed','production_effective':False,
+                        'reason':f'candidate file missing: {relative}'}
+            # Validate syntax for Python files
+            if relative.endswith('.py'):
+                try:
+                    compile(candidate_path.read_text(), str(candidate_path), 'exec')
+                except SyntaxError as exc:
+                    return {'status':'dry_run_failed','production_effective':False,
+                            'reason':f'syntax error in {relative}: {exc}'}
+        # All validations passed
+        return {'status':'dry_run_passed','production_effective':False,
+                'files':targets,'dry_run':True,
+                'before':{p:frozen['source_hashes'][p] for p in targets}}
+    
+    # Normal apply mode (authorized=True, dry_run=False)
     originals = {}
     backup = directory / 'rollback'
     backup.mkdir(parents=True, exist_ok=True)

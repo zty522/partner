@@ -143,13 +143,20 @@ def _deadline_state(policy, now=None):
     current = time.time() if now is None else float(now)
     deadline = float(policy.get('run_until_epoch') or 0)
     reserve = int(policy.get('finalization_reserve_seconds') or 0)
-    remaining = max(0, int(deadline - current)) if deadline else 0
+    mode = policy.get('continuation_mode') == 'until_deadline' and deadline > 0
+    if mode:
+        remaining = max(0, int(deadline - current))
+        may_start = bool(remaining > reserve)
+    else:
+        # bounded_rounds (no deadline): no time budget to exhaust; rounds are bounded instead
+        remaining = None
+        may_start = True
     return {
-        'deadline_mode': policy.get('continuation_mode') == 'until_deadline' and deadline > 0,
+        'deadline_mode': mode,
         'run_until_epoch': deadline,
         'remaining_seconds': remaining,
         'finalization_reserve_seconds': reserve,
-        'may_start_new_work': bool(deadline and remaining > reserve),
+        'may_start_new_work': may_start,
     }
 
 
@@ -436,8 +443,7 @@ def round_design(ctx, params):
     name = _ROUND_NAMES[number]
     previous_name = _ROUND_NAMES.get(number - 1, '')
     previous_record = _round_record(ctx, number - 1) if number > 1 else {}
-    previous = (((previous_record.get('node_outputs') or {}).get('budget_guard') or {})
-                .get('semantic_output') or {})
+    previous = ((previous_record.get('node_outputs') or {}).get('next_decide') or {}).get('semantic_output') or {}
     learning = _learning_record(ctx, number - 1) if number > 1 else {}
     impact = read(folder(ctx) / f'impact_{previous_name}.json') if number > 1 else {}
     contract = params.get('intent_contract') or {}
@@ -474,7 +480,11 @@ def round_design(ctx, params):
         + '\n输入对声明评价指标的充分性=' + json.dumps(input_adequacy_state, ensure_ascii=False)[:6000]
         + '\n上一轮Settlement=' + json.dumps(previous, ensure_ascii=False)[:12000]
         + '\n主动学习结果=' + json.dumps(learning, ensure_ascii=False)[:10000]
-        + '\n学习影响结算=' + json.dumps(impact, ensure_ascii=False)[:6000]))
+        + '\n学习影响结算=' + json.dumps(impact, ensure_ascii=False)[:6000]
+            + '\n【v2 强制规则】next_round_goal 必须显式解决上一轮 verdict_report 的 missing_evidence。'
+            + '如果上一轮 rejected_reasons 非空，next_round_goal 的第一条必须针对其中至少一项缺失证据。'
+            + '禁止忽略上一轮失败原因而提出全新目标。'
+            + '\n上一轮 round_handoff=' + json.dumps(previous.get('round_handoff') or {}, ensure_ascii=False)[:6000]))
     value = json_object(raw)
     selected = value.get('selected') if isinstance(value.get('selected'), dict) else {}
     for key in ('round_goal','hypothesis','expected_effect','failure_conditions','required_evidence',
@@ -752,6 +762,7 @@ def round_settle(ctx, params):
             'token_usage': usage}
 
 
+
 def iteration_next_decide(ctx, params):
     """Let the model propose the next research move from this iteration only."""
     number = int(params.get('round_number') or
@@ -763,7 +774,31 @@ def iteration_next_decide(ctx, params):
     design = ((outputs.get('design') or {}).get('semantic_output') or {})
     portfolio = read(folder(ctx) / 'problem_portfolio.json')
     longitudinal = _longitudinal_evidence(ctx)
-    raw, usage = call_model(ctx, purpose='cycle_iteration_next_decide', prompt=(
+    
+    # v3 fix: 强制学习检查点前移 - 在调用 LLM 之前检查
+    policy = read(folder(ctx) / 'cycle_policy.json')
+    dynamic_learning = list((folder(ctx) / 'iterations').glob('learning_after_*.json'))
+    if policy.get('explicit_learning_checkpoint') and not dynamic_learning:
+        # 用户强制要求主动学习但尚未执行 - 直接返回 active_learning，不调用 LLM
+        value = {
+            'route': 'active_learning',
+            'objective_complete': False,
+            'reason': '用户显式声明的主动学习检查点尚未执行',
+            'epistemic_gap': 'user-declared knowledge checkpoint before the next project phase',
+            'external_evidence_can_resolve': True,
+            'next_round_goal': 'resolve the user-declared knowledge question and freeze a source-bound handoff',
+            'explicit_learning_checkpoint': True,
+            'information_gain': '等待执行强制主动学习',
+            'round_number': number,
+        }
+        path = folder(ctx) / 'iterations' / f'decision_{number:04d}.json'
+        write_json(path, value)
+        return {**result(value, f'第{number}轮强制主动学习检查点', [str(path)]),
+                'primary_route': 'active_learning', 'token_usage': {}}
+    
+    # v3 fix: LLM 失败兜底
+    try:
+        raw, usage = call_model(ctx, purpose='cycle_iteration_next_decide', prompt=(
         '你是项目迭代的下一步裁决器。只基于本轮冻结假设、真实执行、核验与Settlement，选择一个route：'
         'complete、continue_project、active_learning、stop。项目指标未改善属于项目迭代；Partner机制问题不在此处修。'
         '必须区分action_completed、hypothesis_settled、research_question_settled、run_completed；'
@@ -782,7 +817,26 @@ def iteration_next_decide(ctx, params):
                       'longitudinal_evidence': longitudinal, 'problem_portfolio': portfolio,
                       'remaining_budget': (params.get('intent_contract') or {}).get('cycle_deadline') or {}},
                      ensure_ascii=False)[:48000]))
-    value = json_object(raw)
+        value = json_object(raw)
+    except Exception as exc:
+        # v3 fix: LLM 失败兜底 - 检查是否仍需强制学习
+        if policy.get('explicit_learning_checkpoint') and not dynamic_learning:
+            value = {
+                'route': 'active_learning',
+                'objective_complete': False,
+                'reason': f'LLM 调用失败但用户强制要求主动学习: {str(exc)[:200]}',
+                'epistemic_gap': 'user-declared knowledge checkpoint before the next project phase',
+                'external_evidence_can_resolve': True,
+                'next_round_goal': 'resolve the user-declared knowledge question and freeze a source-bound handoff',
+                'explicit_learning_checkpoint': True,
+                'information_gain': 'LLM 失败，回退到强制主动学习',
+                'llm_failure': str(exc)[:500],
+                'round_number': number,
+            }
+            usage = {}
+        else:
+            # 非强制学习场景，按失败处理
+            raise
     route = str(value.get('route') or 'stop')
     if route not in {'complete', 'continue_project', 'active_learning', 'stop'}:
         route = 'stop'
@@ -804,7 +858,85 @@ def iteration_next_decide(ctx, params):
         )
     value.update(route=route, round_number=number)
     path = folder(ctx) / 'iterations' / f'decision_{number:04d}.json'
+    # v2: 生成 round_handoff（内容级交接单）
+    # 基于本轮 verify 的 verdict_report 和 reflect 的 lessons
+    verify_output = (outputs.get('verify') or {}).get('semantic_output') or {}
+    reflect_output = (outputs.get('reflect') or {}).get('semantic_output') or {}
+    execute_output = (outputs.get('execute') or {}).get('semantic_output') or {}
+    
+    verdict_report = verify_output.get('verdict_report') or {}
+    
+    # inherited_facts: 本轮验证为真的事实
+    inherited_facts = []
+    if verify_output.get('verified'):
+        if execute_output.get('goal_coverage'):
+            for coverage in execute_output['goal_coverage']:
+                if coverage.get('coverage_status') == 'full':
+                    inherited_facts.append(f"目标已达成: {coverage.get('goal_aspect', 'unknown')}")
+        if execute_output.get('artifact_claims'):
+            for claim in execute_output['artifact_claims']:
+                if claim.get('verification_status') == 'verified':
+                    inherited_facts.append(f"产物已验证: {claim.get('artifact', 'unknown')}")
+    
+    # rejected_reasons: verify 拒绝的具体层+缺什么证据
+    rejected_reasons = []
+    if verdict_report.get('fail_layer'):
+        rejected_reasons.append(f"失败层级: {verdict_report['fail_layer']}")
+    for evidence in verdict_report.get('missing_evidence', []):
+        rejected_reasons.append(f"缺失证据: {evidence}")
+    
+    # effective_methods: 本轮有效的执行方法
+    effective_methods = []
+    if reflect_output.get('lessons'):
+        for lesson in reflect_output['lessons']:
+            if lesson.get('effectiveness') == 'effective':
+                effective_methods.append(lesson.get('method', 'unknown'))
+    
+    # next_actions: 下一轮具体任务
+    next_actions = []
+    for fix in verdict_report.get('next_round_fix', []):
+        next_actions.append(fix)
+    
+    # artifacts_index: 本轮产物路径清单
+    artifacts_index = []
+    if execute_output.get('files'):
+        for file_info in execute_output['files']:
+            # execute 输出 files 为路径字符串列表（契约）；兼容 dict 形态
+            if isinstance(file_info, dict):
+                artifacts_index.append({
+                    'path': file_info.get('path', ''),
+                    'type': file_info.get('type', 'unknown')
+                })
+            else:
+                artifacts_index.append({'path': str(file_info), 'type': 'unknown'})
+    
+    # avoid_repeat: 不得重复的动作
+    avoid_repeat = []
+    if reflect_output.get('lessons'):
+        for lesson in reflect_output['lessons']:
+            if lesson.get('effectiveness') == 'ineffective':
+                avoid_repeat.append(lesson.get('method', 'unknown'))
+    
+    round_handoff = {
+        'inherited_facts': inherited_facts,
+        'rejected_reasons': rejected_reasons,
+        'effective_methods': effective_methods,
+        'next_actions': next_actions,
+        'artifacts_index': artifacts_index,
+        'avoid_repeat': avoid_repeat,
+        'progress_note': verdict_report.get('progress_note', '无进展记录')
+    }
+    
+    value['round_handoff'] = round_handoff
+    
+    # v2: information_gain 改用 verify 的 progress_since_last_round
+    progress = verdict_report.get('progress_since_last_round', 0)
+    if progress > 0:
+        value['information_gain'] = f'本轮新增 {progress} 个产物'
+    
+
     write_json(path, value)
+
     return {**result(value, f'第{number}轮提出 {route}', [str(path)]),
             'primary_route': route, 'token_usage': usage}
 
@@ -2018,10 +2150,42 @@ def delivery_settle(ctx, params):
     elif params['node_id'] == 'improvement_report_ack':
         sent = (params.get('flow_outputs') or {}).get('send_report') or {}
     else:
+        # v3 fix: 从文件读回执，不依赖 flow_outputs
         source_node = ('final_send' if params['node_id'] == 'final_ack' else
                        'send_message' if params['node_id'] == 'improvement_message_ack' else
                        'send')
+        # 尝试从节点输出文件读
         sent = (params.get('flow_outputs') or {}).get(source_node) or {}
+        if not sent:
+            # v7 fix: 从 outbound receipt 文件读，使用实际 origin_instance
+            job_id = params.get('job_id') or getattr(ctx, 'job_id', '')
+            flow_id = params.get('flow_id') or ''
+            origin = str(params.get('origin_instance') or getattr(ctx, 'instance_id', '01'))
+            receipt_path = Path(ctx.workspace) / 'state/application/outbound' / origin / f'{job_id}.{flow_id}.{source_node}.sent'
+            if receipt_path.exists():
+                try:
+                    import json
+                    sent = json.loads(receipt_path.read_text())
+                except:
+                    pass
+            # 如果 .sent 文件不存在，尝试读 .json 队列文件（send_text 创建的）
+            if not sent:
+                json_path = Path(ctx.workspace) / 'state/application/outbound' / origin / f'{job_id}.{flow_id}.{source_node}.json'
+                if json_path.exists():
+                    try:
+                        import json
+                        queue_data = json.loads(json_path.read_text())
+                        # 从队列文件构造 sent 结构
+                        sent = {
+                            'delivered': queue_data.get('text_delivered', False),
+                            'suppressed': False,
+                            'web_visible': False,
+                            'receipt': {'path': str(json_path), 'channel': queue_data.get('delivery_state', 'queued')},
+                            'delivery_kind': 'text'
+                        }
+                    except:
+                        pass
+
     if sent.get('delivered') or sent.get('suppressed') or sent.get('web_visible'):
         delivered = bool(sent.get('delivered'))
         web_visible = bool(sent.get('web_visible'))

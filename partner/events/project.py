@@ -870,6 +870,38 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     business_delta = bool(executed and artifact_files and contract["conformant"] and not read_only)
 
     ok = bool(contract["conformant"])
+    
+    # v2: 添加 goal_coverage 和 artifact_claims
+    design = ((params.get('flow_outputs') or {}).get('design') or {}).get('semantic_output') or {}
+    round_goal = design.get('round_goal', '')
+    
+    goal_coverage = []
+    artifact_claims = []
+    
+    for file_path in files:
+        file_type = 'unknown'
+        if file_path.endswith('.json'):
+            file_type = 'json'
+        elif file_path.endswith('.md'):
+            file_type = 'markdown'
+        elif file_path.endswith('.py'):
+            file_type = 'python'
+        
+        coverage_item = {
+            'artifact': file_path,
+            'goal_aspect': '未明确绑定',
+            'coverage_status': 'partial'
+        }
+        goal_coverage.append(coverage_item)
+        
+        claim = {
+            'artifact': file_path,
+            'claim': f'产出了 {file_type} 类型的文件',
+            'evidence_requirement': '需要验证文件内容是否符合 round_goal',
+            'verification_status': 'pending'
+        }
+        artifact_claims.append(claim)
+    
     return {"ok": ok, "status": "completed" if ok else "failed",
             "error": "; ".join(violations), "summary": reply[:500],"requested_child_flow":handoff,
             "outcome": reply[:4000], "files": files, "evidence_refs": files,
@@ -883,7 +915,9 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                 "command_receipts":[str(p) for p in receipts],
                                 "declared_artifacts": declared,
                                 "verified_artifacts": artifact_files,
-                                "fabrication_detected": any(not Path(p).is_file() for p in declared)}}
+                                "fabrication_detected": any(not Path(p).is_file() for p in declared),
+                                "goal_coverage": goal_coverage,
+                                "artifact_claims": artifact_claims}}
 
 
 def action_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -1061,6 +1095,50 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         'comparison_complete': comparison_complete,
         'scientific_claim_supported': scientific_claim_supported,
     }
+    
+    # v2: 添加 verdict_report
+    fail_layer = None
+    missing_evidence = []
+    next_round_fix = []
+    
+    if not execution_verified:
+        if not layers.get('execution_verified'):
+            fail_layer = 'execution'
+            missing_evidence.append('执行未通过验证')
+            next_round_fix.append('确保执行过程符合合约要求')
+        elif not layers.get('artifact_verified'):
+            fail_layer = 'artifact'
+            missing_evidence.append('产物验证失败')
+            next_round_fix.append('检查产物完整性和哈希值')
+        elif not layers.get('input_eligible'):
+            fail_layer = 'input_eligibility'
+            missing_evidence.append('输入资格不符')
+            next_round_fix.append('重新筛选符合资格的输入')
+        elif not layers.get('metric_protocol_ready'):
+            fail_layer = 'metric_protocol'
+            missing_evidence.append('指标协议未就绪')
+            next_round_fix.append('完善指标定义和计算方法')
+        elif not layers.get('comparison_complete'):
+            fail_layer = 'comparison'
+            missing_evidence.append('比较未完成')
+            next_round_fix.append('完成 baseline 和 candidate 的比较')
+        elif not layers.get('scientific_claim_supported'):
+            fail_layer = 'scientific_claim'
+            missing_evidence.append('科学主张未获支持')
+            next_round_fix.append('提供更充分的证据支持主张')
+    
+    progress_note = '本轮无显著进展'
+    if evidence:
+        progress_note = f'本轮验证了 {len(evidence)} 个产物'
+    
+    verdict_report = {
+        'fail_layer': fail_layer,
+        'missing_evidence': missing_evidence,
+        'next_round_fix': next_round_fix,
+        'progress_note': progress_note,
+        'progress_since_last_round': len(evidence)
+    }
+    
     return {"ok": True, "status": "completed", "business_delta":execution_verified,
             "semantic_output":{"verified":execution_verified, "scientific_claim_supported": scientific_claim_supported,
                 "verification_layers": layers, "evidence":evidence, "implementation_evidence":implementations,
@@ -1072,7 +1150,7 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 "provenance_violations": sorted(set(foreign_job_refs)),
                 "scientific_contract_violations": scientific_contract_violations,
                 "learning_matched_evidence": learning_matched,
-                "limitation":"执行与产物核验不等于输入合格、比较完成或科学主张成立"},
+                "limitation":"执行与产物核验不等于输入合格、比较完成或科学主张成立", "verdict_report": verdict_report},
             "evidence_refs":[r['path'] for r in evidence if r['valid']],
             "summary":("科学主张已通过分层核验" if scientific_claim_supported else
                        "执行产物已核验，但输入资格、匹配比较或科学主张仍未通过")

@@ -978,7 +978,7 @@ class PartnerApplicationService:
         # passes.  Without this, three passes could each consume two 180-second
         # provider timeouts before an explicit project request was even queued.
         import time as _time
-        ctx_for_llm.event_deadline = _time.monotonic() + 75
+        ctx_for_llm.event_deadline = _time.monotonic() + 150  # 增加到 150 秒，给三个 intent 调用足够时间
         benchmark_requested = mode == "benchmark" or bool(
             incoming_constraints.get('benchmark_embedded'))
         if benchmark_requested:

@@ -172,12 +172,23 @@ ACTIVE_LEARNING_V2 = Flow("active_learning", "2.0.0", (
 ), "Core v1 active learning: verified sources become a frozen adoption experiment and settlement.")
 
 
-ACTIVE_LEARNING = Flow("active_learning", "2.1.0", (
+# 历史版本 2.1.0（钉死）
+ACTIVE_LEARNING_V2_1 = Flow("active_learning", "2.1.0", (
     *ACTIVE_LEARNING_V2.nodes[:-2],
     Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve")),
     Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
     Node("resume", "core.route_next", ("remember", "core_settlement")),
 ), "Source-grounded learning freezes a candidate handoff; downstream project execution must prove improvement.")
+
+# 新版本 2.2.0：在 read 后插入 transfer_mapping
+ACTIVE_LEARNING = Flow("active_learning", "2.2.0", (
+    *ACTIVE_LEARNING_V2.nodes[:-2],
+    Node("transfer_mapping", "active_learning.transfer_mapping", ("read",)),
+    Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve", "transfer_mapping")),
+    Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
+    Node("resume", "core.route_next", ("remember", "core_settlement")),
+), "Source-grounded learning with transfer mapping to executable project actions; freezes a candidate handoff with concrete action plan.")
+
 
 
 SELF_EVOLUTION_V1 = Flow("self_evolution", "1.0.0", (

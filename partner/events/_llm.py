@@ -4,6 +4,41 @@ from __future__ import annotations
 from typing import Any
 import json
 import re
+from pathlib import Path
+import json
+from datetime import datetime
+
+
+def _write_token_ledger(ctx, purpose: str, usage: dict):
+    """立即写入 token ledger（未脱敏），供 token_aggregate 聚合"""
+    try:
+        workspace = getattr(ctx, 'workspace', None)
+        job_id = getattr(ctx, 'job_id', None)
+        if not workspace or not job_id:
+            return
+        
+        ledger_path = Path(workspace) / 'state' / 'run_logs' / job_id / 'token_ledger.jsonl'
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'job_id': job_id,
+            'purpose': purpose,
+            'call_id': usage.get('call_id', ''),
+            'model': usage.get('model', ''),
+            'prompt_tokens': usage.get('prompt_tokens', 0),
+            'completion_tokens': usage.get('completion_tokens', 0),
+            'total_tokens': usage.get('total_tokens', 0),
+            'status': usage.get('status', 'success'),
+            'elapsed_ms': usage.get('elapsed_ms', 0)
+        }
+        
+        with open(ledger_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    except Exception:
+        pass  # 写入失败不影响主流程
+
+
 
 
 def _minimal_json_repair(value: str) -> Any:
@@ -87,6 +122,8 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
             elif re.search(r"</?(think|analysis)>", text, re.IGNORECASE):
                 last_error = "model reasoning block was not closed"
             elif text:
+                # 立即写入 token ledger（未脱敏），供 token_aggregate 聚合
+                _write_token_ledger(ctx, purpose, usage)
                 return text, usage
             else:
                 last_error = usage.get("error") or "model returned an empty result after removing reasoning"

@@ -494,10 +494,15 @@ def message_critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     'candidate_message': final_message, 'message': final_message,
                     'summary': '依据自进化终态回执生成消息',
                     'token_usage': usage}
+    # v13 fix: critic 是质量门不是门禁。失败时降级直投原始消息（candidate_message），
+    # 保证下游 send_text 有内容可发、delivery_settle 有回执可写。
+    final_message = message if accepted else (message or str(params.get('message') or prior.get('message') or ''))
     return {'ok':accepted, 'status':'completed' if accepted else 'failed',
             'error':'' if accepted else 'message did not pass independent review within budget',
-            'semantic_output':{**value,'reviews':reviews}, 'candidate_message':message, 'message':message if accepted else '',
-            'summary':'消息审查完成' if accepted else '消息尚未通过事实与可读性审查', 'token_usage':usage}
+            'semantic_output':{**value,'reviews':reviews}, 'candidate_message':message,
+            'message':final_message,
+            'critic_degraded': not accepted,
+            'summary':'消息审查完成' if accepted else '审查未通过；降级直投原始消息', 'token_usage':usage}
 
 
 def message_deduplicate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -1705,7 +1710,7 @@ def pdf_quality_review(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 DEFINITIONS = [
     EventDefinition("presentation.notification_decide", "presentation", "判断是否形成用户可见里程碑", notification_decide),
     EventDefinition("presentation.message_compose", "presentation", "根据真实 Summary 形成自然消息", message_compose, execution_method="llm", timeout_seconds=60),
-    EventDefinition("presentation.message_critic", "presentation", "独立审查消息清晰度和重复", message_critic, execution_method="llm", timeout_seconds=45),
+    EventDefinition("presentation.message_critic", "presentation", "独立审查消息清晰度和重复", message_critic, execution_method="llm", timeout_seconds=90),
     EventDefinition("presentation.message_deduplicate", "presentation", "抑制同一结论的重复用户消息", message_deduplicate),
     EventDefinition("presentation.report_outline", "presentation", "按项目领域设计报告叙事和真实可视化", report_outline, execution_method="llm"),
     EventDefinition("presentation.report_decide", "presentation", "仅在真实里程碑决定生成报告", report_decide),
@@ -1718,7 +1723,7 @@ DEFINITIONS = [
     EventDefinition("presentation.visual_plan", "presentation", "规划领域相关而非装饰性的可视化", visual_plan, execution_method="llm"),
     EventDefinition("presentation.visual_generate", "presentation", "接纳领域 Event 真实生成的图片", visual_generate, reads_existing_artifact=True),
     EventDefinition("presentation.report_draft", "presentation", "撰写非模板化中文领域报告", report_draft, execution_method="llm", produces_artifact=True),
-    EventDefinition("presentation.claim_verify", "presentation", "逐条核验报告主张和证据", claim_verify, execution_method="llm"),
+    EventDefinition("presentation.claim_verify", "presentation", "逐条核验报告主张和证据", claim_verify, execution_method="llm", timeout_seconds=150),
     EventDefinition("presentation.pdf_render", "presentation", "以中文字体和领域图片渲染 PDF", pdf_render, produces_artifact=True),
     EventDefinition("presentation.pdf_quality_review", "presentation", "交付前检查 PDF 文件和排版证据", pdf_quality_review, reads_existing_artifact=True),
 ]

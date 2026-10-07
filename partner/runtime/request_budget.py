@@ -11,7 +11,8 @@ def validate_constraints(value):
                'method_arm', 'method_arm_label', 'benchmark_protocol_id',
                'benchmark_protocol_version', 'benchmark_inputs',
                'benchmark_guardrail_results', 'benchmark_allow_external_judges',
-               'benchmark_embedded', 'checkpoint_policy', 'delivery_channels'}
+               'benchmark_embedded', 'checkpoint_policy', 'delivery_channels',
+               'active_learning_policy'}
     allowed.update({'max_evolution_attempts', 'notification_mode',
                     'observation_job_ids', 'max_observation_steps',
                     'max_opportunities', 'learning_record_root'})

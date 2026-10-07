@@ -12,8 +12,8 @@ def aggregate_tokens(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     workspace = Path(str(getattr(ctx, 'workspace', '')))
     job_id = str(getattr(ctx, 'job_id', ''))
     
-    # 读取 API 调用日志
-    api_log_path = workspace / 'state' / 'api_log.jsonl'
+    # 从 token_ledger.jsonl 读取未脱敏的 token 记录
+    ledger_path = workspace / 'state' / 'run_logs' / job_id / 'token_ledger.jsonl'
     total_prompt_tokens = 0
     total_completion_tokens = 0
     call_count = 0
@@ -21,28 +21,28 @@ def aggregate_tokens(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     duplicate_prompts = 0
     prompt_hashes = set()
     
-    if api_log_path.exists():
+    if ledger_path.exists():
         try:
-            with open(api_log_path, 'r', encoding='utf-8') as f:
+            with open(ledger_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if line.strip():
                         try:
-                            call = json.loads(line)
-                            if call.get('job_id') == job_id:
+                            entry = json.loads(line)
+                            if entry.get('job_id') == job_id:
                                 call_count += 1
-                                total_prompt_tokens += call.get('prompt_tokens', 0)
-                                total_completion_tokens += call.get('completion_tokens', 0)
+                                total_prompt_tokens += entry.get('prompt_tokens', 0)
+                                total_completion_tokens += entry.get('completion_tokens', 0)
                                 
-                                if call.get('status') == 'failed':
+                                if entry.get('status') == 'failed':
                                     failed_calls += 1
                                 
-                                # 检查重复 prompt
-                                prompt_hash = call.get('prompt_hash', '')
-                                if prompt_hash:
-                                    if prompt_hash in prompt_hashes:
+                                # 检查重复调用（使用 call_id 作为唯一标识）
+                                call_id = entry.get('call_id', '')
+                                if call_id:
+                                    if call_id in prompt_hashes:
                                         duplicate_prompts += 1
                                     else:
-                                        prompt_hashes.add(prompt_hash)
+                                        prompt_hashes.add(call_id)
                         except Exception:
                             pass
         except Exception:
