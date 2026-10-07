@@ -492,7 +492,7 @@ class QQQfficialBridge:
         ``_record_delivery_ack``).  This file lives in ``inbound/``, is
         named ``*.accepted``, and carries no ``delivered_at``."""
         try:
-            target = (self.root / "state" / "application" / "inbound"
+            target = (Path(self.root) / "state" / "application" / "inbound"
                       / ("qq_" + str(msg_id) + ".accepted"))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({
@@ -511,7 +511,7 @@ class QQQfficialBridge:
         Never marks sent/delivered — only records that the send attempt
         failed at the given stage."""
         try:
-            target = (self.root / "state" / "application" / "inbound"
+            target = (Path(self.root) / "state" / "application" / "inbound"
                       / ("qq_" + str(msg_id) + ".reply_failed"))
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({

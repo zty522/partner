@@ -967,7 +967,21 @@ def input_consumption_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]
     work = (Path(work_value) if work_value else
             Path(_workspace(ctx)) / 'state/event_runtime/work' /
             str(getattr(ctx, 'job_id', 'project')))
+    # The executor's working dir is <job>/<flow_id>/ (see action_execute), so
+    # the declaration may land under the flow subdirectory while the audit
+    # resolves <job>/ itself.  Probe the known layouts in order, then fall
+    # back to the first declaration found under the job dir.
     declared_path = work / 'input_consumption.json'
+    if not declared_path.is_file():
+        flow_id = str(params.get('flow_id') or '').strip()
+        if flow_id:
+            candidate = work / flow_id / 'input_consumption.json'
+            if candidate.is_file():
+                declared_path = candidate
+    if not declared_path.is_file():
+        for candidate in sorted(work.glob('**/input_consumption.json')):
+            declared_path = candidate
+            break
     declared = {}
     if declared_path.is_file():
         try:
