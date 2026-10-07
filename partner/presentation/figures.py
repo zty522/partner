@@ -41,8 +41,20 @@ def digest(path):
 
 
 def select(data, key):
-    for part in str(key or '').split('.'):
-        if part: data = data[int(part)] if isinstance(data, list) else data[part]
+    parts = [part for part in str(key or '').split('.') if part]
+    for index, part in enumerate(parts):
+        if isinstance(data, list):
+            if part == 'length':
+                if index != len(parts) - 1:
+                    raise ValueError('length selector must be the last path segment')
+                data = len(data)
+                break
+            try:
+                data = data[int(part)]
+            except ValueError:
+                raise ValueError(f'selector segment {part!r} is not a valid list index') from None
+        else:
+            data = data[part]
     return data
 
 

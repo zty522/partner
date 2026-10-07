@@ -38,7 +38,7 @@ def fetch(url,directory):
         if 'html' in content_type:
             parser=TextParser();parser.feed(text);text='\n'.join(parser.parts)
     if len(text.strip())<100:raise ValueError('source contains insufficient readable content')
-    (folder/'source.bin').write_bytes(body);(folder/'source.txt').write_text(text)
+    (folder/'source.bin').write_bytes(body);(folder/'source.txt').write_bytes(text.encode('utf-8'))
     receipt={'url':url,'final_url':final_url,'content_type':content_type,'bytes':len(body),
              'raw_path':str(folder/'source.bin'),'text_path':str(folder/'source.txt'),
              'sha256':hashlib.sha256(body).hexdigest(),'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
@@ -48,7 +48,7 @@ def fetch(url,directory):
 
 
 def read_verified(row,limit=12000,query=''):
-    raw=Path(row['raw_path']).read_bytes();text=Path(row['text_path']).read_text()
+    raw=Path(row['raw_path']).read_bytes();text=Path(row['text_path']).read_bytes().decode('utf-8')
     if hashlib.sha256(raw).hexdigest()!=row['sha256'] or hashlib.sha256(text.encode()).hexdigest()!=row['text_sha256']:
         raise ValueError('downloaded source changed')
     full_length = len(text)
