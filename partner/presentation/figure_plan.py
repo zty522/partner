@@ -93,6 +93,27 @@ def validate(plans,sources):
                         'requested':requested,'actual':canonical,
                         'scope':'full source array, not prompt sample'}
                 for i in p.get('indices',[0]):rows[int(i)][p.get('smiles_key','canonical_smiles')]
+            if kind=='test_matrix':
+                if len(p['source_refs']) != 2:
+                    raise ValueError('test_matrix requires exactly two JSON test receipts (baseline and candidate)')
+                payloads=[]
+                for raw in p['source_refs']:
+                    rpath=Path(raw)
+                    if rpath.suffix.lower() not in {'.json'}:
+                        raise ValueError(f'test_matrix requires JSON receipt files, not {rpath.suffix or "no extension"}')
+                    try:
+                        payloads.append(json.loads(rpath.read_text()))
+                    except ValueError as exc:
+                        raise ValueError(f'test_matrix source {rpath.name} is not valid JSON: {exc}') from exc
+                if any(not d.get('executed') or d.get('timed_out') for d in payloads):
+                    raise ValueError('test execution not complete')
+                base_cases=[(r.get('class'),r.get('name')) for r in payloads[0].get('cases',[])]
+                if not base_cases:
+                    raise ValueError('test_matrix baseline receipt has no cases')
+                for d in payloads[1:]:
+                    other=[(r.get('class'),r.get('name')) for r in d.get('cases',[])]
+                    if other!=base_cases:
+                        raise ValueError('test sets differ between receipts')
             if kind=='video_frame':float(p['timestamp'])
             if kind=='code_excerpt' and 'start_line' not in p:raise ValueError('code excerpt needs actual start_line/end_line')
             if kind=='existing_image' and source.suffix.lower() not in {'.png','.jpg','.jpeg','.webp','.svg'}:
