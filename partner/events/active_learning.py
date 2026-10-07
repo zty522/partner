@@ -232,8 +232,13 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     directory = work / 'sources' / str(params.get('flow_id') or 'standalone')
     downloaded, failures = [], []
     if local_proposed and not local_value:
-        local_root = Path('/')
-        local_value = '/'
+        # Context evidence files (e.g. handoff.json, input_consumption.json) are
+        # provenance references, not a declared learning root.  Elevating them to
+        # local_root='/' used to set declared_local_mode and silently skip every
+        # external URL planned by source_plan, breaking active-learning runs that
+        # must fetch real sources.  Keep them only as hints for the
+        # explicit-local-root path; without an explicit local_learning_root the
+        # external download plan always runs.
         constraints = {**constraints, 'local_learning_files': [str(p) for p in local_proposed]}
     if local_value and local_root.is_dir():
         preferred: list[Path] = []
