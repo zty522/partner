@@ -56,7 +56,10 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     from scripts.messaging.partner_submit import SubmitPayload, submit
     folder = _regression_folder(ctx)
     folder.mkdir(parents=True, exist_ok=True)
-    instance = str(params.get("regression_instance") or "02")
+    origin_instance = str(getattr(ctx, "instance_id", "") or "")
+    instance = str(params.get("regression_instance") or origin_instance or "01")
+    sender_openid = str(getattr(ctx, "sender_id", "") or "").strip()
+    recipient_ref = f"inst{instance}_{sender_openid}" if sender_openid else f"inst{instance}"
     project = str(params.get("regression_project") or "literature_github_learning")
     message = str(params.get("regression_message") or _default_message())
     request_id = "reg" + uuid.uuid4().hex[:12]
@@ -71,7 +74,7 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         conversation_id=None,
         scope=None,
         request_id=request_id,
-        recipient_ref="qq",
+        recipient_ref=recipient_ref,
         constraints_file=None,
         execution_constraints={"evolution_cycle": False},
         direct_answer=False,
