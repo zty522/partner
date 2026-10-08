@@ -62,14 +62,18 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     request_id = "reg" + uuid.uuid4().hex[:12]
     payload = SubmitPayload(
         instance=instance,
+        sender_id="system_evolution",
+        sender_name="system_evolution",
         message=message,
         project_id=project,
         mode=str(params.get("regression_mode") or "project_iteration"),
         reply_to="qq",
+        conversation_id=None,
+        scope=None,
         request_id=request_id,
-        sender_id="system_evolution",
-        execution_constraints={"evolution_cycle": False},
         recipient_ref="qq",
+        constraints_file=None,
+        execution_constraints={"evolution_cycle": False},
         direct_answer=False,
     )
     try:
