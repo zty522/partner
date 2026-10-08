@@ -76,7 +76,7 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         request_id=request_id,
         recipient_ref=recipient_ref,
         constraints_file=None,
-        execution_constraints={"evolution_cycle": False},
+        execution_constraints={"evolution_cycle": False, "max_rounds": 3},
         subject_allowed_instances=[instance],
         direct_answer=False,
     )
@@ -186,8 +186,17 @@ def _live_supervise_round(ctx: Any, job_id: str, instance: str,
 
 
 def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Poll the regression Job to a terminal state while supervising each
-    finished round live (运行过程实时监督), then collect all outputs."""
+    """Poll the regression Job across many bounded Event runs.
+
+    A single Event must stay well under its 300s timeout so the regression
+    Job's own Events (running on the same instance loop) keep being processed.
+    We therefore persist a ``track_state.json`` between attempts: each run
+    polls up to ``poll_window`` seconds, supervises any newly finished rounds
+    live, and if the Job is not terminal returns ``retryable=True`` so the
+    flow engine re-dispatches this node (``max_attempts`` covers the full
+    ``regression_track_seconds`` deadline).  On terminal it collects all
+    outputs and writes ``regression_evidence.json`` once.
+    """
     folder = _regression_folder(ctx)
     folder.mkdir(parents=True, exist_ok=True)
     job_path = folder / "regression_job.json"
@@ -199,20 +208,32 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 "semantic_output": value}
     job = json.loads(job_path.read_text(encoding="utf-8"))
     job_id = str(job.get("job_id") or "")
-    instance = str(job.get("instance") or "02")
+    instance = str(job.get("instance") or "01")
     if not job_id or not job.get("ok"):
         value = {"ok": False, "status": "regression_submit_failed",
                  "reason": str(job.get("reason") or "submit rejected")}
         write_json(folder / "regression_evidence.json", value)
         return {"ok": True, "status": "completed", "summary": "回归任务投递失败",
                 "semantic_output": value}
+    # --- persisted polling state between Event attempts ---------------------
+    state_path = folder / "track_state.json"
+    try:
+        st = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        st = {}
+    deadline = float(st.get("deadline_epoch") or 0)
+    if not deadline:
+        deadline = time.time() + int(params.get("regression_track_seconds") or 5400)
+    seen_rounds = set(str(r) for r in st.get("seen_rounds") or [])
+    live_supervision = list(st.get("live_supervision") or [])
     db = _jobs_db()
     ws = Path(str(getattr(ctx, "workspace", "") or ""))
-    deadline = time.time() + int(params.get("regression_track_seconds") or 5400)
-    status = "queued"
-    seen_rounds: set[str] = set()
-    live_supervision: list[dict[str, Any]] = []
-    while time.time() < deadline:
+    poll_window = int(params.get("regression_poll_seconds") or 260)
+    remaining = max(0, deadline - time.time())
+    poll_until = time.time() + min(poll_window, remaining)
+    status = str(st.get("last_status") or "queued")
+    new_rounds = 0
+    while time.time() < poll_until:
         try:
             if db:
                 con = sqlite3.connect(db)
@@ -227,6 +248,7 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             if rp in seen_rounds:
                 continue
             seen_rounds.add(rp)
+            new_rounds += 1
             try:
                 rec = _live_supervise_round(ctx, job_id, instance, rp, [])
             except Exception as exc:
@@ -235,20 +257,46 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if _terminal(status):
             break
         time.sleep(20)
+    # persist state for the next attempt
+    write_json(state_path, {
+        "job_id": job_id, "instance": instance,
+        "deadline_epoch": deadline,
+        "last_status": status,
+        "seen_rounds": sorted(seen_rounds),
+        "live_supervision": live_supervision,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    })
+    if not _terminal(status):
+        if time.time() >= deadline:
+            outputs = _collect_outputs(ctx, job_id, instance)
+            value = {"ok": False, "status": status, "terminal": False,
+                     "job_id": job_id, "instance": instance,
+                     "tracked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     "reason": "tracking deadline exceeded before terminal state",
+                     "live_supervision": live_supervision,
+                     "outputs": outputs}
+            path = folder / "regression_evidence.json"
+            write_json(path, value)
+            return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+                    "summary": f"回归任务 {job_id} 追踪超时（{status}），已记录部分证据",
+                    "semantic_output": value}
+        return {"ok": False, "status": "polling", "retryable": True,
+                "error": "regression still running; continue polling",
+                "summary": f"回归任务 {job_id} 运行中（{status}），本轮已实时监督 {new_rounds} 个新轮次，继续轮询",
+                "semantic_output": {"status": status, "terminal": False,
+                                    "job_id": job_id,
+                                    "polled_new_rounds": new_rounds,
+                                    "live_supervision_count": len(live_supervision)}}
     outputs = _collect_outputs(ctx, job_id, instance)
-    value = {"ok": True, "status": status, "terminal": _terminal(status),
+    value = {"ok": True, "status": status, "terminal": True,
              "job_id": job_id, "instance": instance,
              "tracked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
              "live_supervision": live_supervision,
              "outputs": outputs}
-    if not _terminal(status):
-        value["ok"] = False
-        value["reason"] = "tracking deadline exceeded before terminal state"
     path = folder / "regression_evidence.json"
     write_json(path, value)
     return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
-            "summary": f"回归任务 {job_id} 状态={status}，实时监督 {len(live_supervision)} 轮" + (
-                "" if _terminal(status) else "（追踪超时，仅记录部分证据）"),
+            "summary": f"回归任务 {job_id} 状态={status}，实时监督 {len(live_supervision)} 轮",
             "semantic_output": value}
 
 
@@ -288,7 +336,8 @@ DEFINITIONS = [
     EventDefinition("autoevolution.trigger_regression", "evolution",
                     "投递一个有界回归任务给兄弟实例并记录 job（evolution_cycle=False 防递归）", trigger_regression),
     EventDefinition("autoevolution.track_regression", "evolution",
-                    "轮询回归任务到终态并收集消息/PDF/轮次证据", track_regression),
+                    "分段轮询回归任务到终态（300s 事件窗口内让出事件循环，持久化追踪状态跨次续跑）并实时监督每轮", track_regression,
+                    timeout_seconds=300, max_attempts=30),
     EventDefinition("autoevolution.benchmark_gate", "evolution",
                     "候选源码落地后跑仓库级基准套件作为确定性门", benchmark_gate),
 ]
