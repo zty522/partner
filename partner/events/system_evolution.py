@@ -69,7 +69,7 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         sender_name="system_evolution",
         message=message,
         project_id=project,
-        mode=str(params.get("regression_mode") or "project_iteration"),
+        mode="project_iteration",
         reply_to="qq",
         conversation_id=None,
         scope=None,
