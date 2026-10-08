@@ -77,6 +77,7 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         recipient_ref=recipient_ref,
         constraints_file=None,
         execution_constraints={"evolution_cycle": False},
+        subject_allowed_instances=[instance],
         direct_answer=False,
     )
     try:
