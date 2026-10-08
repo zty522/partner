@@ -2709,6 +2709,8 @@ def evolution_request(ctx, params):
     return {**result({}, '主动检查本周期所有方面并执行有界改进实验'),
             'cycle_child': {'flow': 'autonomous_evolution', 'owner_node': params['node_id'],
                 'context': {'cycle_manifest': str(path), 'evidence_refs': [str(path)],
+                            'regression_mode': bool(((params.get('intent_contract') or {})
+                                .get('execution_constraints') or {}).get('system_regression')),
                             'experiment_context': {
                                 'issue': gate.get('selected_issue'),
                                 'scope': 'partner_runtime_only',

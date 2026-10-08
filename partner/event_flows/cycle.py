@@ -465,7 +465,7 @@ EVOLUTION_ATTEMPT = Flow('autonomous_evolution_attempt', '1.0.0', (
 ), 'One isolated self-evolution candidate with matched evidence and a guarded next decision.')
 
 
-AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.1.0', (
+AUTONOMOUS_EVOLUTION_V31 = Flow('autonomous_evolution', '3.1.0', (
     Node('collect', 'autoevolution.collect'),
     Node('read_plan', 'autoevolution.read_plan', ('collect',)),
     Node('sources', 'autoevolution.sources', ('read_plan',)),
@@ -496,11 +496,45 @@ AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.1.0', (
     Node('record', 'autoevolution.record', ('rollback_verify',)),
 ), 'Dynamic self-evolution attempts; each attempt is isolated and the LLM may revise until a guard stops it.')
 
+AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.2.0', (
+    Node('regression_trigger', 'autoevolution.trigger_regression'),
+    Node('regression_track', 'autoevolution.track_regression', ('regression_trigger',)),
+    Node('collect', 'autoevolution.collect', ('regression_track',)),
+    Node('read_plan', 'autoevolution.read_plan', ('collect',)),
+    Node('sources', 'autoevolution.sources', ('read_plan',)),
+    Node('audit', 'autoevolution.audit', ('sources',)),
+    Node('counter', 'autoevolution.counter', ('audit',)),
+    Node('design', 'autoevolution.design', ('counter',)),
+    Node('reconsider', 'autoevolution.read_plan', ('design',)),
+    Node('sources_extra', 'autoevolution.sources', ('reconsider',)),
+    Node('design_confirm', 'autoevolution.design', ('sources_extra',)),
+    Node('target_consistency', 'autoevolution.target_consistency', ('design_confirm',)),
+    Node('tests', 'autoevolution.tests', ('target_consistency',)),
+    Node('tests_preflight', 'autoevolution.tests_preflight', ('tests',)),
+    Node('tests_review', 'autoevolution.tests_review', ('tests_preflight',)),
+    Node('test_repair_v2', 'autoevolution.test_repair_v2', ('tests_review',)),
+    Node('tests_review_2', 'autoevolution.tests_review', ('test_repair_v2',)),
+    Node('freeze', 'autoevolution.freeze', ('tests_review_2',)),
+    Node('attempt_loop', 'autoevolution.attempt_controller', ('freeze',)),
+    Node('decision', 'autoevolution.decision', ('attempt_loop',)),
+    Node('release_baseline', 'autoevolution.release_baseline', ('decision',)),
+    Node('release_candidate', 'autoevolution.release_candidate', ('release_baseline',)),
+    Node('release_compare', 'autoevolution.release_compare', ('release_candidate',)),
+    Node('failure_analyze', 'autoevolution.failure_analyze', ('release_compare',)),
+    Node('apply_source', 'autoevolution.apply_source', ('failure_analyze',)),
+    Node('runtime_reload', 'autoevolution.runtime_reload', ('apply_source',)),
+    Node('benchmark_gate', 'autoevolution.benchmark_gate', ('runtime_reload',)),
+    Node('runtime_verify', 'autoevolution.runtime_verify', ('benchmark_gate',)),
+    Node('rollback', 'autoevolution.rollback', ('runtime_verify',)),
+    Node('rollback_verify', 'autoevolution.rollback_verify', ('rollback',)),
+    Node('record', 'autoevolution.record', ('rollback_verify',)),
+), 'Dynamic self-evolution attempts; each attempt is isolated and the LLM may revise until a guard stops it. v3.2 adds an optional system-regression probe (trigger/track) and a deterministic repository benchmark gate before runtime verification.')
+
 AUTONOMOUS_EVOLUTION_V3 = replace(
-    AUTONOMOUS_EVOLUTION, version='3.0.0',
+    AUTONOMOUS_EVOLUTION_V31, version='3.0.0',
     nodes=tuple(
         replace(node, depends_on=('design_confirm',)) if node.node_id == 'tests' else node
-        for node in AUTONOMOUS_EVOLUTION.nodes if node.node_id != 'target_consistency'),
+        for node in AUTONOMOUS_EVOLUTION_V31.nodes if node.node_id != 'target_consistency'),
     description='Historical v3 autonomous evolution retained for pinned Jobs.')
 
 
@@ -619,5 +653,6 @@ HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
               replace(CYCLE_V3, name='meta_cycle', version='1.0.0'),
               replace(CYCLE, name='meta_cycle', version='1.1.0'),
               AUTONOMOUS_EVOLUTION_V3,
+              AUTONOMOUS_EVOLUTION_V31,
               evolution_flow(), evolution_flow(expanded=True),
               evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]

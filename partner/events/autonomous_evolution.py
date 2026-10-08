@@ -511,6 +511,20 @@ def collect(ctx, params):
         , 'created_at': related.get(r.get('event_id'), {}).get('created_at'),
           'node_id': related.get(r.get('event_id'), {}).get('node_id')}
         for eid in related for r in ledger._projection().rows(ledger.summaries_path,entity=eid,limit=1)]
+    # System-level evolution: merge the tracked regression Job's user-facing
+    # messages, PDF and round evidence so the audit can judge readability and
+    # mechanism behaviour of a fresh real run, not only the sealed cycle.
+    reg_evidence = Path(ctx.workspace) / 'state/evolution_regression' / str(ctx.job_id) / 'regression_evidence.json'
+    if reg_evidence.is_file():
+        try:
+            reg = json.loads(reg_evidence.read_text(encoding='utf-8'))
+            value['regression'] = reg
+            if reg.get('outputs'):
+                value['regression_messages'] = reg['outputs'].get('messages') or []
+                value['regression_pdf'] = reg['outputs'].get('pdfs') or []
+                value['regression_rounds'] = reg['outputs'].get('round_briefs') or []
+        except Exception as exc:
+            value['regression'] = {'read_error': str(exc)[:200]}
     return persist(ctx,params,value,'已读取本周期全部项目轮、学习、交付、报告和记忆的真实证据')
 
 
@@ -757,7 +771,14 @@ def design(ctx, params):
         '"expectations":[{"description":"具体修改后行为","kind":"repair或non_regression","test_name":"test_x"}],'
         '"falsification_conditions":[],"risks":[],"rollback":"..."}。'
         '每项预期必须能被Python测试或冻结行为重放观测。不能只预测产出candidate、测试通过率或减少critic拒绝。'
-        '保持用户需求、事实审查与正确交付。禁止改 freeze_boundary.yaml 的 frozen_layers 文件（见输入里的 frozen_layers 列表）。',
+        '保持用户需求、事实审查与正确交付。禁止改 freeze_boundary.yaml 的 frozen_layers 文件（见输入里的 frozen_layers 列表）。'
+        '若输入含 regression_messages / regression_pdf（系统回归任务的真实消息与 PDF），必须一并审阅其面向用户可读性：'
+        '消息应讲清本轮做了什么、查阅了什么来源及它们讲什么、发现了什么、卡在哪、下一步做什么；'
+        '禁止出现哈希/签名、allowlist/verifier/审计、函数名、文件名、内部文档代号（如 ADR 0112、Expected Effect 第X版）、'
+        '“累计动作签名”“已完成相关数据文件记录”“流程完成：等待ACK/token汇总/写入记录”等机制词或空话；'
+        'PDF 不应包含证据索引或 [E编号] / $$ 标记、不应自指矛盾（如写“报告未生成/投递未实现”而报告已交付）、不应堆叠机制腔句子。'
+        '若回归消息或 PDF 不满足以上要求，即可据此设计修复，target_files 指向对应生成源码'
+        '（如 partner/events/emit_progress.py、partner/events/presentation.py、partner/events/cycle.py、partner/events/pdf_five_section.py）。',
         {'counter':saved(ctx,'counter'),'fresh_source_probe':probe,
          'current_runtime_contract':runtime_contract(),
          'permitted_existing_source_paths':existing_paths,
@@ -765,6 +786,8 @@ def design(ctx, params):
          'supervision_boundary':'本周期supervised_cycle_recovery与supervisor_changes是Codex人工监督恢复/源码修改的历史记录，不是Partner自动恢复Event、常驻config guard或未来可依赖的自动兜底。必须以实际代码确认机制，不能把人工作业当自动能力。',
          'sources':sources,
          'audit':compact(saved(ctx,'audit')),
+         'regression_messages':saved(ctx,'collect').get('regression_messages') or [],
+         'regression_pdf':saved(ctx,'collect').get('regression_pdf') or [],
          'frozen_layers':experiment._frozen_patterns()},('target_files','expectations'))
 
 
@@ -2022,13 +2045,16 @@ def rollback_handler(ctx, params):
     from partner.runtime.evolution_experiment import rollback_source
     apply_receipt = saved(ctx,'apply_source')
     runtime_verify = saved(ctx, 'runtime_verify') or {}
-    if runtime_verify.get('all_ok') and runtime_verify.get('production_effective'):
+    bench_gate = saved(ctx, 'benchmark_gate') or {}
+    gate_failed = bench_gate.get('gate_passed') is False
+    if (runtime_verify.get('all_ok') and runtime_verify.get('production_effective')
+            and not gate_failed):
         return persist(ctx, params, {
             'status': 'not_required',
             'production_effective': True,
-            'reason': 'fresh-interpreter runtime verification passed',
+            'reason': 'fresh-interpreter runtime verification and repository benchmark gate passed',
             'retained_files': (apply_receipt or {}).get('files') or [],
-        }, '运行验证通过，保留生产补丁')
+        }, '运行验证与仓库基准门通过，保留生产补丁')
     if not apply_receipt:
         return persist(ctx,params,{'status':'nothing_to_rollback','production_effective':False})
     value = rollback_source(directory(ctx), apply_receipt)

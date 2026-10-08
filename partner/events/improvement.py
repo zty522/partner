@@ -444,6 +444,8 @@ def improvement_experiment_request(ctx, params):
         "context": {
             "intent_contract": params.get("intent_contract") or {},
             "evidence_refs": list(target.get("evidence_refs") or []),
+            "regression_mode": True,
+            "regression_project": str(params.get("project_id") or "literature_github_learning"),
             "experiment_context": {
                 "opportunity_id": target.get("opportunity_id"),
                 "opportunity_origin": target.get("origin"),
