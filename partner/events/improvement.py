@@ -292,6 +292,42 @@ def improvement_opportunity_assess(ctx, params):
         for row in probes.get('job_facts') or []
         for anomaly in row.get('anomalies') or []
     ]
+    request_text = str((params.get('intent_contract') or {}).get('original_request')
+                       or params.get('request') or '')
+    system_supervision_requested = ('系统自进化' in request_text
+                                    or '系统回归' in request_text
+                                    or '系统监督' in request_text)
+    if not learning and not observed_anomalies and system_supervision_requested:
+        # The user asked for system-level self-evolution: even when no typed
+        # mechanism anomaly was reproduced, a bounded regression run with live
+        # supervision is the requested probe (messages/PDF readability against
+        # the dynamic expectation baseline).  This is a deterministic trigger,
+        # not a fabricated defect.
+        opp = OpportunityRecord(
+            opportunity_id=f"opp-sysreg-{int(time.time())}-{hash(request_text)&0xffff:04x}",
+            origin="system_regression_supervision",
+            type="optimize",
+            instance_id=instance_id,
+            scope="partner",
+            capability="internal-mechanism",
+            current_behavior="regression messages/PDF readability and mechanism behaviour unverified this cycle",
+            desired_behavior=("regression run messages and PDF report meet the dynamic expectation baseline; "
+                              "mechanism behaviour healthy; gaps found are fixed with isolated evolution"),
+            evidence_refs=[],
+            bundle_id=bundle_id,
+            source_version=bundle_info.get("source_version", ""),
+            unknowns=["need a real regression run plus live supervision to confirm"],
+            expected_value="user-readable messages/PDF and healthy mechanism verified by regression",
+            cost_and_risk="isolated experiment + rollback; bounded regression; max attempt budget",
+            minimum_probe="submit a bounded regression job, supervise each round live against expectations, fix found gaps",
+        )
+        opp.write(ctx.workspace)
+        return _semantic({"opportunities": [opp.to_dict()],
+            "draft_opportunity_id": opp.opportunity_id,
+            "origin": "system_regression_supervision",
+            "observed_anomalies": 0,
+            "system_supervision_requested": True},
+            "系统自进化指令：投递回归并实时监督（确定性触发，不依赖机制异常）")
     if not learning and not observed_anomalies:
         # Reading a runtime file is evidence collection, not evidence of a
         # defect.  The old fallback manufactured the same generic
