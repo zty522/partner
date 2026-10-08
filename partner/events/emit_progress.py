@@ -72,14 +72,32 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             # future handoff as already retrieved, frozen, or consumed.
             if route == 'active_learning':
                 reason = '当前知识缺口需要外部来源核对；是否形成可靠 handoff 以后续主动学习 Flow 的真实终态为准'
-            message=f'第 {number} 轮结算：假设“{hypothesis}”；{result_text}；决定 {route}'
-            if action: message+=f'；实际动作：{action}'
-            if error: message+=f'；执行阻塞：{error}'
-            if artifacts: message+=f"；证据：{_clean('、'.join(artifacts),100)}"
-            if finding: message+=f'；本轮认识：{finding}'
-            if reason: message+=f'，理由：{reason}'
-            if next_goal and route in {'continue_project','active_learning'}: message+=f'；下一步：{next_goal}'
-            message+='。'
+            route_text = {
+                'active_learning': '补充外部资料学习', 'continue_project': '继续下一轮研究',
+                'complete': '目标达成', 'stop': '本轮结束',
+            }.get(route, str(route) or '')
+            goal_text = _clean(hypothesis or round_goal, 80)
+            result_text = {
+                True: '本轮已形成可确认的结果', False: '本轮未形成可确认的结果',
+                None: '本轮结果待进一步确认',
+            }.get(facts.get('verified'), result_text)
+            message = f'第 {number} 轮进展'
+            if goal_text:
+                message += f'：围绕“{goal_text}”'
+            if action:
+                message += f'，实际完成：{action}'
+            if error:
+                message += f'；执行受阻：{error}'
+            elif finding:
+                message += f'；取得认识：{finding}'
+            message += f'。{result_text}'
+            if route_text:
+                message += f'，下一步：{route_text}'
+            if reason:
+                message += f'（{reason}）'
+            if next_goal and route in {'continue_project','active_learning'}:
+                message += f'：{next_goal}'
+            message += '。'
         elif flow_name == 'active_learning' and facts:
             if phase == 'flow_failed':
                 message = '主动学习未完成：没有形成可供下一项目轮消费的可靠 handoff。'
@@ -87,10 +105,21 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     message += _clean(summary, 160) + '。'
             else:
                 urls=facts.get('source_urls') or []
+                ideas=facts.get('source_ideas') or []
                 status=_clean(facts.get('learning_status'),40)
-                message=f"主动学习完成：{status or '有来源的 handoff 已冻结'}"
-                if urls: message+=f"；来源：{_clean(urls[0],100)}"
-                message+='；改善仍需下一项目轮消费并匹配比较。'
+                if ideas:
+                    parts=[]
+                    for item in ideas[:3]:
+                        title=_clean(item.get('title'),40) or '未命名资料'
+                        core=_clean('；'.join(item.get('core_ideas') or []),90)
+                        parts.append(f"《{title}》({_clean(item.get('url'),60)})——{core}" if core
+                                     else f"《{title}》({_clean(item.get('url'),60)})")
+                    message=f"主动学习完成：查阅了 {len(ideas)} 份外部资料。{('；'.join(parts))}。"
+                    message+='从中提炼出学习成果映射，供下一轮研究参考。'
+                else:
+                    message=f"主动学习完成：{status or '已查阅外部资料并冻结学习成果'}"
+                    if urls: message+=f"；来源：{_clean(urls[0],100)}"
+                    message+='。学习成果供下一轮研究参考，实际效果需后续验证。'
         else:
             message = f"{_PHASE_LABELS[phase]}：{flow_name or '当前 Flow'}。"
             if summary:

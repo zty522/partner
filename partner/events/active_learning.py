@@ -531,9 +531,31 @@ def handoff_freeze(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     reading_urls |= {str(card.get('source_url') or '') for card in borrowable_cards if isinstance(card, dict)}
     ready = bool(source_urls and reading_urls and reading_urls <= source_urls
                  and adoption.get('event_type') and adoption.get('hypothesis'))
+    # User-facing digest: what was found and what it says, so the progress
+    # message can tell the user which sources were read and their core ideas
+    # instead of relaying raw URLs.
+    titles = {str(row.get('url') or ''): str(row.get('title') or '').strip()
+              for row in retrieved if isinstance(row, dict)}
+    ideas_by_url: dict[str, list[str]] = {}
+    for card in borrowable_cards if isinstance(borrowable_cards, list) else []:
+        url = str(card.get('source_url') or '')
+        if url not in ideas_by_url:
+            ideas_by_url[url] = []
+        idea = str(card.get('core_idea') or '').strip()
+        if idea:
+            ideas_by_url[url].append(idea)
+    source_ideas = []
+    for url in sorted(source_urls):
+        if not str(url).startswith('http'):
+            continue
+        title = titles.get(url) or '未命名资料'
+        ideas = ideas_by_url.get(url) or []
+        source_ideas.append({'url': url, 'title': title,
+                             'core_ideas': ideas[:3], 'idea_count': len(ideas)})
     value = {
         'ready': ready, 'status': 'candidate_frozen' if ready else 'inconclusive',
         'source_urls': sorted(source_urls), 'reading_urls': sorted(reading_urls),
+        'source_ideas': source_ideas,
         'source_receipts': [
             {key: row.get(key) for key in (
                 'url', 'final_url', 'content_type', 'bytes', 'sha256',

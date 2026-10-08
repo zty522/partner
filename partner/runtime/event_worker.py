@@ -756,6 +756,7 @@ class EventWorker:
                 handoff=((result.flow_state.node_outputs.get('handoff') or {}).get('semantic_output') or {})
                 milestone_facts={'learning_status':handoff.get('status'),
                     'source_urls':handoff.get('source_urls') or [],
+                    'source_ideas':handoff.get('source_ideas') or [],
                     'required_next_evidence':handoff.get('required_next_evidence')}
             await asyncio.to_thread(
                 self._publish_lifecycle, job=job, ctx=ctx, flow_state=result.flow_state,

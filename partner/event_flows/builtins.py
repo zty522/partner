@@ -414,10 +414,7 @@ for _flow in DEFINITIONS:
     if _flow.name.startswith('pdf_report'):
         _nodes=[Node('decide','presentation.report_decide'),
             Node('summaries','presentation.run_summary_collect',('decide',)),
-            Node('flow_graph','presentation.flow_graph_project',('summaries',)),
-            Node('flow_graph_render','visualization.flow_graph_render',('flow_graph',)),
-            Node('flow_graph_verify','visualization.flow_graph_verify',('flow_graph_render',)),
-            Node('sources','presentation.report_sources_collect',('flow_graph_verify',)),
+            Node('sources','presentation.report_sources_collect',('summaries',)),
             Node('outline','presentation.report_outline',('sources',)),
             Node('visual_plan','presentation.visual_plan',('outline',)),
             Node('visuals','visualization.render',('visual_plan',)),

@@ -63,5 +63,21 @@ def classify_preflight(receipt, plan):
                    for e in plan.get('expectations', [])):
                 value['classification'] = 'baseline_contract_unmet'
                 return value
+    # Hard gate: a declared repair test must fail on the unmodified baseline
+    # (red baseline).  If it passes there too, it never detects the defect and
+    # the whole experiment is invalid -- demand a rewrite instead of letting
+    # the candidate be judged against a non-discriminating test.
+    repair_green = [
+        str(case.get('name')) for case in cases
+        if expectations.get(str(case.get('name'))) == 'repair'
+        and case.find('failure') is None and case.find('error') is None
+    ]
+    if repair_green:
+        value.update(valid=False, classification='repair_red_baseline_missing',
+                     repair_green_tests=repair_green,
+                     repair_feedback=(
+                         'repair 测试在未修改基线上通过，未复现待修缺陷，测试无判别力；'
+                         '必须重写测试：先构造能稳定触发原缺陷的最小用例，使其在基线上失败。'))
+        return value
     value.update(valid=True, classification='behavioral_review_required')
     return value

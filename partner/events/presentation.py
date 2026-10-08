@@ -645,9 +645,6 @@ def run_summary_collect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             f"- 生产生效：{'是' if n_evolution.get('production_effective') else '否'}。",
             '', '## 局限与下一步', '']
         result_lines += [f'- {item}' for item in n_project.get('limitations') or ['尚需更多真实证据']]
-        result_lines += ['', '## 证据索引', ''] + [
-            f'- {Path(str(item)).name}：支撑本次统一事实模型中的项目、学习或自进化结论。'
-            for item in narrative.get('evidence_refs') or []]
         if final_state_hash:
             result_lines += ['', f'- 最终事实版本：`{final_state_hash}`']
     else:
@@ -987,7 +984,19 @@ def _cycle_visual_plan(ctx, params, sources):
     # their titles.  Select the direct comparison and, when present, its fold
     # delta distribution deterministically; the model remains the fallback for
     # domains without this typed evidence.
-    scalar = next((o for o in options if (o.get('plan') or {}).get('kind')=='scalar_bar'),None)
+    def _is_boolean_state(plan):
+        key = str(plan.get('value_key') or '').lower()
+        if any(tok in key for tok in ('consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count')):
+            return True
+        values = plan.get('values') or []
+        if values and all(v in (0, 1) for v in values):
+            return True
+        return False
+    # Boolean status bars (consumed/improved/verified 0-1) are not research
+    # findings; never let them become the report's default chart.
+    scalar = next((o for o in options
+                   if (o.get('plan') or {}).get('kind') == 'scalar_bar'
+                   and not _is_boolean_state(o.get('plan') or {})), None)
     if scalar:
         chosen=[scalar]
         filename=scalar.get('filename')
@@ -1083,16 +1092,15 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "以原始用户问题和最新有效产物为主线，遵循提纲。早期试跑/失败只用于解释方法选择和局限，不机械罗列每轮历史指标。"
         "提纲和图计划只是建议，不是已核实事实。每张必需图必须在相关段落附近单独一行用 [[figure:F01]] 引用，F01替换成实际图ID。禁止把图全放附录或末尾。不要改写资产图题。未生成的图不能列为现有图。"
         "1) 先写本项目实际问题和最重要发现，紧接关键图，再展开方法和局限。读者不是在看运行日志：正文和表头用中文，禁止哈希、实验长编号以及exit_code/production_effective等内部字段；必要API名称和真正代码节选可保留。把测试状态写成通过/失败、隔离验证与生产生效分开，不能把历史标识解释成当前开关。"
-        "按来源 evidence_id（如 [E01]）引用证据，末尾列编号和简短文件名索引；不要用内部绝对路径和字节数挤占正文。\n"
+        "引用来源用自然语言叙述（如'根据 arXiv 论文《标题》'），正文内直接写清查了什么资料、资料的核心观点；不生成证据索引清单、不列文件名编号。\n"
         "正文使用清楚的中文小节，至少包含‘核心结论’‘研究问题与协议’‘结果’‘主动学习与第二轮变化’‘局限与下一步’。如果主动学习没有被实际消费，明确写没有形成可验证改善，禁止只说已生成交接文件。"
         "若来源含 round_evidence_table.json，结果部分必须用表格逐轮列出：假设、实际动作、执行状态、领域证据、获得的认识、停止或继续理由；重复的同类失败可合并但要写次数。"
         "若来源含 learning_summary.json，只能按其中的 run_count、claims、source_urls、consumed、improved 描述主动学习；run_count=0 时明确写‘未执行’，不得写‘已完成主动学习’。"
         "Event 完成只代表编排节点结束；只有 verified=true 且存在领域证据才可写项目取得实质进展。执行失败时报告标题和核心结论应突出具体阻塞，不得只写‘流程完成’。"
-        "正文控制在1000至1800汉字加必要表格，图题由系统加入，正文不重复图题。禁止逐项抄 Event 日志；Event/Flow 执行摘要放短附录。不要夸张标题、名人身份铺陈或流水账。证据索引只列实际引用的来源。\n"
+        "正文控制在1000至1800汉字加必要表格，图题由系统加入，正文不重复图题。禁止逐项抄 Event 日志；不生成附录章节（含 Event/Flow 执行图与运行摘要附录）。不要夸张标题、名人身份铺陈或流水账。\n"
         "禁止输出任何 LaTeX/数学标记（$$、\\left、\\right、上标下标等），正文一律纯文本 Markdown。"
         "JSON 数据文件（*.json）禁止整段原文节选；需要引用时用一句话概括其内容（如'第1轮基线快照：冻结的初始状态与假设'）。"
         "只有真正的源代码（*.py）才可节选，且必须选择有代表性的实现片段并附一句简短说明。"
-        "证据索引每行格式：[E01] 文件名 — 一句话用途说明（不超过20字）。\n"
         "2) 若【业务证据文件】为空，报告必须以 # 项目未推进 为标题，主体 200 字内说明："
         "本项目迭代 N 轮未产生任何可核验的业务文件，未推进、未决策、未达成任何结果。"
         "禁止虚构产物、虚构数字、虚构结论。\n"
