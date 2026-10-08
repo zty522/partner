@@ -25,16 +25,45 @@ def _clean(value: Any, limit: int = 180) -> str:
     return text[:limit].strip(" ：:，,")
 
 
+# User-facing rewrite of internal execution summaries: strip artifact paths,
+# byte counts and internal jargon so round messages read like plain progress
+# updates rather than developer logs.
+def _userify(text, limit=140):
+    text = str(text or '')
+    text = re.sub(r'【业务产物】[^【]*?(?:json|md|txt|py|pdf)?\s*\[bytes=\d+\]', '已完成相关数据文件记录', text)
+    text = re.sub(r'【执行动作】', '本轮动作：', text)
+    text = re.sub(r'【真实发现】', '发现：', text)
+    text = re.sub(r'【未解决】', '未解决：', text)
+    text = re.sub(r'/mnt/[^ ]+|E:\\[^ ]+', '', text)
+    text = re.sub(r'\[bytes=\d+\]', '', text)
+    text = re.sub(r'sha256|SHA256|physical hash|物理哈希', '内容指纹', text, flags=re.I)
+    text = re.sub(r'handoff|Handoff|HANDOFF', '交接记录', text)
+    text = re.sub(r'转移映射', '学习成果', text)
+    text = re.sub(r'机制性空转|空转', '无效重复', text)
+    text = re.sub(r'准入', '允许范围', text)
+    text = re.sub(r'知识注入', '外部知识借鉴', text)
+    text = re.sub(r'可信下载器', '可靠下载组件', text)
+    text = re.sub(r'consumed|consume|消费', '使用', text, flags=re.I)
+    text = re.sub(r'benchmark|Benchmark', '基准测试', text)
+    text = re.sub(r'证据链', '项目记录', text)
+    text = re.sub(r'结算|裁决|判定', '确定', text)
+    text = re.sub(r'终态', '最终状态', text)
+    text = re.sub(r'里程碑', '阶段', text)
+    text = re.sub(r'\bFlow\b|\bEvent\b|flow_|event_', '', text)
+    text = re.sub(r'\s{2,}', ' ', text).strip()
+    return _clean(text, limit)
+
+
 def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Turn one verified runtime transition into a concise Chinese update."""
     phase = str(params.get("lifecycle_phase") or "event_completed")
     flow_name = _clean(params.get("flow_name") or params.get("flow_type"), 60)
-    event_name = _clean(params.get("event_description") or params.get("event_type")
-                        or params.get("node_id"), 90)
-    summary = _clean(params.get("event_summary") or params.get("summary"), 180)
-    next_event = _clean(params.get("next_event_description"), 100)
+    event_name = _userify(params.get("event_description") or params.get("event_type")
+                           or params.get("node_id"), 90)
+    summary = _userify(params.get("event_summary") or params.get("summary"), 180)
+    next_event = _userify(params.get("next_event_description"), 100)
     index, total = params.get("event_index"), params.get("event_total")
-    position = f"（第 {index}/{total} 步）" if index and total else ""
+    position = ""
     if phase == "accepted":
         # The first line is the user's own task label.  Taking a raw character
         # prefix from a long body can expose half a local path or half a word.
@@ -63,15 +92,15 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                          '未获得完整可核验证据' if facts.get('verified') is False else '核验状态未知')
             route=_clean(facts.get('route'),30); reason=_clean(facts.get('reason'),100)
             next_goal=_clean(facts.get('next_hypothesis') or facts.get('next_round_goal'),100)
-            action=_clean(facts.get('execution_summary'),120)
-            error=_clean(facts.get('execution_error'),120)
-            finding=_clean(facts.get('finding') or facts.get('information_gain'),120)
+            action=_userify(facts.get('execution_summary'))
+            error=_userify(facts.get('execution_error'), 100)
+            finding=_userify(facts.get('finding') or facts.get('information_gain'))
             artifacts=[str(v).rsplit('/',1)[-1] for v in facts.get('artifacts') or []]
             # A round decision may request active learning, but the learning Flow
             # has not run yet. Never relay an LLM explanation that describes a
             # future handoff as already retrieved, frozen, or consumed.
             if route == 'active_learning':
-                reason = '当前知识缺口需要外部来源核对；是否形成可靠 handoff 以后续主动学习 Flow 的真实终态为准'
+                reason = '当前知识缺口需要外部来源核对；是否形成可靠的学习成果，以后续主动学习流程的真实结果为准'
             route_text = {
                 'active_learning': '补充外部资料学习', 'continue_project': '继续下一轮研究',
                 'complete': '目标达成', 'stop': '本轮结束',

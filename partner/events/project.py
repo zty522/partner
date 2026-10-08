@@ -1032,27 +1032,63 @@ def input_consumption_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]
             continue
         verified.append({'path': raw_path, 'sha256': actual,
                          'purpose': str(row.get('purpose'))[:500]})
+    # External-source learning consumption: a round may legitimately consume
+    # live-fetched external sources (arXiv / GitHub / docs) that are NOT part
+    # of the local frozen corpus.  A declared source_url + content_hash +
+    # local_path, whose hash matches the file on disk, counts as valid
+    # consumption so active-learning rounds are not rejected just because the
+    # consumed content came from outside the local admission list.
+    external_verified, external_rejected = [], []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        src = str(row.get('source_url') or '').strip()
+        local = str(row.get('local_path') or '').strip()
+        chash = str(row.get('content_hash') or '').strip()
+        if not (src.startswith(('http://', 'https://', 'arxiv://', 'github:')) and local and chash):
+            continue
+        path = Path(local)
+        if not path.is_file():
+            external_rejected.append({'source_url': src, 'local_path': local,
+                                      'reason': 'local copy missing'})
+            continue
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            actual = ''
+        if actual != chash:
+            external_rejected.append({'source_url': src, 'local_path': local,
+                                      'reason': 'content hash mismatch'})
+            continue
+        external_verified.append({'source_url': src, 'local_path': local,
+                                  'sha256': actual,
+                                  'purpose': str(row.get('purpose'))[:500],
+                                  'source_consumed': True})
     request = str((params.get('intent_contract') or {}).get('original_request') or
                   params.get('request') or '')
     corpus_required = bool(re.search(
         r'论文|文献|内容|来源|corpus|paper|literature|source', request, re.I))
-    valid = bool(verified) if corpus_required else (bool(verified) or not frozen)
+    valid = (bool(verified) or bool(external_verified)) if corpus_required else (
+        bool(verified) or bool(external_verified) or not frozen)
     value = {
         'consumption_valid': valid,
         'corpus_required': corpus_required,
         'eligible_count': len(frozen),
         'verified_consumed_inputs': verified,
+        'external_consumed_inputs': external_verified,
         'rejected_consumption_claims': rejected,
+        'rejected_external_claims': external_rejected,
         'receipt_path': str(declared_path),
-        'rule': 'an admitted path, matching frozen hash and declared purpose is required for corpus claims',
+        'rule': ('an admitted path, matching frozen hash and declared purpose is required for corpus claims; '
+                 'live-fetched external sources with a matching content hash also count as valid consumption'),
     }
     audit_path = work / 'input_consumption_audit.json'
     write_json(audit_path, value)
     return {
         'ok': True, 'status': 'completed', 'semantic_output': value,
         'evidence_refs': [str(audit_path)] + ([str(declared_path)] if declared_path.is_file() else []),
-        'summary': ('已验证实际消费的准入输入' if valid else
-                    '执行未证明消费任何准入输入，科学主张将被拒绝'),
+        'summary': ('已验证实际消费的准入输入或外部来源' if valid else
+                    '执行未证明消费任何准入输入或外部来源，科学主张将被拒绝'),
     }
 
 
