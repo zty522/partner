@@ -58,6 +58,12 @@ def _userify(text, limit=140):
     # arXiv / DYNOSAUR / PDF / QQ must survive user-facing messages.
     text = re.sub(r'`?[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]*`?(?:\.[a-z]{2,4})?', '', text)
     text = re.sub(r'`?[A-Za-z][A-Za-z0-9_]*\.[a-z]{2,4}`?', '', text)
+    text = re.sub(r'\b[\w-]+\.(?:md|py|json|txt|pdf|log)\b', '', text)
+    text = re.sub(r'累计动作签名\([0-9a-f]{8,}\)', '', text)
+    text = re.sub(r'无失败签名|失败签名[:：]?无', '未发现失败原因', text)
+    text = re.sub(r'(?:verifier|allowlist)\s*[：:]?[^，。；]*', '', text, flags=re.I)
+    text = re.sub(r'反思证据被限制[^。；]*', '', text)
+    text = re.sub(r'ADR\s*\d+|Expected\s+Effect[^，。；]*', '内部机制文档', text)
     text = re.sub(r'\s{2,}', ' ', text).strip()
     return _clean(text, limit)
 
@@ -76,7 +82,7 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         # Keep the user's own task label whole: the request may be multi-line
         # and the intent label is its first segment, not a raw first line
         # that can cut mid-word.
-        request = _clean(str(params.get("request") or "").splitlines()[0], 90)
+        request = _clean(str(params.get("request") or "").splitlines()[0], 150)
         message = f"已收到你的任务：{request}。" if request else "已收到你的任务。"
         if flow_name:
             message += f"将按“{flow_name}”流程执行，后续步骤会持续同步到网页和 QQ。"
@@ -119,9 +125,36 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 True: '本轮已形成可确认的结果', False: '本轮未形成可确认的结果',
                 None: '本轮结果待进一步确认',
             }.get(facts.get('verified'), result_text)
-            message = f'第 {number} 轮进展'
-            if goal_text:
-                message += f'：围绕“{goal_text}”'
+            message = None
+            try:
+                import json as _json
+                from ._llm import call_model
+                facts_view = {
+                    'round': number, 'goal': hypothesis or round_goal,
+                    'action': facts.get('execution_summary'),
+                    'finding': facts.get('finding') or facts.get('information_gain'),
+                    'blocked': facts.get('execution_error'),
+                    'artifacts': [str(a).rsplit('/', 1)[-1] for a in (facts.get('artifacts') or [])][:5],
+                    'verified': facts.get('verified'), 'next': route,
+                }
+                _raw, _ = call_model(ctx, purpose='round_progress_user_message', prompt=(
+                    '把一次项目轮次的执行记录改写成发给项目负责人的中文进展消息（3句以内）：'
+                    '先说本轮围绕什么目标做了什么；若查阅了资料，说明看了哪些来源、它们讲什么；'
+                    '再说本轮形成了什么结论或发现了什么；最后说当前卡在哪、下一步准备做什么。'
+                    '只允许使用给定记录中的事实，禁止编造。'
+                    '禁止出现：文件路径与文件名、哈希/签名、allowlist/verifier/审计、函数名、'
+                    '“已完成相关数据文件记录”等空话、“累计动作签名”等机制术语、内部文档代号。'
+                    '消息读起来是给用户看的进展，不是开发日志。\n\n轮次记录：'
+                    + _json.dumps(facts_view, ensure_ascii=False)))
+                _narr = _userify(_raw, 280)
+                if _narr:
+                    message = f'第 {number} 轮进展：{_narr}'
+            except Exception:
+                message = None
+            if not message:
+                message = f'第 {number} 轮进展'
+                if goal_text:
+                    message += f'：围绕“{goal_text}”'
             if action:
                 message += f'，实际完成：{action}'
             if error:
@@ -194,6 +227,15 @@ def lifecycle_critic(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     phase = str(params.get("lifecycle_phase") or "")
     if phase.endswith("failed") and not any(x in message for x in ("未完成", "失败", "等待")):
         problems.append("failure_hidden")
+    # Pure internal-status updates are noise for the user: ACK/token/record
+    # writes/audit boundaries/empty flow-done lines carry no project meaning.
+    _status_noise = ("ack", "回执", "token", "汇总", "写入项目记录",
+                     "审计", "verifier", "allowlist", "语义蕴含边界",
+                     "已取得本次渠道", "等待本次真实渠道", "流程完成：",
+                     "最终状态确定写入", "已记录；全部")
+    if (phase in {"event_completed", "flow_completed", "flow_failed"}
+            and any(x in message.lower() for x in _status_noise)):
+        problems.append("internal_status_noise")
     accepted = not problems
     return {"ok": accepted, "status": "completed" if accepted else "failed",
             "accepted": accepted, "problems": problems, "message": message,

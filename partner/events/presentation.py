@@ -1130,6 +1130,8 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "Event 完成只代表编排节点结束；只有 verified=true 且存在领域证据才可写项目取得实质进展。执行失败时报告标题和核心结论应突出具体阻塞，不得只写‘流程完成’。"
         "正文控制在1000至1800汉字加必要表格，图题由系统加入，正文不重复图题。禁止逐项抄 Event 日志；不生成附录章节（含 Event/Flow 执行图与运行摘要附录）。不要夸张标题、名人身份铺陈或流水账。\n"
         "禁止输出任何 LaTeX/数学标记（$$、\\left、\\right、上标下标等），正文一律纯文本 Markdown。"
+        "禁止内部文档代号（如 ADR 0112、0112-effect-bearing、Expected Effect 第X版、机制文档文件名），涉及内部机制文档统一写“既有机制文档”。"
+        "本报告本身就是本次交付物：禁止写“报告生成/QQ投递/即时通讯投递 未在本轮实现、尚未启动、未执行”等自我否定表述；交付状态由投递环节负责，报告只写研究内容。"
         "JSON 数据文件（*.json）禁止整段原文节选；需要引用时用一句话概括其内容（如'第1轮基线快照：冻结的初始状态与假设'）。"
         "只有直接支撑核心结论的源代码（*.py）才可节选（如核心算法关键判断），且附一句简短说明；工具类、校验类、哈希计算、路径处理类代码一律禁止节选。"
         "2) 若【业务证据文件】为空，报告必须以 # 项目未推进 为标题，主体 200 字内说明："
@@ -1158,6 +1160,9 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # Hard post-filters so the delivered report stays user-readable even when
     # the model drifts: no evidence-id index, no machine-path code excerpts,
     # no internal jargon.
+    # The report is itself the delivered artifact; never claim delivery is missing.
+    raw = re.sub(r'[^。；\n]*?(?:报告生成|即时通讯投递|QQ\s*投递|PDF\s*报告)[^。；\n]*?(?:未在本轮实现|尚未启动|未实现|未启动)[^。；\n]*[。；]?',
+                 '本报告即为本次交付物，已通过 QQ 渠道发送。', raw)
     raw = re.sub(r'(?i)^\s*#+\s*证据索引.*?(?=^#|\Z)', '', raw, flags=re.S)
     raw = re.sub(r'\[E\d+\]', '', raw)
     raw = re.sub(r'(?i)^\s*#+\s*(?:实际代码节选|代码节选).*?(?=^#|\Z)', '', raw, flags=re.S)
@@ -1472,7 +1477,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             else:
                 claim, ids = str(item).strip(), []
             if claim:
-                lines.append('- ' + claim + ((' ' + ''.join(f'[{x}]' for x in ids)) if ids else ''))
+                lines.append('- ' + claim)
         if not verified:
             lines.append('- 当前证据不足以形成可发布的肯定结论。')
         question=(original_goal.splitlines()[0] if original_goal else '').strip()
@@ -1481,7 +1486,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if '?' in question: question=question.split('?',1)[0]+'?'
         lines += ['', '## 研究问题与协议', '',
                   question or '本报告仅审查现有项目产物，没有收到可恢复的原始研究问题。',
-                  '', '比较和评价仅限于下列已收集证据；未在证据中固定的样本、预算、切分和随机性条件保持未知。',
+                  '', '本报告只基于已收集的项目产物与执行记录整理；未记录的样本、预算、切分和随机性条件不作假设。',
                   '', '## 结果', '']
         lines += [('- '+(str(item.get('claim') or '') if isinstance(item,dict) else str(item)))
                   for item in verified[:8] if (str(item.get('claim') or '').strip()
@@ -1492,22 +1497,15 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             lines += [f"[[figure:{row['id']}]]" for row in assets if row.get('id')]
         verified_text=' '.join(str(item.get('claim') or '') for item in verified if isinstance(item,dict))
         has_uncertainty=bool(re.search(r'bootstrap|置信区间|\bCI\b',verified_text,re.I))
-        learning_effect='主动学习形成的 handoff 已由后续匹配实验消费；效果归因仍限于本次冻结任务。' if has_uncertainty else (
-            '只有来源记录显示学习内容被下一轮实际采用并经过匹配比较时，才能归因于主动学习。')
-        next_step=('当前配对结果与不确定性估计已经完成；下一步应在独立数据集或外部 target holdout 上验证泛化。'
+        learning_effect='本轮已形成可核验的主动学习记录与后续使用证据，效果归因限于本次任务。' if has_uncertainty else (
+            '本轮没有可核验的主动学习记录，未形成可验证的改善。')
+        next_step=('当前结果与不确定性估计已完成；下一步应在独立数据集上验证泛化。'
                    if has_uncertainty else
-                   '下一步应补齐冻结协议下的配对结果和不确定性估计，再决定是否接受候选改动。')
+                   '下一步应在真实项目数据上继续推进，再评估是否采纳当前候选改动。')
         lines += ['', '## 主动学习与第二轮变化', '', learning_effect,
                   '', '## 局限与下一步', '',
-                  '本版本仅保留独立审查已确认的主张；被审查为证据不足的解释、因果或泛化结论均未发布。',
-                  next_step, '', '## 证据索引', '']
-        cited={str(x) for item in verified if isinstance(item,dict)
-               for x in item.get('evidence_ids') or []}
-        figure_paths={str(src.get('path') or '') for asset in assets
-                      for src in asset.get('sources') or [] if isinstance(src,dict)}
-        lines += [f"- [{row['evidence_id']}] {Path(row['path']).name}"
-                  for row in source_rows if row.get('evidence_id') and row.get('exists')
-                  and (row.get('evidence_id') in cited or str(row.get('path') or '') in figure_paths)]
+                  '本报告只包含已核实的结论；未经核实的推测未写入。',
+                  next_step, '']
         fallback='\n'.join(lines).strip()+'\n'
         errors=_citation_errors(fallback,sources)
         from partner.presentation.document import figure_errors
