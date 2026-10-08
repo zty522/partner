@@ -1136,7 +1136,7 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     root_ok = (not required_root or all(Path(row["path"]).resolve().is_relative_to(required_root)
                                        for row in evidence))
     scientific_contract_violations = _matched_split_violations(params, evidence)
-    execution_verified = bool(prior.get('business_delta') and evidence and novel and contract_ok and root_ok
+    execution_verified = bool(sem.get('business_delta') and evidence and novel and contract_ok and root_ok
                     and not foreign_job_refs and not scientific_contract_violations and all(
         row['valid'] and row['sha256'] == expected.get(row['path']) for row in evidence))
     contract_params = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}

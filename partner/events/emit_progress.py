@@ -49,7 +49,15 @@ def _userify(text, limit=140):
     text = re.sub(r'结算|裁决|判定', '确定', text)
     text = re.sub(r'终态', '最终状态', text)
     text = re.sub(r'里程碑', '阶段', text)
+    text = re.sub(r'项目周期', '项目流程', text)
+    text = re.sub(r'子Flow|子流程|子流程', '子流程', text)
+    text = re.sub(r'基线结果|baseline', '初始结果', text)
     text = re.sub(r'\bFlow\b|\bEvent\b|flow_|event_', '', text)
+    # Strip only filename-like tokens (snake_case with an underscore, or
+    # alphanumeric names with a file extension).  Proper nouns such as
+    # arXiv / DYNOSAUR / PDF / QQ must survive user-facing messages.
+    text = re.sub(r'`?[A-Za-z_][A-Za-z0-9_]*_[A-Za-z0-9_]*`?(?:\.[a-z]{2,4})?', '', text)
+    text = re.sub(r'`?[A-Za-z][A-Za-z0-9_]*\.[a-z]{2,4}`?', '', text)
     text = re.sub(r'\s{2,}', ' ', text).strip()
     return _clean(text, limit)
 
@@ -65,9 +73,10 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     index, total = params.get("event_index"), params.get("event_total")
     position = ""
     if phase == "accepted":
-        # The first line is the user's own task label.  Taking a raw character
-        # prefix from a long body can expose half a local path or half a word.
-        request = _clean(str(params.get("request") or "").splitlines()[0], 70)
+        # Keep the user's own task label whole: the request may be multi-line
+        # and the intent label is its first segment, not a raw first line
+        # that can cut mid-word.
+        request = _clean(str(params.get("request") or "").splitlines()[0], 90)
         message = f"已收到你的任务：{request}。" if request else "已收到你的任务。"
         if flow_name:
             message += f"将按“{flow_name}”流程执行，后续步骤会持续同步到网页和 QQ。"

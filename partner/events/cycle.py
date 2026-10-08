@@ -409,8 +409,15 @@ def input_eligibility(ctx, params):
         'eligible_inputs': [next(item for item in resolved if item.get('path') == row.get('path'))
                             for row in eligible],
         'eligible_count': len(eligible), 'rejected_count': len(decisions) - len(eligible),
-        'corpus_ready': bool(judged.get('corpus_ready')) and bool(eligible),
-        'missing_inputs': judged.get('missing_inputs') or ([] if eligible else ['no eligible research input']),
+        # corpus_ready must reflect inputs that actually exist for THIS round.
+        # The model frequently lists downstream/final deliverables (later-round
+        # handoffs, the PDF, the QQ payload, candidate patches) as missing,
+        # which would make corpus_ready permanently false and reject every
+        # round.  Base readiness on the admitted files; keep the model's list
+        # as advisory notes only.
+        'corpus_ready': bool(eligible),
+        'missing_inputs': [m for m in (judged.get('missing_inputs') or [])
+                           if m != 'no eligible research input'],
         'rule': 'only eligible_inputs may be presented to hypothesis design as research data',
     }
     number = int(params.get('round_number') or (params.get('intent_contract') or {}).get('round_number') or 1)
