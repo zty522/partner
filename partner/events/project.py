@@ -1096,6 +1096,15 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
     from partner.runtime.artifact_checks import check_file
     sem = prior.get('semantic_output') or {}
+    # The execute node is the actual producer of artifact_checks; the
+    # consumption-audit node that immediately precedes this verify in the flow
+    # chain does not carry them.  Fall back to the execute output so evidence
+    # is never silently empty, which would reject every round as unverified.
+    if not sem.get('artifact_checks'):
+        executed = ((params.get('flow_outputs') or {}).get('execute') or {})
+        execute_sem = executed.get('semantic_output') or {}
+        if execute_sem.get('artifact_checks'):
+            sem = execute_sem
     evidence = [check_file(Path(row['path'])) for row in sem.get('artifact_checks', []) if row.get('valid')]
     expected = {row['path']:row.get('sha256') for row in sem.get('artifact_checks', [])}
     previous_hashes = set((params.get('intent_contract') or {}).get('previous_artifact_hashes') or [])

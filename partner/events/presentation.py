@@ -946,6 +946,26 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if not errors:
             value['visuals']=normalized
             break
+    # Post-filter: runtime timing, boolean status bars (consumed/verified/
+    # count), hashes, indices and code excerpts are provenance, not research
+    # findings.  Never let them become report figures regardless of what the
+    # model selected; this mirrors the cycle planner's guard.
+    filtered_plans = []
+    for plan in (value.get('visuals') or []):
+        if plan.get('kind') == 'code_excerpt':
+            continue
+        key = str(plan.get('value_key') or '').lower()
+        refs = ' '.join(str(x) for x in (plan.get('source_refs') or []))
+        if any(tok in key for tok in (
+                'elapsed', 'duration', 'index', 'token', 'byte',
+                'consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count')):
+            continue
+        if any(tok in refs for tok in (
+                'execution_contract', 'checkpoint', 'events.jsonl', 'run_log',
+                'ack_wait', 'round_evidence_table', 'business_snapshot')):
+            continue
+        filtered_plans.append(plan)
+    value['visuals'] = filtered_plans
     valid=not errors
     value['validation_errors']=errors
     plans=value.get('visuals') or []
@@ -1103,7 +1123,7 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "以原始用户问题和最新有效产物为主线，遵循提纲。早期试跑/失败只用于解释方法选择和局限，不机械罗列每轮历史指标。"
         "提纲和图计划只是建议，不是已核实事实。每张必需图必须在相关段落附近单独一行用 [[figure:F01]] 引用，F01替换成实际图ID。禁止把图全放附录或末尾。不要改写资产图题。未生成的图不能列为现有图。"
         "1) 先写本项目实际问题和最重要发现，紧接关键图，再展开方法和局限。读者不是在看运行日志：正文和表头用中文，禁止哈希、实验长编号以及exit_code/production_effective等内部字段；必要API名称和真正代码节选可保留。把测试状态写成通过/失败、隔离验证与生产生效分开，不能把历史标识解释成当前开关。"
-        "引用来源用自然语言叙述（如'根据 arXiv 论文《标题》'），正文内直接写清查了什么资料、资料的核心观点；不生成证据索引清单、不列文件名编号。\n"
+        "引用来源一律用自然语言叙述（如'根据 arXiv 论文《标题》'），正文内直接写清查了什么资料、资料的核心观点；正文禁止出现E编号引用（如[E01]）、禁止文件名清单、禁止任何'证据索引'小节。内部术语必须用户化：转移映射写作学习成果、handoff写作交接记录、准入写作允许范围、consumed写作使用、物理哈希/sha256写作内容指纹。\n"
         "正文使用清楚的中文小节，至少包含‘核心结论’‘研究问题与协议’‘结果’‘主动学习与第二轮变化’‘局限与下一步’。如果主动学习没有被实际消费，明确写没有形成可验证改善，禁止只说已生成交接文件。"
         "若来源含 round_evidence_table.json，结果部分必须用表格逐轮列出：假设、实际动作、执行状态、领域证据、获得的认识、停止或继续理由；重复的同类失败可合并但要写次数。"
         "若来源含 learning_summary.json，只能按其中的 run_count、claims、source_urls、consumed、improved 描述主动学习；run_count=0 时明确写‘未执行’，不得写‘已完成主动学习’。"
@@ -1111,7 +1131,7 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "正文控制在1000至1800汉字加必要表格，图题由系统加入，正文不重复图题。禁止逐项抄 Event 日志；不生成附录章节（含 Event/Flow 执行图与运行摘要附录）。不要夸张标题、名人身份铺陈或流水账。\n"
         "禁止输出任何 LaTeX/数学标记（$$、\\left、\\right、上标下标等），正文一律纯文本 Markdown。"
         "JSON 数据文件（*.json）禁止整段原文节选；需要引用时用一句话概括其内容（如'第1轮基线快照：冻结的初始状态与假设'）。"
-        "只有真正的源代码（*.py）才可节选，且必须选择有代表性的实现片段并附一句简短说明。"
+        "只有直接支撑核心结论的源代码（*.py）才可节选（如核心算法关键判断），且附一句简短说明；工具类、校验类、哈希计算、路径处理类代码一律禁止节选。"
         "2) 若【业务证据文件】为空，报告必须以 # 项目未推进 为标题，主体 200 字内说明："
         "本项目迭代 N 轮未产生任何可核验的业务文件，未推进、未决策、未达成任何结果。"
         "禁止虚构产物、虚构数字、虚构结论。\n"
@@ -1135,6 +1155,19 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     raw = re.sub(r'\$\$.+?\$\$', '', raw, flags=re.DOTALL)
     raw = re.sub(r'\$+', '', raw)
     raw = re.sub(r'\\(?:left|right|[a-zA-Z]{1,12})', '', raw)
+    # Hard post-filters so the delivered report stays user-readable even when
+    # the model drifts: no evidence-id index, no machine-path code excerpts,
+    # no internal jargon.
+    raw = re.sub(r'(?i)^\s*#+\s*证据索引.*?(?=^#|\Z)', '', raw, flags=re.S)
+    raw = re.sub(r'\[E\d+\]', '', raw)
+    raw = re.sub(r'(?i)^\s*#+\s*(?:实际代码节选|代码节选).*?(?=^#|\Z)', '', raw, flags=re.S)
+    raw = re.sub(r'(?m)^```(?:python|bash|sh|json)?$', '', raw)
+    for src, dst in (('转移映射','学习成果'), ('handoff','交接记录'), ('Handoff','交接记录'),
+                     ('HANDOFF','交接记录'), ('准入','允许范围'), ('consumed','使用'),
+                     ('consume','使用'), ('机制性空转','无效重复'), ('空转','无效重复'),
+                     ('物理哈希','内容指纹'), ('sha256','内容指纹'), ('SHA256','内容指纹'),
+                     ('证据链','项目记录'), ('benchmark','基准测试'), ('Benchmark','基准测试')):
+        raw = re.sub(src, dst, raw, flags=re.I)
     raw = localize_prose(raw,params.get("flow_outputs") or {})
     working.mkdir(parents=True, exist_ok=True)
     title = str(params.get("chinese_filename") or "项目进展报告").removesuffix(".md")

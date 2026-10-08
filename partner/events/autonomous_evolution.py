@@ -836,7 +836,13 @@ def target_consistency(ctx, params):
                         and all(item.get('kind') == 'non_regression'
                                 for item in design_value.get('expectations') or []))
     else:
-        accepted = bool(targets and relevant and verification_covered)
+        # The design may legitimately carry concrete relevant targets without
+        # a pre-selected verification file: the next stage creates the
+        # red-baseline regression test, and relevance above already confirms
+        # the target owns an implicated symbol.  Only reject when a
+        # verification file was actually chosen but fails to reference the
+        # patch target (a sign the patch is aimed at the wrong place).
+        accepted = bool(targets and relevant and (verification_covered or not verification))
     reasons = []
     if not no_change and not targets: reasons.append('design selected no mutable target')
     if not no_change and targets and not relevant: reasons.append('no target contains or owns an implicated symbol')
