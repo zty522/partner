@@ -17,7 +17,7 @@ def start_child(worker, job, parent, output):
             'autonomous_evolution_attempt', 'benchmark_experiment', 'v4_benchmark_episode',
             'self_improvement_round', 'learning_improvement_round',
             'project_research_cycle', 'learning_improvement_cycle',
-            'self_improvement_cycle'}:
+            'self_improvement_cycle', 'supervision_cycle'}:
         raise ValueError('invalid cycle child request')
     node = request['owner_node']
     definition = worker.flows.get(parent.flow_type, version=parent.definition_version)

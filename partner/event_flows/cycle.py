@@ -496,15 +496,31 @@ AUTONOMOUS_EVOLUTION_V31 = Flow('autonomous_evolution', '3.1.0', (
     Node('record', 'autoevolution.record', ('rollback_verify',)),
 ), 'Dynamic self-evolution attempts; each attempt is isolated and the LLM may revise until a guard stops it.')
 
-AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.2.0', (
+SUPERVISION_CYCLE = Flow('supervision_cycle', '1.0.0', (
+    Node('expectations_load', 'supervise.expectations_load'),
+    Node('snapshot', 'supervise.snapshot', ('expectations_load',)),
+    Node('synthesize', 'supervise.synthesize', ('snapshot',)),
+    Node('expectations_update', 'supervise.expectations_update', ('synthesize',)),
+    Node('objective_plan', 'supervise.objective_plan', ('expectations_update',)),
+), 'Shared supervision brick: load expectations, full-text LLM snapshot, gap synthesis, expectation doc update, objective plan. Invoked by the LLM-assembled route (supervise.route_dispatch).')
+
+AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.3.0', (
     Node('regression_trigger', 'autoevolution.trigger_regression'),
     Node('regression_track', 'autoevolution.track_regression', ('regression_trigger',)),
     Node('collect', 'autoevolution.collect', ('regression_track',)),
+    # mechanism audit chain (investigates framework/mechanism behaviour)
     Node('read_plan', 'autoevolution.read_plan', ('collect',)),
     Node('sources', 'autoevolution.sources', ('read_plan',)),
     Node('audit', 'autoevolution.audit', ('sources',)),
     Node('counter', 'autoevolution.counter', ('audit',)),
-    Node('design', 'autoevolution.design', ('counter',)),
+    # supervision chain (full-text round-by-round judgment against expectations)
+    Node('supervise_synthesize', 'supervise.synthesize', ('collect',)),
+    Node('supervise_expectations_update', 'supervise.expectations_update', ('supervise_synthesize',)),
+    Node('route_plan', 'supervise.route_plan', ('supervise_expectations_update',)),
+    Node('route_dispatch', 'supervise.route_dispatch', ('route_plan',)),
+    Node('issue_select', 'supervise.issue_select', ('route_dispatch',)),
+    # design merges both: mechanism issue (counter) + supervision gap (issue_select)
+    Node('design', 'autoevolution.design', ('counter', 'issue_select')),
     Node('reconsider', 'autoevolution.read_plan', ('design',)),
     Node('sources_extra', 'autoevolution.sources', ('reconsider',)),
     Node('design_confirm', 'autoevolution.design', ('sources_extra',)),
@@ -528,7 +544,18 @@ AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.2.0', (
     Node('rollback', 'autoevolution.rollback', ('runtime_verify',)),
     Node('rollback_verify', 'autoevolution.rollback_verify', ('rollback',)),
     Node('record', 'autoevolution.record', ('rollback_verify',)),
-), 'Dynamic self-evolution attempts; each attempt is isolated and the LLM may revise until a guard stops it. v3.2 adds an optional system-regression probe (trigger/track) and a deterministic repository benchmark gate before runtime verification.')
+), 'Dynamic self-evolution with live supervision: regression probe runs while its finished rounds are supervised round-by-round against the dynamic expectation doc; the LLM assembles the next route (supervision child flow / inline fix / stop) and the deterministic benchmark gate guards every source apply. Mechanism audit and supervision gap chains run in parallel and merge at design.')
+
+AUTONOMOUS_EVOLUTION_V32 = replace(
+    AUTONOMOUS_EVOLUTION_V31,
+    nodes=tuple(
+        [Node('regression_trigger', 'autoevolution.trigger_regression'),
+         Node('regression_track', 'autoevolution.track_regression', ('regression_trigger',))]
+        + list(AUTONOMOUS_EVOLUTION_V31.nodes)
+        + [Node('benchmark_gate', 'autoevolution.benchmark_gate', ('runtime_reload',)),
+           replace(AUTONOMOUS_EVOLUTION_V31.node('runtime_verify'), depends_on=('benchmark_gate',))]),
+    version='3.2.0',
+    description='Historical v3.2 system-level self-evolution retained for pinned Jobs.')
 
 AUTONOMOUS_EVOLUTION_V3 = replace(
     AUTONOMOUS_EVOLUTION_V31, version='3.0.0',
@@ -641,7 +668,8 @@ def get_improvement_flow_definitions():
     return list(_IMPROVEMENT_DEFS)
 def _resolved_definitions():
     return [ROUND, CYCLE, PROJECT_RESEARCH_CYCLE, META_CYCLE,
-            EVOLUTION_ATTEMPT, AUTONOMOUS_EVOLUTION, *get_improvement_flow_definitions()]
+            EVOLUTION_ATTEMPT, AUTONOMOUS_EVOLUTION, SUPERVISION_CYCLE,
+            *get_improvement_flow_definitions()]
 
 DEFINITIONS = _resolved_definitions()
 DEFINITIONS_BY_VERSION = {'2.0.0': evolution_flow_v2()}
@@ -654,5 +682,6 @@ HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
               replace(CYCLE, name='meta_cycle', version='1.1.0'),
               AUTONOMOUS_EVOLUTION_V3,
               AUTONOMOUS_EVOLUTION_V31,
+              AUTONOMOUS_EVOLUTION_V32,
               evolution_flow(), evolution_flow(expanded=True),
               evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]

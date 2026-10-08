@@ -691,7 +691,15 @@ def counter(ctx, params):
 
 
 def design(ctx, params):
-    if not saved(ctx,'counter').get('selected_issue'):
+    mech_issue = (saved(ctx, 'counter') or {}).get('selected_issue')
+    sup_issue = None
+    try:
+        sup_path = Path(ctx.workspace) / 'state/supervision' / str(ctx.job_id) / 'selected_issue.json'
+        if sup_path.exists():
+            sup_issue = (json.loads(sup_path.read_text(encoding='utf-8')) or {}).get('selected_issue')
+    except Exception:
+        sup_issue = None
+    if not mech_issue and not sup_issue:
         return persist(ctx,params,{'no_change':True,'target_files':[], 'expectations':[], 'reason':'No supported issue; intervention blocked pending evidence'})
     gated_issue = ((saved(ctx, 'collect').get('experiment_context') or {}).get('issue') or {})
     if gated_issue.get('id') == 'job-lifecycle-terminal-time':
@@ -761,6 +769,8 @@ def design(ctx, params):
     return ask(ctx,params,
         '针对selected_issue制定因果修复设计，不给补丁。优先易复现真实缺陷。'
         + probe_strict_hint +
+        '监督差距优先：若输入含 supervision_issue（监督发现并带原文证据的差距），优先针对它设计修复，'
+        '把机制调查的 selected_issue 作为补充线索；两者都不成立时才可 no_change。'
         '针对selected_issue制定因果修复设计，不给补丁。优先易复现真实缺陷。'
         '最终JSON控制在2500汉字以内；每项说明简短，不重复counter的长篇论证、不抄录源码。'
         '先读 fresh_source_probe 的完整相关函数；它补齐counter要求的源码，不再把未读到当成不存在。'
@@ -786,6 +796,7 @@ def design(ctx, params):
          'supervision_boundary':'本周期supervised_cycle_recovery与supervisor_changes是Codex人工监督恢复/源码修改的历史记录，不是Partner自动恢复Event、常驻config guard或未来可依赖的自动兜底。必须以实际代码确认机制，不能把人工作业当自动能力。',
          'sources':sources,
          'audit':compact(saved(ctx,'audit')),
+         'supervision_issue':sup_issue,
          'regression_messages':saved(ctx,'collect').get('regression_messages') or [],
          'regression_pdf':saved(ctx,'collect').get('regression_pdf') or [],
          'frozen_layers':experiment._frozen_patterns()},('target_files','expectations'))

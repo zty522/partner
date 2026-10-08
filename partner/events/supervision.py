@@ -308,6 +308,147 @@ def objective_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "semantic_output": value}
 
 
+def route_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """LLM assembles the next route from the shared event/flow pool.
+
+    Reads the gap synthesis plus the current run state, then decides the
+    route: whether a dedicated supervision child flow is needed, whether to
+    fix in-line, or to stop (no gaps).  The route is persisted for the
+    dispatch node and for the design stage.  This is the "LLM 自行判断并
+    组装路线" decision point: the flow pool and event pool are shared, the
+    LLM picks the hop and the plan, the runtime executes it.
+    """
+    syn = synthesize(ctx, params)
+    gaps = syn["semantic_output"].get("gaps_by_dimension") or {}
+    uncovered = syn["semantic_output"].get("uncovered_aspects") or []
+    if not gaps and not uncovered:
+        value = {"goal": "监督未发现差距，停止修复",
+                 "route": {"hop": "stop", "flow": None, "reason": "no gaps"},
+                 "plan": [], "route_note": "监督-修复-验证范式的 stop 分支"}
+        folder = _folder(ctx)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "route_plan.json"
+        write_json(path, value)
+        return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+                "summary": "监督无差距，停止修复", "semantic_output": value}
+    current_state = str(params.get("current_state") or "")[:8000]
+    prompt = (
+        "你是 Partner 系统的总指挥，负责从共享事件/flow 池组装下一步路线（积木式）。\n"
+        "可用 flow 池：supervision_cycle（独立监督子流程：期望加载→快照→汇总→期望更新→目标计划）；\n"
+        "主流程内联修复段（design→tests→freeze→attempt→apply→benchmark_gate→runtime_verify→rollback）。\n"
+        "监督差距：\n" + json.dumps({"gaps": gaps, "uncovered": uncovered}, ensure_ascii=False)[:6000] +
+        "\n当前状态（可选）：\n" + current_state +
+        "\n只输出一个 JSON 对象：\n"
+        "{\"goal\": \"一句话核心目标\", \n"
+        "  \"route\": {\"hop\": \"supervise_cycle|inline_fix|stop\", \"flow\": \"supervision_cycle\" 或 null, "
+        "\"reason\": \"为什么这样选\"}, \n"
+        "  \"plan\": [{\"priority\":1, \"action\":\"具体动作\", \"target_files\":[\"相对路径\"], "
+        "\"verification\":\"如何验证\", \"expected_effect\":\"预期效果\"}], \n"
+        "  \"route_note\": \"路线说明（监督-修复-验证范式）\"}"
+    )
+    raw, usage = call_model(ctx, purpose="supervise_route_plan", prompt=prompt)
+    try:
+        value = json_object(raw)
+    except Exception:
+        value = {"goal": "修复监督发现的差距",
+                 "route": {"hop": "inline_fix", "flow": None, "reason": "响应不可解析: " + raw[:120]},
+                 "plan": [], "route_note": "fallback inline_fix"}
+    route = value.get("route") or {}
+    if route.get("hop") not in {"supervise_cycle", "inline_fix", "stop"}:
+        route = {"hop": "inline_fix", "flow": None, "reason": "非法 hop，回退 inline_fix"}
+        value["route"] = route
+    value["model_usage"] = usage or {}
+    folder = _folder(ctx)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "route_plan.json"
+    write_json(path, value)
+    return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+            "summary": f"路线已组装：{route.get('hop')}，计划 {len(value.get('plan') or [])} 项动作",
+            "semantic_output": value}
+
+
+def route_dispatch(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch the LLM-assembled route: start the supervision child flow,
+    continue in-line fix, or stop.  The child flow is a shared, registered
+    flow (supervision_cycle) selected by the LLM from the flow pool."""
+    folder = _folder(ctx)
+    plan_path = folder / "route_plan.json"
+    if not plan_path.exists():
+        return {"ok": True, "status": "completed", "summary": "无路线计划，按内联修复继续",
+                "semantic_output": {"decision": "inline_fix", "reason": "no route_plan"}}
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"ok": True, "status": "completed", "summary": "路线计划不可读，按内联修复继续",
+                "semantic_output": {"decision": "inline_fix", "reason": str(exc)[:160]}}
+    route = plan.get("route") or {}
+    hop = route.get("hop") or "inline_fix"
+    if hop == "supervise_cycle":
+        value = {"decision": "supervise_cycle", "flow": "supervision_cycle",
+                 "reason": route.get("reason", ""), "goal": plan.get("goal", ""),
+                 "cycle_child": {"flow": "supervision_cycle", "owner_node": "route_dispatch",
+                                 "context": {"route_plan": plan, "evidence_refs": params.get("evidence_refs") or []}}}
+        return {"ok": True, "status": "completed", "summary": "投递监督子流程 supervision_cycle",
+                "semantic_output": value}
+    if hop == "stop":
+        return {"ok": True, "status": "completed", "summary": "监督未发现可修差距，停止修复",
+                "semantic_output": {"decision": "stop", "reason": route.get("reason", "")}}
+    return {"ok": True, "status": "completed", "summary": "内联修复路线",
+            "semantic_output": {"decision": "inline_fix", "reason": route.get("reason", ""),
+                                "goal": plan.get("goal", ""), "plan": plan.get("plan") or []}}
+
+
+def issue_select(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Turn the supervision gap synthesis into a design-stage issue.
+
+    The autonomous_evolution design node consumes ``selected_issue`` from the
+    mechanism audit; this node produces the supervision-side counterpart
+    (a gap with evidence) so design can fix what supervision found.  Written
+    under the supervision namespace; design reads it as its primary issue."""
+    syn = synthesize(ctx, params)
+    gaps = syn["semantic_output"].get("gaps_by_dimension") or {}
+    uncovered = syn["semantic_output"].get("uncovered_aspects") or []
+    if not gaps and not uncovered:
+        value = {"selected_issue": None, "reason": "no supervision gaps"}
+        folder = _folder(ctx)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "selected_issue.json"
+        write_json(path, value)
+        return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+                "summary": "监督无差距，无待修问题", "semantic_output": value}
+    flat = []
+    for dim, items in gaps.items():
+        for it in items:
+            flat.append({"dimension": dim, "check_id": it.get("check_id"),
+                         "evidence": it.get("evidence", ""), "note": it.get("note", ""),
+                         "source": it.get("source", "")})
+    prompt = (
+        "你是 Partner 系统监督与设计之间的桥。从监督差距清单中选出**最值得本轮修复的一个差距**"
+        "作为设计阶段的 selected_issue（优先用户可读性相关）。\n"
+        "差距清单：\n" + json.dumps(flat, ensure_ascii=False)[:5000] +
+        "\n未覆盖方面：\n" + json.dumps(uncovered, ensure_ascii=False)[:2000] +
+        "\n只输出一个 JSON 对象：\n"
+        "{\"selected_issue\": {\"id\":\"SUPERVISE:<dimension>:<check_id>\", \"verdict\":\"supported\", "
+        "\"evidence\":\"原文证据\", \"cause\":\"推测根因\", \"dimension\":\"维度名\", \"check_id\":\"检查项ID\", "
+        "\"recommendation\":\"修复建议（面向哪些代码/消息/报告）\"}}"
+    )
+    raw, usage = call_model(ctx, purpose="supervise_issue_select", prompt=prompt)
+    try:
+        value = json_object(raw)
+    except Exception:
+        value = {"selected_issue": {"id": "SUPERVISE:unknown", "verdict": "supported",
+                                    "evidence": "响应不可解析: " + raw[:120], "cause": "unknown",
+                                    "recommendation": "人工复核监督差距"}}
+    value["model_usage"] = usage or {}
+    folder = _folder(ctx)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "selected_issue.json"
+    write_json(path, value)
+    return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+            "summary": "已从监督差距选出待修问题 " + str((value.get("selected_issue") or {}).get("id")),
+            "semantic_output": value}
+
+
 DEFINITIONS = [
     EventDefinition("supervise.expectations_load", "evolution",
                     "加载可动态更新的期望基线（看哪些方面、具体预期）", expectations_load),
@@ -319,4 +460,10 @@ DEFINITIONS = [
                     "监督发现新方面时 LLM 起草并写回期望文档（version+1）", expectations_update),
     EventDefinition("supervise.objective_plan", "evolution",
                     "LLM 依差距清单制定改进计划供设计/修复使用", objective_plan),
+    EventDefinition("supervise.route_plan", "evolution",
+                    "LLM 从共享事件/flow 池组装下一步路线（监督子流/内联修复/停止）", route_plan),
+    EventDefinition("supervise.route_dispatch", "evolution",
+                    "按 LLM 组装路线投递监督子流程或决定内联修复/停止", route_dispatch),
+    EventDefinition("supervise.issue_select", "evolution",
+                    "把监督差距转为设计阶段 selected_issue（供修复）", issue_select),
 ]

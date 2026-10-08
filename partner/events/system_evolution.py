@@ -149,8 +149,37 @@ def _collect_outputs(ctx: Any, job_id: str, instance: str) -> dict[str, Any]:
     return out
 
 
+def _live_supervise_round(ctx: Any, job_id: str, instance: str,
+                          round_path: str, seen_messages: list[str]) -> dict[str, Any]:
+    """Supervise one just-finished regression round while the Job is still
+    running (运行过程实时监督).  The round record is read in full and the LLM
+    judges it item-by-item against the expectation document; verdicts land in
+    the supervision folder of the parent Job."""
+    from partner.events.supervision import snapshot
+    folder = _regression_folder(ctx)
+    messages = sorted(set(seen_messages) | set(
+        glob.glob(str(Path(str(getattr(ctx, "workspace", ""))) / "state/application/outbound" / instance /
+                      f"{job_id}*.sent"))))
+    texts = []
+    for mp in messages:
+        try:
+            texts.append(str(Path(mp)))
+        except Exception:
+            pass
+    round_no = Path(round_path).stem  # round_N
+    out = snapshot(ctx, {"target": "round", "round": round_no,
+                         "expectations_path": "docs/expectations/system_quality.md",
+                         "round_records": [round_path], "messages": texts})
+    if out.get("ok"):
+        verdicts = (out.get("semantic_output") or {}).get("verdicts") or []
+        return {"round": round_no, "path": str(round_path), "verdicts": verdicts,
+                "usage": (out.get("semantic_output") or {}).get("model_usage") or {}}
+    return {"round": round_no, "path": str(round_path), "error": out.get("error") or "supervision failed"}
+
+
 def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Poll the regression Job to a terminal state, then collect its outputs."""
+    """Poll the regression Job to a terminal state while supervising each
+    finished round live (运行过程实时监督), then collect all outputs."""
     folder = _regression_folder(ctx)
     folder.mkdir(parents=True, exist_ok=True)
     job_path = folder / "regression_job.json"
@@ -170,8 +199,11 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "status": "completed", "summary": "回归任务投递失败",
                 "semantic_output": value}
     db = _jobs_db()
+    ws = Path(str(getattr(ctx, "workspace", "") or ""))
     deadline = time.time() + int(params.get("regression_track_seconds") or 5400)
     status = "queued"
+    seen_rounds: set[str] = set()
+    live_supervision: list[dict[str, Any]] = []
     while time.time() < deadline:
         try:
             if db:
@@ -182,6 +214,16 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     status = str(row[0])
         except Exception:
             status = "queued"
+        rounds_now = sorted(glob.glob(str(ws / "state/cycles" / job_id / "iterations" / "round_*.json")))
+        for rp in rounds_now:
+            if rp in seen_rounds:
+                continue
+            seen_rounds.add(rp)
+            try:
+                rec = _live_supervise_round(ctx, job_id, instance, rp, [])
+            except Exception as exc:
+                rec = {"round": Path(rp).stem, "path": rp, "error": str(exc)[:160]}
+            live_supervision.append(rec)
         if _terminal(status):
             break
         time.sleep(20)
@@ -189,6 +231,7 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     value = {"ok": True, "status": status, "terminal": _terminal(status),
              "job_id": job_id, "instance": instance,
              "tracked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+             "live_supervision": live_supervision,
              "outputs": outputs}
     if not _terminal(status):
         value["ok"] = False
@@ -196,7 +239,7 @@ def track_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     path = folder / "regression_evidence.json"
     write_json(path, value)
     return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
-            "summary": f"回归任务 {job_id} 状态={status}" + (
+            "summary": f"回归任务 {job_id} 状态={status}，实时监督 {len(live_supervision)} 轮" + (
                 "" if _terminal(status) else "（追踪超时，仅记录部分证据）"),
             "semantic_output": value}
 
