@@ -108,13 +108,15 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 ideas=facts.get('source_ideas') or []
                 status=_clean(facts.get('learning_status'),40)
                 if ideas:
+                    shown = ideas[:3]
                     parts=[]
-                    for item in ideas[:3]:
+                    for item in shown:
                         title=_clean(item.get('title'),40) or '未命名资料'
                         core=_clean('；'.join(item.get('core_ideas') or []),90)
                         parts.append(f"《{title}》({_clean(item.get('url'),60)})——{core}" if core
                                      else f"《{title}》({_clean(item.get('url'),60)})")
-                    message=f"主动学习完成：查阅了 {len(ideas)} 份外部资料。{('；'.join(parts))}。"
+                    tail = f"；另有 {len(ideas)-len(shown)} 份" if len(ideas) > len(shown) else ''
+                    message=f"主动学习完成：查阅了 {len(ideas)} 份外部资料。{('；'.join(parts))}{tail}。"
                     message+='从中提炼出学习成果映射，供下一轮研究参考。'
                 else:
                     message=f"主动学习完成：{status or '已查阅外部资料并冻结学习成果'}"

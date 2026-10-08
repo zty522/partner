@@ -1201,6 +1201,25 @@ def iteration_budget_guard(ctx, params):
             decision['stop_reason'] = '下一动作重复，且问题池没有提供可执行的新问题'
     if not deadline_mode and number >= maximum and route in {'continue_project', 'active_learning'}:
         route = 'stop'; reasons.append('round_budget_exhausted')
+    # Early-stop guard: a model "stop" verdict must not end the cycle while
+    # round budget remains and the declared objective is unfinished, unless
+    # the stop is budget/user-declared, a confirmed mechanism blocker, or a
+    # genuine two-round repetition stall.  This keeps the user's "run N rounds
+    # or freeze a validated baseline" contract from being cut short by an
+    # over-strict verification verdict.
+    if (route == 'stop' and not deadline_mode and number < maximum
+            and not decision.get('objective_complete')
+            and not repeated_mechanism_failure and not prior_low_gain):
+        stop_text = str(decision.get('stop_reason') or '').lower()
+        if not re.search(r'(预算|用户.*(声明|要求)|baseline.*(冻结|有效)|冻结.*baseline|无意义重复|下一动作重复)', stop_text):
+            route = 'continue_project'
+            reasons.append('early_stop_overridden_by_round_floor')
+            decision['stop_reason'] = None
+            decision['next_round_goal'] = (decision.get('next_round_goal')
+                                           or '继续基于已冻结 handoff 推进分析并补充可核验证据')
+            decision['next_hypothesis'] = (decision.get('next_hypothesis')
+                                           or '在剩余轮次内围绕同一目标推进并取得可核验进展')
+            decision['objective_complete'] = False
     if route == 'complete' and not decision.get('objective_complete'):
         route = 'stop'; reasons.append('unsupported_completion')
     # In deadline mode, completion settles the current hypothesis.  It does

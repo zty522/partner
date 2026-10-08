@@ -194,6 +194,7 @@ def message_compose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "区分实际测量与假设，不能将文件或脚本生成说成实验成功。先直接报一件有意义的发现，不先泛泛评价证据偏弱。整条消息最多两个阿拉伯数字数值，其余计算条件放PDF，不以数字列表代替解释。不必每次重复方法、局限和下一步。"
         "只有实际已排队或执行的动作才能说正在做/接下来会做；未排队的动作称建议。区分项目推进/外部主动学习/Partner自进化，不暴露内部路径和模板字段。"
         "面向用户而非开发日志：用中文解释结果的意义，不堆叠脚本名、哈希、版本代号、假设编号和英文指标字段。不要写production_effective、exit_code、inner_future或true/false，把状态翻译成中文。除用户关注的API名外不报内部变量；最多两个重要数字。"
+        "最终汇报禁止使用内部技术词：物理哈希绑定、机制性空转、知识注入、候选实验、治理账本、可核验业务证据、生产验证、基线/候选等，一律换成日常表达，例如‘第2轮的分析动作缺少可验证依据，无法确认外部资料真正影响了结果，因此提前停止’‘尝试了修复但未通过验证，未改动系统’；解释‘对用户意味着什么’而不罗列机制细节。"
         "对已授权且可执行的步骤直接推进，不反复索要确认。实际缺少登录会话、外部访问条件或发布授权时，"
         "如实说明阻断条件，不虚构已安排的恢复动作，不自行承诺切换账号、网络或接口来规避站点限制。"
         + ("这是简单问答，保持一到两句话，不要扩写。原始回答=" + direct + "\n" if direct else "")
@@ -948,6 +949,16 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     valid=not errors
     value['validation_errors']=errors
     plans=value.get('visuals') or []
+    if not valid:
+        # A rejected figure plan must never abort the whole report.  Degrade to
+        # a no-chart report (visuals stay empty) so draft/render still produce
+        # a user PDF; the validation errors are preserved as evidence.
+        value['visuals'] = []
+        value['missing_data'] = list(dict.fromkeys([*(value.get('missing_data') or []), *errors]))[:5]
+        return {'ok': True, 'status': 'completed', 'semantic_output': value,
+                'error': 'figure plan rejected; report continues without charts: ' + '; '.join(errors),
+                'token_usage': usage,
+                'summary': '图计划被校验拒绝，报告降级为无图继续生成'}
     return {'ok':valid,'status':'completed' if valid else 'failed','semantic_output':value,
             'error':'' if valid else 'figure plan is not executable: '+ '; '.join(errors), 'token_usage':usage,
             'summary':f'规划 {len(plans)} 张真实证据图'}

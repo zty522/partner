@@ -395,7 +395,7 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     raw,usage=call_model(ctx,purpose='learning_source_read',prompt=(
         '你是深度阅读助手。针对学习问题：'+question+'，逐来源输出结构化借鉴卡片。\n'
         '每来源至少 1 张卡片，格式：\n'
-        '{"borrowable_cards":[{"source_url":"...","source_kind":"paper|code|doc",\n'
+        '{"borrowable_cards":[{"source_url":"...","source_title":"来源标题（从原文或URL推断）","source_kind":"paper|code|doc",\n'
         '  "core_idea":"一句话核心思想（解决什么问题、怎么解决）",\n'
         '  "key_method":"关键方法/机制（不是引用原文，而是方法逻辑）",\n'
         '  "model_usage":"用的模型/架构/数据规模（若适用，否则 null）",\n'
@@ -534,8 +534,27 @@ def handoff_freeze(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # User-facing digest: what was found and what it says, so the progress
     # message can tell the user which sources were read and their core ideas
     # instead of relaying raw URLs.
-    titles = {str(row.get('url') or ''): str(row.get('title') or '').strip()
-              for row in retrieved if isinstance(row, dict)}
+    retrieved_titles = {str(row.get('url') or ''): str(row.get('title') or '').strip()
+                        for row in retrieved if isinstance(row, dict)}
+    card_titles = {str(card.get('source_url') or ''): str(card.get('source_title') or '').strip()
+                   for card in borrowable_cards if isinstance(card, dict)}
+    def _title_for(url):
+        for source in (card_titles, retrieved_titles):
+            title = source.get(url)
+            if title and title not in ('未命名资料', 'unknown'):
+                return title
+        # URL fallback so the user sees a human-readable name instead of
+        # "未命名资料": arXiv paper id or GitHub repo path.
+        if 'arxiv.org' in url:
+            import re as _re
+            match = _re.search(r'(\d{4}\.\d{4,5})', url)
+            if match:
+                return 'arXiv:' + match.group(1)
+        for marker in ('raw.githubusercontent.com/', 'github.com/', 'raw.githubusercontent.com/'):
+            if marker in url:
+                tail = url.split(marker, 1)[-1].split('/', 1)[0]
+                return 'GitHub:' + tail
+        return ''
     ideas_by_url: dict[str, list[str]] = {}
     for card in borrowable_cards if isinstance(borrowable_cards, list) else []:
         url = str(card.get('source_url') or '')
@@ -548,7 +567,7 @@ def handoff_freeze(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     for url in sorted(source_urls):
         if not str(url).startswith('http'):
             continue
-        title = titles.get(url) or '未命名资料'
+        title = _title_for(url) or '未命名资料'
         ideas = ideas_by_url.get(url) or []
         source_ideas.append({'url': url, 'title': title,
                              'core_ideas': ideas[:3], 'idea_count': len(ideas)})
