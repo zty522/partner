@@ -50,6 +50,7 @@ def builtin_definitions() -> list[EventDefinition]:
     from .pdf_five_section import pdf_five_section_event
     from .message_sanitizer import message_sanitize_event
     from .system_evolution import DEFINITIONS as system_evolution
+    from .supervision import DEFINITIONS as supervision
     return [*interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
@@ -57,7 +58,7 @@ def builtin_definitions() -> list[EventDefinition]:
             *emit_progress,
             *improvement, *acceptance, *local_learning, *commitment, *core_v1,
             *benchmark, *candidate, *loop_bench, *v4_benchmark, *v5_research,
-            *meta_cycle, *system_evolution,
+            *meta_cycle, *system_evolution, *supervision,
             long_run_controller_event, pdf_fact_adjudicator_event,
             corpus_eligibility_event, learning_source_recovery_event,
             evolution_candidate_merger_event, fair_scheduler_event,
