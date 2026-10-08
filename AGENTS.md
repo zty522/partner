@@ -9,7 +9,8 @@ Every human or coding agent working here must follow this file.
 2. `docs/current_status.md`
 3. `docs/handoff/reading_order.md`
 4. The architecture and project documents selected by `docs/catalog.yaml`
-5. Relevant tests and implementation files
+5. `docs/architecture/event_flow_placement.md` — before adding or moving any Event handler or Event Flow definition
+6. Relevant tests and implementation files
 
 Historical sprint documents are evidence, not current truth. When documents conflict, prefer the
 non-deprecated document with the highest authority and newest `updated_at` in `docs/catalog.yaml`.
