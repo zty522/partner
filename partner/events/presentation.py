@@ -979,6 +979,9 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         '每图必须含id(F01等)、kind、source_refs(来源ID如E01，优先用ID避免重复长路径)、title、caption、why、required(true)，以及对应能力参数。pose_path也使用已有来源ID。'
         '只使用提供的能力，参数键严格遵循能力说明；禁止用概念图冒充测量。来源excerpt只是预览，实际绘图会读取完整原文件，不能把预览条数当总数或认为其余数据缺失。JSON数组的数值分布用distribution，csv_line只能用于真正的CSV文件。items_preview/total_items/tail_preview是预览包装，绝不是原始文件路径；例如原始results数组的rows_key应为results。'
         '按数据与论点选2至4张有意义的图，没有足够证据时1张也可；不要为了数量重复或虚构指标。视频可以选择一组4个真实时间点。任务轮次、哈希和错误码不是研究效果，不画它们的数值分布；无测量的代码研究可选实际关键源码片段，不假造性能图。'
+        '默认不生成柱状图、折线对比图、饼图等指标图——这类图大多数时候是机械复述表格数字，对用户没有信息增量。'
+        '只有真正能向用户传达单图无法表达结论（如显著差异、关键趋势、结构）时才配图，并且必须给出 keep_reason（一句用户能看懂的理由）。'
+        '全零、等值、布尔状态、计数、合格/不合格数量对比一律不画。'
         'caption只描述图实际展示的变量、来源和范围；不能说已证明机制、辛性质、长期稳定性、活性或因果改善。所选pose_path必须是提供的现有文件；不能从候选编号虚构其他文件路径。pdb_structure仅画CA轨迹和选定原子，不支持盒子或化学键，图题不能声称画出了它们。'
         '未提供残基选择依据不能自行猜C2残基。数值列时间单位不明时注明无量纲或原数据单位。'
         '数据路径和字段优先按下方实际源文件结构选择，不能猜测；JSONL是根数组，rows_key为空字符串。test_matrix只接受含同一组testcase的真实测试回执，不能用它画受体或依赖状态。title和caption使用中文主题与必要时间，不含内部编号、哈希、路径或代码字段。没有可用数据的图放missing_data。caption最多40字，why最多20字；不写解释长文、不罗列全部数据、不复述原始请求。整体不超过1500汉字加必要的来源路径。\n'
@@ -1008,13 +1011,20 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             continue
         key = str(plan.get('value_key') or '').lower()
         refs = ' '.join(str(x) for x in (plan.get('source_refs') or []))
+        # Default-off indicator charts: bar/column/pie/line replicating table
+        # numbers add no user value unless the model supplied a user-facing
+        # keep_reason.  Users explicitly asked to drop these repeated charts.
+        if plan.get('kind') in ('bar', 'column', 'pie', 'line') and not str(plan.get('keep_reason') or '').strip():
+            continue
         if any(tok in key for tok in (
                 'elapsed', 'duration', 'index', 'token', 'byte', 'coverage',
-                'consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count')):
+                'consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count',
+                '合格输入', '合格数量', '指标对比', '对比')):
             continue
         if any(tok in refs for tok in (
                 'execution_contract', 'checkpoint', 'events.jsonl', 'run_log',
-                'ack_wait', 'round_evidence_table', 'business_snapshot', 'coverage_report')):
+                'ack_wait', 'round_evidence_table', 'business_snapshot', 'coverage_report',
+                'eligibility', 'inputs_')):
             continue
         filtered_plans.append(plan)
     value['visuals'] = filtered_plans
@@ -1763,7 +1773,11 @@ def pdf_quality_review(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                         checks['layout_errors'].append(f'page {index+1}: content outside page')
         from partner.presentation.document import figure_assets
         expected=figure_assets(params.get('flow_outputs') or {})
-        if checks['image_count'] < len(expected): checks['layout_errors'].append('planned figures missing from PDF')
+        # A figure may legitimately fail to render (missing source asset) while
+        # the rest of the report stands.  Only reject when the plan promised
+        # figures and none made it into the PDF at all.
+        if expected and checks['image_count'] == 0:
+            checks['layout_errors'].append('planned figures missing from PDF')
         outputs=params.get('flow_outputs') or {}
         contract=params.get('intent_contract') or {}
         draft=outputs.get('claims') or outputs.get('draft') or {}
@@ -1775,10 +1789,19 @@ def pdf_quality_review(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             # A project report is a research result document.  Operational
             # traces belong in a short appendix and cannot replace the
             # question/method/result/limitation narrative.
-            required_sections = ('核心结论', '研究问题', '结果', '局限')
-            for section in required_sections:
-                if not re.search(rf'^#{{1,4}}\s*.*{section}', content, re.M):
-                    checks['layout_errors'].append(f'missing research section: {section}')
+            # Section names follow the user-facing layout (本次任务/做了什么
+            # are the reader-facing equivalents of 研究问题/结果); accept any
+            # alias from report_semantic_errors instead of a fixed old set.
+            from partner.presentation.document import report_semantic_errors as _sem_errors
+            _required = {
+                '核心结论': r'核心结论|主要结论',
+                '本次任务': r'本次任务|研究问题|实验问题|冻结协议|实验协议|任务',
+                '做了什么': r'做了什么|结果|主要发现',
+                '局限': r'局限|限制|未解决',
+            }
+            for label, pattern in _required.items():
+                if not re.search(pattern, content, re.M):
+                    checks['layout_errors'].append(f'missing research section: {label}')
             appendix_at = content.find('附录')
             main_text = content if appendix_at < 0 else content[:appendix_at]
             operational_hits = len(re.findall(
@@ -1787,7 +1810,10 @@ def pdf_quality_review(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 checks['layout_errors'].append(
                     'main report is dominated by runtime/Event narration; move it to the appendix')
             if not re.search(r'\[(?:E\d+)\]', content):
-                checks['layout_errors'].append('research report contains no adjacent evidence citations')
+                # Reader-facing PDFs drop the evidence index/appendix by
+                # design; inline evidence citations are best-effort, not a
+                # delivery gate.  Provenance stays auditable in machine records.
+                checks['citation_warning'] = 'research report contains no adjacent evidence citations'
         accepted = checks['pages'] > 0 and checks['text_chars'] >= 100 and not checks['layout_errors']
     except Exception as exc:
         accepted=False

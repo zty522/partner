@@ -2249,8 +2249,14 @@ def delivery_settle(ctx, params):
                     except:
                         pass
 
-    if sent.get('delivered') or sent.get('suppressed') or sent.get('web_visible'):
-        delivered = bool(sent.get('delivered'))
+    # .sent receipts carry delivery_state/text_delivered (schema_version 2);
+    # the older delivered/suppressed/web_visible shape is also accepted.
+    _state = str(sent.get('delivery_state') or '')
+    _text_delivered = bool(sent.get('text_delivered'))
+    _delivered_flag = bool(sent.get('delivered'))
+    if (_delivered_flag or (_state == 'sent' and _text_delivered)
+            or sent.get('suppressed') or sent.get('web_visible')):
+        delivered = _delivered_flag or (_state == 'sent' and _text_delivered)
         web_visible = bool(sent.get('web_visible'))
         receipt = {'delivered': delivered, 'web_visible': web_visible,
                    'suppressed': bool(sent.get('suppressed')),
