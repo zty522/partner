@@ -200,8 +200,15 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             message = f"{_PHASE_LABELS[phase]}：{flow_name or '当前 Flow'}。"
             if summary:
                 message += summary + "。"
+    elif phase == 'event_failed':
+        # Event-level failures are mechanism noise to the user: never relay a
+        # raw RuntimeError/Traceback. Say what step did not finish in plain
+        # words and leave internals to the web trace.
+        reason = _userify(params.get('event_summary') or summary or '', 80)
+        if re.search(r'Traceback|RuntimeError|Exception|Error:|raise |at \w+:\d+', reason):
+            reason = ''
+        message = f'上一步未完成：{reason}。' if reason else '上一步未完成，详见运行追踪。'
     else:
-        label = _PHASE_LABELS.get(phase, "进展")
         subject = event_name or _clean(params.get("node_id"), 60) or "当前 Event"
         message = f"{label}{position}：{subject}。"
         if summary and phase != "event_started":

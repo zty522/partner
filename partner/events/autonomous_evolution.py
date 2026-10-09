@@ -2387,7 +2387,8 @@ def engine_continue(ctx, params):
                 # inner regression job submitted by trigger_regression.
                 'max_rounds': 3, 'evolution_apply': True,
                 'engine_loop': True, 'engine_id': engine_id,
-                'engine_mode': state['mode'], 'engine_round': rounds_run + 1},
+                'engine_mode': state['mode'], 'engine_round': rounds_run + 1,
+                'notification_mode': 'standard'},
             subject_allowed_instances=[instance],
             direct_answer=False,
         )
