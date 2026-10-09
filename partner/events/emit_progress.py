@@ -30,7 +30,10 @@ def _clean(value: Any, limit: int = 180) -> str:
 # updates rather than developer logs.
 def _userify(text, limit=140):
     text = str(text or '')
-    text = re.sub(r'【业务产物】[^【]*?(?:json|md|txt|py|pdf)?\s*\[bytes=\d+\]', '已完成相关数据文件记录', text)
+    # Remove artifact-path blocks entirely instead of replacing them with the
+    # empty phrase "已完成相关数据文件记录": that phrase leaked into round
+    # messages (repeated 3x) and told the user nothing about what was made.
+    text = re.sub(r'【业务产物】[^【]*?(?:json|md|txt|py|pdf)?\s*\[bytes=\d+\]', ' ', text)
     text = re.sub(r'【执行动作】', '本轮动作：', text)
     text = re.sub(r'【真实发现】', '发现：', text)
     text = re.sub(r'【未解决】', '未解决：', text)
@@ -102,11 +105,11 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         facts=params.get('milestone_facts') if isinstance(params.get('milestone_facts'),dict) else {}
         if flow_name == 'project_cycle_round' and facts:
             number=facts.get('round_number') or '?'
-            hypothesis=_clean(facts.get('hypothesis') or facts.get('round_goal'),110)
+            hypothesis=_userify(facts.get('hypothesis') or facts.get('round_goal'), 70)
             result_text=('获得可核验证据' if facts.get('verified') is True else
                          '未获得完整可核验证据' if facts.get('verified') is False else '核验状态未知')
-            route=_clean(facts.get('route'),30); reason=_clean(facts.get('reason'),100)
-            next_goal=_clean(facts.get('next_hypothesis') or facts.get('next_round_goal'),100)
+            route=_clean(facts.get('route'),30); reason=_userify(facts.get('reason'),60)
+            next_goal=_userify(facts.get('next_hypothesis') or facts.get('next_round_goal'),60)
             action=_userify(facts.get('execution_summary'))
             error=_userify(facts.get('execution_error'), 100)
             finding=_userify(facts.get('finding') or facts.get('information_gain'))
@@ -120,7 +123,7 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 'active_learning': '补充外部资料学习', 'continue_project': '继续下一轮研究',
                 'complete': '目标达成', 'stop': '本轮结束',
             }.get(route, str(route) or '')
-            goal_text = _clean(hypothesis or round_goal, 80)
+            goal_text = _userify(hypothesis or round_goal, 70)
             result_text = {
                 True: '本轮已形成可确认的结果', False: '本轮未形成可确认的结果',
                 None: '本轮结果待进一步确认',
@@ -155,11 +158,11 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 message = f'第 {number} 轮进展'
                 if goal_text:
                     message += f'：围绕“{goal_text}”'
-            if action:
+            if action and not re.search(r'已完成相关数据文件记录|数据文件记录', action):
                 message += f'，实际完成：{action}'
             if error:
                 message += f'；执行受阻：{error}'
-            elif finding:
+            elif finding and not re.search(r'已完成相关数据文件记录|数据文件记录', finding):
                 message += f'；取得认识：{finding}'
             message += f'。{result_text}'
             if route_text:

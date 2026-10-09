@@ -1136,8 +1136,29 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     root_ok = (not required_root or all(Path(row["path"]).resolve().is_relative_to(required_root)
                                        for row in evidence))
     scientific_contract_violations = _matched_split_violations(params, evidence)
+    # Provenance gate: an artifact that explicitly declares itself to be a
+    # simulated / derived / placeholder value is not a real execution result.
+    # Without this gate the round-3 style "coverage derived from history, not
+    # a real pytest run" artifacts were verified as genuine progress, which
+    # is exactly the empty spinning the user observed. Content markers are
+    # checked, not just file existence or hash match.
+    _SIMULATED_MARKERS = (
+        'simulated', 'mock data', 'mock_data', 'placeholder', '推导值',
+        '模拟值', '模拟数据', '模拟生成', '基于历史数据推导', '模拟推导',
+        '非真实动态插桩', '未实际运行', '非实测', '并非真实',
+    )
+    provenance_suspected = []
+    for row in evidence:
+        try:
+            text = Path(row['path']).read_text(errors='replace')[:200000].lower()
+        except OSError:
+            text = ''
+        hits = [m for m in _SIMULATED_MARKERS if m in text]
+        if hits:
+            provenance_suspected.append({'path': row['path'], 'markers': hits[:6]})
     execution_verified = bool(sem.get('business_delta') and evidence and novel and contract_ok and root_ok
-                    and not foreign_job_refs and not scientific_contract_violations and all(
+                    and not foreign_job_refs and not scientific_contract_violations
+                    and not provenance_suspected and all(
         row['valid'] and row['sha256'] == expected.get(row['path']) for row in evidence))
     contract_params = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}
     eligibility = contract_params.get('input_eligibility') if isinstance(
@@ -1182,7 +1203,11 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     next_round_fix = []
     
     if not execution_verified:
-        if not layers.get('execution_verified'):
+        if provenance_suspected:
+            fail_layer = 'provenance'
+            missing_evidence.append('产物声明为模拟/推导值，不能视为真实执行证据')
+            next_round_fix.append('对声明为模拟的指标执行真实运行（如真实 pytest 插桩）后再主张推进')
+        elif not layers.get('execution_verified'):
             fail_layer = 'execution'
             missing_evidence.append('执行未通过验证')
             next_round_fix.append('确保执行过程符合合约要求')
@@ -1218,6 +1243,10 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         'progress_note': progress_note,
         'progress_since_last_round': len(evidence)
     }
+    # provenance is part of the layer report so downstream iteration_decide /
+    # report draft can explain in user language why the round was not counted.
+    layers['provenance_verified'] = not provenance_suspected
+    layers['provenance_suspected'] = provenance_suspected
     
     return {"ok": True, "status": "completed", "business_delta":execution_verified,
             "semantic_output":{"verified":execution_verified, "scientific_claim_supported": scientific_claim_supported,
@@ -1423,6 +1452,7 @@ def outcome_reflect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                  "并把 business_delta 判 false，禁止用叙事掩盖执行缺口。\n")
     base = _deliberate(ctx, params, "project_outcome_reflect",
         "只依据已验证结果反思：哪些认识被支持或否证、是否真的推进业务、下一项目问题是什么。有限样本未达阈值只是否定本次配置下的假设，不能推出物理不可能、化学不可达或性能上限。比较两轮效果前必须核对同一样本集合、预处理、搜索预算与指标口径；多个因素变化不能归因于单因素，不同候选数的最优值或TopK不能直接声称排名改善。还须对照 implementation_evidence 的实际函数调用和常量列表：写死候选列表再过滤不等于实现生成算法，记录方法名称不等于运行了该方法；仅有静态调用名也不能证明某分支已执行，须结合命令回执。字段 supported,rejected,unknown,business_delta,next_question,lesson,evidence_refs,objective_complete,failure_class(project/science/epistemic/mechanism/runtime/data),epistemic_gap,missing_external_evidence,source_query,reproducer_passed,repeated_falsified_route,scientific_negative_result,data_scarcity。路由字段必须依据证据：知识或外部来源缺口才标 epistemic；Partner 机制缺陷必须有稳定复现才标 mechanism/runtime 和 reproducer_passed；科学假设被否证要标 scientific_negative_result，不能伪装成自进化。"
+        + "【必须具体，禁止通用模板】supported/rejected/unknown 每项必须写明本轮做了什么、看到了什么、具体数值或路径（例：'生成 coverage_report_round3.json，其中行覆盖率85.4%为基于历史推导的模拟值，非真实 pytest 插桩结果'；'input_consumption_audit 确认消费了 ADR 0112 与 v4 结果文档'）。不得输出与上一轮相同的陈述，不得只写'本轮已产生并核验当前 Job 的业务证据'这类空泛话。lesson 必须写一条本轮具体可复用的教训，并说明它在下一轮如何避免重蹈覆辙。"
         + "执行整体失败与中间数据有效是不同命题：若 evidence 已读取并给出有效数据行数，保留该部分事实，不能仅因后续超时或模型预算耗尽否定已经生成的数据。文件格式核验不证明来源科学合理，结合命令回执判断具体步骤是否运行。"
         + extra)
     sem_out = base.get("semantic_output") or {}
@@ -1437,23 +1467,27 @@ def outcome_reflect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         # current round's evidence with metrics or limitations from an older
         # Job.  This exact contamination invented a 27-row external-test
         # bottleneck even though the current paired evidence had 30,056 rows.
+        # Keep the model's specific round-observations (supported/rejected/
+        # unknown/lesson) — a fully templated fallback is what made every
+        # round's reflect look identical — and only strip the foreign refs.
+        kept_refs = [p for p in (sem_out.get("evidence_refs") or []) if str(p) not in foreign_refs]
         sem_out = {
-            "supported": ["本轮已产生并核验当前 Job 的业务证据"],
-            "rejected": ["拒绝引用其他 Job 或未被本轮 verifier 核验的证据来解释当前结果"],
-            "unknown": ["只保留当前 verifier 尚未裁决的项目边界"],
-            "business_delta": bool(sem.get("verified")),
-            "next_question": "按用户冻结的下一阶段协议继续，或在协议完成后结算",
-            "lesson": "反思证据被限制为当前轮 verifier 的 allowlist",
-            "evidence_refs": sorted(allowed_refs),
-            "objective_complete": bool(sem.get("verified")),
-            "failure_class": "project",
+            **sem_out,
+            "supported": sem_out.get("supported") or ["本轮已产生并核验当前 Job 的业务证据"],
+            "rejected": (sem_out.get("rejected") or []) + [
+                "拒绝引用其他 Job 或未被本轮 verifier 核验的证据来解释当前结果"],
+            "unknown": sem_out.get("unknown") or ["只保留当前 verifier 尚未裁决的项目边界"],
+            "evidence_refs": kept_refs or sorted(allowed_refs),
+            "lesson": sem_out.get("lesson") or "反思证据被限制为当前轮 verifier 的 allowlist",
+            # Contamination guard stays hard: a foreign job cannot be used to
+            # claim data scarcity or an epistemic gap. Only the narrative
+            # (supported/rejected/lesson) keeps the model's specific wording.
+            "data_scarcity": False,
             "epistemic_gap": False,
             "missing_external_evidence": False,
             "source_query": "",
-            "reproducer_passed": False,
-            "repeated_falsified_route": False,
-            "scientific_negative_result": False,
-            "data_scarcity": False,
+            "business_delta": sem_out.get("business_delta", bool(sem.get("verified"))),
+            "objective_complete": sem_out.get("objective_complete", bool(sem.get("verified"))),
             "foreign_evidence_refs": foreign_refs,
             "truth_guard_applied": True,
         }

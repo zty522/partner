@@ -510,6 +510,10 @@ def round_design(ctx, params):
             + '\n【v2 强制规则】next_round_goal 必须显式解决上一轮 verdict_report 的 missing_evidence。'
             + '如果上一轮 rejected_reasons 非空，next_round_goal 的第一条必须针对其中至少一项缺失证据。'
             + '禁止忽略上一轮失败原因而提出全新目标。'
+            + '\n【v3 真实执行规则】禁止设计任何"推导/模拟/基于历史推算"性质的执行（例如"基于历史数据推导覆盖率"）。'
+            + '所有声明的指标必须来自本轮真实运行的命令与产物；若当前环境无法真实执行某项验证，'
+            + '应选择 active_learning（真实读取外部文献/代码/文档补齐能力）或明确的环境修复动作，'
+            + '而不是用模拟值假装推进。execute 的 target_artifact 必须标注 provenance=executed 且给出可复现命令。'
             + '\n上一轮 round_handoff=' + json.dumps(previous.get('round_handoff') or {}, ensure_ascii=False)[:6000]))
     value = json_object(raw)
     selected = value.get('selected') if isinstance(value.get('selected'), dict) else {}
@@ -823,6 +827,10 @@ def iteration_next_decide(ctx, params):
                 'primary_route': 'active_learning', 'token_usage': {}}
     
     # v3 fix: LLM 失败兜底
+    jev_judgment = ((outputs.get('core_jev') or {}).get('semantic_output') or {}).get('judgment') or {}
+    jev_route = (jev_judgment.get('answers') or {}).get('route') or {}
+    jev_choice = (jev_route.get('choice') if isinstance(jev_route, dict) else None)
+    jev_readiness = ((jev_judgment.get('answers') or {}).get('readiness') or {}).get('score')
     try:
         raw, usage = call_model(ctx, purpose='cycle_iteration_next_decide', prompt=(
         '你是项目迭代的下一步裁决器。只基于本轮冻结假设、真实执行、核验与Settlement，选择一个route：'
@@ -836,9 +844,15 @@ def iteration_next_decide(ctx, params):
         'required_evidence,stop_reason,success_criteria_assessment,completion_level,settled_problem_id。'
         'settled_problem_id只能是问题池中的id；本轮未结算某个问题时必须为null，不得填Settlement决策id。'
         'success_criteria_assessment必须逐条返回'
-        '{criterion,status,evidence_refs}，status只能是met或unmet；没有当前轮核验证据不得写met。\n'
+        '{criterion,status,evidence_refs}，status只能是met或unmet；没有当前轮核验证据不得写met。'
+        + chr(10) + chr(10)
+        + '[世界模型JEV参考] 下面给出本轮JEV判断：readiness分数（0-3，<2表示主要证据缺失）与路由概率。'
+        + '如果readiness<2且外部资料（文献/代码/文档）可能补齐缺失证据从而改变下一实验设计，'
+        + '必须优先选择active_learning去真实读取外部资料，而不是continue_project用模拟数据继续推进。'
+        + '你必须在reason中显式写出采纳或驳回JEV路由建议的理由。\n'
         + json.dumps({'round_number': number, 'design': design, 'verify': verify,
                       'reflect': reflect, 'settlement': settlement,
+                      'core_jev': jev_judgment,
                       'original_success_criteria': (params.get('intent_contract') or {}).get('success_criteria') or [],
                       'longitudinal_evidence': longitudinal, 'problem_portfolio': portfolio,
                       'remaining_budget': (params.get('intent_contract') or {}).get('cycle_deadline') or {}},

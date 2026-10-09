@@ -1009,12 +1009,12 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         key = str(plan.get('value_key') or '').lower()
         refs = ' '.join(str(x) for x in (plan.get('source_refs') or []))
         if any(tok in key for tok in (
-                'elapsed', 'duration', 'index', 'token', 'byte',
+                'elapsed', 'duration', 'index', 'token', 'byte', 'coverage',
                 'consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count')):
             continue
         if any(tok in refs for tok in (
                 'execution_contract', 'checkpoint', 'events.jsonl', 'run_log',
-                'ack_wait', 'round_evidence_table', 'business_snapshot')):
+                'ack_wait', 'round_evidence_table', 'business_snapshot', 'coverage_report')):
             continue
         filtered_plans.append(plan)
     value['visuals'] = filtered_plans
@@ -1046,11 +1046,11 @@ def _cycle_visual_plan(ctx, params, sources):
         # Runtime timing, command indices, receipts and audit code are useful
         # provenance, but they are not research findings and must never become
         # the report's headline figures.
-        if any(token in field for token in ('elapsed', 'duration', 'index', 'token', 'byte')):
+        if any(token in field for token in ('elapsed', 'duration', 'index', 'token', 'byte', 'coverage')):
             continue
         if any(token in filename for token in (
                 'execution_contract', 'checkpoint', 'events.jsonl', 'run_log',
-                'ack_wait', 'round_evidence_table', 'business_snapshot')):
+                'ack_wait', 'round_evidence_table', 'business_snapshot', 'coverage_report')):
             continue
         if plan.get('kind') == 'code_excerpt':
             continue
@@ -1176,7 +1176,7 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "提纲和图计划只是建议，不是已核实事实。每张必需图必须在相关段落附近单独一行用 [[figure:F01]] 引用，F01替换成实际图ID。禁止把图全放附录或末尾。不要改写资产图题。未生成的图不能列为现有图。"
         "1) 先写本项目实际问题和最重要发现，紧接关键图，再展开方法和局限。读者不是在看运行日志：正文和表头用中文，禁止哈希、实验长编号以及exit_code/production_effective等内部字段；必要API名称和真正代码节选可保留。把测试状态写成通过/失败、隔离验证与生产生效分开，不能把历史标识解释成当前开关。"
         "引用来源一律用自然语言叙述（如'根据 arXiv 论文《标题》'），正文内直接写清查了什么资料、资料的核心观点；正文禁止出现E编号引用（如[E01]）、禁止文件名清单、禁止任何'证据索引'小节。内部术语必须用户化：转移映射写作学习成果、handoff写作交接记录、准入写作允许范围、consumed写作使用、物理哈希/sha256写作内容指纹。\n"
-        "正文使用清楚的中文小节，至少包含‘核心结论’‘研究问题与协议’‘结果’‘主动学习与第二轮变化’‘局限与下一步’。如果主动学习没有被实际消费，明确写没有形成可验证改善，禁止只说已生成交接文件。"
+        "正文使用清楚的中文小节，至少包含‘核心结论’‘本次任务’‘做了什么’‘结果’‘局限与下一步’。主动学习如果有实质内容（真实查阅的来源与核心观点）并入‘做了什么’说明；如果未执行或未被消费，明确写没有形成可验证改善，禁止只说已生成交接文件。"
         "若来源含 round_evidence_table.json，结果部分必须用表格逐轮列出：假设、实际动作、执行状态、领域证据、获得的认识、停止或继续理由；重复的同类失败可合并但要写次数。"
         "若来源含 learning_summary.json，只能按其中的 run_count、claims、source_urls、consumed、improved 描述主动学习；run_count=0 时明确写‘未执行’，不得写‘已完成主动学习’。"
         "Event 完成只代表编排节点结束；只有 verified=true 且存在领域证据才可写项目取得实质进展。执行失败时报告标题和核心结论应突出具体阻塞，不得只写‘流程完成’。"
@@ -1536,8 +1536,8 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         question=re.sub(r'^【[^】]+】(?:【[^】]+】)*','',question).strip()
         if '？' in question: question=question.split('？',1)[0]+'？'
         if '?' in question: question=question.split('?',1)[0]+'?'
-        lines += ['', '## 研究问题与协议', '',
-                  question or '本报告仅审查现有项目产物，没有收到可恢复的原始研究问题。',
+        lines += ['', '## 本次任务', '',
+                  question or '本报告仅审查现有项目产物，没有收到可恢复的原始任务。',
                   '', '本报告只基于已收集的项目产物与执行记录整理；未记录的样本、预算、切分和随机性条件不作假设。',
                   '', '## 结果', '']
         lines += [('- '+(str(item.get('claim') or '') if isinstance(item,dict) else str(item)))
@@ -1554,7 +1554,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         next_step=('当前结果与不确定性估计已完成；下一步应在独立数据集上验证泛化。'
                    if has_uncertainty else
                    '下一步应在真实项目数据上继续推进，再评估是否采纳当前候选改动。')
-        lines += ['', '## 主动学习与第二轮变化', '', learning_effect,
+        lines += ['', '## 做了什么', '', learning_effect,
                   '', '## 局限与下一步', '',
                   '本报告只包含已核实的结论；未经核实的推测未写入。',
                   next_step, '']
@@ -1686,26 +1686,10 @@ def pdf_render(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if not in_code and line.startswith('> '):
             line = line[2:]
         if not in_code and re.match(r'^#{2,3}\s*(?:证据索引|证据附录)', line):
-            story.append(Paragraph(inline(line.lstrip('#').strip()), heading))
-            references=[]
-            while index < len(lines):
-                candidate_line=lines[index].strip()
-                if candidate_line.startswith('#'):
-                    break
+            # User asked for readable reports: no evidence index/appendix in
+            # the delivered PDF. Provenance stays in the machine records.
+            while index < len(lines) and not lines[index].strip().startswith('#'):
                 index += 1
-                if candidate_line and re.match(r'^[-*]?\s*\[E\d+\]',candidate_line):
-                    references.append(candidate_line.lstrip('-* ').strip())
-            if references:
-                cells=[Paragraph(inline(value),reference_style) for value in references]
-                rows=[cells[i:i+2]+([Paragraph('',reference_style)] if len(cells[i:i+2])==1 else [])
-                      for i in range(0,len(cells),2)]
-                ref_table=Table(rows,colWidths=[84*mm,84*mm],hAlign='LEFT')
-                ref_table.setStyle(TableStyle([
-                    ('VALIGN',(0,0),(-1,-1),'TOP'),
-                    ('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),4),
-                    ('TOPPADDING',(0,0),(-1,-1),1),('BOTTOMPADDING',(0,0),(-1,-1),2),
-                ]))
-                story.extend([ref_table,Spacer(1,2*mm)])
             continue
         if line.startswith('|') and not in_code:
             table_rows = []
@@ -1735,14 +1719,6 @@ def pdf_render(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         is_reference = not in_code and bool(re.match(r'^[-*]?\s*\[E\d+\]',line))
         story.append(Paragraph(content, title if level == 1 else heading if level in {2,3} else reference_style if is_reference else body))
     images = [Path(a['path']) for a in assets]
-    graph_output=((params.get('flow_outputs') or {}).get('flow_graph_verify') or {}).get('semantic_output') or {}
-    graph_path=Path(str(graph_output.get('png_path') or ''))
-    if graph_path.is_file():
-        story.extend([PageBreak(), Paragraph('附录：实际 Event / Flow 运行图', heading),
-                      Paragraph('本图由报告 Event 从本次 Job 的真实运行日志生成，用于审计；研究结论以正文和证据索引为准。', body)])
-        graph_image=Image(str(graph_path)); graph_image._restrictSize(170*mm,220*mm)
-        story.append(graph_image)
-        images.append(graph_path)
     document_title = next((line[2:].strip() for line in text.splitlines()
                            if line.startswith('# ')), source.stem)
     doc = SimpleDocTemplate(str(output), pagesize=A4, rightMargin=20 * mm,

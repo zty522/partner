@@ -151,7 +151,9 @@ class EventFlowRunner:
                       "mechanism": f"event/{node.event_type}"}
         # Public, secret-free receipt for every successful or failed LLM Event.
         # token_usage is redacted in user-facing traces, so provider/model
-        # identity needs its own audit field.
+        # identity needs its own audit field. Token COUNTS are not content:
+        # they are included so token_aggregate / audit can reconcile real
+        # consumption without leaking the prompt or completion text.
         if event_definition.execution_method == "llm":
             receipt = dict(getattr(getattr(ctx, "adapter", None),
                                    "last_usage", {}) or {})
@@ -159,7 +161,9 @@ class EventFlowRunner:
                 allowed = {key: receipt.get(key) for key in (
                     "call_id", "provider", "model", "purpose", "status",
                     "http_status", "elapsed_ms", "finish_reason",
-                    "thinking_requested") if receipt.get(key) is not None}
+                    "thinking_requested",
+                    "prompt_tokens", "completion_tokens", "total_tokens"
+                ) if receipt.get(key) is not None}
                 if allowed:
                     output["model_call_receipt"] = allowed
         if output.get("status") == "waiting":

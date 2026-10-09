@@ -80,8 +80,13 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
     # One attempt here means one HTTP call for DirectAdapter; no nested retries.
     deadline = getattr(ctx, "event_deadline", None)
     deep = (purpose.startswith(('intent_', 'cycle_', 'learning_', 'autoevolution_',
-                                'self_evolution_', 'report_', 'message_factcheck'))
-            or purpose in {'project_plan_propose', 'project_outcome_reflect'})
+                                'self_evolution_', 'report_', 'message_factcheck',
+                                'supervise_', 'improvement_'))
+            or purpose in {'project_plan_propose', 'project_outcome_reflect',
+                           'message_critic', 'cycle_memory_lesson',
+                           'cycle_memory_growth', 'cycle_memory_habit',
+                           'cycle_problem_portfolio_update', 'cycle_assess',
+                           'cycle_input_eligibility'})
     attempts = 1 if purpose == 'cycle_partner_audit' else 2
     for attempt in range(attempts):
         remaining = deadline - time.monotonic() - 2 if deadline else (180 if deep else 90)

@@ -164,9 +164,11 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
     # Audit density belongs in the Web event explorer.  Broadcasting every
     # Event start/finish to QQ produced hundreds of low-information messages
     # per run.  QQ keeps only root lifecycle, failures and explicit milestone
-    # messages composed by the business Flow.
+    # messages composed by the business Flow.  Event-level failures ("未完成：
+    # 核验…") are mechanism noise for the user; only flow-level failures carry
+    # enough meaning to deserve a QQ push.
     if (mode in {'audit', 'debug'} and lifecycle_phase in
-            {'event_started', 'event_completed', 'flow_started'}):
+            {'event_started', 'event_completed', 'flow_started', 'event_failed'}):
         channels = ['web']
     constraints["delivery_channels"] = channels
     contract["execution_constraints"] = constraints

@@ -256,6 +256,20 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
         'learning_local_idea_record', 'autoevolution_audit',
         'self_evolution_issue_diagnose', 'self_evolution_candidate_critic',
         'report_draft', 'message_factcheck',
+        # Core decisions that were previously running on the flash model with
+        # thinking disabled. They select what to do, judge inputs, assess the
+        # round, decide continuation and write memory; shallow output here is
+        # exactly what made runs feel like spinning. Route them to the
+        # cognitive model with thinking enabled.
+        'project_plan_propose', 'cycle_input_eligibility', 'cycle_assess',
+        'cycle_problem_portfolio_update',
+        'cycle_memory_lesson', 'cycle_memory_growth', 'cycle_memory_habit',
+        'message_critic',
+        'autoevolution_read_plan', 'autoevolution_counter', 'autoevolution_design',
+        'autoevolution_sources',
+        'supervise_snapshot_round', 'supervise_expectations_update',
+        'improvement_opportunity_assess', 'improvement_opportunity_select',
+        'improvement_outcome_settle', 'improvement_narrative',
     }
     if (selected_provider == 'qwen' and purpose in cognitive_purposes
             and cfg.get('cognitive_thinking') is True):
