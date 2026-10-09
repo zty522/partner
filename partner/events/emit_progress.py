@@ -161,7 +161,10 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             if action and not re.search(r'已完成相关数据文件记录|数据文件记录', action):
                 message += f'，实际完成：{action}'
             if error:
-                message += f'；执行受阻：{error}'
+                clean_error = _userify(error, 100)
+                if re.search(r'Traceback|RuntimeError|Exception|Error:|raise |budget exhausted|command receipts|checkpoint', clean_error):
+                    clean_error = '本轮执行动作遇到运行时限制（如模型调用预算或命令超时），具体原因见运行追踪'
+                message += f'；执行受阻：{clean_error}'
             elif finding and not re.search(r'已完成相关数据文件记录|数据文件记录', finding):
                 message += f'；取得认识：{finding}'
             message += f'。{result_text}'
