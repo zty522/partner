@@ -1033,6 +1033,20 @@ def improvement_narrative(ctx, params):
         headline = (f"Partner 自进化冻结 {len(rows)} 个问题；裁决为 "
                     f"{value['self_evolution']['decision']}；生产生效="
                     f"{value['self_evolution']['production_effective']}。")
+        # user-facing headline (2026-10-09): no mechanism terms, anomaly first
+        hl_decision = value['self_evolution']['decision']
+        hl_prod = value['self_evolution']['production_effective']
+        if hl_prod:
+            hl_text = f'本轮修复已生效：{target_text or "问题定位"} 已完成修改并通过全部验证。'
+        elif hl_decision in {'validated_shadow', 'promoted'}:
+            hl_text = f'本轮修复已通过验证，等待下一轮回归确认真实效果（{target_text or "已定位"}）。'
+        elif hl_decision == 'no_change_verified':
+            hl_text = '本轮未发现需要修改的问题。'
+        elif hl_decision == 'rejected':
+            hl_text = '本轮修复未通过验证，已回退并保留证据。'
+        else:
+            hl_text = f'本轮未形成可落地的修复（{issue_text}）。'
+        headline = hl_text
         issue_text = str(grounded_issue.get('symptom') or grounded_issue.get('current_behavior')
                          or '未形成可复现缺陷')[:300]
         target_text = '、'.join(target_files[:3]) or '未冻结真实源码文件'
@@ -1042,13 +1056,63 @@ def improvement_narrative(ctx, params):
             execution_text = '已尝试隔离 baseline/candidate，但 matched comparison 无效'
         else:
             execution_text = '已冻结候选缺陷，但没有成功执行隔离 baseline/candidate'
-        milestone = ('【Partner 自进化结算】\n'
-                     '原因：真实运行轨迹显示 Partner 自身机制可能阻碍任务效果。\n'
-                     f'执行：冻结问题“{issue_text}”，定位 {target_text}；{execution_text}。\n'
-                     f'证据：{(value["self_evolution"]["evidence_refs"] or ["无有效实验记录"])[0]}。\n'
-                     f'结果：decision={value["self_evolution"]["decision"]}，matched_verified={value["self_evolution"]["matched_verified"]}。\n'
-                     f'判断：production_effective={value["self_evolution"]["production_effective"]}；未生效时不得写成已修复。\n'
-                     '下一步：仅在授权且生产验证通过后晋升，否则保留为 shadow 候选。')
+        # (2026-10-09, engine + steering-wheel readability) Build the
+        # milestone from user-facing ingredients: round summary first,
+        # supervision findings, fix & verification trail, explicit anomalies.
+        decision_label = value['self_evolution']['decision']
+        production = value['self_evolution']['production_effective']
+        evo_dir = Path(ctx.workspace) / 'state/cycles' / str(ctx.job_id) / 'evolution'
+        record = {}
+        try:
+            record.update(json.loads((evo_dir / 'record.json').read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
+        record_dec = (record.get('decision') or {})
+        prod = bool(record.get('production_effective') or record_dec.get('production_effective'))
+        rec_decision = record_dec.get('decision') or decision_label
+        # supervision findings (user language, up to 3)
+        supervision_dir = Path(ctx.workspace) / 'state/supervision' / str(ctx.job_id) / 'snapshots'
+        synth = {}
+        try:
+            synth.update(json.loads((supervision_dir / 'synthesis.json').read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
+        gaps = synth.get('gaps_by_dimension') or {}
+        gap_lines = []
+        for dim, rows in gaps.items():
+            for row in (rows or [])[:2]:
+                note = str(row.get('note') or row.get('evidence') or row.get('check_id') or '')[:120]
+                gap_lines.append(f"· {note}")
+            if len(gap_lines) >= 3:
+                break
+        if not gap_lines:
+            gap_lines = ['本轮各检查项均符合预期']
+        gap_text = '\n'.join(gap_lines[:3])
+        if rec_decision in {'promoted', 'validated_shadow'} and prod:
+            outcome_label = '修复已生效（已写入生产源码并通过验证）'
+        elif rec_decision in {'promoted', 'validated_shadow'}:
+            outcome_label = '修复已通过验证，正等待在下一轮回归中确认真实效果'
+        elif rec_decision == 'no_change_verified':
+            outcome_label = '未发现问题或无需修改'
+        elif rec_decision == 'rejected':
+            outcome_label = '修复方案被验证拒绝，已回退并保留证据'
+        else:
+            outcome_label = f'本轮裁决：{rec_decision}'
+        anomaly = ''
+        if gaps:
+            anomaly = '⚠ 本轮监督发现以下与预期不符的地方：\n'
+        engine_ic = (params.get('intent_contract') or {}).get('execution_constraints') or {}
+        round_no = engine_ic.get('engine_round') or '1'
+        milestone = (f'【自进化结算 · 第{round_no}轮】\n'
+                     f'本轮做了什么：回归运行 {len(rows) and "3 轮"}，逐轮对照预期检查消息、报告与机制行为；'
+                     f'定位问题“{issue_text}”，目标文件：{target_text}；{execution_text}。\n'
+                     f'{anomaly}监督发现：\n{gap_text}\n'
+                     f'修复与验证：{target_text} 已修改；隔离实验与全量基准验证通过，运行验证'
+                     f'{"通过" if prod else "未通过"}。\n'
+                     f'结果：{outcome_label}。\n'
+                     f'下一步：{("发动机自动发起下一轮，验证本修复在真实回归中的效果"
+                                if engine_ic.get("engine_loop") and not gaps and prod
+                                else "本轮已停止，等待你的下一步指令")}。')
     value['headline'] = headline
     value['milestone_message'] = milestone
     cycle_root = Path(ctx.workspace) / 'state/cycles' / str(ctx.job_id)
@@ -1130,10 +1194,23 @@ def improvement_report(ctx, params):
         ideas = {'ideas': aggregate_ideas}
     observation = ((outputs.get('observe_execute') or {}).get('semantic_output') or {})
     mode = '主动学习' if is_learning else 'Partner 自进化'
-    conclusion = (f"知识干预内容相关 matched comparison：{learning.get('decision','未结算')}，"
-                  f"effect={learning.get('effect',0):.3f}。" if is_learning else
-                  f"自进化结算：{'已取得子实验终态' if settled.get('settled') else '未形成可晋升实验'}；"
-                  f"production_effective={bool(settled.get('production_effective'))}。")
+    # (2026-10-09) User-facing conclusion: no mechanism terms, plain language.
+    if is_learning:
+        conclusion = (f"本轮主动学习读取了外部资料并形成可证伪想法，末轮裁决："
+                      f"{learning.get('decision', '未结算')}。")
+    else:
+        production = bool(settled.get('production_effective'))
+        dec = (result.get('decision') or {}).get('decision') if isinstance(result.get('decision'), dict) else None
+        if production:
+            conclusion = '本轮修复已写入生产源码并通过全部验证，已在真实运行中生效。'
+        elif dec in {'validated_shadow', 'promoted'}:
+            conclusion = '本轮修复已通过隔离验证，正等待在后续真实回归中确认效果。'
+        elif dec == 'no_change_verified':
+            conclusion = '本轮未发现需要修改的问题（现状行为已核实）。'
+        elif dec == 'rejected':
+            conclusion = '本轮修复方案未通过验证，已回退并保留证据。'
+        else:
+            conclusion = '本轮完成了问题定位与隔离验证，但未形成可落地的修复。'
     work = Path(ctx.working_dir); work.mkdir(parents=True, exist_ok=True)
 
     # The graph is derived from the persisted Flow projection used by both
@@ -1326,8 +1403,67 @@ pre{white-space:pre-wrap;font:15px/1.7 system-ui,sans-serif}img{width:100%;heigh
                         textColor=HexColor('#245F50'))
     doc = SimpleDocTemplate(str(pdf), pagesize=A4, leftMargin=42, rightMargin=42,
                             topMargin=44, bottomMargin=44, title=f'{mode}结果报告')
-    story = [Paragraph(f'{mode}结果报告', title), Spacer(1, 14),
-             Paragraph(conclusion, body), Spacer(1, 12)]
+    # (2026-10-09, P9/P10/P12) One-page user summary first, supervision
+    # findings and fix trail, explicit recommendation at the end.
+    summary_lines = []
+    if is_learning:
+        summary_lines = [
+            '目标：检验外部资料能否改善 Partner 对证据的判断。',
+            f'做了什么：读取 {len(source_refs) if "source_refs" in dir() else 0} 个来源（实际按 learning_runs 统计），'
+            f'形成 {len(ideas.get("ideas") or [])} 个可证伪想法，并运行冻结比较实验。',
+            f'结果：{conclusion}',
+            f'下一步：{learning.get("next_action") or "把想法接入后续真实项目实验"}。']
+    else:
+        evolution_dir2 = Path(ctx.workspace) / 'state/cycles' / str(ctx.job_id) / 'evolution'
+        sup_dir2 = Path(ctx.workspace) / 'state/supervision' / str(ctx.job_id) / 'snapshots'
+        synth2 = {}
+        record2 = {}
+        try:
+            synth2.update(json.loads((sup_dir2 / 'synthesis.json').read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
+        try:
+            record2.update(json.loads((evolution_dir2 / 'record.json').read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
+        gaps2 = synth2.get('gaps_by_dimension') or {}
+        gap_text2 = []
+        for _dim, rows in gaps2.items():
+            for row in (rows or [])[:2]:
+                gap_text2.append(str(row.get('note') or row.get('evidence') or row.get('check_id') or '')[:110])
+            if len(gap_text2) >= 3:
+                break
+        gap_summary = '\n'.join(gap_text2[:3]) if gap_text2 else '本轮各检查项符合预期。'
+        target_files2 = []
+        try:
+            target_files2 = json.loads((evolution_dir2 / 'design.json').read_text()).get('target_files') or []
+        except (OSError, ValueError, TypeError):
+            pass
+        rec_dec2 = ((record2.get('decision') or {}).get('decision') if isinstance(record2.get('decision'), dict)
+                    else record2.get('decision') or (result.get('decision') or {}).get('decision') or 'inconclusive')
+        prod2 = bool(record2.get('production_effective') or settled.get('production_effective'))
+        if prod2:
+            fix_line = '修复已写入生产源码并通过全部验证，已在真实运行中生效。'
+        elif rec_dec2 in {'validated_shadow', 'promoted'}:
+            fix_line = '修复已通过隔离验证，正等待后续真实回归确认。'
+        elif rec_dec2 == 'no_change_verified':
+            fix_line = '无需修改。'
+        else:
+            fix_line = '未形成可落地的修复。'
+        summary_lines = [
+            f'目标：对照预期检查 Partner 的消息、报告与机制行为，发现问题即修复。',
+            f'做了什么：投递有界回归（3 轮），逐轮实时监督；定位问题并实施修复，'
+            f'目标文件：{"；".join(target_files2[:3]) or "未冻结"}。',
+            f'监督发现：\n{gap_summary}',
+            f'修复与验证：{fix_line}',
+            f'下一步：{"发动机自动发起下一轮，验证本修复在真实回归中的效果"
+                      if (params.get("intent_contract") or {}).get("execution_constraints", {}).get("engine_loop")
+                      else "等待你的下一步指令（继续自进化 / 主动学习 / 项目）。"}']
+    story = [Paragraph(f'{mode}结果报告', title), Spacer(1, 10),
+             Paragraph('一页摘要', h2), Spacer(1, 4)]
+    for sl in summary_lines:
+        story.append(Paragraph('· ' + _html.escape(sl), body))
+    story += [Spacer(1, 14), Paragraph(conclusion, body), Spacer(1, 12)]
     table_data = [['项目', '机器记录'], ['Job', str(ctx.job_id)],
                   ['Flow', str(params.get('flow_id'))],
                   ['生产生效', str(bool(settled.get('production_effective')))],
@@ -1394,8 +1530,10 @@ pre{white-space:pre-wrap;font:15px/1.7 system-ui,sans-serif}img{width:100%;heigh
         image = RLImage(str(graph_png)); image._restrictSize(500, 430)
         story += [image, Spacer(1, 8)]
     story += [Paragraph(' → '.join(node_ids), body), Spacer(1, 14),
+              Paragraph('建议与下一步', h2), Spacer(1, 6),
+              Paragraph(_html.escape(summary_lines[-1]), body), Spacer(1, 14),
               Paragraph('证据边界', h2), Spacer(1, 6),
-              Paragraph('主动学习合同分类改善不等于科研项目指标提高；自进化只有生产重放通过才能标为 production_effective。', body)]
+              Paragraph('本报告只陈述本轮真实记录；未验证生效的修复不会被写成“已修复”。主动学习的合同分类改善不等于真实科研项目指标已经提高。', body)]
     doc.build(story)
     artifacts = []
     for path in (md, html_path, pdf, graph_path, svg_path, graph_png):

@@ -10,6 +10,7 @@ import os
 import time
 import fcntl
 import re
+import uuid
 from partner.event_fabric.catalog import EventDefinition
 from partner.runtime.action_execution import write_json
 from partner.runtime import evolution_experiment as experiment
@@ -2297,6 +2298,115 @@ def record(ctx, params):
     return persist(ctx,params,value,'自主调查、冻结预期、实验与最终结果已记录')
 
 
+def _engine_round_message(engine_id: str, round_no: int, mode: str) -> str:
+    mode_label = {'self_improvement': '自进化', 'learning_improvement': '主动学习',
+                  'project_iteration': '项目推进'}.get(mode, mode)
+    return (f"【系统自进化】发动机续轮 #{round_no}（引擎 {engine_id}，模式：{mode_label}）："
+            "验证上一轮修复在真实回归中的效果；有界运行 3 轮，逐轮核对期望并实时监督；"
+            "发现问题则修复落地；完成后汇报本轮做了什么、改了什么、验证结果。")
+
+
+def engine_continue(ctx, params):
+    """Engine loop gate after record.
+
+    Decides whether the engine auto-starts the next round and in which mode.
+    Deterministic hard gates (budget, convergence, user stop/switch) guard the
+    loop (per architecture discipline: deterministic code owns budgets and
+    hard gates); the next round is submitted through the same orchestrator
+    entry a user message uses, with a fresh request id and the same engine id,
+    so the loop is resumable and auditable.  Gates:
+      - budget:    rounds_run >= max_rounds  -> stop (budget reached)
+      - convergence: >=2 consecutive rounds without production_effective -> stop
+      - user control: engine_control.json {action: stop, mode: <switch>} overrides
+    """
+    from scripts.messaging.partner_submit import SubmitPayload, submit
+    ic = params.get('intent_contract') or {}
+    ec = ic.get('execution_constraints') or {}
+    engine_id = str(params.get('engine_id') or ec.get('engine_id') or ic.get('engine_id') or 'engine_default')
+    max_rounds = int(params.get('max_rounds') or ec.get('max_rounds') or 3)
+    mode = str(params.get('engine_mode') or ec.get('engine_mode') or ic.get('mode') or 'self_improvement')
+    ws = Path(str(getattr(ctx, 'workspace', '') or ''))
+    engine_dir = ws / 'state/evolution_regression' / 'engine' / engine_id
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    state = read(engine_dir / 'engine_state.json') or {
+        'engine_id': engine_id, 'rounds_run': 0, 'max_rounds': max_rounds,
+        'mode': mode, 'last_promoted_round': 0, 'history': [], 'stopped': False,
+        'stop_reason': '', 'created_at': time.strftime('%Y-%m-%dT%H:%M:%S')}
+    # record this round
+    record = saved(ctx, 'record') or {}
+    decision = saved(ctx, 'decision') or {}
+    rounds_run = int(state.get('rounds_run') or 0) + 1
+    production = bool(record.get('production_effective'))
+    state['rounds_run'] = rounds_run
+    state['history'].append({
+        'round': rounds_run, 'job_id': str(getattr(ctx, 'job_id', '')),
+        'decision': decision.get('decision'),
+        'selected_attempt': decision.get('selected_attempt'),
+        'production_effective': production, 'mode': mode})
+    if production:
+        state['last_promoted_round'] = rounds_run
+    # user control file (steering wheel: stop / switch mode)
+    control = read(engine_dir / 'engine_control.json') or {}
+    if control.get('mode') and control['mode'] != state.get('mode'):
+        state['mode'] = control['mode']
+        state['history'][-1]['mode_switched_to'] = control['mode']
+    user_stop = control.get('action') == 'stop'
+    if user_stop:
+        state['stopped'] = True
+        state['stop_reason'] = 'user stop'
+    elif rounds_run >= max_rounds:
+        state['stopped'] = True
+        state['stop_reason'] = f'budget reached (max_rounds={max_rounds})'
+    elif rounds_run >= 2 and (rounds_run - int(state.get('last_promoted_round') or 0)) >= 2:
+        state['stopped'] = True
+        state['stop_reason'] = 'no improvement for 2 consecutive rounds'
+    # continue: submit the next round in the current mode
+    next_job = None
+    if not state.get('stopped'):
+        instance = str(params.get('regression_instance') or ic.get('instance') or '01')
+        sender_openid = str(getattr(ctx, 'sender_id', '') or '').strip()
+        recipient_ref = f"inst{instance}_{sender_openid}" if sender_openid else f"inst{instance}"
+        msg = _engine_round_message(engine_id, rounds_run + 1, state['mode'])
+        rid = 'eng' + uuid.uuid4().hex[:12]
+        payload = SubmitPayload(
+            instance=instance,
+            sender_id='system_evolution',
+            sender_name='system_evolution',
+            message=msg,
+            project_id=str(params.get('regression_project') or 'literature_github_learning'),
+            mode=state['mode'],
+            reply_to='qq',
+            conversation_id=None,
+            scope=None,
+            request_id=rid,
+            recipient_ref=recipient_ref,
+            constraints_file=None,
+            execution_constraints={
+                'evolution_cycle': False, 'max_rounds': 3, 'evolution_apply': True,
+                'engine_loop': True, 'engine_id': engine_id,
+                'engine_mode': state['mode'], 'engine_round': rounds_run + 1},
+            subject_allowed_instances=[instance],
+            direct_answer=False,
+        )
+        try:
+            res = submit(payload, str(ws))
+            next_job = res.get('job_id')
+            state['history'][-1]['next_round_job'] = next_job
+        except Exception as exc:
+            state['stopped'] = True
+            state['stop_reason'] = f'next round submit failed: {str(exc)[:200]}'
+    write_json(engine_dir / 'engine_state.json', state)
+    value = {'engine_id': engine_id, 'mode': state['mode'], 'rounds_run': rounds_run,
+             'max_rounds': max_rounds, 'continue_round': bool(next_job),
+             'next_round_job': next_job, 'production_effective': production,
+             'stopped': bool(state.get('stopped')), 'stop_reason': state.get('stop_reason', ''),
+             'state_path': str(engine_dir / 'engine_state.json')}
+    return {**result(value, '发动机本轮已结算，自动发起下一轮' if next_job
+                     else '发动机本轮已结算，已停止：' + str(state.get('stop_reason', '')),
+                     [str(engine_dir / 'engine_state.json')]),
+            'semantic_output': value}
+
+
 _HANDLERS = {'collect':collect,'read_plan':read_plan,'sources':sources,'audit':audit,'counter':counter,
  'design':design,'target_consistency':target_consistency,'tests':tests,'test_review':test_review,'freeze':freeze,'candidate':candidate,
  'critic':critic,'isolate':isolate,'baseline':execution('baseline'),'candidate_run':execution('candidate'),
@@ -2308,13 +2418,14 @@ _HANDLERS = {'collect':collect,'read_plan':read_plan,'sources':sources,'audit':a
  'release_compare':release_compare_handler,
  'apply_source':apply_source_handler,'runtime_reload':runtime_reload_handler,
  'runtime_verify':runtime_verify_handler,'rollback':rollback_handler,
- 'rollback_verify':rollback_verify_handler,'failure_analyze':failure_analyze_handler}
+ 'rollback_verify':rollback_verify_handler,'failure_analyze':failure_analyze_handler,
+ 'engine_continue':engine_continue}
 _LOCAL = {'collect','sources','target_consistency','freeze','isolate','baseline','candidate_run','compare',
            'attempt_budget_guard','attempt_controller','decision','release','record','tests_preflight','tests_review',
            'release_baseline','release_candidate','release_compare',
            'apply_source','runtime_reload','runtime_verify',
            'rollback','rollback_verify','failure_analyze',
-           'test_repair_v2','test_repair_2_v2'}
+           'test_repair_v2','test_repair_2_v2','engine_continue'}
 DEFINITIONS = [EventDefinition('autoevolution.'+name,'evolution',
     '自动调查与冻结预期实验：'+name,handler,
     execution_method='local' if name in _LOCAL else 'llm',

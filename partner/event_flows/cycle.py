@@ -504,7 +504,7 @@ SUPERVISION_CYCLE = Flow('supervision_cycle', '1.0.0', (
     Node('objective_plan', 'supervise.objective_plan', ('expectations_update',)),
 ), 'Shared supervision brick: load expectations, full-text LLM snapshot, gap synthesis, expectation doc update, objective plan. Invoked by the LLM-assembled route (supervise.route_dispatch).')
 
-AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.3.0', (
+AUTONOMOUS_EVOLUTION_V33 = Flow('autonomous_evolution', '3.3.0', (
     Node('regression_trigger', 'autoevolution.trigger_regression'),
     Node('regression_track', 'autoevolution.track_regression', ('regression_trigger',)),
     Node('collect', 'autoevolution.collect', ('regression_track',)),
@@ -545,6 +545,17 @@ AUTONOMOUS_EVOLUTION = Flow('autonomous_evolution', '3.3.0', (
     Node('rollback_verify', 'autoevolution.rollback_verify', ('rollback',)),
     Node('record', 'autoevolution.record', ('rollback_verify',)),
 ), 'Dynamic self-evolution with live supervision: regression probe runs while its finished rounds are supervised round-by-round against the dynamic expectation doc; the LLM assembles the next route (supervision child flow / inline fix / stop) and the deterministic benchmark gate guards every source apply. Mechanism audit and supervision gap chains run in parallel and merge at design.')
+
+AUTONOMOUS_EVOLUTION = replace(
+    AUTONOMOUS_EVOLUTION_V33,
+    version='3.4.0',
+    nodes=tuple(list(AUTONOMOUS_EVOLUTION_V33.nodes) +
+                [Node('engine_continue', 'autoevolution.engine_continue', ('record',))]),
+    description=('Engine loop: after record, the engine gate decides whether to auto-start the next '
+                 'round (budget/convergence/user-control guarded), submits it through the same '
+                 'orchestrator entry with a fresh request id and the same engine id, and records the '
+                 'loop state under state/evolution_regression/engine/<engine_id>/engine_state.json. '
+                 'Derived from v3.3.0 (live-supervision closed loop); v3.3.0 retained for pinned Jobs.'))
 
 AUTONOMOUS_EVOLUTION_V32 = replace(
     AUTONOMOUS_EVOLUTION_V31,
@@ -683,5 +694,6 @@ HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
               AUTONOMOUS_EVOLUTION_V3,
               AUTONOMOUS_EVOLUTION_V31,
               AUTONOMOUS_EVOLUTION_V32,
+              AUTONOMOUS_EVOLUTION_V33,
               evolution_flow(), evolution_flow(expanded=True),
               evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]

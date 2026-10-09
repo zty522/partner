@@ -76,7 +76,7 @@ def trigger_regression(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         request_id=request_id,
         recipient_ref=recipient_ref,
         constraints_file=None,
-        execution_constraints={"evolution_cycle": False, "max_rounds": 3},
+        execution_constraints={"evolution_cycle": False, "max_rounds": int(params.get("max_rounds") or 3)},
         subject_allowed_instances=[instance],
         direct_answer=False,
     )
