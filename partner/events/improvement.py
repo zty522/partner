@@ -1034,6 +1034,9 @@ def improvement_narrative(ctx, params):
                     f"{value['self_evolution']['decision']}；生产生效="
                     f"{value['self_evolution']['production_effective']}。")
         # user-facing headline (2026-10-09): no mechanism terms, anomaly first
+        issue_text = str(grounded_issue.get('symptom') or grounded_issue.get('current_behavior')
+                         or '未形成可复现缺陷')[:300]
+        target_text = '、'.join(target_files[:3]) or '未冻结真实源码文件'
         hl_decision = value['self_evolution']['decision']
         hl_prod = value['self_evolution']['production_effective']
         if hl_prod:
@@ -1047,9 +1050,6 @@ def improvement_narrative(ctx, params):
         else:
             hl_text = f'本轮未形成可落地的修复（{issue_text}）。'
         headline = hl_text
-        issue_text = str(grounded_issue.get('symptom') or grounded_issue.get('current_behavior')
-                         or '未形成可复现缺陷')[:300]
-        target_text = '、'.join(target_files[:3]) or '未冻结真实源码文件'
         if value['self_evolution']['real_experiment_executed'] and value['self_evolution']['matched_verified']:
             execution_text = '已运行隔离 baseline/candidate，且 matched comparison 有效'
         elif value['self_evolution']['real_experiment_executed']:
