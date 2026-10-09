@@ -35,7 +35,7 @@ def push_file(ws, path, caption=""):
 
 def push_deliverables(ws, caption="", _workspace=None):
     d = os.path.join(ws, "deliverables")
-    if not os.path.exists(d): return {"ok": False}
+    if not os.path.exists(d): return {"ok": False, "error": "missing_deliverables_dir"}
     results = {}
     for f in sorted(os.listdir(d)):
         fp = os.path.join(d, f)
@@ -46,4 +46,6 @@ def push_deliverables(ws, caption="", _workspace=None):
     pushed = sum(1 for v in results.values() if v)
     total = len(results)
     logger.info("[QQ-PUSH] Summary: %d/%d files pushed", pushed, total)
+    if total == 0:
+        return {"ok": False, "error": "empty_deliverables", "pushed": 0, "total": 0, "results": {}}
     return {"ok": True, "pushed": pushed, "total": total, "results": results}
