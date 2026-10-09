@@ -110,10 +110,17 @@ def expectations_load(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _read_full_texts(params: dict[str, Any]) -> dict[str, str]:
-    """Read every listed artifact **in full** for item-by-item judgment."""
+    """Read every listed artifact for item-by-item judgment.
+
+    Budgets are bounded so a supervision Event stays inside its deadline with
+    the cognitive model (thinking on): full 45k+ char prompts hard-timed-out
+    at ~77s and supervision silently degraded.  Round records are sampled to
+    their decisive nodes; messages/PDFs keep their user-facing excerpts.
+    """
     out: dict[str, str] = {}
     for key in ("round_records", "messages", "pdfs", "misc"):
-        for p in list(params.get(key) or []):
+        cap = 12000 if key == "round_records" else 8000
+        for p in list(params.get(key) or [])[:4]:
             fp = Path(p)
             try:
                 if not fp.exists():
@@ -121,8 +128,33 @@ def _read_full_texts(params: dict[str, Any]) -> dict[str, str]:
                 txt = fp.read_text(encoding="utf-8", errors="replace")
             except Exception as exc:
                 txt = f"(read error: {exc})"
-            out[str(fp)] = txt[:40000]
-    return out
+            out[str(fp)] = txt[:cap]
+    # round_*.json records are mostly machine noise; keep only the nodes a
+    # supervisor actually judges so the prompt stays small enough for the
+    # thinking model to answer in time.
+    compact = {}
+    for p, t in out.items():
+        if p.endswith('.json') and 'round_' in p:
+            import json as _json
+            try:
+                row = _json.loads(t)
+                nodes = row.get("node_outputs") or {}
+                keep = {}
+                for nid in ("design", "execute", "verify", "reflect", "iterate", "next_decide", "settle"):
+                    sem = (nodes.get(nid) or {}).get("semantic_output") or {}
+                    keep[nid] = {k: (str(v)[:600] if not isinstance(v, (dict, list)) else v)
+                                 for k, v in sem.items() if k in {
+                                     'round_goal', 'action_summary', 'execution_status', 'error',
+                                     'verified', 'execution_verified', 'business_delta', 'evidence',
+                                     'supported', 'rejected', 'unknown', 'lesson', 'route', 'reason',
+                                     'next_hypothesis', 'next_round_goal', 'fail_layer',
+                                     'missing_evidence', 'settled', 'learning_effect'}}
+                compact[p] = _json.dumps(keep, ensure_ascii=False, default=str)[:cap]
+            except Exception:
+                compact[p] = t
+        else:
+            compact[p] = t
+    return compact
 
 
 def snapshot(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
