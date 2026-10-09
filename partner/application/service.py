@@ -497,6 +497,7 @@ class PartnerApplicationService:
         controller = EventFlowController(store)
         state = controller.start(
             flow_def, catalog_version=catalog.version,
+            builtin_catalog_version=catalog.builtin_version,
             task_id=job_id, project_id="acceptance_test",
             instance_id=persona_hint)
         job.flow_id = state.flow_id
@@ -1346,6 +1347,7 @@ class PartnerApplicationService:
             flow_definition = build_flow_registry().get(flow_name)
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
+                builtin_catalog_version=event_catalog.builtin_version,
                 task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
                 run_context={
                     'runtime_trace_token': f'runtime_trace_{job.job_id}',
@@ -1492,6 +1494,7 @@ class PartnerApplicationService:
                                   f"未注册的续跑 flow：{flow_name}")
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
+                builtin_catalog_version=event_catalog.builtin_version,
                 task_id=job.job_id, project_id=dispatch_target, instance_id=assigned,
                 run_context={'runtime_trace_token': f'runtime_trace_{job.job_id}'},
             )

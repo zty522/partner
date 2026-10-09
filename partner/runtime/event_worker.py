@@ -459,10 +459,20 @@ class EventWorker:
             self._save_job(job)
             return True
         if state.catalog_version != self.catalog.version:
-            job.status = "failed"
-            job.error = "pinned_catalog_unavailable_after_restart"
-            self._save_job(job)
-            return True
+            # Source edits during a long run (developer workflow, watchdog
+            # restart) change the full catalog hash through extension/candidate
+            # churn alone.  Only builtin source changes invalidate an in-flight
+            # Job: its Event handlers must keep executing against a stable
+            # builtin set, while extension-only drift is safe to continue.
+            if (state.builtin_catalog_version
+                    and state.builtin_catalog_version == self.catalog.builtin_version):
+                logger.warning("catalog drift for %s: extension-only (%s -> %s); continuing",
+                               job.job_id, state.catalog_version, self.catalog.version)
+            else:
+                job.status = "failed"
+                job.error = "pinned_catalog_unavailable_after_restart"
+                self._save_job(job)
+                return True
         if state.definition_version != definition.version:
             job.status = "failed"
             job.error = "pinned_flow_definition_unavailable_after_restart"

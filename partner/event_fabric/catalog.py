@@ -57,6 +57,7 @@ class EventCatalog:
         self._events: dict[str, EventDefinition] = {}
         self._frozen = False
         self._version = ""
+        self._builtin_version = ""
 
     def register(self, definition: EventDefinition) -> None:
         if self._frozen:
@@ -80,12 +81,28 @@ class EventCatalog:
     @property
     def version(self) -> str:
         if not self._version:
-            body = json.dumps(
-                [self._events[name].public_record() for name in self.names()],
-                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-            )
-            self._version = sha256(body.encode("utf-8")).hexdigest()[:16]
+            self._version = self._hash_of(None)
         return self._version
+
+    def _hash_of(self, source_filter: str | None) -> str:
+        events = ([d for d in self._events.values() if d.source == source_filter]
+                  if source_filter is not None else list(self._events.values()))
+        body = json.dumps(
+            [d.public_record() for d in sorted(events, key=lambda d: d.name)],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        return sha256(body.encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def builtin_version(self) -> str:
+        """Version over built-in Events only.
+
+        Extension/candidate manifest churn (promotions during a run) must not
+        invalidate an in-flight Job; source-level builtin changes still do.
+        """
+        if not self._builtin_version:
+            self._builtin_version = self._hash_of("builtin")
+        return self._builtin_version
 
     def freeze(self) -> "EventCatalog":
         self._frozen = True

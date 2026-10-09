@@ -47,6 +47,7 @@ class EventEnvelope:
     updated_at: str = ""
     schema_version: int = 1
     catalog_version: str = ""
+    builtin_catalog_version: str = ""
     flow_id: str = ""
     flow_type: str = ""
     node_id: str = ""

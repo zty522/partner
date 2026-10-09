@@ -68,6 +68,7 @@ class EventFlowState:
     task_id: str
     project_id: str
     instance_id: str
+    builtin_catalog_version: str = ""
     root_event_id: str = ""
     status: str = "running"
     current_event_id: str = ""
@@ -130,11 +131,13 @@ class EventFlowController:
 
     def start(self, definition: EventFlowDefinition, *, catalog_version: str,
               task_id: str, project_id: str, instance_id: str,
+              builtin_catalog_version: str = "",
               run_context: dict[str, Any] | None = None) -> EventFlowState:
         roots = [node.node_id for node in definition.nodes if not node.depends_on]
         state = EventFlowState(
             flow_id=f"flow_{uuid.uuid4().hex[:16]}", flow_type=definition.name,
             definition_version=definition.version, catalog_version=catalog_version,
+            builtin_catalog_version=builtin_catalog_version,
             task_id=task_id, project_id=project_id, instance_id=instance_id,
             ready_node_ids=roots,
             run_context=dict(run_context or {}),
