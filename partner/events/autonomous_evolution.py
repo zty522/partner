@@ -2433,5 +2433,7 @@ _LOCAL = {'collect','sources','target_consistency','freeze','isolate','baseline'
 DEFINITIONS = [EventDefinition('autoevolution.'+name,'evolution',
     '自动调查与冻结预期实验：'+name,handler,
     execution_method='local' if name in _LOCAL else 'llm',
-    timeout_seconds=(900 if name in ('runtime_verify','runtime_reload','release_baseline','release_candidate') else 600 if name=='release' else 300),
+    timeout_seconds=(1200 if name in ('track_regression','collect','audit','counter','read_plan','sources') else
+                     900 if name in ('runtime_verify','runtime_reload','release_baseline','release_candidate') else
+                     600 if name == 'release' else 300),
     max_attempts=2) for name,handler in _HANDLERS.items()]
