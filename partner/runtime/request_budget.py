@@ -16,6 +16,9 @@ def validate_constraints(value):
     allowed.update({'max_evolution_attempts', 'notification_mode',
                     'observation_job_ids', 'max_observation_steps',
                     'max_opportunities', 'learning_record_root'})
+    # Engine-loop keys (2026-10-09): carried across the autonomous-evolution
+    # engine continuation, validated for type where it matters.
+    allowed.update({'engine_loop', 'engine_id', 'engine_mode', 'engine_round'})
     if set(value)-allowed:
         raise ValueError('unknown execution constraint')
     result = dict(value)
