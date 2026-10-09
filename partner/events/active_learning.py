@@ -34,8 +34,30 @@ def _llm(ctx: Any, params: dict[str, Any], purpose: str, instruction: str) -> di
 
 
 def question_formulate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    # Gap-driven learning (2026-10-10): the learning question must target the
+    # previous round's unmet evidence requirements, not a generic curiosity.
+    # outcome_verify persists gap_report.json into the job working dir; the
+    # active-learning child runs in the same job, so read it directly.
+    gaps = []
+    try:
+        ws = str(getattr(ctx, 'workspace', '') or '')
+        jid = str(getattr(ctx, 'job_id', '') or '')
+        gap_path = Path(ws) / 'state/event_runtime/work' / jid / 'gap_report.json'
+        if gap_path.is_file():
+            data = json.loads(gap_path.read_text())
+            for row in data.get('round_gaps') or []:
+                g = str(row.get('gap') or '')
+                if g:
+                    gaps.append(g)
+    except Exception:
+        pass
+    gap_note = ('\n【缺口驱动】上一轮核验未满足的缺口（学习必须优先针对这些缺口补能力，'
+                'question 必须直接关联至少一条）：' + json.dumps(gaps, ensure_ascii=False)[:8000]
+                if gaps else '')
     return _llm(ctx, params, "learning_question_formulate",
-        "把项目当前未知变成一个答案会改变下一行动的可证伪问题。字段 question,decision_impact,known,unknown,stop_rule。")
+        ("把项目当前未知变成一个答案会改变下一行动的可证伪问题。字段 question,decision_impact,"
+         "known,unknown,stop_rule。问题必须聚焦本轮真实推进缺口：读了什么、差什么、需要外部学什么。"
+         + gap_note))
 
 
 def source_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:

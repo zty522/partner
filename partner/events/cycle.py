@@ -473,6 +473,20 @@ def round_design(ctx, params):
     previous_full = {
         k: (((previous_record.get('node_outputs') or {}).get(k) or {}).get('semantic_output') or {})
         for k in ('design', 'execute', 'verify', 'reflect', 'settle')}
+    # Gap ledger: the previous round's unmet evidence requirements become a
+    # MUST-consume checklist for this round (gap-driven iteration).  The
+    # durable gap_report.json (written by outcome_verify) is authoritative;
+    # fall back to the verdict payload embedded in the verify node.
+    _gap_report = read(folder(ctx) / 'gap_report.json') if number > 1 else {}
+    _round_gaps = (_gap_report.get('round_gaps')
+                   or (((previous_record.get('node_outputs') or {}).get('verify') or {})
+                       .get('semantic_output') or {}).get('verdict_report') or {})
+    if isinstance(_round_gaps, dict):
+        _gap_list = [str(g) for g in
+                     (_round_gaps.get('missing_evidence') or []) + (_round_gaps.get('next_round_fix') or [])]
+    else:
+        _gap_list = [str(g.get('gap') or '') for g in _round_gaps if isinstance(g, dict)]
+    _gap_list = [g for g in dict.fromkeys(_gap_list) if g]
     learning = _learning_record(ctx, number - 1) if number > 1 else {}
     impact = read(folder(ctx) / f'impact_{previous_name}.json') if number > 1 else {}
     contract = params.get('intent_contract') or {}
@@ -518,6 +532,11 @@ def round_design(ctx, params):
             + '所有声明的指标必须来自本轮真实运行的命令与产物；若当前环境无法真实执行某项验证，'
             + '应选择 active_learning（真实读取外部文献/代码/文档补齐能力）或明确的环境修复动作，'
             + '而不是用模拟值假装推进。execute 的 target_artifact 必须标注 provenance=executed 且给出可复现命令。'
+            + ('\n【v4 缺口必答】上一轮核验未满足的缺口清单（来自 gap_report.json，必须逐条消解，不得无视）：'
+               + json.dumps(_gap_list, ensure_ascii=False)[:12000]
+               + '\n输出必须新增 gap_resolution 字段：数组，每条 {"gap":"原文","resolution_plan":"本轮如何真实消解","lands_in_round_goal":true/false}。'
+               + 'round_goal 必须显式覆盖每条缺口的消解；若某条缺口本轮无法消解，必须写明理由并让 stop_condition 指向它。'
+               if _gap_list else '')
             + '\n上一轮 round_handoff=' + json.dumps(previous.get('round_handoff') or {}, ensure_ascii=False)[:6000]))
     value = json_object(raw)
     selected = value.get('selected') if isinstance(value.get('selected'), dict) else {}
@@ -542,6 +561,13 @@ def round_design(ctx, params):
             'project.outcome_verify',
             'project.outcome_reflect', 'core.settlement']
         value['blueprint_repaired'] = True
+    # v4: require a concrete gap-resolution plan whenever the previous round
+    # left unmet evidence requirements.  If the model did not emit one, ask it
+    # to answer the missing item instead of silently continuing.
+    if _gap_list and not (value.get('gap_resolution') or []):
+        value['gap_resolution_unanswered'] = _gap_list
+        value['round_goal'] = (str(value.get('round_goal') or '') +
+                               '【未消解缺口】' + '；'.join(_gap_list[:6]))
     value.update(round_number=number, domain='project', evolution_target_forbidden=True,
                  previous_settlement_ref=(str(folder(ctx) / f'settle_{previous_name}.json')
                                           if number > 1 else ''))

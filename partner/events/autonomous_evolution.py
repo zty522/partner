@@ -1637,15 +1637,29 @@ def analyze(ctx, params):
         for arm in ('baseline','candidate'):
             p=Path(isolated['directory'])/(arm+'.log')
             if p.exists():logs[arm]=p.read_text(errors='replace')[-18000:]
+    # User-facing originals (2026-10-10): what the user actually received —
+    # messages, PDF, round briefs — must be judged verbatim for readability;
+    # a defect in presentation is only real if the original text/PDF shows it.
+    collect_row = saved(ctx, 'collect') or {}
+    user_views = {}
+    for key in ('regression_messages', 'regression_pdf', 'regression_rounds'):
+        rows = collect_row.get(key) or []
+        if isinstance(rows, list):
+            user_views[key] = [str(r)[:8000] for r in rows[:8]]
     return ask(ctx,params,
         '解释真实实验与baseline和冻结预期的差异，不能覆盖机器判定。'
         '区分根因错误、实现缺陷、测试fixture错误、环境失败、证据不足。'
         '输出 {"summary":"...","gap_analysis":[],"root_cause_supported":true/false,'
         '"next_action":"revise或accept或investigate","specific_revision":"..."}。'
-        '第二版候选不可更改冻结测试或标准；测试失效则记录inconclusive，不伪称改善。',
+        '第二版候选不可更改冻结测试或标准；测试失效则记录inconclusive，不伪称改善。'
+        '【用户视角原文】下方 regression_messages/regression_pdf/regression_rounds 是用户真实收到的消息与PDF原文。'
+        '若缺陷涉及用户可见呈现（消息、PDF、报告），必须以原文逐句评估可读性：机械词（结算/缺口/边界/事件等）、'
+        '不面向用户的叙事逻辑、无信息量的固定图、证据索引等，都要在 specific_revision 里给出具体到句子/段落的修改。'
+        '不得只写"提升可读性"这种无法落地的建议。',
         {'design':saved(ctx,'design'),'candidate':saved(ctx,f'candidate_{n}'),
          'critic':saved(ctx,f'critic_{n}'),'isolation':isolated,
-         'comparison':saved(ctx,f'compare_{n}'),'logs':logs},('summary','next_action'))
+         'comparison':saved(ctx,f'compare_{n}'),'logs':logs,
+         'user_facing_originals':user_views},('summary','next_action'))
 
 
 def _attempt_numbers(ctx):
@@ -2302,7 +2316,7 @@ def _engine_round_message(engine_id: str, round_no: int, mode: str) -> str:
     mode_label = {'self_improvement': '自进化', 'learning_improvement': '主动学习',
                   'project_iteration': '项目推进'}.get(mode, mode)
     return (f"【系统自进化】发动机续轮 #{round_no}（引擎 {engine_id}，模式：{mode_label}）："
-            "验证上一轮修复在真实回归中的效果；有界运行 3 轮，逐轮核对期望并实时监督；"
+            "验证上一轮修复在真实回归中的效果；逐轮核对期望并实时监督，缺口未归零且预算未耗尽就继续；"
             "发现问题则修复落地；完成后汇报本轮做了什么、改了什么、验证结果。")
 
 
@@ -2323,7 +2337,7 @@ def engine_continue(ctx, params):
     ic = params.get('intent_contract') or {}
     ec = ic.get('execution_constraints') or {}
     engine_id = str(params.get('engine_id') or ec.get('engine_id') or ic.get('engine_id') or 'engine_default')
-    max_rounds = int(params.get('max_rounds') or ec.get('max_rounds') or 3)
+    max_rounds = int(params.get('max_rounds') or ec.get('max_rounds') or 5)
     mode = str(params.get('engine_mode') or ec.get('engine_mode') or ic.get('mode') or 'self_improvement')
     ws = Path(str(getattr(ctx, 'workspace', '') or ''))
     engine_dir = ws / 'state/evolution_regression' / 'engine' / engine_id
@@ -2357,9 +2371,13 @@ def engine_continue(ctx, params):
     elif rounds_run >= max_rounds:
         state['stopped'] = True
         state['stop_reason'] = f'budget reached (max_rounds={max_rounds})'
-    elif rounds_run >= 2 and (rounds_run - int(state.get('last_promoted_round') or 0)) >= 2:
+    # Gap-driven convergence (2026-10-10): the engine keeps turning while
+    # evidence gaps remain and budget allows.  "No improvement" is only
+    # declared after 3 consecutive rounds without production effect, so a
+    # single inconclusive/rejected round no longer stalls the engine.
+    elif rounds_run >= 3 and (rounds_run - int(state.get('last_promoted_round') or 0)) >= 3:
         state['stopped'] = True
-        state['stop_reason'] = 'no improvement for 2 consecutive rounds'
+        state['stop_reason'] = 'no improvement for 3 consecutive rounds'
     # continue: submit the next round in the current mode
     next_job = None
     if not state.get('stopped'):

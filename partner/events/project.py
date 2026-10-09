@@ -1236,12 +1236,31 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if evidence:
         progress_note = f'本轮验证了 {len(evidence)} 个产物'
     
+    # Gap ledger: persist the round's unmet requirements as a durable file so
+    # the next round's design MUST consume it (gap-driven iteration).
+    from partner.runtime.action_execution import write_json as _wj
+    gap_path = Path(getattr(ctx, 'working_dir', _workspace(ctx) + '/state/event_runtime/work/' + str(getattr(ctx, 'job_id', '')))) / 'gap_report.json'
+    gap_rows = []
+    for g in missing_evidence:
+        gap_rows.append({'gap': str(g), 'kind': str(fail_layer or 'evidence'),
+                         'resolution_required_by_next_round': True})
+    for fix in next_round_fix:
+        gap_rows.append({'gap': str(fix), 'kind': 'next_round_fix',
+                         'resolution_required_by_next_round': True})
+    if gap_rows:
+        try:
+            _wj(gap_path, {'round_gaps': gap_rows, 'fail_layer': fail_layer,
+                           'verified': execution_verified,
+                           'produced_at': getattr(ctx, 'started_at', '') or ''})
+        except Exception:
+            pass
     verdict_report = {
         'fail_layer': fail_layer,
         'missing_evidence': missing_evidence,
         'next_round_fix': next_round_fix,
         'progress_note': progress_note,
-        'progress_since_last_round': len(evidence)
+        'progress_since_last_round': len(evidence),
+        'gap_report_path': str(gap_path) if gap_rows else '',
     }
     # provenance is part of the layer report so downstream iteration_decide /
     # report draft can explain in user language why the round was not counted.
@@ -1269,15 +1288,74 @@ def outcome_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 def _learning_matched_evidence(ctx: Any, params: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
     """Project comparison projection used by the later learning settlement.
 
-    The learning handoff has to be physically available to the round and the
-    comparison must be a verified JSON artifact.  This Event only projects
-    measured values; it does not let an LLM award improvement.
+    Two acceptance modes (2026-10-10):
+    A. Learning-consumption mode: the round's real artifacts physically touch
+       a transfer_map target_component from the active-learning handoff (the
+       transfer_mapping.json / learning_handoff.json produced earlier in this
+       same job).  This is what makes external-source learning count as a
+       real advance even when the target is a code-quality/architecture
+       change without an RMSE comparison.
+    B. RMSE-comparison mode (legacy): a verified JSON comparison artifact.
+    This Event only projects measured values; it does not let an LLM award
+    improvement.
     """
     contract = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}
+    job_id = str(getattr(ctx, 'job_id', '') or '')
+    ws = Path(str(getattr(ctx, 'workspace', '') or ''))
+    # ---- Mode A: learning consumption -------------------------------------
+    handoff_candidates = []
+    h1 = Path(str(contract.get('learning_handoff_path') or ''))
+    if h1.is_file():
+        handoff_candidates.append(h1)
+    h2 = ws / 'state/event_runtime/work' / job_id / 'transfer_mapping.json'
+    if h2.is_file():
+        handoff_candidates.append(h2)
+    h3 = ws / 'state/event_runtime/work' / job_id / 'learning_handoff.json'
+    if h3.is_file():
+        handoff_candidates.append(h3)
+    target_hints: list[str] = []
+    for hpath in handoff_candidates:
+        try:
+            data = json.loads(hpath.read_text(encoding='utf-8'))
+        except (OSError, ValueError, TypeError):
+            continue
+        maps = (data.get('transfer_map') if isinstance(data, dict) else None) or []
+        for row in maps if isinstance(maps, list) else []:
+            tgt = str(row.get('target_component') or '')
+            if tgt:
+                target_hints.append(tgt)
+        cand = data.get('candidate') if isinstance(data, dict) else None
+        if isinstance(cand, dict):
+            for key in ('target_component', 'target_files', 'files'):
+                val = cand.get(key)
+                if isinstance(val, str) and val:
+                    target_hints.append(val)
+                elif isinstance(val, list):
+                    target_hints.extend(str(v) for v in val if v)
+    if target_hints:
+        hint_basenames = set()
+        for hint in target_hints:
+            name = Path(str(hint)).name
+            if name:
+                hint_basenames.add(name)
+            hint_basenames.add(str(hint))
+        for row in evidence:
+            if not row.get('valid'):
+                continue
+            path = Path(str(row.get('path') or ''))
+            if not path.is_file():
+                continue
+            name = path.name
+            if any(hint in str(path) or hint == name
+                   for hint in hint_basenames if hint):
+                return {'consumed': True, 'mode': 'learning_consumption',
+                        'handoff_ref': str(h2 if h2.is_file() else (h3 if h3.is_file() else h1)),
+                        'evidence_path': str(path),
+                        'matched_targets': sorted(hint_basenames)[:8]}
+    # ---- Mode B: RMSE comparison (legacy) ----------------------------------
     handoff_path = Path(str(contract.get('learning_handoff_path') or ''))
     if not handoff_path.is_file():
         return {}
-    job_id = str(getattr(ctx, 'job_id', '') or '')
     if job_id and 'job_' in str(handoff_path) and job_id not in str(handoff_path):
         return {}
     for row in evidence:
