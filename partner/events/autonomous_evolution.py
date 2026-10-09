@@ -2382,7 +2382,10 @@ def engine_continue(ctx, params):
             recipient_ref=recipient_ref,
             constraints_file=None,
             execution_constraints={
-                'evolution_cycle': False, 'max_rounds': 3, 'evolution_apply': True,
+                # engine rounds must be able to trigger regression again; the
+                # recursion guard (evolution_cycle:False) belongs only to the
+                # inner regression job submitted by trigger_regression.
+                'max_rounds': 3, 'evolution_apply': True,
                 'engine_loop': True, 'engine_id': engine_id,
                 'engine_mode': state['mode'], 'engine_round': rounds_run + 1},
             subject_allowed_instances=[instance],

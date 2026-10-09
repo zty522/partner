@@ -1200,7 +1200,12 @@ def improvement_report(ctx, params):
                       f"{learning.get('decision', '未结算')}。")
     else:
         production = bool(settled.get('production_effective'))
-        dec = (result.get('decision') or {}).get('decision') if isinstance(result.get('decision'), dict) else None
+        # (2026-10-09 fix) 'result' was referenced but never defined here,
+        # raising UnboundLocalError at render time for every self-improvement
+        # report.  Derive it from the settlement like improvement_narrative.
+        settled_result = settled.get('result') if isinstance(settled.get('result'), dict) else {}
+        dec_raw = settled_result.get('decision')
+        dec = dec_raw.get('decision') if isinstance(dec_raw, dict) else dec_raw
         if production:
             conclusion = '本轮修复已写入生产源码并通过全部验证，已在真实运行中生效。'
         elif dec in {'validated_shadow', 'promoted'}:
