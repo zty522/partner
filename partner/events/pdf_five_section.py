@@ -2,10 +2,31 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from pathlib import Path
 from partner.event_fabric.catalog import EventDefinition
 
+
+def _sanitize_user_facing_content(content: Any) -> Any:
+    """Remove internal file names and evidence indices from content."""
+    if isinstance(content, str):
+        # Remove patterns like eligibility_0001.json, .py, .md files
+        content = re.sub(r'\b[a-zA-Z0-9_]+\.json\b', '', content)
+        content = re.sub(r'\b[a-zA-Z0-9_]+\.py\b', '', content)
+        content = re.sub(r'\b[a-zA-Z0-9_]+\.md\b', '', content)
+        # Remove evidence index markers ([E01], [E编号]); keep bracketed
+        # business text such as "[Example]" untouched.
+        content = re.sub(r'\[E\s*编号\s*\]', '', content)
+        content = re.sub(r'\[E\d+\]', '', content)
+        # Clean up extra spaces left by removals
+        content = re.sub(r'\s+', ' ', content).strip()
+        return content
+    elif isinstance(content, dict):
+        return {k: _sanitize_user_facing_content(v) for k, v in content.items()}
+    elif isinstance(content, list):
+        return [_sanitize_user_facing_content(item) for item in content]
+    return content
 
 def format_pdf_five_section(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """将报告内容格式化为五段式结构。"""
@@ -18,6 +39,13 @@ def format_pdf_five_section(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     methods_and_results = params.get('methods_and_results', {})
     limitations = params.get('limitations', [])
     next_steps = params.get('next_steps', [])
+    
+    # Sanitize inputs to remove internal jargon/files/indices
+    core_conclusion = _sanitize_user_facing_content(core_conclusion)
+    research_question = _sanitize_user_facing_content(research_question)
+    methods_and_results = _sanitize_user_facing_content(methods_and_results)
+    limitations = _sanitize_user_facing_content(limitations)
+    next_steps = _sanitize_user_facing_content(next_steps)
     
     # 如果研究问题为空，从 Job 请求中提取
     if not research_question:

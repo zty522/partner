@@ -132,8 +132,15 @@ def _humanize_internal_terms(text: str) -> str:
         'exit_code': '退出码',
         'manifest_sha256': '清单指纹',
         'inner_future': '内部异步任务',
+        '探针': '检测机制',
+        'epistemic gap': '认知缺口',
+        '父协调器': '主控制器',
+        '独立轨道': '并行流程',
+        'missing delivery receipt': '缺失交付回执',
     }
     result = text
+    # Fix abnormal spacing patterns like '冻结 基线结果' before term replacement
+    result = re.sub(r'冻结\s+基线结果', '基线冻结状态', result)
     for internal, friendly in replacements.items():
         # Case-insensitive replacement for English terms, exact for Chinese
         if internal.isascii():
