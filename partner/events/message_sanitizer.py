@@ -48,6 +48,10 @@ def sanitize_message(text: str) -> str:
         r'\bproject_research_cycle\b': '研究流程', r'\bproject_cycle_round\b': '研究轮次',
         r'\binput_consumption\b': '输入消费', r'\biteration_artifact\b': '迭代产物',
         r'\blearning_effect\b': '学习效果', r'\boutcome_verify\b': '结果核验',
+        r'\bself_improvement_cycle\b': '系统自进化流程',
+        r'\blearning_improvement_cycle\b': '主动学习流程',
+        r'\bresearch_improvement_cycle\b': '研究改进流程',
+        r'\bmessage_delivery\b': '消息投递',
     }
     for pattern, repl in ci_map.items():
         result = re.sub(pattern, repl, result, flags=re.IGNORECASE)
@@ -59,10 +63,9 @@ def sanitize_message(text: str) -> str:
     # 内部步骤进度短语折叠
     result = re.sub(r'(?:未)?完成（第\s*\d+\s*/\s*\d+\s*步）[：:][^\n]*', '进度：内部流程步骤已完成。', result)
     
-    # 过滤 Event 名称（常见内部 Event）
+    # 过滤 Event 名称（常见内部 Event）；flow 名已在 ci_map 转成用户流程名，不再折叠
     event_names = [
         'local_read', 'local_compare', 'source_extraction', 'handoff',
-        'project_cycle_round', 'learning_improvement_cycle', 'self_improvement_cycle',
         'context_recall', 'state_inspect', 'plan_propose', 'action_execute',
         'outcome_verify', 'outcome_reflect', 'settlement', 'input_resolve',
         'input_eligibility', 'round_design', 'round_blueprint_critic'

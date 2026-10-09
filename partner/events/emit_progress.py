@@ -210,6 +210,8 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         message = f'上一步未完成：{reason}。' if reason else '上一步未完成，详见运行追踪。'
     else:
         subject = event_name or _clean(params.get("node_id"), 60) or "当前 Event"
+        label = _PHASE_LABELS.get(phase, '进展')
+        position = f"（{index}/{total}）" if index and total else ""
         message = f"{label}{position}：{subject}。"
         if summary and phase != "event_started":
             message += summary + "。"
