@@ -1565,7 +1565,11 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if report_contract.get('source_job_id'):
             from partner.presentation.document import report_semantic_errors
             errors += report_semantic_errors(fallback,outputs)
-        if verified and not errors:
+        if not errors:
+            # Deliver even when zero claims passed review: the fallback already
+            # states plainly that current evidence cannot support a publishable
+            # positive conclusion, which is honest and far more useful than
+            # refusing to render any PDF for the user.
             fallback_path=Path(ctx.working_dir)/'项目证据报告_审查降级稿.md'
             fallback_path.write_text(fallback,encoding='utf-8')
             draft={'path':str(fallback_path),'content':fallback}
