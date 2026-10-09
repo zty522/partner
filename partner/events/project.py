@@ -1471,12 +1471,16 @@ def outcome_reflect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         # unknown/lesson) — a fully templated fallback is what made every
         # round's reflect look identical — and only strip the foreign refs.
         kept_refs = [p for p in (sem_out.get("evidence_refs") or []) if str(p) not in foreign_refs]
+        def _as_list(value: Any) -> list[str]:
+            if value is None:
+                return []
+            return value if isinstance(value, list) else [str(value)]
         sem_out = {
             **sem_out,
-            "supported": sem_out.get("supported") or ["本轮已产生并核验当前 Job 的业务证据"],
-            "rejected": (sem_out.get("rejected") or []) + [
+            "supported": _as_list(sem_out.get("supported")) or ["本轮已产生并核验当前 Job 的业务证据"],
+            "rejected": _as_list(sem_out.get("rejected")) + [
                 "拒绝引用其他 Job 或未被本轮 verifier 核验的证据来解释当前结果"],
-            "unknown": sem_out.get("unknown") or ["只保留当前 verifier 尚未裁决的项目边界"],
+            "unknown": _as_list(sem_out.get("unknown")) or ["只保留当前 verifier 尚未裁决的项目边界"],
             "evidence_refs": kept_refs or sorted(allowed_refs),
             "lesson": sem_out.get("lesson") or "反思证据被限制为当前轮 verifier 的 allowlist",
             # Contamination guard stays hard: a foreign job cannot be used to
