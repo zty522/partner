@@ -764,7 +764,7 @@ def llm_judge(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             raw, usage = call_model(ctx, purpose="benchmark_blind_judge", prompt=(
                 "你是独立盲评员。只依据给出的检查点和证据评价，不猜测缺失事实。"
                 "输出JSON: preferred_arm(a/b/tie/unknown), scores, evidence_refs, reason。\n" +
-                json.dumps(blind, ensure_ascii=False)[:24000]))
+                json.dumps(blind, ensure_ascii=False)[:48000]))
             parsed = json_object(raw)
             preferred = str(parsed.get("preferred_arm") or "unknown").lower()
             canonical_preference = ({"a": order[0], "b": order[1]}.get(preferred)

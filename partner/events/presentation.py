@@ -261,7 +261,7 @@ def message_compose(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         + "\n以上这些是 self-evolution 的最终报告义务；不写就是隐瞒事实，禁止。"
         + "\n以上只是在本消息作为终汇报、且记录中存在 autoevolution 节点输出时才生效；"
         + "简单问答与普通问题不受影响\u3002"
-        + event_facts(params, max_chars=18000)
+        + event_facts(params, max_chars=40000)
     ))
     raw = _humanize_internal_terms(raw)
     # Deduplicate consecutive identical sentences/phrases to improve readability
@@ -300,7 +300,7 @@ def message_critic(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     facts = (json.dumps({'original_user_request':params.get('request'),
                          'project_for_terminology_only':params.get('project_id'),
                          'runtime_receipts':answer_receipts}, ensure_ascii=False)
-             if (params.get('flow_outputs') or {}).get('answer') else event_facts(params, max_chars=18000))
+             if (params.get('flow_outputs') or {}).get('answer') else event_facts(params, max_chars=40000))
     if params.get('flow_id') and getattr(ctx,'workspace',None):
         from partner.event_fabric import EventFlowStore
         state=EventFlowStore(ctx.workspace).load(params['flow_id'])
@@ -1398,7 +1398,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "任何 unsupported_claims 都令 accepted=false。不同样本集合、预处理或搜索预算的最优值不能直接归因为某个因素的改善；代理评分不等于功能活性。\n" + json.dumps({
                 "draft":draft, "actual_visual_assets":visual_context(outputs),
                 "external_review_feedback_to_check":feedback,
-                "sources":_report_source_context(sources)}, ensure_ascii=False)[:64000]))
+                "sources":_report_source_context(sources)}, ensure_ascii=False)[:120000]))
             for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
                 usage_total[key] = usage_total.get(key, 0) + int(usage.get(key) or 0)
             value = json_object(raw)
@@ -1476,7 +1476,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "首张图紧跟简短核心结论；完整哈希放证据附录。证据附录中每个E编号仅对应注册的单个文件名，不能把一个文件名改写成文件范围。"
             "直接输出完整修订稿。\n" + json.dumps({"draft":draft.get('content') or path.read_text(),
                 "review":value, "actual_visual_assets":visual_context(outputs),
-                "sources":_report_source_context(sources)}, ensure_ascii=False)[:64000]))
+                "sources":_report_source_context(sources)}, ensure_ascii=False)[:120000]))
         for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
             usage_total[key] = usage_total.get(key, 0) + int(usage.get(key) or 0)
         revision = localize_prose(_markdown_body(revision),outputs)

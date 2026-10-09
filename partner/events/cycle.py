@@ -258,9 +258,9 @@ def research_preflight(ctx, params):
         'early_stop_conditions。problem_candidates每项含id,question,required_inputs,measurement,status，status初始为untried。'
         '如果用户要求baseline/candidate/比较，measurement_contract必须要求同输入、同预算的可复算对照；'
         '没有明确数据或评价器时标记needs_protocol，不得假装已完成benchmark。\n'
-        '原始请求=' + original[:10000] + '\nIntentContract=' +
+        '原始请求=' + original[:20000] + '\nIntentContract=' +
         json.dumps({k: contract.get(k) for k in ('goal','constraints','success_criteria','knowledge_gaps')},
-                   ensure_ascii=False)[:12000]))
+                   ensure_ascii=False)[:24000]))
     value = json_object(raw)
     candidates = [row for row in value.get('problem_candidates') or [] if isinstance(row, dict)]
     if not candidates:
@@ -378,8 +378,8 @@ def input_eligibility(ctx, params):
         '你是研究输入准入Event。逐个判断文件能否用于当前研究问题，不能因为文件可读就把项目说明、日志、'
         '临时产物或代码当作论文/实验数据。输出JSON：decisions，每项含path,eligible,role,reason,limitations；'
         '另含 corpus_ready,missing_inputs。只允许引用给定path。研究协议=' +
-        json.dumps(preflight, ensure_ascii=False)[:12000] + '\n候选输入=' +
-        json.dumps(samples, ensure_ascii=False)[:36000]))
+        json.dumps(preflight, ensure_ascii=False)[:24000] + '\n候选输入=' +
+        json.dumps(samples, ensure_ascii=False)[:60000]))
     judged = json_object(raw)
     by_path = {str(row.get('path')): row for row in judged.get('decisions') or []
                if isinstance(row, dict) and row.get('path')}
@@ -470,6 +470,9 @@ def round_design(ctx, params):
     previous_name = _ROUND_NAMES.get(number - 1, '')
     previous_record = _round_record(ctx, number - 1) if number > 1 else {}
     previous = ((previous_record.get('node_outputs') or {}).get('next_decide') or {}).get('semantic_output') or {}
+    previous_full = {
+        k: (((previous_record.get('node_outputs') or {}).get(k) or {}).get('semantic_output') or {})
+        for k in ('design', 'execute', 'verify', 'reflect', 'settle')}
     learning = _learning_record(ctx, number - 1) if number > 1 else {}
     impact = read(folder(ctx) / f'impact_{previous_name}.json') if number > 1 else {}
     contract = params.get('intent_contract') or {}
@@ -496,17 +499,18 @@ def round_design(ctx, params):
         '但执行、核验、反思和结算不可省略。下一轮不得重复已否证动作。'
         '本轮蓝图只包含科研/项目动作；消息、PDF、Event/Flow图、记忆和Partner自进化由父Flow后续专门Event完成，'
         '不得写进round_goal、required_evidence或本轮成功条件。\n'
-        '原始目标=' + str((params.get('intent_contract') or {}).get('original_request') or params.get('request') or '')[:6000]
-        + '\n持续运行剩余时间=' + json.dumps(deadline, ensure_ascii=False)[:1200]
-        + '\n已执行轮次与路线（不得重复相同动作）=' + json.dumps(history, ensure_ascii=False)[:10000]
-        + '\n累计证据表与动作签名（必须逐项比较）=' + json.dumps(evidence_table, ensure_ascii=False)[:18000]
-        + '\n运行级研究协议（单轮不可改写）=' + json.dumps(preflight, ensure_ascii=False)[:12000]
-        + '\n跨轮问题池=' + json.dumps(portfolio, ensure_ascii=False)[:12000]
-        + '\n通过语料准入且哈希冻结的可用输入=' + json.dumps(resolved_inputs, ensure_ascii=False)[:16000]
-        + '\n输入对声明评价指标的充分性=' + json.dumps(input_adequacy_state, ensure_ascii=False)[:6000]
-        + '\n上一轮Settlement=' + json.dumps(previous, ensure_ascii=False)[:12000]
-        + '\n主动学习结果=' + json.dumps(learning, ensure_ascii=False)[:10000]
-        + '\n学习影响结算=' + json.dumps(impact, ensure_ascii=False)[:6000]
+        '原始目标=' + str((params.get('intent_contract') or {}).get('original_request') or params.get('request') or '')[:12000]
+        + '\n持续运行剩余时间=' + json.dumps(deadline, ensure_ascii=False)[:2400]
+        + '\n已执行轮次与路线（不得重复相同动作）=' + json.dumps(history, ensure_ascii=False)[:20000]
+        + '\n累计证据表与动作签名（必须逐项比较）=' + json.dumps(evidence_table, ensure_ascii=False)[:36000]
+        + '\n运行级研究协议（单轮不可改写）=' + json.dumps(preflight, ensure_ascii=False)[:20000]
+        + '\n跨轮问题池=' + json.dumps(portfolio, ensure_ascii=False)[:24000]
+        + '\n通过语料准入且哈希冻结的可用输入=' + json.dumps(resolved_inputs, ensure_ascii=False)[:30000]
+        + '\n输入对声明评价指标的充分性=' + json.dumps(input_adequacy_state, ensure_ascii=False)[:12000]
+        + '\n上一轮Settlement=' + json.dumps(previous, ensure_ascii=False)[:24000]
+        + '\n上一轮完整执行与反思记录（蓝图、实际执行、核验、反思、结算；设计下一轮前必须读懂上一轮做了什么、卡在哪）=' + json.dumps(previous_full, ensure_ascii=False)[:40000]
+        + '\n主动学习结果=' + json.dumps(learning, ensure_ascii=False)[:20000]
+        + '\n学习影响结算=' + json.dumps(impact, ensure_ascii=False)[:12000]
             + '\n【v2 强制规则】next_round_goal 必须显式解决上一轮 verdict_report 的 missing_evidence。'
             + '如果上一轮 rejected_reasons 非空，next_round_goal 的第一条必须针对其中至少一项缺失证据。'
             + '禁止忽略上一轮失败原因而提出全新目标。'

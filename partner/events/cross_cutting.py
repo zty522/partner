@@ -153,9 +153,9 @@ def aspect_observe(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "recurring_patterns (recent_rounds 里反复出现的模式)；"
         "modification_outcomes (self_evolution_history 里最近修改的成功/失败)。"
         "不评估，不建议，只列事实。如果某一项为空，明确写 none，不要替观察做判断。\n"
-        "current_round=" + json.dumps(payload["current_round_summary"], ensure_ascii=False)[:6000]
-        + "\nrecent_rounds=" + json.dumps(payload["recent_rounds"], ensure_ascii=False)[:8000]
-        + "\nself_evolution_history=" + json.dumps(payload["self_evolution_history"], ensure_ascii=False)[:6000]
+        "current_round=" + json.dumps(payload["current_round_summary"], ensure_ascii=False)[:14000]
+        + "\nrecent_rounds=" + json.dumps(payload["recent_rounds"], ensure_ascii=False)[:18000]
+        + "\nself_evolution_history=" + json.dumps(payload["self_evolution_history"], ensure_ascii=False)[:14000]
         + "\nopen_issues=" + str(payload["open_issues"])
     ))
     value = json_object(raw)
@@ -210,10 +210,10 @@ def aspect_synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "你是 Partner 自进化 synthesize Event。aspect=" + aspect + "。" + chr(10)
         + "【已知修复案例库 (precedents) - INSTANCE 症状匹配时复用 fix_shape 模板】" + chr(10)
         + str(history.get("precedents", "")) + chr(10)
-        + "已知事实=" + json.dumps(observe, ensure_ascii=False)[:10000]
-        + "\n漏洞=" + json.dumps(counter, ensure_ascii=False)[:10000]
-        + "\n最近 self_evolution 修改=" + json.dumps(history["evolution_events"][:5], ensure_ascii=False)[:6000]
-        + "\n最近轮次=" + json.dumps(history["round_summaries"][:3], ensure_ascii=False)[:6000]
+        + "已知事实=" + json.dumps(observe, ensure_ascii=False)[:20000]
+        + "\n漏洞=" + json.dumps(counter, ensure_ascii=False)[:20000]
+        + "\n最近 self_evolution 修改=" + json.dumps(history["evolution_events"][:5], ensure_ascii=False)[:14000]
+        + "\n最近轮次=" + json.dumps(history["round_summaries"][:3], ensure_ascii=False)[:14000]
         + "\n连续 no_op 次数=" + str(no_op_streak)
         + "\n\n任务：综合上述，输出 JSON 字段 decision ('no_op' | 'candidate'), "
           "reason (一段话解释为什么)，"

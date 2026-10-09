@@ -113,14 +113,17 @@ def _read_full_texts(params: dict[str, Any]) -> dict[str, str]:
     """Read every listed artifact for item-by-item judgment.
 
     Budgets are bounded so a supervision Event stays inside its deadline with
-    the cognitive model (thinking on): full 45k+ char prompts hard-timed-out
-    at ~77s and supervision silently degraded.  Round records are sampled to
-    their decisive nodes; messages/PDFs keep their user-facing excerpts.
+    the cognitive model (thinking on): a full 45k+ char prompt hard-timed-out
+    at ~77s and supervision silently degraded.  Since 2026-10-09 the cognitive
+    timeout is 300s, so the per-file caps and sample count are raised while
+    still keeping the whole prompt far below the provider limit.  Round
+    records keep their decisive nodes; messages/PDFs keep their user-facing
+    excerpts.
     """
     out: dict[str, str] = {}
     for key in ("round_records", "messages", "pdfs", "misc"):
-        cap = 12000 if key == "round_records" else 8000
-        for p in list(params.get(key) or [])[:4]:
+        cap = 20000 if key == "round_records" else 12000
+        for p in list(params.get(key) or [])[:6]:
             fp = Path(p)
             try:
                 if not fp.exists():
@@ -142,7 +145,7 @@ def _read_full_texts(params: dict[str, Any]) -> dict[str, str]:
                 keep = {}
                 for nid in ("design", "execute", "verify", "reflect", "iterate", "next_decide", "settle"):
                     sem = (nodes.get(nid) or {}).get("semantic_output") or {}
-                    keep[nid] = {k: (str(v)[:600] if not isinstance(v, (dict, list)) else v)
+                    keep[nid] = {k: (str(v)[:1500] if not isinstance(v, (dict, list)) else v)
                                  for k, v in sem.items() if k in {
                                      'round_goal', 'action_summary', 'execution_status', 'error',
                                      'verified', 'execution_verified', 'business_delta', 'evidence',

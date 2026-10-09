@@ -319,7 +319,7 @@ def verification_dependencies(ctx):
                 if not module or not module.startswith('partner.'):continue
                 relative=module.replace('.','/')+'.py';p=experiment.REPO/relative
                 if p.is_file() and relative not in files and len(files)<3:
-                    files[relative]={'sha256':experiment.sha(p),'source':p.read_text()[:24000]}
+                    files[relative]={'sha256':experiment.sha(p),'source':p.read_text()[:48000]}
     value={'files':files,'python_call_bindings':bindings}
     write_json(directory(ctx)/'verification_dependencies.json',value)
     return value
@@ -578,7 +578,7 @@ def sources(ctx, params):
         if reading['truncated']:raise ValueError('source exceeds read budget; narrow source selection')
         lines=reading['text'].splitlines()
         files[relative]={'sha256':reading['sha256'],'line_count':len(lines),
-                         'source':'\n'.join(f'{i+1}: {s}' for i,s in enumerate(lines))[:22000]}
+                         'source':'\n'.join(f'{i+1}: {s}' for i,s in enumerate(lines))[:40000]}
     from partner.index.resource_catalog import ResourceCatalog
     tests=[str(Path(r['path']).relative_to(experiment.REPO)) for r in ResourceCatalog(ctx.workspace).query('code',scope='benchmark',limit=200) if Path(r['path']).is_relative_to(experiment.REPO) and Path(r['path']).name.startswith('test_')]
     if not tests:
@@ -964,7 +964,7 @@ def test_terminal_upsert_repairs_legacy_fabricated_finish_time(tmp_path):
     # Exact raw source prevents line-number-prefixed code entering patches/tests.
     context={}
     for relative in (design_value.get('target_files') or design_value.get('verification_files') or []):
-        try: context[relative]=experiment.safe_source(relative).read_text()[:30000]
+        try: context[relative]=experiment.safe_source(relative).read_text()[:48000]
         except ValueError: pass
     produced = ask(ctx,params,
         '在候选修改之前编写独立复现测试。测试按设计的预期行为断言，baseline应因原缺陷失败，'
@@ -989,7 +989,7 @@ def test_terminal_upsert_repairs_legacy_fabricated_finish_time(tmp_path):
          'actual_imported_helpers':verification_dependencies(ctx),
          'previous_test_plan':saved(ctx,'tests') if repairing else {},
          'independent_review':saved(ctx,'test_review') if repairing else {},
-         'read_only_dependencies':{r:(experiment.REPO/r).read_text()[:24000]
+         'read_only_dependencies':{r:(experiment.REPO/r).read_text()[:48000]
               for r in source.get('files',{}) if r.startswith('partner/presentation/') and (experiment.REPO/r).is_file()},
         'output_budget':'用共享fixture避免重复；测试源码尽量在180行以内，禁止长篇注释；保留全部预期断言。'},
         ('test_code','reproducer_names','regression_tests','expectations'))
@@ -1012,7 +1012,7 @@ def test_terminal_upsert_repairs_legacy_fabricated_finish_time(tmp_path):
         for relative in catalog:
             path = experiment.REPO / relative.split('::', 1)[0]
             try:
-                body = path.read_text(errors='replace')[:12000].lower()
+                body = path.read_text(errors='replace')[:24000].lower()
             except OSError:
                 body = ''
             haystack = relative.lower() + '\n' + body
@@ -1079,14 +1079,14 @@ def test_review(ctx, params):
     context={}
     for relative in saved(ctx,'tests').get('regression_tests') or []:
         p=experiment.REPO/relative.split('::')[0]
-        if p.is_file():context[relative]=p.read_text()[:4000]
+        if p.is_file():context[relative]=p.read_text()[:8000]
     # (2026-09-14) 补读 design 的 target_files 实际源码。之前 test_review 只靠
     # target_source_probe.json（只覆盖 read_plan 选的 files），当 design 选定了
     # read_plan 没选过的文件（如 events/cycle.py，evolution_request 所在）时，
     # test_review 看不到被测函数真实签名，只能拒绝 -> inconclusive。
     target_sources={}
     for relative in (saved(ctx,'design').get('target_files') or []) + (saved(ctx,'design').get('verification_files') or []):
-        try: target_sources[relative]=experiment.safe_source(relative).read_text()[:20000]
+        try: target_sources[relative]=experiment.safe_source(relative).read_text()[:40000]
         except ValueError: pass
     preflight=experiment.test_preflight(directory(ctx),saved(ctx,'tests'))
     return ask(ctx,params,
@@ -1499,7 +1499,7 @@ def critic(ctx, params):
         for relative in saved(ctx, 'design').get('target_files') or []:
             path = Path(frozen['repo']) / relative
             if path.is_file():
-                exact_sources[relative] = path.read_text()[:50000]
+                exact_sources[relative] = path.read_text()[:80000]
     return ask(ctx,params,
         '你是 self-evolution 的 candidate critic。判断 candidate patch 是否可以进入隔离实验（isolate）。'
         '接受标准 (accepted=true)：(1) candidate.target_files 与 design.target_files 一致；'

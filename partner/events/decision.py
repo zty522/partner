@@ -25,7 +25,7 @@ continue_project / active_learning / self_evolution / waiting / report / complet
 知识或来源不足才选 active_learning；Partner 的规划、Event、执行、交付机制缺陷才选 self_evolution；
 项目可继续就优先推进。一次失败或未产生新数据本身不要求等待：若有具体可执行的纠错步骤，可选择 continue_project 并显式列出 next_event_candidates，说明本轮没有业务推进。单个动作完成不等于用户原始目标完成；complete 必须逐项对应原始目标的真实证据，仍缺算法实现、运行结果或验证时应选择有具体下一步的 continue_project。不得用报告生成代替项目进展。只输出 JSON：
 {"primary_route":"","side_routes":[],"reason":"","resume_event":"","next_event_candidates":[]}。
-事实=""" + event_facts({**params, "flow_outputs":facts.get("event_outputs") or params.get("flow_outputs")}, max_chars=24000)
+事实=""" + event_facts({**params, "flow_outputs":facts.get("event_outputs") or params.get("flow_outputs")}, max_chars=60000)
     raw, usage = call_model(ctx, purpose="decision_assess_next", prompt=prompt)
     value = json_object(raw)
     allowed = {"continue_project", "active_learning", "self_evolution", "waiting", "report", "complete"}

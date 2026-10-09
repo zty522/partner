@@ -118,10 +118,11 @@ def _post_hard_timeout(url: str, headers: dict, payload: dict, proxies: dict, ti
     """
     # (2026-09-14) read_timeout 设宽：minimax 长 prompt（autoevolution counter
     # 节点塞 audit 12 aspects + cycle 真实证据 + sources 实际源码 ≈ 30k+ token）
-    # 经常 50-80s 才回，30s 太短直接 Read timed out。改为 read_timeout 至少 60s、
-    # 最多 180s；连接超时仍 15s（minimax 后端挂掉时不该等 60s 才建连）。
+    # 经常 50-80s 才回，30s 太短直接 Read timed out。2026-10-09 上下文放大后
+    # （event_facts 80k、supervision 每文件 20k）认知调用可达 120-250s，read_timeout
+    # 上限从 180 提到 300；连接超时仍 15s（minimax 后端挂掉时不该等 60s 才建连）。
     def _do():
-        read_timeout = max(60, min(timeout, 180))
+        read_timeout = max(60, min(timeout, 300))
         hdrs = dict(headers)
         hdrs["Connection"] = "close"
         session = _direct_session()

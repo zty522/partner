@@ -450,7 +450,7 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 '不能找到原句则将该结论列为 unresolved。返回 JSON borrowable_cards([...]),unresolved；quote_ids 只能选本来源 quote_spans 内存在的编号。\n'
                 'borrowable_cards 的 source_url 必须从"可用 source_url 白名单"中选择，禁止编造或引用白名单之外的 URL：'
                 + json.dumps([r['url'] for r in excerpts], ensure_ascii=False) + '\n'
-                +'上次输出='+raw[:12000]+'\n实际原文='+json.dumps(excerpts,ensure_ascii=False)))
+                +'上次输出='+raw[:24000]+'\n实际原文='+json.dumps(excerpts,ensure_ascii=False)))
             for key in ('prompt_tokens','completion_tokens','total_tokens'):
                 usage[key] = usage.get(key,0) + extra.get(key,0)
     audit_path=Path(sources[0]['text_path']).parent.parent/'reading_audit.json'
@@ -627,8 +627,8 @@ def transfer_mapping(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     raw, usage = call_model(ctx, purpose='learning_transfer_mapping', prompt=(
         '你是项目改进规划助手。基于以下借鉴卡片，输出可执行的项目动作映射。\n'
         '项目 ID: ' + project_id + '\n'
-        '项目文件结构（前 20 个）:\n' + '\n'.join(project_files[:20]) + '\n\n'
-        '借鉴卡片:\n' + json.dumps(cards, ensure_ascii=False)[:8000] + '\n\n'
+        '项目文件结构（前 40 个）:\n' + '\n'.join(project_files[:40]) + '\n\n'
+        '借鉴卡片:\n' + json.dumps(cards, ensure_ascii=False)[:16000] + '\n\n'
         '输出格式：\n'
         '{"transfer_map":[\n'
         '  {"from_source":"source_url","target_component":"相对路径或模块名",\n'

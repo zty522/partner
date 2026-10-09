@@ -32,7 +32,7 @@ def state_inspect(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     project_id = str(params.get("project_id") or "")
     value = build_project_cognition_context(
         _workspace(ctx), project_id, project_steps=int(params.get("project_steps") or 0),
-        max_chars=int(params.get("max_chars") or 32000),
+        max_chars=int(params.get("max_chars") or 60000),
     )
     # Discover context beside user-specified inputs. Project IDs can be
     # newly classified; that must not hide the actual scientific project.
@@ -637,9 +637,9 @@ def action_execute_inline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         f"项目={project_id}\n用户目标={request}\n"
         f"已选动作={json.dumps(selected, ensure_ascii=False)}\n"
         # The action model needs the frozen decision and direct evidence refs,
-        # not a replay of the whole memory/Flow history.  Keeping this bounded
-        # prevents long-context provider timeouts before the first command.
-        f"已核实上下文={event_facts(params, max_chars=8000)}\n"
+        # not a replay of the whole memory/Flow history.  Bounded, but rich
+        # enough to execute precisely from the verified context (raised from 8k).
+        f"已核实上下文={event_facts(params, max_chars=20000)}\n"
         f"工作目录={work}\n"
         f"运行时审计目录={runtime_work}\n"
         f"运行时 Event ID={params.get('event_id', '')}；Job ID={getattr(ctx, 'job_id', '')}。需要记录溯源编号时只使用这些真实编号，不自行发明。\n"

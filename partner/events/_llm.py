@@ -89,28 +89,32 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
                            'cycle_input_eligibility'})
     attempts = 1 if purpose == 'cycle_partner_audit' else 2
     for attempt in range(attempts):
-        remaining = deadline - time.monotonic() - 2 if deadline else (180 if deep else 90)
+        remaining = deadline - time.monotonic() - 2 if deadline else (300 if deep else 120)
         if remaining <= 0:
             raise TimeoutError("cognitive Event deadline exhausted")
         try:
             if hasattr(adapter, "chat_once"):
-                options = {"max_tokens":retry_budget} if retry_budget is not None else {}
+                # Deep cognitive calls get a generous first-pass output budget:
+                # 4096 tokens truncates long JSON + thinking and made deep calls
+                # look shallow.  Retries (finish_reason=length) double it up to 16k.
+                options = {"max_tokens": retry_budget if retry_budget is not None
+                           else (12000 if deep else 4096)}
                 from partner.adapters.adapter import DirectAdapter
                 if isinstance(adapter, DirectAdapter):
                     # A larger output budget also needs bounded generation time;
                     # retaining the 8k timeout made 16k truncation retries futile.
-                    call_cap = 120 if purpose == 'cycle_partner_audit' else (
-                        180 if deep or (retry_budget or 8192) > 8192 else 90)
+                    call_cap = 240 if purpose == 'cycle_partner_audit' else (
+                        300 if deep or (retry_budget or 8192) > 8192 else 120)
                     options["timeout"] = min(call_cap,
                                              remaining)
                 active_prompt = prompt
-                if attempt and len(active_prompt) > 36000:
+                if attempt and len(active_prompt) > 100000:
                     # A provider timeout is not repaired by replaying the same
                     # oversized request.  Preserve the contract header and the
                     # newest evidence tail for one compact recovery call.
-                    active_prompt = (active_prompt[:14000]
+                    active_prompt = (active_prompt[:40000]
                                      + '\n[中间重复上下文已由运行器压缩]\n'
-                                     + active_prompt[-20000:])
+                                     + active_prompt[-50000:])
                 raw = adapter.chat_once(active_prompt, purpose=purpose, **options)
             elif callable(adapter):
                 raw = adapter(prompt, purpose=purpose)
@@ -164,7 +168,7 @@ def json_object(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def event_facts(params: dict, *, max_chars: int = 32000) -> str:
+def event_facts(params: dict, *, max_chars: int = 80000) -> str:
     """Prioritize actual terminals over recursively duplicated upstream prompts."""
     outputs = params.get('flow_outputs') or params.get('parent_flow_outputs') or {}
     facts = {'original_user_request':(params.get('intent_contract') or {}).get('original_request') or params.get('request'),
@@ -190,11 +194,11 @@ def event_facts(params: dict, *, max_chars: int = 32000) -> str:
     context = {
         'operator_feedback':inspected.get('operator_feedback') or {},
         'verified_artifact_index':inspected.get('verified_artifact_index') or {},
-        'project_documents':json.dumps(list(documents.values()), ensure_ascii=False)[:6000],
-        'continuation_request':str(params.get('request') or '')[:2500],
+        'project_documents':json.dumps(list(documents.values()), ensure_ascii=False)[:20000],
+        'continuation_request':str(params.get('request') or '')[:5000],
         'attachments':params.get('attachments') or [],
-        'recent_execution':json.dumps(inspected.get('recent_execution', []), ensure_ascii=False)[:2500],
-        'evidence_inputs':json.dumps(inspected.get('attached_evidence', []), ensure_ascii=False)[:2000]}
+        'recent_execution':json.dumps(inspected.get('recent_execution', []), ensure_ascii=False)[:8000],
+        'evidence_inputs':json.dumps(inspected.get('attached_evidence', []), ensure_ascii=False)[:6000]}
     # Latest execution/verification must survive the context budget.
     for key in ('init','execute','verify','reflect','route','select','critic','hypothesis','understand_3','inspect','recall'):
         if key == 'select':
@@ -210,9 +214,9 @@ def event_facts(params: dict, *, max_chars: int = 32000) -> str:
                 if clean.get('local_input_context'):
                     clean['local_input_context'] = [{k:v for k,v in item.items() if k != 'documents'}
                                                     for item in clean['local_input_context']]
-            facts[key] = json.dumps(clean, ensure_ascii=False)[:6000]
+            facts[key] = json.dumps(clean, ensure_ascii=False)[:16000]
     if outputs.get('claims', {}).get('ok'):
-        facts['verified_report'] = str(outputs['claims'].get('content') or '')[:10000]
+        facts['verified_report'] = str(outputs['claims'].get('content') or '')[:24000]
         facts['verified_figures'] = [{k:a.get(k) for k in ('id','caption','measured')} for a in (outputs.get('visuals',{}).get('semantic_output') or {}).get('images',[])]
     prior = params.get('previous_semantic') or (params.get('previous') or {}).get('semantic_output')
     # Other domain flows have different node names; omitting them made a
