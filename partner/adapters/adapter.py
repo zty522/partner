@@ -2936,6 +2936,94 @@ class DirectAdapter(AgentAdapter):
         from partner.runtime.action_execution import execute
         return execute(self, prompt, seconds=seconds)
 
+    def chat_with_images(
+        self,
+        message: str,
+        image_paths: list[str],
+        max_tokens: int = None,
+        purpose: str = "vision",
+    ) -> str:
+        """qwen 视觉直连：转写长图正文（小红书长图笔记等）。
+
+        DirectAdapter 是生产主后端（worker/实例的 ctx.adapter）。基类默认
+        chat_with_images 只返回内部占位符，会导致 _read_source_images 的
+        长图转写永远为空；这里直连阿里云百炼 qwen（OpenAI 兼容端点）逐张
+        转写，与 HermesAdapter 的 qwen 后端同一实现。
+        """
+        valid = [p for p in (image_paths or []) if p and os.path.exists(p)]
+        if not valid:
+            return ""
+        cfg = _load_qwen_vision_cfg(self.workspace)
+        if not (cfg.get("api_key") and cfg.get("model")):
+            return ""
+        import io
+        import urllib.request
+        from PIL import Image
+
+        base = (cfg.get("base_url") or "").rstrip("/")
+        model = cfg["model"]
+        headers = {
+            "Authorization": f"Bearer {cfg['api_key']}",
+            "Content-Type": "application/json",
+        }
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        selected = valid[:8]
+        outputs: list[str] = []
+        for idx, image_path in enumerate(selected, start=1):
+            try:
+                im = Image.open(image_path)
+                w, h = im.size
+                scale = min(1.0, 1200 / max(w, h))
+                if scale < 1.0:
+                    im = im.resize((int(w * scale), int(h * scale)))
+                buf = io.BytesIO()
+                im.convert("RGB").save(buf, format="JPEG", quality=85)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+            except Exception:
+                continue
+            prompt = (
+                f"{message}\n\n"
+                f"这是第 {idx}/{len(selected)} 张图片或长截图切片。请读取图片中的文字和视觉信息，"
+                "不要编造看不见的内容。"
+            )
+            payload = {
+                "model": model,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+                "max_tokens": max_tokens or 2048,
+                "temperature": 0.1,
+                "stream": False,
+            }
+            try:
+                req = urllib.request.Request(
+                    f"{base}/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                resp = opener.open(req, timeout=120)
+                data = json.loads(resp.read().decode("utf-8"))
+                content = str((data.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+                if content:
+                    outputs.append(f"## 图片{idx}\n{content}")
+                    try:
+                        from ..api_log import append_api_call
+                        append_api_call("qwen", model=model, base_url=base, purpose=purpose,
+                                        status="ok", elapsed_ms=0,
+                                        prompt_chars=len(prompt), response_chars=len(content))
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        if not outputs:
+            return ""
+        return "\n\n".join(outputs).strip()
+
 
 class HybridLiteAdapter(AgentAdapter):
     """Route small language tasks to Ollama and heavy project work to primary."""
