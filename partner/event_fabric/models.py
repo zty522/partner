@@ -19,6 +19,10 @@ EVENT_SERIES = {
     # to be registered here or EventLedger.create rejects it at flow startup
     # (see partner/observe/precedents.py case_05_event_series_unknown).
     "commitment",
+    # Mind Notes series (notes.recall / notes.judge / notes.promote) —
+    # registered here or EventLedger.create rejects it at flow startup
+    # (same failure class as case_05_event_series_unknown).
+    "notes",
 }
 TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 
