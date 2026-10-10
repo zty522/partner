@@ -620,11 +620,13 @@ def _improvement_flow_definitions(local_learning=True):
 
     if local_learning:
         learning_nodes = (learning_nodes[0],
+            ('notes_recall','notes.recall'),
             ('source_retrieve','active_learning.source_retrieve',('recall',)),
             ('local_read','improvement.local_read',('source_retrieve',)),
             ('local_compare','improvement.local_compare',('local_read',)),
             ('local_ideas','improvement.local_idea_record',('local_compare',)),
-            ('learning_commitment','improvement.learning_commitment',('local_ideas',)),
+            ('judge','notes.judge',('local_ideas',)),
+            ('learning_commitment','improvement.learning_commitment',('judge',)),
             ('learning_evaluate','improvement.learning_downstream_evaluate',('learning_commitment',)),
             ('learning_settlement','improvement.learning_settlement',('learning_evaluate',)),
             ('evidence_seal','improvement.evidence_seal',('learning_settlement',)),

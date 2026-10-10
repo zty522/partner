@@ -73,6 +73,16 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
     adapter = getattr(ctx, "adapter", None) or getattr(ctx, "model", None)
     if adapter is None:
         raise RuntimeError("cognitive Event requires a configured model adapter")
+    # Mind-notes injection hook: every LLM call automatically carries the
+    # relevant long-term notes + open pending rendered by notes.recall,
+    # so the note system is actually *used* instead of occupying space.
+    try:
+        from partner.memory.notes import notes_injection
+        injected = notes_injection(ctx)
+        if injected and injected not in prompt:
+            prompt = injected + "\n" + prompt
+    except Exception:
+        pass
     import time
     import random
     last_error = "empty response"

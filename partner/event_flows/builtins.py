@@ -42,15 +42,17 @@ DIRECT_ANSWER_V1_1 = Flow("direct_answer", "1.1.0", (
 # 1.2.0 adds the execution half: the recorded bet is run to a terminal state with a
 # bounded, deterministic action, an independently measured baseline and a machine
 # settlement.  Still no project work and no LLM.
-CONTENT_READ_REPLY = Flow("content_read_reply", "1.0.0", (
-    Node("retrieve", "active_learning.source_retrieve"),
+CONTENT_READ_REPLY = Flow("content_read_reply", "1.1.0", (
+    Node("recall", "notes.recall"),
+    Node("retrieve", "active_learning.source_retrieve", ("recall",)),
     Node("read", "active_learning.source_read", ("retrieve",)),
     Node("synthesize", "active_learning.synthesize", ("read",)),
-    Node("report", "presentation.report_outline", ("synthesize",)),
+    Node("judge", "notes.judge", ("synthesize",)),
+    Node("report", "presentation.report_outline", ("judge",)),
     Node("draft", "presentation.report_draft", ("report",)),
     Node("render", "presentation.pdf_render", ("draft",)),
     Node("quality", "presentation.pdf_quality_review", ("render",)),
-    Node("compose", "presentation.message_compose", ("synthesize",)),
+    Node("compose", "presentation.message_compose", ("judge",)),
     Node("critic", "presentation.message_critic", ("compose",)),
     Node("deduplicate", "presentation.message_deduplicate", ("critic",)),
     Node("send", "delivery.send_text", ("deduplicate",)),
@@ -58,8 +60,10 @@ CONTENT_READ_REPLY = Flow("content_read_reply", "1.0.0", (
     Node("send_pdf", "delivery.send_pdf", ("quality",)),
     Node("pdf_settle", "cycle.delivery_settle", ("send_pdf",)),
 ), "Read a user-supplied external link, answer the user about its content, "
-   "and attach a user-readable PDF report. Soft-orchestrated: the LLM may "
-   "adjust the remaining graph at runtime against the shared Event pool.",
+   "attach a user-readable PDF report, and record learnable points into the "
+   "unified note store (judge: act-now / record / dismiss). "
+   "Soft-orchestrated: the LLM may adjust the remaining graph at runtime "
+   "against the shared Event pool.",
    soft_orchestrated=True)
 
 DIRECT_ANSWER = Flow("direct_answer", "1.2.0", (
@@ -126,8 +130,9 @@ PROJECT_ITERATION = Flow("project_iteration", "3.0.0", (
     Node("commitment", "commitment.bet_record", ("experience_prior",)),
     Node("commitment_execute", "commitment.bet_execute", ("commitment",)),
     Node("recall", "memory.context_recall", ("understand_3",)),
-    Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall",), optional=True),
-    Node("inspect", "project.state_inspect", ("pre_iteration_reflect", "recall")),
+    Node("notes_recall", "notes.recall", ("understand_3",)),
+    Node("pre_iteration_reflect", "evolution.pre_iteration_reflect", ("recall", "notes_recall"), optional=True),
+    Node("inspect", "project.state_inspect", ("pre_iteration_reflect", "recall", "notes_recall")),
     # The domain LLM proposes and attacks a finite candidate set.  Core v1 then
     # predicts and judges in shadow before freezing the domain's final choice.
     Node("plan", "project.plan_propose", ("inspect",)),
@@ -200,10 +205,12 @@ ACTIVE_LEARNING_V2_1 = Flow("active_learning", "2.1.0", (
     Node("resume", "core.route_next", ("remember", "core_settlement")),
 ), "Source-grounded learning freezes a candidate handoff; downstream project execution must prove improvement.")
 
-# 新版本 2.2.0：在 read 后插入 transfer_mapping
+# 新版本 2.2.0：在 read 后插入 transfer_mapping；synthesize 后插入 notes.judge
 ACTIVE_LEARNING = Flow("active_learning", "2.2.0", (
     *ACTIVE_LEARNING_V2.nodes[:-2],
     Node("transfer_mapping", "active_learning.transfer_mapping", ("read",)),
+    Node("notes_recall", "notes.recall", ("recall",)),
+    Node("judge", "notes.judge", ("synthesize",)),
     Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve", "transfer_mapping")),
     Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
     Node("resume", "core.route_next", ("remember", "core_settlement")),
