@@ -12,6 +12,7 @@ from partner.event_fabric.catalog import EventDefinition
 
 
 def builtin_definitions() -> list[EventDefinition]:
+    from .orchestration import DEFINITIONS as orchestration
     from .interaction import DEFINITIONS as interaction
     from .memory import DEFINITIONS as memory
     from .decision import DEFINITIONS as decision
@@ -51,7 +52,7 @@ def builtin_definitions() -> list[EventDefinition]:
     from .message_sanitizer import message_sanitize_event
     from .system_evolution import DEFINITIONS as system_evolution
     from .supervision import DEFINITIONS as supervision
-    return [*interaction, *memory, *decision, *presentation, *project,
+    return [*orchestration, *interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
             *pre_iteration_reflect, *cycle, *autonomous_evolution,

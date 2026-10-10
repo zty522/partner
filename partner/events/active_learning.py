@@ -223,6 +223,19 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                    else str(row) for row in queries]
     query_texts = [row for row in query_texts if row.strip()]
     sources: list[dict[str, str]] = []
+    # user_sources: URLs the user explicitly asked us to read, injected into
+    # run_context by the intake router.  They are mandatory work, so they are
+    # fetched even when no source_plan / download_plan exists.
+    user_sources = params.get('user_sources') or []
+    if isinstance(user_sources, (str, list, tuple)):
+        rows_iter = [user_sources] if isinstance(user_sources, str) else list(user_sources)
+        for row in rows_iter:
+            value = (row.get('url') or row.get('target') or '') if isinstance(row, dict) else str(row)
+            value = str(value).strip()
+            if value.startswith(('https://', 'http://')) and '*' not in value:
+                sources.append({'url': value,
+                                'source_kind': _classify_source_kind(value),
+                                'user_requested': True})
     proposed = list(previous.get('primary_sources') or params.get('sources') or [])
     download_plan = previous.get('download_plan') or []
     if isinstance(download_plan, dict):
@@ -277,6 +290,12 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     from partner.runtime.source_evidence import fetch
     import hashlib
     unique = {row["url"]: row for row in sources}
+    if not unique and not local_value and not local_proposed and not query_texts:
+        return {"ok": True, "status": "completed",
+                "semantic_output": {"sources": [], "empty": True,
+                                    "reason": "no user sources, no queries, no local root"},
+                "evidence_refs": [],
+                "summary": "无用户指定来源或检索意图，跳过外部抓取"}
     work = Path(getattr(ctx,'working_dir', '') or Path(ctx.workspace)/'state/event_runtime/work'/str(getattr(ctx,'job_id','learning')))
     directory = work / 'sources' / str(params.get('flow_id') or 'standalone')
     downloaded, failures = [], []

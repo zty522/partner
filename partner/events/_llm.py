@@ -80,7 +80,8 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
     # One attempt here means one HTTP call for DirectAdapter; no nested retries.
     deadline = getattr(ctx, "event_deadline", None)
     deep = (purpose.startswith(('intent_', 'cycle_', 'learning_', 'autoevolution_',
-                                'self_evolution_', 'report_', 'message_factcheck',
+                                'self_evolution_', 'orchestration_',
+                                'report_', 'message_factcheck',
                                 'supervise_', 'improvement_'))
             or purpose in {'project_plan_propose', 'project_outcome_reflect',
                            'message_critic', 'cycle_memory_lesson',

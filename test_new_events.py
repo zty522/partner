@@ -3,12 +3,13 @@ import sys
 sys.path.insert(0, "/mnt/e/work/partner")
 
 from pathlib import Path
-from partner.events import (
+from partner.events.message_sanitizer import (
     sanitize_message,
     format_user_message,
     format_failure_message,
-    ALL_NEW_EVENTS
 )
+from partner.events import builtin_definitions
+ALL_NEW_EVENTS = builtin_definitions()
 
 print("=" * 60)
 print("测试 1: 消息清洗功能")

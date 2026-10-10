@@ -4,7 +4,7 @@ sys.path.insert(0, "/mnt/e/work/partner")
 
 from pathlib import Path
 from partner.event_fabric.catalog import build_catalog
-from partner.events import (
+from partner.events.message_sanitizer import (
     sanitize_message,
     format_user_message,
     format_failure_message,
@@ -75,7 +75,8 @@ print("  ✓ 失败消息格式化正常")
 
 # 5. 验证 Event 定义
 print("\n[5/5] 验证 Event 定义完整性...")
-from partner.events import ALL_NEW_EVENTS
+from partner.events import builtin_definitions
+ALL_NEW_EVENTS = builtin_definitions()
 
 for event in ALL_NEW_EVENTS:
     assert event.name, f"Event {event} 缺少 name"

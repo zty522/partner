@@ -261,6 +261,9 @@ class EventFlowRunner:
         state = self.controller.mark_terminal(
             state, definition, node.node_id, event_id=event.event_id,
             summary=summary.to_dict())
+        state = self._maybe_orchestrate(
+            state, definition, node.node_id, terminal, ctx,
+            event_id=event.event_id)
         state.current_event_id = ""
         self.controller.store.save(state)
         write_trace("event", phase="finished", flow_id=state.flow_id,
@@ -269,3 +272,105 @@ class EventFlowRunner:
                     outputs=output, status=terminal,
                     duration_ms=summary.duration_ms, attempt=attempt)
         return EventRunResult(state, node.node_id, event.event_id, output)
+
+    def _maybe_orchestrate(self, state: EventFlowState,                           definition: EventFlowDefinition, node_id: str,
+                           terminal: str, ctx: Any, *, event_id: str = "") -> EventFlowState:
+        """Soft-orchestration runtime hook.
+
+        For soft_orchestrated flows only: at most two runtime evaluations
+        (first completed node, plus any node failure), the LLM decides
+        keep / adjust / switch / redesign against the shared Event pool
+        whitelist.  Decisions are applied deterministically through
+        controller.apply_orchestration and recorded in orchestration_history.
+        Any assess or validation failure falls back to the static baseline.
+        """
+        from .flows import _now
+        if not getattr(definition, "soft_orchestrated", False):
+            return state
+        if state.orchestration_attempts >= 2:
+            return state
+        triggered = (terminal == "failed") or (state.orchestration_attempts == 0)
+        if not triggered:
+            return state
+        from partner.events.orchestration import orchestration_assess
+        from partner.event_flows.registry import build_flow_registry
+        whitelist: list[dict[str, str]] = []
+        try:
+            names = self.catalog.names() if self.catalog else []
+            whitelist = []
+            for name in names:
+                spec = self.catalog.get(name)
+                if spec is None:
+                    continue
+                whitelist.append({"event_type": str(getattr(spec, "name", "") or ""),
+                                  "description": str(getattr(spec, "description", "") or "")[:120]})
+        except Exception:
+            pass
+        nodes_payload = []
+        for node in definition.nodes:
+            if node.node_id in state.completed_node_ids:
+                status = "completed"
+            elif node.node_id in state.failed_node_ids:
+                status = "failed"
+            elif node.node_id in state.ready_node_ids:
+                status = "ready"
+            else:
+                status = "pending"
+            nodes_payload.append({"node_id": node.node_id,
+                                  "event_type": node.event_type, "status": status})
+        finished: dict[str, dict[str, str]] = {}
+        for nid, row in (state.node_outputs or {}).items():
+            if isinstance(row, dict):
+                finished[str(nid)] = {"status": str(row.get("status") or ""),
+                                      "summary": str(row.get("summary") or "")[:200]}
+        goal = str((state.run_context or {}).get("goal")
+                   or (state.run_context or {}).get("original_request") or "")
+        params = {
+            "goal": goal, "flow_name": definition.name, "flow_version": definition.version,
+            "nodes": nodes_payload, "finished_summaries": finished, "whitelist": whitelist,
+        }
+        result: dict[str, Any] = {}
+        try:
+            result = orchestration_assess(ctx, params)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "semantic_output": {"action": "keep",
+                       "reason": f"assess raised {type(exc).__name__}: {exc}"}}
+        decision = (result.get("semantic_output") or {}) if isinstance(result, dict) else {}
+        if not isinstance(decision, dict):
+            decision = {"action": "keep", "reason": "malformed decision"}
+        action = str(decision.get("action") or "keep")
+        if action not in {"keep", "adjust", "switch", "redesign"}:
+            action = "keep"
+        history_row = {"at": _now(), "node_id": node_id, "terminal": terminal,
+                       "action": action, "reason": str(decision.get("reason") or "")[:300]}
+        proposed: EventFlowDefinition | None = None
+        applied = False
+        try:
+            if action == "switch":
+                target = str(decision.get("target_flow") or "")
+                if target:
+                    proposed = build_flow_registry().get(target)
+            elif action in {"adjust", "redesign"}:
+                sequence = decision.get("proposed_sequence") or []
+                if sequence:
+                    proposed = EventFlowDefinition.build_from_sequence(
+                        definition.name, f"{definition.version}.o", list(sequence),
+                        description=f"orchestrated {action} of {definition.name}",
+                        soft_orchestrated=True)
+            if proposed is not None:
+                changed = (proposed.name != definition.name) or (
+                    proposed.nodes != definition.nodes)
+                if changed:
+                    state = self.controller.apply_orchestration(
+                        state, definition, proposed,
+                        evidence_event_id=event_id,
+                        reason=f"orchestration:{action}",
+                        decision=decision)
+                    applied = True
+        except Exception as exc:  # noqa: BLE001
+            history_row["error"] = f"{type(exc).__name__}: {exc}"
+        history_row["applied"] = applied
+        state.orchestration_attempts += 1
+        state.orchestration_history.append(history_row)
+        return state
+

@@ -39,12 +39,41 @@ class EventFlowDefinition:
     version: str
     nodes: tuple[FlowNode, ...]
     description: str = ""
+    soft_orchestrated: bool = False
 
     def node(self, node_id: str) -> FlowNode:
         for value in self.nodes:
             if value.node_id == node_id:
                 return value
         raise KeyError(node_id)
+
+    @classmethod
+    def build_from_sequence(
+        cls, name: str, version: str, event_types: list[str], *,
+        description: str = "", parameters: dict[str, dict[str, Any]] | None = None,
+        soft_orchestrated: bool = False,
+    ) -> "EventFlowDefinition":
+        """Assemble a linear Event Flow from an event-type sequence.
+
+        Soft-orchestration output: the LLM proposes event types from the shared
+        pool; this constructor materialises them into a legal definition with
+        depends_on = previous node (no cycles, fully reachable).  Node ids are
+        derived from the event name and uniquified for repeated events.
+        """
+        nodes: list[FlowNode] = []
+        seen: dict[str, int] = {}
+        for event_type in event_types:
+            base = event_type.split('.')[-1].replace('_', '')
+            node_id = base
+            if node_id in seen:
+                seen[node_id] += 1
+                node_id = f"{base}_{seen[node_id]}"
+            else:
+                seen[node_id] = 0
+            deps = (nodes[-1].node_id,) if nodes else ()
+            node_params = dict((parameters or {}).get(event_type) or {})
+            nodes.append(FlowNode(node_id, event_type, deps, parameters=node_params))
+        return cls(name, version, tuple(nodes), description, soft_orchestrated)
 
 
 @dataclass
@@ -87,6 +116,8 @@ class EventFlowState:
     active_child_flow_id: str = ""
     selected_route: str = ""
     definition_history: list[dict[str, Any]] = field(default_factory=list)
+    orchestration_attempts: int = 0
+    orchestration_history: list[dict[str, Any]] = field(default_factory=list)
     run_context: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
@@ -257,6 +288,111 @@ class EventFlowController:
                 state.run_context["actual_flow_hash"] = "sha256:" + hashlib.sha256(
                     json.dumps(actual, ensure_ascii=False,
                                separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.store.save(state)
+        return state
+
+    def validate_definition(self, definition: EventFlowDefinition) -> None:
+        """Registry-style structural validation for LLM-assembled flows.
+
+        Mirrors EventFlowRegistry.register checks so a dynamic definition can be
+        validated before it replaces the running graph.
+        """
+        node_ids = [node.node_id for node in definition.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError(f"duplicate node in dynamic flow: {definition.name}")
+        if not node_ids:
+            raise ValueError(f"empty dynamic flow: {definition.name}")
+        deps: dict[str, list[str]] = {}
+        for node in definition.nodes:
+            missing = set(node.depends_on) - set(node_ids)
+            if missing:
+                raise ValueError(f"unknown dependency in {definition.name}: {sorted(missing)}")
+            deps[node.node_id] = list(node.depends_on)
+        roots = [nid for nid in node_ids if not deps[nid]]
+        if not roots:
+            raise ValueError(f"sourceless dynamic flow: {definition.name}")
+        seen, visiting = set(), set()
+        def visit(nid: str) -> None:
+            if nid in seen:
+                return
+            if nid in visiting:
+                raise ValueError(f"cycle detected in {definition.name} at {nid}")
+            visiting.add(nid)
+            for dep in deps.get(nid, []):
+                visit(dep)
+            visiting.discard(nid)
+            seen.add(nid)
+        for nid in node_ids:
+            visit(nid)
+        unreachable = set(node_ids) - seen
+        if unreachable:
+            raise ValueError(f"unreachable nodes in {definition.name}: {sorted(unreachable)}")
+
+    def apply_orchestration(self, state: EventFlowState, current: EventFlowDefinition,
+                            proposed: EventFlowDefinition, *, evidence_event_id: str = "",
+                            reason: str = "soft_orchestration",
+                            decision: dict[str, Any] | None = None) -> EventFlowState:
+        """Replace the running graph suffix with an LLM-approved definition.
+
+        Pure state transition (same discipline as route_after_intent):
+        already-completed nodes must exist unchanged in the proposed graph;
+        ready is recomputed from the proposed dependencies; history is
+        appended so every dynamic adjustment is auditable.
+        """
+        self.validate_definition(proposed)
+        proposed_ordered = list(proposed.nodes)
+        # Completed nodes are aligned by event_type, in baseline order, against
+        # the proposed prefix.  An LLM-assembled sequence names nodes by event
+        # short name, so node ids differ from the baseline; the event type is
+        # the stable contract.  A proposed graph that drops a completed event
+        # type is rejected.
+        current_order = [n.node_id for n in current.nodes]
+        completed_ordered = [nid for nid in current_order
+                             if nid in state.completed_node_ids]
+        skipped_ordered = [nid for nid in current_order
+                           if nid in state.skipped_node_ids]
+        p_idx = 0
+        for nid in completed_ordered + skipped_ordered:
+            ev = current.node(nid).event_type
+            found = False
+            while p_idx < len(proposed_ordered):
+                if proposed_ordered[p_idx].event_type == ev:
+                    found = True
+                    p_idx += 1
+                    break
+                p_idx += 1
+            if not found:
+                raise ValueError(f"orchestration drops completed event: {nid} ({ev})")
+        # The proposed nodes matching completed events are inherited as done;
+        # the remaining suffix is recomputed into ready.
+        done = set(state.completed_node_ids) | set(state.skipped_node_ids)
+        matched_done: set[str] = set()
+        p_idx = 0
+        for nid in completed_ordered + skipped_ordered:
+            ev = current.node(nid).event_type
+            while p_idx < len(proposed_ordered):
+                candidate = proposed_ordered[p_idx]
+                if candidate.event_type == ev and candidate.node_id not in done:
+                    matched_done.add(candidate.node_id)
+                    p_idx += 1
+                    break
+                p_idx += 1
+        effective_done = done | matched_done
+        ready = [node.node_id for node in proposed.nodes
+                 if node.node_id not in effective_done
+                 and node.node_id not in state.ready_node_ids
+                 and node.node_id not in state.failed_node_ids
+                 and set(node.depends_on).issubset(effective_done | set(state.ready_node_ids))]
+        state.definition_history.append({
+            'flow_type': current.name, 'version': current.version,
+            'routed_to': proposed.name, 'target_version': proposed.version,
+            'evidence_event_id': evidence_event_id, 'at': _now(),
+            'orchestrated': True, 'reason': reason,
+            'decision': dict(decision or {}),
+        })
+        state.flow_type, state.definition_version = proposed.name, proposed.version
+        state.ready_node_ids = ready
+        state.status = 'running'
         self.store.save(state)
         return state
 

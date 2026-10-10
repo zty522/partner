@@ -42,6 +42,26 @@ DIRECT_ANSWER_V1_1 = Flow("direct_answer", "1.1.0", (
 # 1.2.0 adds the execution half: the recorded bet is run to a terminal state with a
 # bounded, deterministic action, an independently measured baseline and a machine
 # settlement.  Still no project work and no LLM.
+CONTENT_READ_REPLY = Flow("content_read_reply", "1.0.0", (
+    Node("retrieve", "active_learning.source_retrieve"),
+    Node("read", "active_learning.source_read", ("retrieve",)),
+    Node("synthesize", "active_learning.synthesize", ("read",)),
+    Node("report", "presentation.report_outline", ("synthesize",)),
+    Node("draft", "presentation.report_draft", ("report",)),
+    Node("render", "presentation.pdf_render", ("draft",)),
+    Node("quality", "presentation.pdf_quality_review", ("render",)),
+    Node("compose", "presentation.message_compose", ("synthesize",)),
+    Node("critic", "presentation.message_critic", ("compose",)),
+    Node("deduplicate", "presentation.message_deduplicate", ("critic",)),
+    Node("send", "delivery.send_text", ("deduplicate",)),
+    Node("verify", "delivery.verify", ("send",)),
+    Node("send_pdf", "delivery.send_pdf", ("quality",)),
+    Node("pdf_settle", "cycle.delivery_settle", ("send_pdf",)),
+), "Read a user-supplied external link, answer the user about its content, "
+   "and attach a user-readable PDF report. Soft-orchestrated: the LLM may "
+   "adjust the remaining graph at runtime against the shared Event pool.",
+   soft_orchestrated=True)
+
 DIRECT_ANSWER = Flow("direct_answer", "1.2.0", (
     Node("understand_1", "interaction.intent_observe"),
     Node("understand_2", "interaction.intent_counter_read", ("understand_1",)),
@@ -370,7 +390,7 @@ ACCEPTANCE_MINIMAL = Flow("acceptance_minimal_chain", "1.0.0", (
 ), "Acceptance-only minimal task chain. Used to verify JobRepository claim/release path.")
 
 
-DEFINITIONS = [DIRECT_ANSWER, PROJECT_ITERATION, ACTIVE_LEARNING, SELF_EVOLUTION,
+DEFINITIONS = [CONTENT_READ_REPLY, DIRECT_ANSWER, PROJECT_ITERATION, ACTIVE_LEARNING, SELF_EVOLUTION,
                MESSAGE_DELIVERY, PDF_REPORT, PDF_REPORT_REVISION, PDF_REPORT_REISSUE,
                NEW_PROJECT, XHS_AUTHORING, VIDEO_LEARNING]
 

@@ -1267,6 +1267,11 @@ class PartnerApplicationService:
         # Improvement modes take precedence over project routing when explicitly set.
         mode = intent_contract.get('mode') or ''
         scope = intent_contract.get('scope') or ''
+        user_urls = [u for u in re.findall(r'https?://[^\s"\'<>()]+', clean or '') if u]
+        workstream_type = intent_contract.get('workstream_type') or ''
+        read_link_request = bool(user_urls) and (
+            mode in {'learning_improvement', 'active_learning'}
+            or workstream_type in {'active_learning', 'learning_improvement'})
         if mode == 'benchmark':
             flow_name = ('v4_benchmark_suite'
                          if benchmark_protocol_id == 'v4_longitudinal_closed_loop_v1'
@@ -1285,6 +1290,8 @@ class PartnerApplicationService:
             flow_name = 'self_improvement_cycle'
         elif intent_contract.get('workstream_type') == 'mixed':
             flow_name = 'meta_cycle'
+        elif read_link_request:
+            flow_name = 'content_read_reply'
         elif dispatch_target in {"browser_video_learning", "xhs_authoring"}:
             flow_name = dispatch_target
         elif dispatch_target == "direct_answer":
@@ -1358,6 +1365,9 @@ class PartnerApplicationService:
                     'catalog_version': event_catalog.version,
                 } if mode == 'benchmark' else {
                     'runtime_trace_token': f'runtime_trace_{job.job_id}',
+                    **({'user_sources': [{'url': u, 'source_kind': 'user_link'}
+                                          for u in user_urls]} if user_urls else {}),
+                    'original_request': clean[:4000],
                 },
             )
             flow_state.root_event_id = received.event_id

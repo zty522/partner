@@ -620,7 +620,8 @@ def _improvement_flow_definitions(local_learning=True):
 
     if local_learning:
         learning_nodes = (learning_nodes[0],
-            ('local_read','improvement.local_read',('recall',)),
+            ('source_retrieve','active_learning.source_retrieve',('recall',)),
+            ('local_read','improvement.local_read',('source_retrieve',)),
             ('local_compare','improvement.local_compare',('local_read',)),
             ('local_ideas','improvement.local_idea_record',('local_compare',)),
             ('learning_commitment','improvement.learning_commitment',('local_ideas',)),
@@ -637,18 +638,20 @@ def _improvement_flow_definitions(local_learning=True):
             ('improvement_report_ack','cycle.delivery_settle',('send_report',)),
             ('finish','improvement.finish',('improvement_report_ack',)))
 
-    def build(nodes, name, version, description):
+    def build(nodes, name, version, description, soft=False):
         flow_nodes = []
         for entry in nodes:
             nid, ev = entry[0], entry[1]
             deps = entry[2] if len(entry) == 3 else ()
             flow_nodes.append(FlowNode(nid, ev, deps))
-        return Flow(name, version, tuple(flow_nodes), description)
+        return Flow(name, version, tuple(flow_nodes), description, soft)
 
     self_flow = build(self_nodes, 'self_improvement_cycle', '1.4.0' if local_learning else '1.1.0',
         'Internal-mechanism improvement driven by runtime observation; feeds shared autonomous_evolution child.')
-    learning_flow = build(learning_nodes, 'learning_improvement_cycle', '1.7.0' if local_learning else '1.1.0',
-        'External-learning driven improvement; feeds shared autonomous_evolution child.')
+    learning_flow = build(learning_nodes, 'learning_improvement_cycle', '1.8.0' if local_learning else '1.2.0',
+        'External-learning driven improvement; reads user-supplied sources when given; '
+        'feeds shared autonomous_evolution child. Soft-orchestrated baseline.',
+        soft=True)
     def through_memory(nodes):
         rows = []
         for entry in nodes:
