@@ -221,6 +221,7 @@ def _read_source_images(ctx: Any, media_urls: list[str], directory: Path,
         return "", 0
     import hashlib as _hl
     import httpx
+    import base64
     img_dir = Path(directory) / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     paths: list[str] = []
@@ -234,6 +235,16 @@ def _read_source_images(ctx: Any, media_urls: list[str], directory: Path,
         candidates = list(media_urls)
     for url in candidates[:limit]:
         try:
+            if str(url).startswith('data:image'):
+                # 登录态降级时 win_fetch 返回内联 data:image/png;base64 缩略图，
+                # 同样解码落盘转写（正文长图仍可读）。
+                content = base64.b64decode(str(url).split(',', 1)[1])
+                if len(content) < 1000:
+                    continue
+                p = img_dir / (_hl.sha256(str(url).encode()).hexdigest()[:16] + ".img")
+                p.write_bytes(content)
+                paths.append(str(p))
+                continue
             with httpx.Client(timeout=30, follow_redirects=True, trust_env=False) as client:
                 resp = client.get(url, headers={"User-Agent": ua})
             if resp.status_code != 200 or len(resp.content) < 1000:
@@ -844,7 +855,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     txt_path.write_text(text, encoding='utf-8')
                     from partner.runtime.action_execution import write_json
                     media = [str(m) for m in (win.get('media_urls') or [])
-                             if str(m).startswith(('http://', 'https://'))][:40]
+                             if str(m).startswith(('http://', 'https://', 'data:image'))][:40]
                     receipt = {'url': url, 'final_url': url,
                                'content_type': 'text/html(win-browser)',
                                'bytes': len(body), 'raw_path': str(raw_path),
@@ -892,7 +903,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     txt_path.write_text(text, encoding='utf-8')
                     from partner.runtime.action_execution import write_json
                     media = [str(m) for m in (win.get('media_urls') or [])
-                             if str(m).startswith(('http://', 'https://'))][:40]
+                             if str(m).startswith(('http://', 'https://', 'data:image'))][:40]
                     receipt = {'url': url, 'final_url': url,
                                'content_type': 'text/html(win-browser)',
                                'bytes': len(body), 'raw_path': str(raw_path),
@@ -1034,7 +1045,7 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             continue
         missing = bool(r.get('xhs_body_missing'))
         media = [str(m) for m in (r.get('media_urls') or [])
-                 if str(m).startswith(('http://', 'https://'))]
+                 if str(m).startswith(('http://', 'https://', 'data:image'))]
         text_chars = int(r.get('text_chars') or 0)
         if not media or not (missing or text_chars < 200):
             continue
