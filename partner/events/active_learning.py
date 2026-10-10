@@ -333,6 +333,50 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 failures.append({'url': row['url'], 'error': 'GitHub expansion failed (no README or source files fetched)',
                                  'source_kind': kind})
                 continue
+        # Login-state browser channel (2026-10-10) for login-walled social
+        # platforms (xiaohongshu / bilibili).  Requires
+        # PARTNER_ENABLE_BROWSER_LOGIN=1 and PARTNER_BROWSER_PROFILE=<dir>
+        # (configured in scripts/runtime/ensure_watchdog.sh).  Writes the same
+        # receipt schema (source.bin/source.txt/sha256) so source_read works
+        # unchanged.  Without a configured profile it fails honestly.
+        if any(d in url for d in ('xiaohongshu.com', 'xhslink.com', 'bilibili.com', 'b23.tv')):
+            try:
+                from partner.knowledge.content_tools import fetch_login_browser_full
+                res = fetch_login_browser_full(url)
+                status = str(res.get('status') or '')
+                text = str(res.get('full_text') or '')
+                if status in ('text_available', 'metadata_only') and len(text.strip()) >= 100:
+                    import hashlib as _hl
+                    folder = directory / _hl.sha256(url.encode()).hexdigest()[:20]
+                    folder.mkdir(parents=True, exist_ok=True)
+                    body = text.encode('utf-8')
+                    raw_path, txt_path = folder / 'source.bin', folder / 'source.txt'
+                    raw_path.write_bytes(body)
+                    txt_path.write_text(text, encoding='utf-8')
+                    from partner.runtime.action_execution import write_json
+                    receipt = {'url': url, 'final_url': url,
+                               'content_type': 'text/html(browser)',
+                               'bytes': len(body), 'raw_path': str(raw_path),
+                               'text_path': str(txt_path),
+                               'sha256': _hl.sha256(body).hexdigest(),
+                               'text_sha256': _hl.sha256(body).hexdigest(),
+                               'text_chars': len(text), 'source_kind': kind,
+                               'browser_channel': True,
+                               'title': str(res.get('title') or ''),
+                               'media_urls': res.get('media_urls') or [],
+                               'screenshot': str(res.get('screenshot_path') or '')}
+                    write_json(folder / 'receipt.json', receipt)
+                    downloaded.append(receipt)
+                    continue
+                else:
+                    failures.append({'url': url,
+                                     'error': f'browser channel: {status} {res.get("reason") or ""}'.strip()[:240],
+                                     'source_kind': kind})
+                    continue
+            except Exception as exc:
+                failures.append({'url': url, 'error': f'browser channel failed: {str(exc)[:240]}',
+                                 'source_kind': kind})
+                continue
         # Generic HTTP fetch
         try:
             receipt = fetch(url, directory)
