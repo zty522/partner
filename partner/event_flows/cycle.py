@@ -533,6 +533,8 @@ AUTONOMOUS_EVOLUTION_V33 = Flow('autonomous_evolution', '3.3.0', (
     Node('freeze', 'autoevolution.freeze', ('tests_review_2',)),
     Node('attempt_loop', 'autoevolution.attempt_controller', ('freeze',)),
     Node('decision', 'autoevolution.decision', ('attempt_loop',)),
+    Node('notes_sync', 'notes.evolution_sync', ('decision',),
+         parameters={'decision_node': 'decision'}),
     Node('release_baseline', 'autoevolution.release_baseline', ('decision',)),
     Node('release_candidate', 'autoevolution.release_candidate', ('release_baseline',)),
     Node('release_compare', 'autoevolution.release_compare', ('release_candidate',)),
@@ -543,8 +545,10 @@ AUTONOMOUS_EVOLUTION_V33 = Flow('autonomous_evolution', '3.3.0', (
     Node('runtime_verify', 'autoevolution.runtime_verify', ('benchmark_gate',)),
     Node('rollback', 'autoevolution.rollback', ('runtime_verify',)),
     Node('rollback_verify', 'autoevolution.rollback_verify', ('rollback',)),
-    Node('record', 'autoevolution.record', ('rollback_verify',)),
-), 'Dynamic self-evolution with live supervision: regression probe runs while its finished rounds are supervised round-by-round against the dynamic expectation doc; the LLM assembles the next route (supervision child flow / inline fix / stop) and the deterministic benchmark gate guards every source apply. Mechanism audit and supervision gap chains run in parallel and merge at design.')
+    Node('promote', 'notes.promote', ('rollback_verify', 'notes_sync'), optional=True,
+         parameters={'evidence_sources': ['decision', 'release_compare', 'notes_sync']}),
+    Node('record', 'autoevolution.record', ('promote', 'rollback_verify')),
+), 'Dynamic self-evolution with live supervision: regression probe runs while its finished rounds are supervised round-by-round against the dynamic expectation doc; the LLM assembles the next route (supervision child flow / inline fix / stop) and the deterministic benchmark gate guards every source apply. Mechanism audit and supervision gap chains run in parallel and merge at design. Evolution decisions sync to the note ledger and open notes are promoted against this round evidence.')
 
 AUTONOMOUS_EVOLUTION = replace(
     AUTONOMOUS_EVOLUTION_V33,
@@ -604,7 +608,9 @@ def _improvement_flow_definitions(local_learning=True):
         ("render", "improvement.report", ("improvement_message_ack",)),
         ("send_report", "delivery.send_pdf", ("render",)),
         ("improvement_report_ack", "cycle.delivery_settle", ("send_report",)),
-        ("finish", "improvement.finish", ("improvement_report_ack",)),
+        ("promote", "notes.promote", ("improvement_report_ack",),
+         {"evidence_sources": ["outcome_settle", "memory_consolidate"]}),
+        ("finish", "improvement.finish", ("promote",)),
     )
     # 02 learning_improvement: no observe steps; recall is the root.
     learning_nodes = (
@@ -638,14 +644,20 @@ def _improvement_flow_definitions(local_learning=True):
             ('render','improvement.report',('improvement_message_ack',)),
             ('send_report','delivery.send_pdf',('render',)),
             ('improvement_report_ack','cycle.delivery_settle',('send_report',)),
-            ('finish','improvement.finish',('improvement_report_ack',)))
+            ('promote','notes.promote',('improvement_report_ack',),
+             {'evidence_sources': ['learning_settlement','learning_evaluate','judge']}),
+            ('finish','improvement.finish',('promote',)))
 
     def build(nodes, name, version, description, soft=False):
         flow_nodes = []
         for entry in nodes:
             nid, ev = entry[0], entry[1]
-            deps = entry[2] if len(entry) == 3 else ()
-            flow_nodes.append(FlowNode(nid, ev, deps))
+            deps = entry[2] if len(entry) >= 3 else ()
+            node = FlowNode(nid, ev, deps)
+            if len(entry) >= 4 and entry[3]:
+                from dataclasses import replace as _dc_replace
+                node = _dc_replace(node, parameters=dict(entry[3]))
+            flow_nodes.append(node)
         return Flow(name, version, tuple(flow_nodes), description, soft)
 
     self_flow = build(self_nodes, 'self_improvement_cycle', '1.4.0' if local_learning else '1.1.0',
@@ -659,7 +671,7 @@ def _improvement_flow_definitions(local_learning=True):
         for entry in nodes:
             if entry[0] in {'iterate_more', 'narrative', 'send_message',
                              'improvement_message_ack', 'render', 'send_report',
-                             'improvement_report_ack', 'finish'}:
+                             'improvement_report_ack', 'promote', 'finish'}:
                 continue
             rows.append(entry)
         rows.append(('finish', 'improvement.finish', ('memory_consolidate',)))

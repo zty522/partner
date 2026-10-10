@@ -143,9 +143,10 @@ def validate_record(note_type: str, record: Mapping[str, Any]) -> None:
 class NoteStore:
     """Append/replace typed notes in one JSONL ledger.
 
-    The ledger is a sequence of full snapshots; an update rewrites the whole
-    file (bounded, since notes are few and small).  File locking keeps
-    concurrent instances safe.
+    The ledger is append-only: new notes and updated versions are appended as
+    new rows.  A row is addressed by ``id``; readers keep the *last* row for
+    each id (dedupe), so an update is O(1) write even with a large ledger.
+    File locking keeps concurrent instances safe.
     """
 
     def __init__(self, workspace: str | Path):
@@ -191,8 +192,8 @@ class NoteStore:
         return note
 
     def replace(self, note_id: str, patch: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Update one note by id (full-snapshot rewrite).  Returns updated note or None."""
-        rows = self._read_all()
+        """Update one note by id (append new version, readers keep last)."""
+        rows = self._dedupe(self._read_all())
         found = None
         for row in rows:
             if row.get("id") == note_id:
@@ -202,8 +203,24 @@ class NoteStore:
             return None
         merged = {**found, **dict(patch), "id": note_id, "updated_at": _now()}
         validate_record(merged.get("type", found.get("type", "observation")), merged)
-        self._write_all([merged if row.get("id") == note_id else row for row in rows])
+        handle = self._lock()
+        try:
+            handle.write(json.dumps(merged, ensure_ascii=False) + "\n")
+            handle.flush()
+        finally:
+            self._unlock()
         return merged
+
+    @staticmethod
+    def _dedupe(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep the last row per note id (append-only versioning)."""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            nid = row.get("id")
+            if not nid:
+                continue
+            latest[nid] = row
+        return list(latest.values())
 
     def _read_all(self) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -224,24 +241,15 @@ class NoteStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return rows
 
-    def _write_all(self, rows: list[dict[str, Any]]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        handle = self._lock()
-        try:
-            handle.seek(0)
-            handle.truncate()
-            for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-            handle.flush()
-        finally:
-            self._unlock()
+    def _rows_current(self) -> list[dict[str, Any]]:
+        return self._dedupe(self._read_all())
 
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
     def list_all(self) -> list[dict[str, Any]]:
-        rows = self._read_all()
+        rows = self._rows_current()
         rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
         return rows
 
@@ -249,7 +257,7 @@ class NoteStore:
                statuses: list[str] | None = None, limit: int = 8,
                project_id: str = "") -> list[dict[str, Any]]:
         """Semantic-ish recall: keyword/bigram overlap + status/type filters + recency."""
-        rows = self._read_all()
+        rows = self._rows_current()
         tokens = _text_tokens(str(query or ""))
         hits: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
@@ -274,13 +282,13 @@ class NoteStore:
                            limit=limit)
 
     def by_id(self, note_id: str) -> dict[str, Any] | None:
-        for row in self._read_all():
+        for row in self._rows_current():
             if row.get("id") == note_id:
                 return row
         return None
 
     def stats(self) -> dict[str, Any]:
-        rows = self._read_all()
+        rows = self._rows_current()
         by_type: dict[str, int] = {}
         by_status: dict[str, int] = {}
         for row in rows:

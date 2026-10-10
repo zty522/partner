@@ -11,7 +11,7 @@ from typing import Any
 import json
 
 from partner.event_fabric.catalog import EventDefinition
-from partner.memory.notes import NOTE_TYPES, NoteStore, notes_injection
+from partner.mind_lab.notes import NOTE_TYPES, NoteStore, notes_injection
 from ._llm import call_model, json_object
 
 
@@ -230,6 +230,8 @@ def notes_promote(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     Params:
       note_ids: list[str] — target ids (default: all open pending + candidate insights)
       evidence: str       — new evidence / this round's outcomes to judge against
+      evidence_sources: list[str] — node ids whose outputs are merged into evidence
+                            (default []) — resolved from params.flow_outputs
     """
     store = NoteStore(_workspace(ctx))
     note_ids = params.get("note_ids") or None
@@ -245,6 +247,18 @@ def notes_promote(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 "semantic_output": {"promoted": [], "kept": [], "dismissed": []},
                 "summary": "没有待升级的笔记"}
     evidence = str(params.get("evidence") or "")
+    sources = params.get("evidence_sources") or []
+    outputs = params.get("flow_outputs") if isinstance(params.get("flow_outputs"), dict) else {}
+    if sources and not evidence:
+        chunks = []
+        for nid in sources:
+            out = outputs.get(nid) or {}
+            semantic = out.get("semantic_output")
+            if isinstance(semantic, dict):
+                chunks.append(f"[{nid}] {json.dumps(semantic, ensure_ascii=False)[:1500]}")
+            else:
+                chunks.append(f"[{nid}] {str(semantic or out.get('summary') or '')[:1500]}")
+        evidence = "\n".join(chunks)
     raw, usage = call_model(ctx, purpose="notes_promote", prompt=(
         "你是 partner 的笔记晋升官。判断下列 open 笔记是否可以被本轮新证据升级、保持或关闭。\n"
         "规则：\n"
@@ -290,8 +304,61 @@ def notes_promote(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "token_usage": usage}
 
 
+# notes.evolution_sync — evolution decisions land in the note ledger
+# ---------------------------------------------------------------------------
+
+def notes_evolution_sync(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Sync a self-evolution / supervision decision into the note ledger.
+
+    Reads the decision node's semantic_output from ``flow_outputs`` (or a
+    directly passed ``content``) and writes an idempotent issue_note: a
+    promoted decision closes the issue (fixed), a rejected/inconclusive one
+    keeps it open with the reason.  This makes evolution problems and their
+    resolution part of the unified Mind Notes so later runs recall and
+    promote them.
+
+    Params:
+      decision_node: str — node id whose output carries the decision (default "decision")
+      content: str      — explicit issue text (used when the node output has none)
+    """
+    outputs = params.get("flow_outputs") if isinstance(params.get("flow_outputs"), dict) else {}
+    decision_node = str(params.get("decision_node") or "decision")
+    row = outputs.get(decision_node) or {}
+    so = row.get("semantic_output") if isinstance(row.get("semantic_output"), dict) else {}
+    content = str(so.get("issue") or so.get("problem") or so.get("content")
+                  or params.get("content") or "").strip()
+    decision = str(so.get("decision") or so.get("status") or "inconclusive")
+    reason = str(so.get("reason") or "")
+    source_marker = (f"evolution:{decision_node}:"
+                     f"{so.get('candidate_id') or so.get('experiment_id') or ''}")
+    if not content:
+        content = f"自进化决策记录：{decision}"
+    status = "fixed" if decision in {"promoted", "promote", "accepted", "fixed"} else "open"
+    store = NoteStore(_workspace(ctx))
+    existing = [n for n in store.list_all() if n.get("source") == source_marker]
+    if existing:
+        note = store.replace(existing[0]["id"], {
+            "status": status,
+            "reason": reason[:500] or str(existing[0].get("reason") or ""),
+        })
+    else:
+        note = store.append("issue_note", {
+            "content": content[:600],
+            "source": source_marker,
+            "status": status,
+            "reason": reason[:500],
+            "evidence_refs": [str(r) for r in (so.get("evidence") or so.get("evidence_refs") or [])][:8],
+            "confidence": 0.8,
+        })
+    return {"ok": True, "status": "completed",
+            "semantic_output": {"note": note, "decision": decision},
+            "summary": f"进化决策已同步笔记：{decision}",
+            "evidence_refs": [note.get("id", "")]}
+
+
 DEFINITIONS = [
     EventDefinition("notes.recall", "notes", "召回相关笔记与待定项并注入运行上下文", notes_recall),
     EventDefinition("notes.judge", "notes", "LLM判别提炼点：落地/记笔记/丢弃，写入统一笔记库", notes_judge, execution_method="llm"),
     EventDefinition("notes.promote", "notes", "LLM晋升扫描：升级/保持/关闭 open 笔记", notes_promote, execution_method="llm"),
+    EventDefinition("notes.evolution_sync", "notes", "自进化决策同步进笔记库（问题→issue_note，promoted→fixed）", notes_evolution_sync),
 ]

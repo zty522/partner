@@ -13,11 +13,16 @@ L5 负责 partner **如何改进自己、如何保证质量**。
 | 治理/规则 | `partner/events/governance/`、`context/layered_rules.py`、`rules/` | layered_rules 现 0 引用，待接线 |
 | 监督 | `partner/events/supervision.py`、`system_evolution.py`、`long_run_controller.py`、`fair_scheduler.py`、`token_aggregator.py` | 运行期监督 |
 
-## 与 L4 的协作
+## 与 L4 的协作（已落地）
 
+- **进化决策同步**：`notes.evolution_sync` 已接进 `self_evolution 2.0.0` 与
+  `autonomous_evolution 3.4.0`——每次进化决策把问题写入 issue_note
+  （promoted → fixed，rejected/inconclusive → open + reason），进化问题
+  与修复结果从此进入统一笔记库。
+- **晋升闭环**：`notes.promote` 已接进 content_read_reply / project_iteration /
+  active_learning / self_evolution / autonomous_evolution / learning_improvement_cycle——
+  每一轮运行结束用本轮证据（verify/compare/settlement）对 open 笔记做升级/保持/关闭。
 - L5 自进化修复的"问题"来自 L4 笔记库（issue_note / pending）与运行时监督事件池。
-- L5 每次进化尝试必须产出 `EvolutionExperiment` + `PromotionDecision`，
-  并经 notes.promote 同步笔记状态（失败记 dismissed，成功记 active/confirmed）。
 - L4 学习到的新 idea 通过 notes.judge 的 action_now 转成 L5 的候选改进。
 
 ## 使用纪律

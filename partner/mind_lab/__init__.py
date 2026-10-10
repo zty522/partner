@@ -8,19 +8,15 @@ L4 owns everything the partner *knows and learns*:
     preferences, user insights and issue notes.  Ledger:
     ``<workspace>/share/mind/notes/notes.jsonl``.
   - LLM doors on the note store: ``partner/events/notes.py``
-    (notes.recall / notes.judge / notes.promote).
+    (notes.recall / notes.judge / notes.promote / notes.evolution_sync).
   - Learning sources & external knowledge: ``partner/events/active_learning.py``,
-    ``partner/events/local_learning.py``, ``partner/events/curiosity.py``,
-    ``partner/events/knowledge.py`` (logical home: mind_lab.learning).
+    ``partner/events/local_learning.py``, ``partner/events/learning_source_recovery.py``.
   - Event memory (observations/lessons/preferences/habits/beliefs/growth):
-    ``partner/memory/`` (logical home: mind_lab.memory).
-  - Experience engine & procedural memory: ``partner/evolution/experience_engine.py``,
-    ``partner/memory/procedural_memory.py``.
-  - World model / cognition: ``partner/events/world_model.py``,
-    ``partner/events/cognition.py``, ``partner/events/curation.py``.
-  - Reserved idea/literature slots: ``partner/events/`` (cross-pollination,
-    deep-analysis, exploration, idea-exploration, literature-deep-dive,
-    method-learning, synthesis-review).
+    ``partner/memory/event_memory.py`` — storage unified into the note ledger.
+  - World model / JEV channels: ``partner/world_model/``, ``partner/events/core.py``.
+  - Candidate registry: ``partner/mind_lab/registry.py`` — implemented vs
+    blueprint components (the 8 reserved EVENT.md slots are registered there
+    as instantiate-on-evidence blueprints).
 
 Invariant: physical paths above are transitional.  Logical ownership is
 declared here; code moves here only when imports are updated in the same

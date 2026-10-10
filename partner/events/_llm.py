@@ -77,7 +77,7 @@ def call_model(ctx: Any, *, purpose: str, prompt: str) -> tuple[str, dict[str, A
     # relevant long-term notes + open pending rendered by notes.recall,
     # so the note system is actually *used* instead of occupying space.
     try:
-        from partner.memory.notes import notes_injection
+        from partner.mind_lab.notes import notes_injection
         injected = notes_injection(ctx)
         if injected and injected not in prompt:
             prompt = injected + "\n" + prompt

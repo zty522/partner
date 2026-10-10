@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, "/mnt/e/work/partner")
 
-from partner.memory.notes import (
+from partner.mind_lab.notes import (
     NOTE_TYPES,
     NoteStore,
     NoteValidationError,

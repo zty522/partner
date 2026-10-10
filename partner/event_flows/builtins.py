@@ -59,9 +59,12 @@ CONTENT_READ_REPLY = Flow("content_read_reply", "1.1.0", (
     Node("verify", "delivery.verify", ("send",)),
     Node("send_pdf", "delivery.send_pdf", ("quality",)),
     Node("pdf_settle", "cycle.delivery_settle", ("send_pdf",)),
+    Node("promote", "notes.promote", ("pdf_settle",), optional=True,
+         parameters={"evidence_sources": ["synthesize", "verify", "judge"]}),
 ), "Read a user-supplied external link, answer the user about its content, "
-   "attach a user-readable PDF report, and record learnable points into the "
-   "unified note store (judge: act-now / record / dismiss). "
+   "attach a user-readable PDF report, record learnable points into the "
+   "unified note store (judge: act-now / record / dismiss), and promote "
+   "open notes against this round's evidence. "
    "Soft-orchestrated: the LLM may adjust the remaining graph at runtime "
    "against the shared Event pool.",
    soft_orchestrated=True)
@@ -158,6 +161,8 @@ PROJECT_ITERATION = Flow("project_iteration", "3.0.0", (
     Node("channel", "delivery.channel_route", ("commitment_reconcile",)),
     Node("send", "delivery.send_text", ("channel",)),
     Node("delivery_verify", "delivery.verify", ("send",)),
+    Node("promote", "notes.promote", ("delivery_verify",), optional=True,
+         parameters={"evidence_sources": ["verify", "reflect", "core_settlement"]}),
 ), "Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route.")
 
 
@@ -213,6 +218,8 @@ ACTIVE_LEARNING = Flow("active_learning", "2.2.0", (
     Node("judge", "notes.judge", ("synthesize",)),
     Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve", "transfer_mapping")),
     Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
+    Node("promote", "notes.promote", ("remember",), optional=True,
+         parameters={"evidence_sources": ["matched", "core_settlement", "judge"]}),
     Node("resume", "core.route_next", ("remember", "core_settlement")),
 ), "Source-grounded learning with transfer mapping to executable project actions; freezes a candidate handoff with concrete action plan.")
 
@@ -247,11 +254,15 @@ SELF_EVOLUTION = Flow("self_evolution", "2.0.0", (
     Node("candidate_run", "self_evolution.candidate_execute", ("baseline",)),
     Node("compare", "self_evolution.matched_compare", ("candidate_run",)),
     Node("decision", "self_evolution.promotion_decide", ("compare",)),
+    Node("notes_sync", "notes.evolution_sync", ("decision",),
+         parameters={"decision_node": "decision"}),
     Node("core_settlement", "core.settlement", ("decision",),
          parameters={"evaluated_node": "decision"}),
     Node("habit", "memory.habit_propose", ("decision", "core_settlement"), optional=True),
-    Node("resume", "core.route_next", ("habit", "core_settlement")),
-), "Core v1 self-evolution: reproducible mechanism issue, isolated candidate, matched settlement.")
+    Node("promote", "notes.promote", ("notes_sync",), optional=True,
+         parameters={"evidence_sources": ["decision", "compare", "core_settlement"]}),
+    Node("resume", "core.route_next", ("habit", "promote", "core_settlement")),
+), "Core v1 self-evolution: reproducible mechanism issue, isolated candidate, matched settlement; decisions sync to the note ledger and open notes are promoted against this round's evidence.")
 
 
 MESSAGE_DELIVERY = Flow("message_delivery", "1.0.0", (

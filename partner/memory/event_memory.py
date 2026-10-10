@@ -33,7 +33,23 @@ def _append(path: Path, row: Mapping[str, Any]) -> None:
 
 
 class EventMemory:
-    """Append-only facts plus small versioned semantic projections."""
+    """Append-only facts plus small versioned semantic projections.
+
+    The underlying ledger is the unified Mind Notes store
+    (``share/mind/notes/notes.jsonl``) since Sprint 43: observations, lessons,
+    preferences, habits, beliefs and growth are note types in one ledger
+    instead of six parallel JSONL files.  The legacy JSONL files under
+    ``share/mind/memory/`` are kept as migrated history (read-only); new
+    semantic writes go to the note store.
+    """
+
+    # note_type 映射：memory kind -> note type
+    _NOTE_TYPE = {"lesson": "lesson", "user_preference": "preference",
+                  "habit": "habit", "belief": "belief", "growth": "growth",
+                  "observation": "observation"}
+    _STATUS = {"habit": "candidate", "growth": "confirmed",
+               "lesson": "open", "belief": "open", "user_preference": "active",
+               "observation": "recorded"}
 
     def __init__(self, workspace: str | Path):
         self.root = _root(workspace)
@@ -44,10 +60,35 @@ class EventMemory:
         self.habits = self.directory / "habits.jsonl"
         self.beliefs = self.directory / "beliefs.jsonl"
         self.growth = self.directory / "growth.jsonl"
+        from partner.mind_lab.notes import NoteStore
+        self._notes = NoteStore(workspace)
+
+    def _as_note(self, kind: str, row: Mapping[str, Any]) -> dict[str, Any]:
+        note_type = self._NOTE_TYPE.get(kind, "observation")
+        status = str(row.get("status") or self._STATUS.get(kind, "open"))
+        if note_type == "habit" and status not in {"candidate", "active", "dismissed"}:
+            status = "candidate"
+        if note_type == "growth" and status not in {"confirmed", "dismissed"}:
+            status = "confirmed"
+        content = str(row.get("content") or row.get("headline") or "").strip()
+        if not content:
+            content = str(row.get("outcome") or "").strip()
+        return {
+            "content": content,
+            "source": f"memory:{kind}",
+            "confidence": float(row.get("confidence") or 0.5),
+            "evidence_refs": list(row.get("evidence_refs") or []),
+            "project_id": str(row.get("project_id") or ""),
+            "scope": str(row.get("scope") or ""),
+            "layer": str(row.get("layer") or "task_specific"),
+            "counterexample": str(row.get("counterexample") or ""),
+            "status": status,
+            "created_at": str(row.get("recorded_at") or _now()),
+        }
 
     def project_terminal(self, envelope: Mapping[str, Any], summary: Mapping[str, Any]) -> None:
-        """Persist one raw experience without creating a recursive Event."""
-        _append(self.observations, {
+        """Persist one raw experience into the note store (observation type)."""
+        row = {
             "schema_version": 1, "recorded_at": _now(),
             "event_id": summary.get("event_id"), "event_type": envelope.get("event_type"),
             "series": envelope.get("series"), "flow_id": envelope.get("flow_id"),
@@ -61,7 +102,12 @@ class EventMemory:
             "business_delta": bool(summary.get("business_delta")),
             "learning_delta": bool(summary.get("learning_delta")),
             "evolution_delta": bool(summary.get("evolution_delta")),
-        })
+        }
+        try:
+            self._notes.append("observation", self._as_note("observation", row))
+        except Exception:
+            # fallback: legacy JSONL so observation projection never breaks the run
+            _append(self.observations, row)
 
     def link_usage_outcome(self, envelope, summary):
         """An observed terminal is not proof that a recalled lesson caused improvement."""
@@ -83,14 +129,28 @@ class EventMemory:
         return list(reversed(StreamProjection(self.root).rows(path,limit=limit)))
 
     def recall(self, *, project_id='', query='', limit=8):
+        """Recall from the unified note store, preserving the legacy dict shape."""
         from partner.index.stream_projection import StreamProjection
-        repo=StreamProjection(self.root)
-        def fetch(path,status=None):
-            return repo.memory(path,project_id=project_id,query=query,limit=limit,status=status)
-        return {'observations':fetch(self.observations), 'lessons':fetch(self.lessons),
-            'preferences':fetch(self.preferences),'active_habits':fetch(self.habits,'active'),
-            'candidate_habits':fetch(self.habits,'candidate'),'beliefs':fetch(self.beliefs),
-            'growth':fetch(self.growth)}
+        repo = StreamProjection(self.root)
+        def fetch(path, note_type=None, status=None):
+            if note_type:
+                notes = self._notes.recall(query=query, types=[note_type],
+                                           statuses=[status] if status else None,
+                                           limit=limit, project_id=project_id)
+                if not notes:
+                    # legacy fallback: historical rows still live in old JSONL
+                    return repo.memory(path, project_id=project_id, query=query,
+                                       limit=limit, status=status)
+                return notes
+            return repo.memory(path, project_id=project_id, query=query,
+                               limit=limit, status=status)
+        return {'observations': fetch(self.observations, 'observation'),
+                'lessons': fetch(self.lessons, 'lesson'),
+                'preferences': fetch(self.preferences, 'preference'),
+                'active_habits': fetch(self.habits, 'habit', 'active'),
+                'candidate_habits': fetch(self.habits, 'habit', 'candidate'),
+                'beliefs': fetch(self.beliefs, 'belief'),
+                'growth': fetch(self.growth, 'growth')}
 
     def record_usage(self, *, event_id, flow_id, memory_ids, effect, status='referenced'):
         if status not in ('referenced','applied','rejected'):
@@ -99,18 +159,28 @@ class EventMemory:
             'memory_ids':list(dict.fromkeys(memory_ids)), 'effect':effect,'status':status,'recorded_at':_now()})
 
     def append_semantic(self, kind: str, record: Mapping[str, Any]) -> str:
+        """Append a semantic memory into the unified note store.
+
+        Returns the legacy JSONL path for backward-compatible callers; the
+        actual row lands in ``share/mind/notes/notes.jsonl``.
+        """
         paths = {"lesson": self.lessons, "user_preference": self.preferences,
                  "habit": self.habits, "belief": self.beliefs, "growth": self.growth}
         if kind not in paths:
             raise ValueError(f"unknown memory kind: {kind}")
-        import uuid
         supplied = dict(record)
-        default_id = (f"{kind}_{supplied.get('scope')}"
-                      if supplied.get("scope") and supplied.get("content") == supplied.get("scope")
-                      else uuid.uuid4().hex)
-        row = {"schema_version": 1, "recorded_at": _now(),
-               "record_id": default_id, **supplied}
-        _append(paths[kind], row)
+        note = self._as_note(kind, supplied)
+        try:
+            self._notes.append(self._NOTE_TYPE.get(kind, "observation"), note)
+        except Exception:
+            # fallback to legacy JSONL so semantic memory never breaks the run
+            import uuid
+            default_id = (f"{kind}_{supplied.get('scope')}"
+                          if supplied.get("scope") and supplied.get("content") == supplied.get("scope")
+                          else uuid.uuid4().hex)
+            row = {"schema_version": 1, "recorded_at": _now(),
+                   "record_id": default_id, **supplied}
+            _append(paths[kind], row)
         return str(paths[kind])
 
 
