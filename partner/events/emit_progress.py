@@ -205,12 +205,28 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 message += summary + "。"
     elif phase == 'event_failed':
         # Event-level failures are mechanism noise to the user: never relay a
-        # raw RuntimeError/Traceback. Say what step did not finish in plain
-        # words and leave internals to the web trace.
-        reason = _userify(params.get('event_summary') or summary or '', 80)
-        if re.search(r'Traceback|RuntimeError|Exception|Error:|raise |at \w+:\d+', reason):
-            reason = ''
-        message = f'上一步未完成：{reason}。' if reason else '上一步未完成，详见运行追踪。'
+        # raw Traceback.  Distinguish external-access failures (say honestly
+        # what could not be read, keep the no-fabrication promise) from
+        # internal anomalies (tell the user it can be retried, leave
+        # internals to the web trace).
+        raw_reason = str(params.get('event_summary') or summary or '').strip()
+        clean_reason = _userify(raw_reason, 110)
+        internal_hit = re.search(
+            r'Traceback|RuntimeError|NameError|TypeError|KeyError|AttributeError|'
+            r'IndexError|ValueError|Exception|raise |at \w+:\d+',
+            clean_reason, re.I)
+        fetch_hit = re.search(
+            r'fetch|抓取|读取|访问|登录|反爬|拦截|blocked|timeout|网络|win_fetch|'
+            r'xiaohongshu|bilibili|无内容|空响应',
+            clean_reason, re.I)
+        if fetch_hit and not internal_hit:
+            message = f'读取外部内容未成功：{clean_reason}。未虚构内容，可稍后重试或确认链接是否可访问。'
+        elif internal_hit:
+            message = '该步骤遇到内部异常未完成，原因已记录；可稍后重试，或查看网页端运行追踪。'
+        else:
+            message = (f'上一步未完成：{clean_reason}。'
+                       if clean_reason
+                       else '上一步未完成：执行出现异常，原因已记录，可稍后重试或查看网页端运行追踪。')
     else:
         subject = event_name or _clean(params.get("node_id"), 60) or "当前 Event"
         label = _PHASE_LABELS.get(phase, '进展')
