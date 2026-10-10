@@ -523,6 +523,8 @@ def round_design(ctx, params):
         + '\n输入对声明评价指标的充分性=' + json.dumps(input_adequacy_state, ensure_ascii=False)[:12000]
         + '\n上一轮Settlement=' + json.dumps(previous, ensure_ascii=False)[:24000]
         + '\n上一轮完整执行与反思记录（蓝图、实际执行、核验、反思、结算；设计下一轮前必须读懂上一轮做了什么、卡在哪）=' + json.dumps(previous_full, ensure_ascii=False)[:40000]
+        + '\n上一轮execute原始结果（真实命令输出/失败详情，非摘要；据此设计本轮修复）=' + json.dumps((previous_record.get('node_outputs') or {}).get('execute') or {}, ensure_ascii=False)[:12000]
+        + '\n上一轮verify原始结果（fail_layer 与 missing_evidence 原文）=' + json.dumps((previous_record.get('node_outputs') or {}).get('verify') or {}, ensure_ascii=False)[:8000]
         + '\n主动学习结果=' + json.dumps(learning, ensure_ascii=False)[:20000]
         + '\n学习影响结算=' + json.dumps(impact, ensure_ascii=False)[:12000]
             + '\n【v2 强制规则】next_round_goal 必须显式解决上一轮 verdict_report 的 missing_evidence。'
@@ -734,6 +736,15 @@ def round_settle(ctx, params):
     reflect = ((outputs.get('reflect') or {}).get('semantic_output') or {})
     core_settlement = ((outputs.get('core_settlement') or {}).get('semantic_output') or {})
     business_delta = bool((outputs.get('verify') or {}).get('business_delta') or verify.get('verified'))
+    # 2026-10-10: explicit substantive-progress flag for the engine's stop rule.
+    # A round makes substantive progress when it verified a claim, produced a
+    # real work product (not a consumption/eligibility receipt), or was
+    # recognized as business_delta.  This is the machine signal the engine
+    # convergence rule keys on instead of raw round counting.
+    _round_files = [str(f) for f in (record.get('files') or [])]
+    _receipt_like = re.compile(r'(?:input[_\-]?consumption|eligible|eligibility|verification|verify|receipt|ack|manifest)[^/\\]*\.json$', re.I)
+    _substantive_files = [f for f in _round_files if not _receipt_like.search(f)]
+    substantive_progress = bool(business_delta or _substantive_files)
     raw, usage = call_model(ctx, purpose='cycle_round_settle', prompt=(
         '只依据本轮真实Event终态裁决下一步。分类只能是 complete、continue_project、active_learning、stop。'
         '科学假设失败、RMSE未改善、项目数据问题属于continue_project或stop，绝不能归入Partner自进化。'
@@ -814,6 +825,7 @@ def round_settle(ctx, params):
     value = {**judged, 'round_number': number, 'route': route,
              'business_delta': business_delta, 'continue_iteration': continue_iteration,
              'budget_remaining': number < maximum,
+             'substantive_progress': substantive_progress,
              'project_metric_is_not_self_evolution': True}
     path = folder(ctx) / f'settle_{name}.json'
     write_json(path, value)

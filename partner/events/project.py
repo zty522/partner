@@ -1332,6 +1332,7 @@ def _learning_matched_evidence(ctx: Any, params: dict[str, Any], evidence: list[
                     target_hints.append(val)
                 elif isinstance(val, list):
                     target_hints.extend(str(v) for v in val if v)
+    _receipt_only = re.compile(r'(?:input[_\-]?consumption|consumption|eligible|eligibility|verification|verify|receipt|ack|manifest)[^/\\]*\.json$', re.I)
     if target_hints:
         hint_basenames = set()
         for hint in target_hints:
@@ -1339,6 +1340,7 @@ def _learning_matched_evidence(ctx: Any, params: dict[str, Any], evidence: list[
             if name:
                 hint_basenames.add(name)
             hint_basenames.add(str(hint))
+        receipt_hits = []
         for row in evidence:
             if not row.get('valid'):
                 continue
@@ -1346,12 +1348,27 @@ def _learning_matched_evidence(ctx: Any, params: dict[str, Any], evidence: list[
             if not path.is_file():
                 continue
             name = path.name
-            if any(hint in str(path) or hint == name
-                   for hint in hint_basenames if hint):
-                return {'consumed': True, 'mode': 'learning_consumption',
-                        'handoff_ref': str(h2 if h2.is_file() else (h3 if h3.is_file() else h1)),
-                        'evidence_path': str(path),
-                        'matched_targets': sorted(hint_basenames)[:8]}
+            if not any(hint in str(path) or hint == name
+                       for hint in hint_basenames if hint):
+                continue
+            # 2026-10-10 substantive gate: a consumption/eligibility receipt is
+            # NOT a real learning outcome.  Only count artifacts that change or
+            # produce actual work product (source, data, docs, metrics).
+            if _receipt_only.search(str(path)):
+                receipt_hits.append(str(path))
+                continue
+            return {'consumed': True, 'mode': 'learning_consumption',
+                    'handoff_ref': str(h2 if h2.is_file() else (h3 if h3.is_file() else h1)),
+                    'evidence_path': str(path),
+                    'matched_targets': sorted(hint_basenames)[:8],
+                    'substantive': True}
+        if receipt_hits:
+            return {'consumed': False, 'mode': 'learning_consumption',
+                    'handoff_ref': str(h2 if h2.is_file() else (h3 if h3.is_file() else h1)),
+                    'evidence_path': receipt_hits[0],
+                    'matched_targets': sorted(hint_basenames)[:8],
+                    'substantive': False,
+                    'reason': '只有消费回执/合规证明命中学习目标，无实质产物；学习尚未落地为真实改动'}
     # ---- Mode B: RMSE comparison (legacy) ----------------------------------
     handoff_path = Path(str(contract.get('learning_handoff_path') or ''))
     if not handoff_path.is_file():

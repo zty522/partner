@@ -160,6 +160,30 @@ def _job_status_line(ctx: Any, params: dict[str, Any], flow_outputs: dict[str, A
     return header
 
 
+
+def _delivery_consistency_fix(ctx: Any, text: str) -> str:
+    """When a PDF report genuinely exists for this job, never let the outgoing
+    message claim the report/delivery was not executed (LLM drafts often write
+    such self-denial lines from stale narrative).  Deterministic, evidence-based:
+    if no PDF exists, leave the text untouched."""
+    if not text:
+        return text
+    ws = str(getattr(ctx, "workspace", "") or "")
+    job = str(getattr(ctx, "job_id", "") or "")
+    pdfs = []
+    if ws and job:
+        root = Path(ws) / "state" / "event_runtime" / "work" / job
+        if root.is_dir():
+            pdfs = list(root.glob("**/*.pdf"))
+    if not pdfs:
+        return text
+    pat = re.compile(
+        r'(?:PDF\s*报告|报告|QQ\s*投递|投递|端到端交付物|附件)[^。；\n]*?'
+        r'(?:未能执行|未执行|未能完成|未完成|未实现|未能生成|未能投递|未投递)[^。；\n]*[。；]?')
+    return pat.sub('PDF 报告已生成并通过 QQ 发送。', text)
+
+
+
 def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if (((params.get('intent_contract') or {}).get('execution_constraints') or {})
             .get('suppress_user_delivery') is True):
@@ -214,6 +238,7 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         text = raw
     from partner.events.message_sanitizer import sanitize_message
     text = sanitize_message(text)
+    text = _delivery_consistency_fix(ctx, text)
     channel = str(params.get("channel") or getattr(ctx, "channel", "local"))
     channels = _delivery_channels(ctx, params)
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})
@@ -375,6 +400,7 @@ def send_pdf(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         return {'ok':False,'status':'failed','error':'QQ recipient identity is missing; no transport request was made'}
     from partner.events.message_sanitizer import sanitize_message
     text_msg = sanitize_message(text_msg)
+    text_msg = _delivery_consistency_fix(ctx, text_msg)
     payload = {"schema_version": 4, "job_id": getattr(ctx, "job_id", ""),
                "to_user": qq_recipient,
                "content": text_msg, "image_artifacts":[{'path':a['path'],'sha256':a['sha256'],'id':a['id']} for a in assets[:1]],

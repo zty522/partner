@@ -32,6 +32,11 @@ def sanitize_message(text: str) -> str:
         '消费审计': '数据审核', 'dry-run': '预演', '回归测试': '兼容性测试',
         'Shadow': '灰度', '验证层': '验证', '实时性约束': '时效性要求',
         '转移映射': '学习成果映射',
+        'admitted inputs': '允许输入清单', 'eligible_count': '合格数量',
+        'pytest': '测试', 'budget exhausted': '预算用尽',
+        'model-turn budget': '模型执行预算', 'research_succeeded': '研究目标达成',
+        'nd(file)': '文件追加逻辑', 'input consumption': '输入消费',
+        'eligible_inputs': '允许输入', 'test_metrics': '测试指标',
     }
     for term, repl in term_map.items():
         result = result.replace(term, repl)
@@ -47,6 +52,11 @@ def sanitize_message(text: str) -> str:
         r'\bconsumed\b': '已消费', r'\bimproved\b': '有改善',
         r'\bproject_research_cycle\b': '研究流程', r'\bproject_cycle_round\b': '研究轮次',
         r'\binput_consumption\b': '输入消费', r'\biteration_artifact\b': '迭代产物',
+        r'\beligible_count\b': '合格数量', r'\bresearch_succeeded\b': '研究目标达成',
+        r'\baction_model\-?turn\b': '模型执行预算', r'\bbudget\s+exhausted\b': '预算用尽',
+        r'\bpytest\b': '测试', r'\badmitted\s+inputs\b': '允许输入清单',
+        r'\beligible_inputs\b': '允许输入', r'\btest_metrics\b': '测试指标',
+        r'\bround_goal\b': '本轮目标', r'\bnext_round_goal\b': '下一轮目标',
         r'\blearning_effect\b': '学习效果', r'\boutcome_verify\b': '结果核验',
         r'\bself_improvement_cycle\b': '系统自进化流程',
         r'\blearning_improvement_cycle\b': '主动学习流程',
@@ -77,6 +87,11 @@ def sanitize_message(text: str) -> str:
     result = re.sub(r'第\s*\d+\s*/\s*\d+\s*步', '[进度]', result)
     result = re.sub(r'\bstep\s+\d+\s*/\s*\d+\b', '[进度]', result, flags=re.IGNORECASE)
     
+    # 反引号代码片段折叠（消息里的代码细节对用户无价值，且常被截断成残缺词如 nd(file)/ed）
+    result = re.sub(r'`[^`\n]{1,160}`', '程序片段', result)
+    # 重复词修复（如"输入输入审核规则""审核审核"）
+    result = re.sub(r'(输入|审核|结果|数据|流程|步骤){2,}', r'\1', result)
+
     # 过滤 Job ID、Flow ID
     result = re.sub(r'job_[a-f0-9]{8,}', '[任务]', result)
     result = re.sub(r'flow_[a-f0-9]{8,}', '[流程]', result)

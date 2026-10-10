@@ -1364,6 +1364,202 @@ def _hard_gated_candidate(ctx, params, frozen):
     }
 
 
+
+# ---- candidate quality (2026-10-10): callers map / file-role map / static check ----
+_FILE_ROLE_HINT = """
+[file_role_map] 事件职责边界（决定 edits 应落在哪个文件）：
+- partner/events/*.py = 单个事件处理单元：实现 handler 逻辑并注册进 _HANDLERS；事件内部的状态读写在此。
+- partner/event_flows/*.py = 流程编排：按业务顺序组合事件节点，决定节点输入输出流转；跨事件的状态协调、预算/路由/分支控制在此。
+- 若缺陷是"某 handler 内部逻辑错误"，改对应 partner/events/ 文件；若缺陷是"跨事件编排/预算传递/路由决策"，改 partner/event_flows/ 文件。
+- 禁止把跨事件编排逻辑塞进单个事件 handler（会改变其他 flow 引用该事件时的行为）。
+"""
+
+
+def _callers_map(repo: str, target_files: list[str]) -> dict:
+    """For each target file/function, list where it is referenced (registry,
+    flows, tests) with line numbers — so the candidate never breaks a caller."""
+    repo = str(repo or '')
+    if not repo:
+        return {}
+    callers: dict[str, dict[str, list[str]]] = {}
+    for rel in target_files or []:
+        p = Path(repo) / rel
+        if not p.is_file():
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding='utf-8'))
+        except SyntaxError:
+            continue
+        fns = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fns[node.name] = []
+        if fns:
+            callers[rel] = fns
+    if not callers:
+        return {}
+    roots = [Path(repo) / 'partner' / 'events', Path(repo) / 'partner' / 'event_flows',
+             Path(repo) / 'benchmark', Path(repo) / 'scripts']
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob('*.py')):
+            try:
+                txt = p.read_text(encoding='utf-8')
+            except Exception:
+                continue
+            try:
+                relp = str(p.relative_to(repo))
+            except ValueError:
+                continue
+            for rel, fns in callers.items():
+                for fname in fns:
+                    if len(fns[fname]) >= 4:
+                        continue
+                    if fname in txt:
+                        for i, line in enumerate(txt.splitlines(), 1):
+                            if fname in line:
+                                fns[fname].append(f'{relp}:{i}: {line.strip()[:100]}')
+                                if len(fns[fname]) >= 4:
+                                    break
+    return {rel: {fn: locs[:4] for fn, locs in fns.items()} for rel, fns in callers.items()}
+
+
+def _undefined_names(file_src: str, new_src: str) -> list[str]:
+    """Names loaded in `new_src` that are not defined anywhere in `file_src`
+    (module level, function defs, args, assignments, imports) and are not
+    builtins.  Used as a deterministic NameError-class gate."""
+    defined: set[str] = set()
+    try:
+        tree = ast.parse(file_src)
+    except SyntaxError:
+        return []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined.add(node.name)
+            for a in list(node.args.args) + list(node.args.kwonlyargs):
+                defined.add(a.arg)
+            if node.args.vararg:
+                defined.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                defined.add(node.args.kwarg.arg)
+            for stmt in ast.walk(node):
+                if isinstance(stmt, ast.Assign):
+                    for t in stmt.targets:
+                        for n in ast.walk(t):
+                            if isinstance(n, ast.Name):
+                                defined.add(n.id)
+                elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                    for al in stmt.names:
+                        defined.add(al.asname or al.name.split('.')[0])
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        defined.add(n.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for al in node.names:
+                defined.add(al.asname or al.name.split('.')[0])
+        elif isinstance(node, ast.ClassDef):
+            defined.add(node.name)
+        elif isinstance(node, (ast.ExceptHandler, ast.With)):
+            if isinstance(node, ast.ExceptHandler) and node.name:
+                defined.add(node.name)
+    used: set[str] = set()
+    try:
+        nt = ast.parse(new_src)
+    except SyntaxError:
+        return []
+    for node in ast.walk(nt):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used.add(node.id)
+    built = set(dir(builtins))
+    return sorted(u for u in used if u not in defined and u not in built and not u.startswith('_'))
+
+
+def _candidate_static_check(repo: str, edits: list[dict]) -> list[str]:
+    """Deterministic gate run right after generation (before critic):
+    syntax validity, old-snippet uniqueness, unresolved symbols."""
+    problems: list[str] = []
+    for i, e in enumerate(edits or []):
+        path = str(e.get('path') or '')
+        full = Path(str(repo)) / path
+        if not full.is_file():
+            problems.append(f'edit[{i}] path 不存在或不在 target_files: {path}')
+            continue
+        try:
+            file_src = full.read_text(encoding='utf-8')
+        except Exception as ex:
+            problems.append(f'edit[{i}] 无法读取 {path}: {ex}')
+            continue
+        old = str(e.get('old') or '')
+        new = str(e.get('new') or '')
+        try:
+            compile(new, path, 'exec')
+        except SyntaxError as ex:
+            problems.append(f'edit[{i}] {path} 替换内容语法错误: {ex}')
+        if old and old not in file_src:
+            problems.append(f'edit[{i}] old 片段在 {path} 中不存在（必须逐字复制当前源码）')
+        if old and old in file_src and file_src.count(old) > 1:
+            problems.append(f'edit[{i}] old 片段在 {path} 中出现 {file_src.count(old)} 次，不唯一')
+        for name in _undefined_names(file_src, new):
+            problems.append(f'edit[{i}] 引用了 {path} 中未定义的名字: {name}')
+    return problems
+
+
+def _candidate_contract_hint(callers_map: dict) -> str:
+    hint = """
+[contract_hard_rules] 必须遵守：
+- 不得删除/重命名/改变签名任何被 _HANDLERS 注册、event_flow 引用、benchmark 测试直接调用的函数或事件；若必须调整调用契约，先在 reason 中列出全部调用方并同步更新其调用，且 edits 必须覆盖所有调用方文件。
+- edits.path 必须属于 design.target_files（不得改其他文件）。
+- 每次 attempt 只修一个根因问题；优先最小 diff。
+- 新引用的名字必须在同一文件的 old 源码中已定义（顶层 def/import/赋值/函数参数），否则会被确定性静态检查拦截。
+"""
+    if callers_map:
+        hint += '\n[callers] 被修改文件函数的引用点（改动前必读，勿破坏调用方）：\n' + json.dumps(callers_map, ensure_ascii=False)[:12000]
+    return hint
+
+
+def _ask_candidate_checked(ctx, params, instructions, payload, required, frozen):
+    """ask() plus deterministic static self-check and ONE LLM retry when the
+    first generated edits fail the static gate (syntax/old-uniqueness/
+    unresolved-symbol).  The retry prompt carries the exact machine problems."""
+    path = directory(ctx) / (params['node_id'] + '.json')
+    if path.exists():
+        return result(read(path), '复用已保存的同一自进化节点结果', [str(path)])
+    base = ('你负责Partner自身机制的调查与改进，业务任务失败不自动意味着框架有bug。'
+            '明确区分用户要求、观测事实、历史说法、假设和未知。关键结论必须引用给定证据或当前源码。'
+            '你可以提出方案与测试，不能伪造执行结果或降低验收门。'
+            '症状相似不等于根因相同；没有证据不要强行套用旧修复案例。只输出完整JSON。\n'
+            + instructions + '\n真实输入=' + json.dumps(payload, ensure_ascii=False))
+
+    def _run(prompt, tag):
+        (directory(ctx)).mkdir(parents=True, exist_ok=True)
+        (directory(ctx) / (params['node_id'] + f'.{tag}.prompt.txt')).write_text(prompt)
+        raw, usage = call_model(ctx, purpose='autoevolution_' + params['node_id'], prompt=prompt)
+        (directory(ctx) / (params['node_id'] + f'.{tag}.response.raw')).write_text(raw)
+        value = json_object(raw)
+        if any(k not in value for k in required):
+            raise ValueError('required autonomous output missing: ' + str(required))
+        return value, usage
+
+    repo = str(frozen.get('repo') or '')
+    value, usage = _run(base, 'v1')
+    problems = _candidate_static_check(repo, value.get('edits') or [])
+    if problems:
+        retry = base + '\n\n[deterministic_static_check] 上一版补丁未通过机器静态检查（不是模型偏好）：' + json.dumps(problems, ensure_ascii=False) + '\n必须逐条修复这些具体问题后重新输出完整 edits；old 必须仍从 source 逐字复制。'
+        value2, usage2 = _run(retry, 'v2')
+        for k in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+            usage[k] = int(usage.get(k) or 0) + int(usage2.get(k) or 0)
+        problems2 = _candidate_static_check(repo, value2.get('edits') or [])
+        value = value2
+        value['static_check'] = {'passed': not problems2, 'problems': problems2 or problems, 'retried': True}
+    else:
+        value['static_check'] = {'passed': True, 'problems': [], 'retried': False}
+    return persist(ctx, params, value, usage=usage)
+
+
+
 def candidate(ctx, params):
     skipped=skip(ctx,params)
     if skipped:return skipped
@@ -1466,7 +1662,9 @@ def candidate(ctx, params):
             + '\ncausal_hypothesis 必须解释该错误；edits 必须直接修复错误触发点（例如运行时异常'
             + 'AttributeError/TypeError/KeyError 时，edits 需覆盖抛错的确切代码行及其调用方契约）；'
             + '禁止只写无关重构或泛泛而谈。')
-    return ask(ctx,params,
+    callers_map = _callers_map(str(frozen.get('repo') or ''),
+                          list((saved(ctx, 'design') or {}).get('target_files') or []))
+    return _ask_candidate_checked(ctx, params,
         '实现已设计的修复。输出 {"candidate_id":"...","causal_hypothesis":"...",'
         '"edits":[{"path":"partner/...py","old":"当前源码中唯一存在的精确完整片段","new":"替换内容"}],'
         '"expectation_mapping":[],"reason":"..."}。最多修改3个源码文件；不得修改测试、验收门或保护层。'
@@ -1475,8 +1673,9 @@ def candidate(ctx, params):
         + '[attempt=2 关键] 输入 previous_baseline / previous_candidate_run / previous_compare 包含上一 attempt 真跑的数据（cases 列表/failed 字段/expectation_results），必须根据这些真实失败 case 改 patch 而不是凭猜测。'
 '[attempt=2 关键] expectation_results 中每个 unmet 的 test_name 是失败的具体期望（test_memory_update_kind_semantic_differentiation 要求 Jaccard<0.6）；patch 必须让该 test 从 baseline_failed=true + candidate_passed=false 变成 candidate_passed=true，且 reproduction_steps 中描述的真实调用契约不能在改后丢失。'
         + revise_hint
-        + freeze_failure_hint,
-        {'design':saved(ctx,'design'),'source':source,'test_contract':saved(ctx,'tests'),
+        + freeze_failure_hint
+        + _candidate_contract_hint(callers_map),
+        {'design':saved(ctx,'design'),'source':source,'callers':callers_map,'test_contract':saved(ctx,'tests'),
          'previous_analysis':saved(ctx,'analyze_1') if params['attempt']==2 else {},
          'previous_candidate':saved(ctx,'candidate_1') if params['attempt']==2 else {},
          'previous_critic': prev_critic,
@@ -2320,6 +2519,39 @@ def _engine_round_message(engine_id: str, round_no: int, mode: str) -> str:
             "发现问题则修复落地；完成后汇报本轮做了什么、改了什么、验证结果。")
 
 
+
+def _engine_llm_stop(ctx, state, decision, engine_dir):
+    """LLM-judged early stop for the engine loop (2026-10-10).  Called only
+    after >=2 rounds; deterministic gates (budget, user stop) remain the
+    safety net.  Stop reasons must be evidence-grounded: gaps resolved,
+    unresolvable, or diminishing returns.  Never extends the loop."""
+    try:
+        ws = Path(str(getattr(ctx, 'workspace', '') or ''))
+        job_id = str(getattr(ctx, 'job_id', '') or '')
+        gap = {}
+        if job_id:
+            p = ws / 'state/cycles' / job_id / 'gap_report.json'
+            if p.is_file():
+                gap = json.loads(p.read_text(encoding='utf-8'))
+        recent = (state.get('history') or [])[-4:]
+        prompt = ('你是自进化发动机的续跑仲裁。根据最近轮次的真实结果判断是否应提前停止。'
+                  '停止理由只能来自证据：剩余缺口已归零/不可解/收益明显递减/继续会重复同一失败模式。'
+                  '只要仍有可解的实质缺口且最近有实质推进，就应继续。输出 JSON {"continue":true/false,"reason":"..."}。'
+                  '\n剩余缺口=' + json.dumps(gap, ensure_ascii=False)[:6000]
+                  + '\n最近轮次=' + json.dumps(recent, ensure_ascii=False)[:6000]
+                  + '\n本轮决策=' + json.dumps({k: decision.get(k) for k in
+                    ('decision', 'production_effective', 'selected_attempt')}, ensure_ascii=False)[:2000])
+        raw, _ = call_model(ctx, purpose='engine_continue_judge', prompt=prompt)
+        val = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(val, dict) and val.get('continue') is False:
+            state['llm_stop_reason'] = str(val.get('reason') or '')[:200]
+            return True
+        return False
+    except Exception:
+        return False
+
+
+
 def engine_continue(ctx, params):
     """Engine loop gate after record.
 
@@ -2351,6 +2583,13 @@ def engine_continue(ctx, params):
     decision = saved(ctx, 'decision') or {}
     rounds_run = int(state.get('rounds_run') or 0) + 1
     production = bool(record.get('production_effective'))
+    _decision_raw = decision.get('decision')
+    _decision_str = str(_decision_raw.get('decision') if isinstance(_decision_raw, dict) else _decision_raw or '')
+    substantive = bool(production or _decision_str in ('promote', 'accepted', 'validated_promote')
+                       or record.get('qualified'))
+    state['last_substantive'] = substantive
+    if substantive:
+        state['last_substantive_round'] = rounds_run
     state['rounds_run'] = rounds_run
     state['history'].append({
         'round': rounds_run, 'job_id': str(getattr(ctx, 'job_id', '')),
@@ -2371,13 +2610,17 @@ def engine_continue(ctx, params):
     elif rounds_run >= max_rounds:
         state['stopped'] = True
         state['stop_reason'] = f'budget reached (max_rounds={max_rounds})'
-    # Gap-driven convergence (2026-10-10): the engine keeps turning while
-    # evidence gaps remain and budget allows.  "No improvement" is only
-    # declared after 3 consecutive rounds without production effect, so a
-    # single inconclusive/rejected round no longer stalls the engine.
-    elif rounds_run >= 3 and (rounds_run - int(state.get('last_promoted_round') or 0)) >= 3:
+    # LLM-judged stop (2026-10-10): after 2 rounds the model may shorten the
+    # loop when remaining gaps are resolved/unresolvable or returns diminish.
+    elif rounds_run >= 2 and _engine_llm_stop(ctx, state, decision, engine_dir):
         state['stopped'] = True
-        state['stop_reason'] = 'no improvement for 3 consecutive rounds'
+        state['stop_reason'] = 'llm judged stop: ' + str(state.get('llm_stop_reason') or '')[:140]
+    # Gap-driven convergence: 2 consecutive rounds WITHOUT substantive progress
+    # stop the engine (a single inconclusive round no longer stalls it).
+    elif rounds_run >= 2 and not state.get('last_substantive') and (
+            rounds_run - int(state.get('last_substantive_round') or 0)) >= 2:
+        state['stopped'] = True
+        state['stop_reason'] = 'no substantive progress for 2 consecutive rounds'
     # continue: submit the next round in the current mode
     next_job = None
     if not state.get('stopped'):

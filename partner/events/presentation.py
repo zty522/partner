@@ -1021,11 +1021,14 @@ def visual_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         # Default-off indicator charts: bar/column/pie/line replicating table
         # numbers add no user value unless the model supplied a user-facing
         # keep_reason.  Users explicitly asked to drop these repeated charts.
-        if plan.get('kind') in ('bar', 'column', 'pie', 'line') and not str(plan.get('keep_reason') or '').strip():
-            continue
+        _reason = str(plan.get('keep_reason') or '').strip()
+        if plan.get('kind') in ('bar', 'column', 'pie', 'line'):
+            if not _reason or not re.search(r'对比|差异|趋势|显著|结构|变化|提升|下降|改善', _reason):
+                continue
         if any(tok in key for tok in (
                 'elapsed', 'duration', 'index', 'token', 'byte', 'coverage',
                 'consumed', 'improved', 'verified', 'status', 'is_', 'bool', 'count',
+                'round', 'distribution', '分布', '原始记录', 'assessment',
                 '合格输入', '合格数量', '指标对比', '对比')):
             continue
         if any(tok in refs for tok in (
@@ -1170,6 +1173,48 @@ def visual_generate(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                 "invalid_images": errors,
                                 "rule": "domain Event owns scientific/browser image generation"},
             "summary": f"收集 {len(images)} 张真实项目图；未用装饰图补数"}
+
+
+
+def _fallback_learning_line(ctx: Any, outputs: dict[str, Any]) -> str:
+    """Fallback-report '做了什么' learning line, sourced from REAL learning
+    records (learning_summary.json / learning_after_*.json) instead of guessing
+    from uncertainty keywords.  Never claims learning that did not happen."""
+    lines: list[str] = []
+    try:
+        ls = read(folder(ctx) / 'learning_summary.json') or {}
+        if isinstance(ls, dict):
+            run_count = int(ls.get('run_count') or 0)
+            urls = [str(u) for u in (ls.get('source_urls') or []) if str(u).strip()]
+            claims = ls.get('claims') or []
+            if isinstance(claims, list):
+                claims = [str(c) for c in claims if str(c).strip()]
+            elif isinstance(claims, str):
+                claims = [claims]
+            if run_count > 0:
+                parts = []
+                if urls:
+                    parts.append('查阅了 ' + '、'.join(urls[:3]))
+                if claims:
+                    parts.append('，学习了「' + claims[0][:120] + '」')
+                head = '本轮进行了主动学习：' + ''.join(parts) + '。'
+                consumed = bool(ls.get('consumed'))
+                improved = bool(ls.get('improved'))
+                if improved:
+                    head += '学习成果已被后续环节采用并形成可验证的改善。'
+                elif consumed:
+                    head += '学习成果已被后续环节使用；是否形成指标改善由下游验证确认。'
+                else:
+                    head += '学习成果尚未被后续环节使用，暂不声称已产生改善。'
+                lines.append(head)
+            else:
+                lines.append('本轮未执行主动学习（run_count=0），未形成可验证的改善。')
+        else:
+            lines.append('本轮未执行主动学习，未形成可验证的改善。')
+    except Exception:
+        lines = lines or ['本轮未执行主动学习，未形成可验证的改善。']
+    return '\n'.join(lines)
+
 
 
 def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -1564,10 +1609,7 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         if assets:
             lines += ['', '### 真实结果图', '']
             lines += [f"[[figure:{row['id']}]]" for row in assets if row.get('id')]
-        verified_text=' '.join(str(item.get('claim') or '') for item in verified if isinstance(item,dict))
-        has_uncertainty=bool(re.search(r'bootstrap|置信区间|\bCI\b',verified_text,re.I))
-        learning_effect='本轮已形成可核验的主动学习记录与后续使用证据，效果归因限于本次任务。' if has_uncertainty else (
-            '本轮没有可核验的主动学习记录，未形成可验证的改善。')
+        learning_effect = _fallback_learning_line(ctx, outputs)
         next_step=('当前结果与不确定性估计已完成；下一步应在独立数据集上验证泛化。'
                    if has_uncertainty else
                    '下一步应在真实项目数据上继续推进，再评估是否采纳当前候选改动。')

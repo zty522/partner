@@ -499,7 +499,10 @@ def synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 def adoption_candidate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     return _llm(ctx, params, "learning_adoption_candidate",
-        "把新知识转成一个最小、隔离、可回滚的项目动作 Candidate。字段 event_type,parameters,hypothesis,baseline,success_criteria,rollback。")
+        "把新知识转成一个最小、隔离、可回滚的项目动作 Candidate。字段 event_type,parameters,hypothesis,baseline,success_criteria,rollback。"
+        "【落地硬规则】parameters 必须包含会在本轮/下轮真实执行的 operation 与 target_files（指向真实文件路径），"
+        "落地方式必须是产生实质产物：修改真实 corpus/源码/数据文件、写出可复用的生成器或工具脚本、产出新的可验证度量文件；"
+        "禁止只构造消费回执（input_consumption/eligibility 类 JSON）充当学习落地——那会被下游验证判为未实质推进。")
 
 
 def matched_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
