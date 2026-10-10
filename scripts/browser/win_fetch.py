@@ -109,6 +109,39 @@ def _main() -> int:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
+            # 0) search mode: return rendered result links instead of body
+            search_mode = "__search_mode=1" in url
+            if search_mode:
+                page.wait_for_timeout(2500)
+                search_results = []
+                try:
+                    search_results = page.evaluate(
+                        """() => Array.from(document.querySelectorAll('h3 a[href], .news-list a, .txt-box h3 a, ul.news-list li h3 a'))
+                            .map(a => ({title: (a.innerText || a.textContent || '').trim(), url: a.href}))
+                            .filter(x => x.title && x.url)"""
+                    )
+                except Exception:
+                    pass
+                if not search_results:
+                    try:
+                        search_results = page.evaluate(
+                            """() => Array.from(document.querySelectorAll('a[href]'))
+                                .map(a => ({title: (a.innerText || a.textContent || '').trim(), url: a.href}))
+                                .filter(x => x.title && x.url && /^https?:\\/\\//.test(x.url))"""
+                        )
+                    except Exception:
+                        pass
+                try:
+                    page_title = page.title() or ""
+                except Exception:
+                    page_title = ""
+                ctx.close()
+                sys.stdout.write(json.dumps({
+                    "status": "search_results", "search_results": search_results[:30],
+                    "title": page_title, "text": "",
+                    "media_urls": [], "screenshot_path": "", "reason": "", "url": url},
+                    ensure_ascii=False))
+                return 0
             # 1) try to wait for an XHS body selector to appear
             body_text, body_sel = "", ""
             for _ in range(3):

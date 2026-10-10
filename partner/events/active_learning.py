@@ -215,8 +215,6 @@ def _xhs_search_fallback(ctx: Any, url: str, query_texts: list[str],
     original query so provenance stays auditable.
     """
     adapter = getattr(ctx, "adapter", None)
-    if adapter is None or not hasattr(adapter, "search_web"):
-        return None, {}
     candidates: list[str] = []
     for row in query_texts:
         row = str(row).strip()
@@ -229,39 +227,357 @@ def _xhs_search_fallback(ctx: Any, url: str, query_texts: list[str],
     if not candidates:
         return None, {}
     from partner.runtime.source_evidence import fetch, read_verified
+    variants = _search_variants(candidates)
     seen: set[str] = set()
     attempts: list[dict] = []
-    for query in candidates[:2]:
-        try:
-            rows = adapter.search_web(query)[:6]
-        except Exception:
-            rows = []
-        for row in rows:
-            hit_url = str(getattr(row, 'url', '') or '').strip()
+    # 1) adapter.search_web (LLM/agent-backed) if available
+    if adapter is not None and hasattr(adapter, "search_web"):
+        for query in variants[:2]:
+            try:
+                rows = adapter.search_web(query)[:6]
+            except Exception:
+                rows = []
+            for row in rows:
+                hit_url = str(getattr(row, 'url', '') or '').strip()
+                if (not hit_url.startswith(('https://', 'http://')) or hit_url in seen
+                        or any(d in hit_url for d in ('xiaohongshu.com', 'xhslink.com',
+                                                      'bilibili.com', 'b23.tv'))):
+                    continue
+                seen.add(hit_url)
+                attempts.append({'url': hit_url,
+                                 'title': str(getattr(row, 'title', '') or ''),
+                                 'query': query})
+    # 2) deterministic Bing/Sogou HTML search (WSL-reachable; the DDG
+    #    instant-answer API is not a real web search and returns no results)
+    for query in variants[:2]:
+        for hit in _web_search_urls(query, limit=8):
+            hit_url = str(hit.get('url') or '').strip()
             if (not hit_url.startswith(('https://', 'http://')) or hit_url in seen
                     or any(d in hit_url for d in ('xiaohongshu.com', 'xhslink.com',
                                                   'bilibili.com', 'b23.tv'))):
                 continue
             seen.add(hit_url)
             attempts.append({'url': hit_url,
-                             'title': str(getattr(row, 'title', '') or ''),
+                             'title': str(hit.get('title') or ''),
                              'query': query})
-    for attempt in attempts[:4]:
+    # Prefer candidates whose title overlaps the original query: mirrors that
+    # paraphrase the queried title are far more likely to carry the full text
+    # than brand homepages / unrelated news.
+    gate = re.sub(r'\s+', '', (candidates[0] or '').lower())
+    for a in attempts:
+        t = re.sub(r'[\s,，。.?？!！:：;；\-_~～()（）"“”\'’]+', '',
+                   str(a.get('title') or '').lower())
+        if gate and t:
+            a['_overlap'] = len(set(gate) & set(t)) / len(set(gate))
+        else:
+            a['_overlap'] = 0.0
+    attempts.sort(key=lambda a: a.get('_overlap', 0.0), reverse=True)
+    for attempt in attempts[:8]:
+        fetched_text: str = ""
+        receipt = None
+        # 1) plain HTTP reader (works for direct article pages)
         try:
             receipt = fetch(attempt['url'], directory)
             text = read_verified(receipt, limit=20000, query=attempt['query'])
-            if len(str(text.get('text') or '').strip()) < 200:
-                continue
-            receipt = dict(receipt)
-            receipt['source_kind'] = 'search_fallback'
-            receipt['search_query'] = attempt['query']
-            receipt['search_title'] = str(attempt['title'] or '')[:200]
-            receipt['original_url'] = url
-            return receipt, {'query': attempt['query'], 'matched': attempt['url'],
-                             'title': str(attempt['title'] or '')[:200]}
+            fetched_text = str(text.get('text') or '').strip()
         except Exception:
+            pass
+        # 2) login-state Windows browser for Sogou redirect links / WeChat
+        #    articles (httpx cannot follow Sogou's JS/cookie jumps)
+        if len(fetched_text) < 200:
+            try:
+                win = _win_browser_fetch(attempt['url'])
+                if str(win.get('status')) in ('text_available', 'metadata_only'):
+                    fetched_text = str(win.get('text') or '').strip()
+                    if len(fetched_text) >= 200:
+                        import hashlib as _hl
+                        folder = directory / _hl.sha256(attempt['url'].encode()).hexdigest()[:20]
+                        folder.mkdir(parents=True, exist_ok=True)
+                        body = fetched_text.encode('utf-8')
+                        raw_path, txt_path = folder / 'source.bin', folder / 'source.txt'
+                        raw_path.write_bytes(body)
+                        txt_path.write_text(fetched_text, encoding='utf-8')
+                        from partner.runtime.action_execution import write_json
+                        media = [str(m) for m in (win.get('media_urls') or [])
+                                 if str(m).startswith(('http://', 'https://'))][:40]
+                        receipt = {'url': attempt['url'], 'final_url': attempt['url'],
+                                   'content_type': 'text/html(win-browser)',
+                                   'bytes': len(body), 'raw_path': str(raw_path),
+                                   'text_path': str(txt_path),
+                                   'sha256': _hl.sha256(body).hexdigest(),
+                                   'text_sha256': _hl.sha256(body).hexdigest(),
+                                   'text_chars': len(fetched_text),
+                                   'browser_channel': True,
+                                   'title': str(win.get('title') or ''),
+                                   'media_urls': media}
+                        write_json(folder / 'receipt.json', receipt)
+            except Exception:
+                pass
+        if len(fetched_text) < 200 or receipt is None:
             continue
-    return None, {'searched': candidates, 'attempted': len(attempts)}
+        # Relevance gate.  (1) Latin entities from the ORIGINAL query are a
+        # hard gate: a mirror that never mentions any queried latin entity is
+        # rejected.  (2) The search-result title must share >= 50% of the
+        # distinct characters of the original query — this rejects brand
+        # homepages (title "OpenAI") and unrelated news while accepting
+        # mirrors whose title paraphrases the queried title.
+        gate_query = candidates[0]
+        lowered = fetched_text.lower()
+        latin_entities = re.findall(r'[A-Za-z][A-Za-z0-9._-]{2,}', gate_query)
+        latin_hits = sum(1 for w in latin_entities if w.lower() in lowered)
+        if latin_entities and latin_hits == 0:
+            continue
+        norm_q = set(re.sub(r'\s+', '', gate_query.lower()))
+        norm_t = set(re.sub(r'[\s,，。.?？!！:：;；\-_~～()（）"“”\'’]+', '',
+                            str(attempt.get('title') or '').lower()))
+        if norm_q and norm_t:
+            overlap = len(norm_q & norm_t) / len(norm_q)
+            if overlap < 0.5:
+                continue
+        receipt = dict(receipt)
+        receipt['source_kind'] = 'search_fallback'
+        receipt['search_query'] = attempt['query']
+        receipt['search_title'] = str(attempt['title'] or '')[:200]
+        receipt['original_url'] = url
+        return receipt, {'query': attempt['query'], 'matched': attempt['url'],
+                         'title': str(attempt['title'] or '')[:200]}
+    return None, {'searched': variants, 'attempted': len(attempts)}
+
+
+def _query_keywords(query: str) -> set[str]:
+    """Extract discriminating keywords from a Chinese/English query for the
+    relevance gate: latin tokens len>=3 plus CJK runs len>=4."""
+    kws: set[str] = set()
+    for token in re.findall(r'[A-Za-z][A-Za-z0-9._-]{2,}', query):
+        kws.add(token)
+    for run in re.findall(r'[\u4e00-\u9fff]{4,}', query):
+        kws.add(run)
+    return kws
+
+
+def _search_variants(query_texts: list[str]) -> list[str]:
+    """Build up to 4 search-friendly query variants from the plan queries.
+
+    Exact-quoted and entity-augmented variants are tried before the raw query
+    because Bing tokenises bare Chinese queries around the first entity (e.g.
+    "OpenAI …" returns the OpenAI homepage)."""
+    base = ' '.join(query_texts[:2]).strip()
+    variants: list[str] = []
+    first = (query_texts[0] or '').strip() if query_texts else ''
+    if base and base not in variants:
+        variants.append(base)
+    if first:
+        entities = re.findall(r'[A-Za-z][A-Za-z0-9._-]{2,}', first)
+        numbers = re.findall(r'[\d]{2,}(?: ?亿|亿)?', first)
+        topic = ''
+        m = re.search(r'([\u4e00-\u9fff]{4,8}Jev)|(Jev[\u4e00-\u9fff]{4,8})', first)
+        if m:
+            topic = m.group(0)
+        parts = entities[:3] + numbers[:2]
+        if topic:
+            parts.append(topic)
+        if parts:
+            aug = ' '.join(dict.fromkeys(parts))
+            if aug and aug not in variants:
+                variants.append(aug)
+            # Jev-first variant: search engines brand-hijack queries that
+            # start with "OpenAI", returning official homepages; putting the
+            # rare entity first yields genuine analysis mirrors.
+            jf = [p for p in parts if 'Jev' in p or 'jev' in p] + [p for p in parts if 'Jev' not in p and 'jev' not in p]
+            if jf:
+                jf_q = ' '.join(jf)
+                if jf_q not in variants:
+                    variants.append(jf_q)
+    if first and len(first) >= 6:
+        quoted = '"' + first + '"'
+        if quoted not in variants:
+            variants.append(quoted)
+    return variants[:4]
+
+
+_SEARCH_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _web_search_urls(query: str, limit: int = 6) -> list[dict]:
+    """Deterministic web search via httpx with engine rotation and cooling.
+
+    Search engines rate-limit anonymous scraping and degrade repeated queries
+    (word-splitting to the brand term).  The FIRST request in a fresh session
+    is the most reliable, so we try Sogou, cool down, try Bing, cool down,
+    then retry Sogou once.  Results are cached for 10 minutes per query so
+    repeated fallback calls do not re-trigger rate limits.  Returns
+    [{'url','title'}] deduplicated."""
+    import time as _time
+    now = _time.time()
+    cached = _SEARCH_CACHE.get(query)
+    if cached and now - cached[0] < 600:
+        return cached[1]
+    # 0) Sogou WeChat-article search: by far the most reliable channel for
+    #    Chinese news/analysis titles (it returns the mp.weixin.qq.com
+    #    redirect directly, which win_fetch renders with login state).
+    hits = _sogou_weixin_search(query, limit=limit)
+    if len(hits) < 1 or _weixin_hits_relevant(hits, query) < 1:
+        # cookie-less httpx results degrade to unrelated headlines; fall back
+        # to the real-browser search page (stable, login-state session).
+        hits = _sogou_weixin_search_win(query, limit=limit)
+    if len(hits) >= 1:
+        _SEARCH_CACHE[query] = (now, hits)
+        return hits
+    _time.sleep(6)
+    hits = _sogou_search(query, limit=limit)
+    if len(hits) >= 2:
+        _SEARCH_CACHE[query] = (now, hits)
+        return hits
+    _time.sleep(8)
+    hits += _bing_search(query, limit=limit)
+    if len(hits) >= 2:
+        _SEARCH_CACHE[query] = (now, hits)
+        return hits
+    _time.sleep(8)
+    hits += _sogou_search(query, limit=limit)
+    seen: set = set()
+    out: list[dict] = []
+    for h in hits:
+        if h['url'] not in seen:
+            out.append(h)
+            seen.add(h['url'])
+        if len(out) >= limit:
+            break
+    _SEARCH_CACHE[query] = (now, out)
+    return out
+
+
+def _weixin_hits_relevant(hits: list[dict], query: str) -> int:
+    """Count how many WeChat hits overlap the query by >= 40% of distinct
+    characters — cookie-less searches sometimes return unrelated headlines."""
+    gate = set(re.sub(r'\s+', '', query.lower()))
+    if not gate:
+        return len(hits)
+    n = 0
+    for h in hits:
+        t = set(re.sub(r'[\s,，。.?？!！:：;；\-_~～()（）"“”\'’]+', '',
+                       str(h.get('title') or '').lower()))
+        if t and len(gate & t) / len(gate) >= 0.4:
+            n += 1
+    return n
+
+
+def _sogou_weixin_search_win(query: str, limit: int = 6) -> list[dict]:
+    """Search WeChat articles through the real Windows browser (login state,
+    stable results).  Returns /link?url=... redirect URLs whose targets are
+    mp.weixin.qq.com articles."""
+    import urllib.parse as _up
+    search_url = ('https://weixin.sogou.com/weixin?type=2&ie=utf8&s_from=input&query='
+                  + _up.quote(query) + '&__search_mode=1')
+    results: list[dict] = []
+    try:
+        win = _win_browser_fetch(search_url)
+        rows = win.get('search_results') or []
+        for row in rows[:limit * 3]:
+            hit_url = str(row.get('url') or '').strip()
+            title = str(row.get('title') or '').strip()
+            if not hit_url.startswith(('http://', 'https://')):
+                continue
+            if 'weixin.sogou.com/link' not in hit_url and 'mp.weixin.qq.com' not in hit_url:
+                continue
+            results.append({'url': hit_url, 'title': title[:200]})
+            if len(results) >= limit:
+                break
+    except Exception:
+        pass
+    return results
+
+
+def _sogou_weixin_search(query: str, limit: int = 6) -> list[dict]:
+    """Search WeChat public-account articles via weixin.sogou.com.
+
+    Returns /link?url=... redirect URLs (resolved against weixin.sogou.com)
+    that lead to mp.weixin.qq.com articles — the highest-quality Chinese
+    analysis mirror channel.  No cookies required; the plain reader can follow
+    the redirect only sometimes, so callers usually need win_fetch."""
+    import httpx as _httpx
+    results: list[dict] = []
+    try:
+        with _httpx.Client(timeout=15, follow_redirects=True, trust_env=False) as client:
+            resp = client.get('https://weixin.sogou.com/weixin',
+                              params={'type': 2, 'query': query, 'ie': 'utf8',
+                                      's_from': 'input'},
+                              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                     'AppleWebKit/537.36 Chrome/120 Safari/537.36'})
+        if resp.status_code != 200 or '请输入验证码' in resp.text or 'antispider' in resp.text:
+            return results
+        for m in re.finditer(r'<h3>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                             resp.text, re.S):
+            hit_url = m.group(1).strip()
+            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if hit_url.startswith('/'):
+                hit_url = 'https://weixin.sogou.com' + hit_url
+            if hit_url.startswith(('http://', 'https://')):
+                results.append({'url': hit_url, 'title': title[:200]})
+            if len(results) >= limit:
+                break
+    except Exception:
+        pass
+    return results
+
+
+def _sogou_search(query: str, limit: int = 6) -> list[dict]:
+    import httpx as _httpx
+    results: list[dict] = []
+    try:
+        with _httpx.Client(timeout=12, follow_redirects=True, trust_env=False) as client:
+            resp = client.get('https://www.sogou.com/web',
+                              params={'query': query},
+                              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                     'AppleWebKit/537.36 Chrome/120 Safari/537.36'})
+        if resp.status_code != 200 or '安全验证' in resp.text or 'antispider' in resp.text:
+            return results
+        for m in re.finditer(r'<h3[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                             resp.text, re.S):
+            hit_url = m.group(1).strip().replace('&amp;', '&')
+            title = re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if hit_url.startswith('/'):
+                hit_url = 'https://www.sogou.com' + hit_url
+            if hit_url.startswith(('http://', 'https://')):
+                results.append({'url': hit_url, 'title': title[:200]})
+            if len(results) >= limit:
+                break
+    except Exception:
+        pass
+    return results
+
+
+def _bing_search(query: str, limit: int = 6) -> list[dict]:
+    import base64 as _b64
+    import httpx as _httpx
+    results: list[dict] = []
+    try:
+        with _httpx.Client(timeout=15, follow_redirects=True, trust_env=False) as client:
+            resp = client.get('https://www.bing.com/search',
+                              params={'q': query, 'mkt': 'zh-CN'},
+                              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                                                     'AppleWebKit/537.36 Chrome/120 Safari/537.36'})
+        if resp.status_code != 200:
+            return results
+        for m in re.finditer(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                             resp.text, re.S):
+            hit_url, title = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).strip()
+            if '/ck/a' in hit_url:
+                encoded = re.search(r'u=a1([A-Za-z0-9+/=]+)', hit_url)
+                if encoded:
+                    try:
+                        decoded = _b64.b64decode(encoded.group(1)).decode('utf-8', errors='ignore')
+                        if decoded.startswith(('http://', 'https://')):
+                            hit_url = decoded
+                    except Exception:
+                        pass
+            if hit_url.startswith(('http://', 'https://')):
+                results.append({'url': hit_url, 'title': title[:200]})
+            if len(results) >= limit:
+                break
+    except Exception:
+        pass
+    return results
 
 
 
@@ -453,7 +769,9 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 win = _win_browser_fetch(url)
                 status = str(win.get('status') or '')
                 text = str(win.get('text') or '')
-                if status in ('text_available', 'metadata_only') and len(text.strip()) >= 100:
+                title = str(win.get('title') or '')
+                has_meta = bool(title) or len(text.strip()) >= 40
+                if status in ('text_available', 'metadata_only') and has_meta:
                     import hashlib as _hl
                     folder = directory / _hl.sha256(url.encode()).hexdigest()[:20]
                     folder.mkdir(parents=True, exist_ok=True)
@@ -472,10 +790,23 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                'text_sha256': _hl.sha256(body).hexdigest(),
                                'text_chars': len(text), 'source_kind': kind,
                                'browser_channel': True,
-                               'title': str(win.get('title') or ''),
+                               'title': title,
                                'media_urls': media,
                                'screenshot': str(win.get('screenshot_path') or '')}
+                    if len(text.strip()) < 100:
+                        receipt['xhs_body_missing'] = True
                     write_json(folder / 'receipt.json', receipt)
+                    # Body too short (tags/comments only, e.g. long-image
+                    # notes): still try the open-web mirror for the full text.
+                    # On success the mirror receipt (full body) is the primary
+                    # evidence; the metadata receipt stays as provenance.
+                    if len(text.strip()) < 200:
+                        fb_receipt, fb_meta = _xhs_search_fallback(ctx, url, query_texts, directory)
+                        if fb_receipt is not None:
+                            downloaded.append(fb_receipt)
+                            continue
+                        receipt['xhs_fallback'] = {'query': str(fb_meta.get('searched') or '')[:200],
+                                                   'attempted': fb_meta.get('attempted', 0)}
                     downloaded.append(receipt)
                     continue
                 # Body missing / login-walled: search the open web for a mirror
@@ -484,6 +815,37 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 fb_receipt, fb_meta = _xhs_search_fallback(ctx, url, query_texts, directory)
                 if fb_receipt is not None:
                     downloaded.append(fb_receipt)
+                    continue
+                # No usable mirror: keep whatever metadata the browser got
+                # (title/tags/comment snippet) as a metadata receipt so read can
+                # still answer honestly about the note instead of dropping it.
+                if status in ('text_available', 'metadata_only') and (title or len(text.strip()) >= 10):
+                    import hashlib as _hl
+                    folder = directory / _hl.sha256(url.encode()).hexdigest()[:20]
+                    folder.mkdir(parents=True, exist_ok=True)
+                    body = text.encode('utf-8')
+                    raw_path, txt_path = folder / 'source.bin', folder / 'source.txt'
+                    raw_path.write_bytes(body)
+                    txt_path.write_text(text, encoding='utf-8')
+                    from partner.runtime.action_execution import write_json
+                    media = [str(m) for m in (win.get('media_urls') or [])
+                             if str(m).startswith(('http://', 'https://'))][:40]
+                    receipt = {'url': url, 'final_url': url,
+                               'content_type': 'text/html(win-browser)',
+                               'bytes': len(body), 'raw_path': str(raw_path),
+                               'text_path': str(txt_path),
+                               'sha256': _hl.sha256(body).hexdigest(),
+                               'text_sha256': _hl.sha256(body).hexdigest(),
+                               'text_chars': len(text), 'source_kind': kind,
+                               'browser_channel': True,
+                               'title': title,
+                               'media_urls': media,
+                               'xhs_body_missing': True,
+                               'xhs_fallback': {'query': str(fb_meta.get('searched') or '')[:200],
+                                                'attempted': fb_meta.get('attempted', 0)},
+                               'screenshot': str(win.get('screenshot_path') or '')}
+                    write_json(folder / 'receipt.json', receipt)
+                    downloaded.append(receipt)
                     continue
                 if status != 'fetch_failed':
                     failures.append({'url': url,
