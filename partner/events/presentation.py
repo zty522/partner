@@ -594,6 +594,50 @@ def message_deduplicate(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "summary": "与最近消息重复，本轮不再发送" if duplicate else "消息具有新的有效信息"}
 
 
+
+
+def _learning_material(flow_outputs: dict, budget: int = 12000) -> str:
+    """Aggregate genuinely retrieved/read/synthesized content for link-reading
+    flows (content_read_reply). Downstream events call this as a fallback so
+    reports and messages describe what was actually read instead of guessing."""
+    parts = []
+    budget = max(2000, int(budget))
+    syn = (flow_outputs.get('synthesize') or {}).get('semantic_output') or {}
+    findings = syn.get('findings') or []
+    if findings:
+        parts.append('【核心发现】' + json.dumps(findings, ensure_ascii=False)[:max(800, budget // 2)])
+    read = (flow_outputs.get('read') or {}).get('semantic_output') or {}
+    cards = read.get('borrowable_cards') or []
+    if cards:
+        concise = [{'source_title': c.get('source_title'),
+                    'core_idea': c.get('core_idea'),
+                    'key_method': c.get('key_method'),
+                    'model_usage': c.get('model_usage'),
+                    'transfer_points': c.get('transfer_points')}
+                   for c in cards if isinstance(c, dict)]
+        parts.append('【资料要点】' + json.dumps(concise, ensure_ascii=False)[:max(800, budget // 2)])
+    retr = (flow_outputs.get('retrieve') or {}).get('semantic_output') or {}
+    srcs = retr.get('sources') or []
+    if srcs:
+        parts.append('【已抓取来源】' + json.dumps(
+            [{k: s.get(k) for k in ('url', 'final_url', 'content_type', 'bytes', 'text_chars', 'source_kind')}
+             for s in srcs if isinstance(s, dict)], ensure_ascii=False)[:1500])
+    return '\n'.join(parts)
+
+
+
+def _learning_material_fallback(params: dict) -> str:
+    """Empty-safe append of learning material; returns '' when the flow did not
+    produce any retrieved content (so other flows are unaffected)."""
+    flow_outputs = params.get("flow_outputs") or {}
+    has_sources = bool((flow_outputs.get('retrieve') or {}).get('semantic_output')
+                       or (flow_outputs.get('read') or {}).get('semantic_output')
+                       or (flow_outputs.get('synthesize') or {}).get('semantic_output'))
+    if not has_sources:
+        return ''
+    material = _learning_material(flow_outputs, budget=12000)
+    return ('\n\n【已读取资料汇总】\n' + material) if material else ''
+
 def report_outline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     raw, usage = call_model(ctx, purpose="report_outline", prompt=(
         "根据真实证据为中文 PDF 设计一条让项目负责人能看懂的研究叙事。标题必须直接写研究对象、候选改动和评价问题，禁止使用‘项目证据报告’‘运行报告’等通用标题。"
@@ -602,6 +646,7 @@ def report_outline(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "只输出 JSON：{\"title\":\"\",\"sections\":[],\"visuals\":[],\"claims_to_verify\":[]}。\n"
         + "原始目标=" + str((params.get('intent_contract') or {}).get('original_request') or params.get('request') or '')[:2500]
         + "\n来源=" + _report_source_context((params.get('flow_outputs') or {}).get('sources', {}), budget=12000)
+        + _learning_material_fallback(params)
     ))
     value = json_object(raw)
     return {"ok": True, "status": "completed", "semantic_output": value,
@@ -1230,6 +1275,12 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             + '\n【原稿】' + prior.read_text(encoding='utf-8')[:30000])
     # 先抽取项目真实证据（业务产物），没产物就显式写"项目未推进"，禁止编。
     evs = [str(x) for x in (params.get("evidence_refs") or (params.get("intent_contract") or {}).get("evidence_refs") or []) if str(x).strip()]
+    if not evs:
+        # content_read_reply: the genuinely retrieved & synthesized material IS
+        # the business substance of this job; do not degrade into 未推进.
+        material = _learning_material(params.get("flow_outputs") or {}, budget=8000)
+        if material:
+            evs = ["已真实读取并提炼以下资料（本项目本轮的业务产物）：\n" + material]
     evs_block = "\n".join(f"- {x}" for x in evs[:20]) if evs else "（无任何业务产物文件）"
     raw, usage = call_model(ctx, purpose="report_draft", prompt=(
         "撰写中文图文项目报告 Markdown。读者应只看这份报告就理解研究问题、实际做法、结果和边界。首页先给核心结论，随即放最重要的结果图；以后围绕发现组织图文。\n"
@@ -1263,6 +1314,7 @@ def report_draft(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         + "\n"
         f"【业务证据文件】\n{evs_block}\n"
         "【真实来源内容】\n" + _report_source_context((params.get("flow_outputs") or {}).get("sources", {}))
+        + _learning_material_fallback(params)
         + revision_context
         + "\n只写有来源支撑的阶段结论，不把计算候选说成已经证实有效的药物。"
     ))

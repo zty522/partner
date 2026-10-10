@@ -228,6 +228,14 @@ def event_facts(params: dict, *, max_chars: int = 80000) -> str:
                           {'ok','status','error','summary','requires_human','business_delta','learning_delta'}}
             if isinstance(value.get('semantic_output'), dict) and value['semantic_output'].get('notes_excerpt'):
                 facts[key]['notes_excerpt'] = str(value['semantic_output']['notes_excerpt'])[:2500]
+            if isinstance(value.get('semantic_output'), dict):
+                _so = value['semantic_output']
+                _so_text = json.dumps(_so, ensure_ascii=False)
+                # Real learning/source terminals must reach downstream LLMs:
+                # their findings/borrowable_cards/claims are the substance this
+                # job produced; dropping them made composers hallucinate.
+                if re.search(r'(findings|borrowable_cards|core_idea|key_method|unsupported_claims|source_title)', _so_text, re.I):
+                    facts[key]['semantic_output'] = _so_text[:16000]
     # Preserve the deterministic final settlement facts.  The generic compact
     # projection intentionally omits semantic_output, which previously hid the
     # apply/reload/rollback result from the final message reviewer.
