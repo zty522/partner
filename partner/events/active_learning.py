@@ -176,6 +176,33 @@ def _expand_github_url(url: str, directory: Path) -> list[dict]:
     return receipts
 
 
+
+def _win_browser_fetch(url: str) -> dict:
+    """Fetch a login-walled page through the Windows-side browser fetcher.
+
+    Partner runs inside WSL; xiaohongshu blocks WSL's egress IP / headless
+    automation, but the Windows network stack + system Edge (msedge channel)
+    + the dedicated logged-in profile pass.  win_fetch.py returns one JSON
+    object on stdout: {status,title,text,media_urls,screenshot_path,reason,url}.
+    """
+    import subprocess
+    win_py = os.environ.get('PARTNER_WIN_PY') or '/mnt/c/Users/zty12/partner_browser_env/Scripts/python.exe'
+    win_script = os.environ.get('PARTNER_WIN_FETCH') or 'E:/work/partner/scripts/browser/win_fetch.py'
+    try:
+        proc = subprocess.run([win_py, win_script, url],
+                              capture_output=True, text=True, timeout=180)
+        out = (proc.stdout or '').strip()
+        if not out:
+            return {'status': 'fetch_failed',
+                    'reason': 'win_fetch empty output: ' + str(proc.stderr or '')[:150]}
+        value = json.loads(out)
+        return value if isinstance(value, dict) else {'status': 'fetch_failed',
+                                                      'reason': 'win_fetch non-dict output'}
+    except Exception as exc:
+        return {'status': 'fetch_failed', 'reason': f'win_fetch error: {str(exc)[:200]}'}
+
+
+
 def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Retrieve external sources with real HTTP fetching.
 
@@ -334,12 +361,48 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                                  'source_kind': kind})
                 continue
         # Login-state browser channel (2026-10-10) for login-walled social
-        # platforms (xiaohongshu / bilibili).  Requires
-        # PARTNER_ENABLE_BROWSER_LOGIN=1 and PARTNER_BROWSER_PROFILE=<dir>
-        # (configured in scripts/runtime/ensure_watchdog.sh).  Writes the same
-        # receipt schema (source.bin/source.txt/sha256) so source_read works
-        # unchanged.  Without a configured profile it fails honestly.
+        # platforms (xiaohongshu / bilibili).  xiaohongshu URLs go through the
+        # Windows-side fetcher (win_fetch.py: system Edge + logged-in profile +
+        # Windows network stack) because xiaohongshu blocks WSL's egress IP and
+        # headless automation.  WSL playwright is only the fallback.  Writes the
+        # same receipt schema (source.bin/source.txt/sha256) so source_read
+        # works unchanged.  Without a configured profile it fails honestly.
         if any(d in url for d in ('xiaohongshu.com', 'xhslink.com', 'bilibili.com', 'b23.tv')):
+            if 'xiaohongshu.com' in url or 'xhslink.com' in url:
+                win = _win_browser_fetch(url)
+                status = str(win.get('status') or '')
+                text = str(win.get('text') or '')
+                if status in ('text_available', 'metadata_only') and len(text.strip()) >= 100:
+                    import hashlib as _hl
+                    folder = directory / _hl.sha256(url.encode()).hexdigest()[:20]
+                    folder.mkdir(parents=True, exist_ok=True)
+                    body = text.encode('utf-8')
+                    raw_path, txt_path = folder / 'source.bin', folder / 'source.txt'
+                    raw_path.write_bytes(body)
+                    txt_path.write_text(text, encoding='utf-8')
+                    from partner.runtime.action_execution import write_json
+                    media = [str(m) for m in (win.get('media_urls') or [])
+                             if str(m).startswith(('http://', 'https://'))][:40]
+                    receipt = {'url': url, 'final_url': url,
+                               'content_type': 'text/html(win-browser)',
+                               'bytes': len(body), 'raw_path': str(raw_path),
+                               'text_path': str(txt_path),
+                               'sha256': _hl.sha256(body).hexdigest(),
+                               'text_sha256': _hl.sha256(body).hexdigest(),
+                               'text_chars': len(text), 'source_kind': kind,
+                               'browser_channel': True,
+                               'title': str(win.get('title') or ''),
+                               'media_urls': media,
+                               'screenshot': str(win.get('screenshot_path') or '')}
+                    write_json(folder / 'receipt.json', receipt)
+                    downloaded.append(receipt)
+                    continue
+                if status != 'fetch_failed':
+                    failures.append({'url': url,
+                                     'error': f'win browser channel: {status} {win.get("reason") or ""}'.strip()[:240],
+                                     'source_kind': kind})
+                    continue
+                # fall through to WSL fallback below
             try:
                 from partner.knowledge.content_tools import fetch_login_browser_full
                 res = fetch_login_browser_full(url)
