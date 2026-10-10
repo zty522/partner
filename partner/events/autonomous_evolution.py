@@ -2403,7 +2403,9 @@ def engine_continue(ctx, params):
                 # engine rounds must be able to trigger regression again; the
                 # recursion guard (evolution_cycle:False) belongs only to the
                 # inner regression job submitted by trigger_regression.
-                'max_rounds': 3, 'evolution_apply': True,
+                # max_rounds propagates the engine's budget so 5+ round engines
+                # actually keep turning (2026-10-10, was hard-coded 3).
+                'max_rounds': max_rounds, 'evolution_apply': True,
                 'engine_loop': True, 'engine_id': engine_id,
                 'engine_mode': state['mode'], 'engine_round': rounds_run + 1,
                 'notification_mode': 'standard'},
