@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 import json
+import os
 import re
 
 from partner.event_fabric.catalog import EventDefinition
