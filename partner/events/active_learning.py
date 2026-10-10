@@ -204,6 +204,69 @@ def _win_browser_fetch(url: str) -> dict:
 
 
 
+def _read_source_images(ctx: Any, media_urls: list[str], directory: Path,
+                        limit: int = 8) -> tuple[str, int]:
+    """Download up to ``limit`` images and ask the vision-capable model to
+    transcribe long-image body text (xiaohongshu long-image notes).
+
+    Partner's model backend (qwen3.8-flash) natively accepts image inputs via
+    adapter.chat_with_images; the transcript is merged into the source text so
+    borrowable_cards can quote the long-image content like normal prose.
+
+    Returns (transcript, downloaded_count). Empty transcript when no image
+    could be downloaded or the adapter has no vision support.
+    """
+    adapter = getattr(ctx, "adapter", None)
+    if adapter is None or not hasattr(adapter, "chat_with_images"):
+        return "", 0
+    import hashlib as _hl
+    import httpx
+    img_dir = Path(directory) / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    paths: list[str] = []
+    ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+    # media_urls 混有头像/平台图标（sns-avatar / fe-platform，小图非正文）。
+    # 优先取 webpic 图床的正文字图；无则退回原顺序。
+    candidates = [u for u in media_urls
+                  if "webpic" in u and "avatar" not in u and "fe-platform" not in u]
+    if not candidates:
+        candidates = list(media_urls)
+    for url in candidates[:limit]:
+        try:
+            with httpx.Client(timeout=30, follow_redirects=True, trust_env=False) as client:
+                resp = client.get(url, headers={"User-Agent": ua})
+            if resp.status_code != 200 or len(resp.content) < 1000:
+                continue
+            p = img_dir / (_hl.sha256(url.encode()).hexdigest()[:16] + ".img")
+            p.write_bytes(resp.content)
+            paths.append(str(p))
+        except Exception:
+            continue
+    if not paths:
+        return "", 0
+    prompt = (
+        "这些图片是一篇小红书长图笔记的正文切片（可能跨多张图连续成文）。"
+        "请逐张读取图片中的全部文字与关键视觉信息，把长图正文完整转写为文本；"
+        "不要编造看不见的内容；表格/示意图请描述其结构与关键数据。"
+        "最后用一句总结这篇笔记的核心观点。"
+    )
+    # 逐张调用：qwen 视觉路径对批量输入是"一张失败整批放弃"，
+    # 坏图（头像/图标/签名过期图）不应拖垮整篇长图的转写。
+    transcripts: list[str] = []
+    for p in paths:
+        try:
+            t = adapter.chat_with_images(prompt, [p])
+        except Exception:
+            t = ""
+        t = (t or "").strip()
+        if t and "__PARTNER_AGENT_STILL_RUNNING" not in t and "unavailable" not in t.lower():
+            transcripts.append(t)
+    if not transcripts:
+        return "", 0
+    return "\n\n".join(transcripts), len(paths)
+
+
 def _xhs_search_fallback(ctx: Any, url: str, query_texts: list[str],
                          directory: Path) -> tuple[dict | None, dict]:
     """When the xiaohongshu page is login-walled / bodyless, search the open
@@ -959,10 +1022,42 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # v2: raise limit from 3 to 10
     sources = sources[:10]
     question = str(_semantic(params,'question').get('question') or params.get('request') or '')[:1600]
+    # v3.1: 图片理解接线——正文为长图的来源（xhs_body_missing 或文本过短）下载图片，
+    # 用视觉模型转写长图正文；转写文本随后并入 excerpt，使 borrowable_cards 可引用图片内容。
+    image_text_by_url: dict[str, str] = {}
+    image_count_by_url: dict[str, int] = {}
+    for r in sources:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get('url') or '')
+        if not url:
+            continue
+        missing = bool(r.get('xhs_body_missing'))
+        media = [str(m) for m in (r.get('media_urls') or [])
+                 if str(m).startswith(('http://', 'https://'))]
+        text_chars = int(r.get('text_chars') or 0)
+        if not media or not (missing or text_chars < 200):
+            continue
+        try:
+            image_text, n = _read_source_images(ctx, media,
+                                                Path(str(r.get('text_path') or '')).parent)
+        except Exception:
+            image_text, n = '', 0
+        if image_text:
+            image_text_by_url[url] = image_text
+            image_count_by_url[url] = n
     # v2: raise read limit from 6000 to 16000 chars per source
     try: excerpts = [read_verified(r,limit=16000,query=question) for r in sources]
     except (OSError,KeyError,ValueError) as exc:
         return {"ok":False,"status":"failed","error":str(exc)}
+    # Merge long-image transcripts BEFORE quote_spans are built, so quotes
+    # drawn from the image body validate like any other source text.
+    for idx, r in enumerate(sources[:len(excerpts)]):
+        url = str(r.get('url') or '') if isinstance(r, dict) else ''
+        img_text = image_text_by_url.get(url)
+        if img_text and idx < len(excerpts):
+            excerpts[idx]['text'] = (excerpts[idx].get('text') or '') \
+                + '\n\n[长图正文转写]\n' + img_text
     # Quote selection uses literal spans of the downloaded text.
     for excerpt in excerpts:
         pieces = re.split(r'(?<=[.!?])\s+', re.sub(r'\s+', ' ', excerpt['text']).strip())
@@ -981,10 +1076,9 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         '  "model_usage":"用的模型/架构/数据规模（若适用，否则 null）",\n'
         '  "transfer_points":[{"to_what":"映射到本项目哪个组件","how":"具体怎么借鉴"}],\n'
         '  "limitations":"局限与不适用处",\n'
-        '  "quote_ids":["q3","q5"]  // 支撑上述主张的原文片段编号\n'
+        '  "quote_ids":["q3","q5"]\n'
         '}]}\n'
-        '规则：\n'
-        '- quote_ids 必须选自该来源的 quote_spans，程序会提取对应原文校验\n'
+        '说明：quote_ids 必须选自该来源的 quote_spans，程序会提取对应原文校验\n'
         '- 代码来源按"接口签名/核心实现逻辑/可复用模式"读，不是全文翻译\n'
         '- 论文来源提取核心思想、方法、模型、可迁移点、局限\n'
         '- 文档来源提取关键概念、使用模式、限制\n'
@@ -1004,6 +1098,16 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     for attempt in range(2):
         value=json_object(raw)
         cards = value.get('borrowable_cards') or []
+        if isinstance(cards, str):
+            try:
+                cards = json.loads(cards)
+            except Exception:
+                cards = []
+        if not isinstance(cards, list):
+            cards = []
+        # LLM 输出防御：数组内混入非对象元素（截断/结构异常）时过滤，
+        # 仅保留合法卡片对象；过滤后为空则走 repair 重试。
+        cards = [c for c in cards if isinstance(c, dict)]
         error = '' if cards else 'no borrowable_cards produced'
         for card in cards:
             if card.get('source_url') not in known:
@@ -1038,9 +1142,13 @@ def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if error:
         return {'ok':False,'status':'failed','error':error,'token_usage':usage,'evidence_refs':[str(audit_path)]}
     path=Path(sources[0]['text_path']).parent.parent/'reading.json';write_json(path,value)
+    img_note = ''
+    if image_text_by_url:
+        total_imgs = sum(image_count_by_url.values())
+        img_note = f'；其中 {len(image_text_by_url)} 份正文为长图，已转写 {total_imgs} 张图片'
     return {'ok':True,'status':'completed','semantic_output':value,
             'files':[str(path)],'evidence_refs':[str(path)]+[r['text_path'] for r in sources],
-            'summary':f'已深度阅读 {len(cards)} 张借鉴卡片（来自 {len(sources)} 份来源）',
+            'summary':f'已深度阅读 {len(cards)} 张借鉴卡片（来自 {len(sources)} 份来源{img_note}）',
             'learning_delta':False,'token_usage':usage}
 
 
