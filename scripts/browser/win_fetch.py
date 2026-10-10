@@ -12,12 +12,60 @@ Outputs a single JSON object on stdout:
     {"status": "text_available"|"metadata_only"|"fetch_failed"|"bad_usage",
      "title": str, "text": str, "media_urls": [str],
      "screenshot_path": str, "reason": str, "url": str}
+
+XHS body handling: xiaohongshu renders the note body lazily; we wait for the
+body selector (with scroll cycles) instead of snapshotting the first screen.
 """
 import json
 import os
 import re
 import sys
 import time
+
+# XHS note-body selectors, in priority order (desktop web, 2024-2026 variants).
+_XHS_BODY_SELECTORS = [
+    "#detail-desc",
+    ".note-text",
+    ".note-content",
+    ".detail-content",
+    ".desc",
+    ".content",
+    "[class*='note-content']",
+    "[class*='detail-desc']",
+]
+_XHS_TITLE_SELECTORS = ["#detail-title", ".title", ".note-title", "h1"]
+
+
+def _extract_body(page) -> tuple[str, str]:
+    """Return (body_text, which_selector).  Prefers XHS body selectors."""
+    for sel in _XHS_BODY_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            text = (loc.inner_text(timeout=4000) or "").strip()
+            if len(text) >= 40:
+                return text, sel
+        except Exception:
+            continue
+    return "", ""
+
+
+def _scroll_to_bottom(page, cycles: int = 4) -> None:
+    """Scroll to bottom repeatedly to trigger lazy rendering, then back up."""
+    for _ in range(cycles):
+        try:
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        except Exception:
+            try:
+                page.mouse.wheel(0, 4000)
+            except Exception:
+                pass
+        time.sleep(0.9)
+    try:
+        page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
 
 
 def _main() -> int:
@@ -61,23 +109,38 @@ def _main() -> int:
                 page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
-            # scroll a few times to trigger lazy content
+            # 1) try to wait for an XHS body selector to appear
+            body_text, body_sel = "", ""
             for _ in range(3):
+                body_text, body_sel = _extract_body(page)
+                if body_text:
+                    break
+                _scroll_to_bottom(page, cycles=2)
+            # 2) lazy body still missing -> deep scroll once more
+            if not body_text:
+                _scroll_to_bottom(page, cycles=6)
+                body_text, body_sel = _extract_body(page)
+            title = ""
+            for sel in _XHS_TITLE_SELECTORS:
                 try:
-                    page.mouse.wheel(0, 1200)
+                    loc = page.locator(sel).first
+                    if loc.count() and (loc.inner_text(timeout=2000) or "").strip():
+                        title = (loc.inner_text(timeout=2000) or "").strip()
+                        break
+                except Exception:
+                    continue
+            if not title:
+                try:
+                    title = page.title() or ""
                 except Exception:
                     pass
-                time.sleep(1.0)
-            title = ""
-            try:
-                title = page.title() or ""
-            except Exception:
-                pass
-            text = ""
-            try:
-                text = page.locator("body").inner_text(timeout=10000) or ""
-            except Exception:
-                pass
+            text = body_text
+            which = body_sel
+            if not text:
+                try:
+                    text = page.locator("body").inner_text(timeout=10000) or ""
+                except Exception:
+                    pass
             media_urls = []
             try:
                 media_urls = page.evaluate(

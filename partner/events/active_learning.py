@@ -204,6 +204,67 @@ def _win_browser_fetch(url: str) -> dict:
 
 
 
+def _xhs_search_fallback(ctx: Any, url: str, query_texts: list[str],
+                         directory: Path) -> tuple[dict | None, dict]:
+    """When the xiaohongshu page is login-walled / bodyless, search the open
+    web for a non-xhs mirror (InfoQ/知乎/CSDN …) carrying the full text and
+    fetch it with the plain HTTP reader.
+
+    Returns (receipt, meta) where receipt is None when no usable mirror was
+    found.  The receipt carries ``source_kind=search_fallback`` and the
+    original query so provenance stays auditable.
+    """
+    adapter = getattr(ctx, "adapter", None)
+    if adapter is None or not hasattr(adapter, "search_web"):
+        return None, {}
+    candidates: list[str] = []
+    for row in query_texts:
+        row = str(row).strip()
+        if not row:
+            continue
+        if row not in candidates and len(row) >= 6:
+            candidates.append(row)
+        if len(candidates) >= 2:
+            break
+    if not candidates:
+        return None, {}
+    from partner.runtime.source_evidence import fetch, read_verified
+    seen: set[str] = set()
+    attempts: list[dict] = []
+    for query in candidates[:2]:
+        try:
+            rows = adapter.search_web(query)[:6]
+        except Exception:
+            rows = []
+        for row in rows:
+            hit_url = str(getattr(row, 'url', '') or '').strip()
+            if (not hit_url.startswith(('https://', 'http://')) or hit_url in seen
+                    or any(d in hit_url for d in ('xiaohongshu.com', 'xhslink.com',
+                                                  'bilibili.com', 'b23.tv'))):
+                continue
+            seen.add(hit_url)
+            attempts.append({'url': hit_url,
+                             'title': str(getattr(row, 'title', '') or ''),
+                             'query': query})
+    for attempt in attempts[:4]:
+        try:
+            receipt = fetch(attempt['url'], directory)
+            text = read_verified(receipt, limit=20000, query=attempt['query'])
+            if len(str(text.get('text') or '').strip()) < 200:
+                continue
+            receipt = dict(receipt)
+            receipt['source_kind'] = 'search_fallback'
+            receipt['search_query'] = attempt['query']
+            receipt['search_title'] = str(attempt['title'] or '')[:200]
+            receipt['original_url'] = url
+            return receipt, {'query': attempt['query'], 'matched': attempt['url'],
+                             'title': str(attempt['title'] or '')[:200]}
+        except Exception:
+            continue
+    return None, {'searched': candidates, 'attempted': len(attempts)}
+
+
+
 def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Retrieve external sources with real HTTP fetching.
 
@@ -417,9 +478,16 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     write_json(folder / 'receipt.json', receipt)
                     downloaded.append(receipt)
                     continue
+                # Body missing / login-walled: search the open web for a mirror
+                # carrying the full text (InfoQ/知乎/CSDN …) and fetch it with
+                # the plain HTTP reader, so read still receives real content.
+                fb_receipt, fb_meta = _xhs_search_fallback(ctx, url, query_texts, directory)
+                if fb_receipt is not None:
+                    downloaded.append(fb_receipt)
+                    continue
                 if status != 'fetch_failed':
                     failures.append({'url': url,
-                                     'error': f'win browser channel: {status} {win.get("reason") or ""}'.strip()[:240],
+                                     'error': f'win browser channel: {status} {win.get("reason") or ""}; 标题搜索无可用转载全文'.strip()[:240],
                                      'source_kind': kind})
                     continue
                 # fall through to WSL fallback below
@@ -479,9 +547,10 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 "summary": f"外部来源全部失败（{len(failures)} 条），不以本地缓存冒充"}
     return {"ok": bool(downloaded), "status": "completed" if downloaded else "failed",
             "semantic_output": {"sources": downloaded, 'retrieval_failures':failures,
-                                'external_planned': len(unique), 'external_fetched': sum(1 for r in downloaded if r.get('source_kind') in ('paper','code','doc'))},
+                                'external_planned': len(unique), 'external_fetched': sum(1 for r in downloaded if r.get('source_kind') in ('paper','code','doc','search_fallback')),
+                                'search_mirrors': sum(1 for r in downloaded if r.get('source_kind') == 'search_fallback')},
             "evidence_refs": [x['text_path'] for x in downloaded],
-            "summary": f"实际下载并提取 {len(downloaded)} 份来源（{sum(1 for r in downloaded if r.get('source_kind') in ('paper','code','doc'))} 份外部）；{len(failures)} 份失败"}
+            "summary": f"实际下载并提取 {len(downloaded)} 份来源（{sum(1 for r in downloaded if r.get('source_kind') in ('paper','code','doc','search_fallback'))} 份外部，其中 {sum(1 for r in downloaded if r.get('source_kind') == 'search_fallback')} 份为正文镜像）；{len(failures)} 份失败"}
 
 
 def source_read(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
