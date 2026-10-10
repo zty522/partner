@@ -1278,6 +1278,8 @@ class PartnerApplicationService:
                          else 'v5_research_study'
                          if benchmark_protocol_id == 'v5_open_generalization_study_v1'
                          else 'benchmark_experiment')
+        elif read_link_request:
+            flow_name = 'content_read_reply'
         elif mode == 'self_improvement':
             flow_name = 'self_improvement_cycle'
             dispatch_target = 'partner_self_improvement'
@@ -1290,8 +1292,6 @@ class PartnerApplicationService:
             flow_name = 'self_improvement_cycle'
         elif intent_contract.get('workstream_type') == 'mixed':
             flow_name = 'meta_cycle'
-        elif read_link_request:
-            flow_name = 'content_read_reply'
         elif dispatch_target in {"browser_video_learning", "xhs_authoring"}:
             flow_name = dispatch_target
         elif dispatch_target == "direct_answer":

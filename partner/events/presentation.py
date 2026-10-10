@@ -1876,7 +1876,7 @@ def pdf_quality_review(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 DEFINITIONS = [
     EventDefinition("presentation.notification_decide", "presentation", "判断是否形成用户可见里程碑", notification_decide),
     EventDefinition("presentation.message_compose", "presentation", "根据真实 Summary 形成自然消息", message_compose, execution_method="llm", timeout_seconds=60),
-    EventDefinition("presentation.message_critic", "presentation", "独立审查消息清晰度和重复", message_critic, execution_method="llm", timeout_seconds=90),
+    EventDefinition("presentation.message_critic", "presentation", "独立审查消息清晰度和重复", message_critic, execution_method="llm", timeout_seconds=240),
     EventDefinition("presentation.message_deduplicate", "presentation", "抑制同一结论的重复用户消息", message_deduplicate),
     EventDefinition("presentation.report_outline", "presentation", "按项目领域设计报告叙事和真实可视化", report_outline, execution_method="llm"),
     EventDefinition("presentation.report_decide", "presentation", "仅在真实里程碑决定生成报告", report_decide),

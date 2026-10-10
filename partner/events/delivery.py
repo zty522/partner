@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from partner.event_fabric.catalog import EventDefinition
 
 

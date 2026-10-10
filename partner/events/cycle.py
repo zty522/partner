@@ -2254,6 +2254,7 @@ def delivery_settle(ctx, params):
         # v3 fix: 从文件读回执，不依赖 flow_outputs
         source_node = ('final_send' if params['node_id'] == 'final_ack' else
                        'send_message' if params['node_id'] == 'improvement_message_ack' else
+                       'send_pdf' if params['node_id'] in {'pdf_settle', 'pdf_ack'} else
                        'send')
         # 尝试从节点输出文件读
         sent = (params.get('flow_outputs') or {}).get(source_node) or {}
