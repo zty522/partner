@@ -332,26 +332,10 @@ class QQQfficialBridge:
             if not self._reply(msg, "收到，但消息入队失败：" + str(exc)[:120]):
                 self._record_reply_failure(msg.msg_id, "inbox_failed")
             return
-        warm = self._fast_warm_reply(text, attachments)
-        if warm and not self._reply(msg, warm):
-            self._record_reply_failure(msg.msg_id, "fast_reply")
-
-    @staticmethod
-    def _fast_warm_reply(text: str, attachments: list[dict]) -> str:
-        """Cheap, deterministic first acknowledgement so the user always
-        gets an immediate reaction; the MessageAgent follows up with the
-        real, classified answer."""
-        if re.search(r"https?://", text):
-            return "收到链接，正在读取。"
-        if any(k in text for k in ("停止", "暂停", "停下", "不要再", "别做了", "先别")):
-            return "好的，正在按你的要求处理。"
-        if any(k in text for k in ("继续", "接着", "下一步", "往下")):
-            return "收到，继续推进。"
-        if any(k in text for k in ("谢谢", "感谢", "辛苦", "多谢")):
-            return "不客气！"
-        if attachments:
-            return "收到附件，正在处理。"
-        return ""
+        # No deterministic warm reply here: ALL user-visible replies come
+        # from the LLM (MessageAgent classification).  The QQ event loop is
+        # never blocked on a model call; the MessageAgent thread replies
+        # within a few seconds.
 
     def _handle_special_command(self, text: str, _msg: QQMessage) -> str | None:
         command = text.strip()
