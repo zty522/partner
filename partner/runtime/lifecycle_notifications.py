@@ -12,10 +12,13 @@ from partner.runtime.event_run_log import EventRunLog
 
 
 _STANDARD_MILESTONE_NODES = {
-    # These are semantic boundaries, rather than Event chatter: one message
-    # says what the research concluded, one reports benchmark/evolution
-    # settlement, and the ACK nodes close delivery.
+    # Semantic boundaries rather than Event chatter: one message says what the
+    # research concluded, one reports benchmark/evolution settlement, and the
+    # ACK nodes close delivery. The understand/commitment/execute/settle nodes
+    # are added so long-running research jobs push phase progress instead of
+    # staying silent for hours between acceptance and the final report.
     "assess", "benchmark_settle", "evolution_gate", "report_ack", "final_ack",
+    "understand_3", "commitment", "execute", "settle",
 }
 
 
@@ -47,8 +50,11 @@ def should_publish(*, mode: str, lifecycle_phase: str, node_id: str = "",
     if lifecycle_phase == "flow_started":
         return False
     if lifecycle_phase == "flow_completed":
-        return bool(is_child_flow and flow_name in {
-            'project_cycle_round', 'active_learning', 'autonomous_evolution'})
+        # Push a wrap-up for every user-visible flow: the research spine itself
+        # plus each child round (cycle/learning/evolution), so users see what
+        # finished even on multi-hour runs.
+        return bool(flow_name in {'project_iteration', 'project_cycle_round',
+                                  'active_learning', 'autonomous_evolution'})
     return lifecycle_phase == "event_completed" and node_id in _STANDARD_MILESTONE_NODES
 
 

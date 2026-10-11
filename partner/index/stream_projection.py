@@ -9,6 +9,17 @@ from .runtime_storage import workspace_dir
 from .sqlite_base import get_connection
 
 
+def _safe_loads(value: str) -> dict:
+    """Parse a stored payload defensively; never raise on a corrupt row."""
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 class StreamProjection:
     def __init__(self, root):
         self.root = Path(root).resolve()
@@ -74,7 +85,7 @@ class StreamProjection:
         if entity is not None: clauses.append('entity=?');args.append(entity)
         if project is not None: clauses.append('project IN (?,?)');args.extend([project,''])
         args.append(max(1,int(limit)))
-        return [json.loads(r[0]) for r in get_connection(self.db).execute(
+        return [_safe_loads(r[0]) for r in get_connection(self.db).execute(
             'SELECT payload FROM records WHERE '+' AND '.join(clauses)+' ORDER BY offset DESC LIMIT ?',args)]
 
     def event(self, events_path, event_id):
@@ -97,7 +108,14 @@ class StreamProjection:
           ON e.path=? AND e.entity=s.entity AND e.kind='event_created'
           WHERE """+' AND '.join(clauses)+' ORDER BY s.offset DESC LIMIT ?'
         rows=c.execute(sql,[str(Path(events_path).resolve()),*args,max(1,int(limit))]).fetchall()
-        return [{**json.loads(r[0] or '{}'),**json.loads(r[1])} for r in rows]
+        result = []
+        for r in rows:
+            merged = {}
+            merged.update(_safe_loads(r[0]))
+            merged.update(_safe_loads(r[1]))
+            if merged:
+                result.append(merged)
+        return result
 
     def memory(self,path,*,project_id='',limit=8,status=None,query=''):
         self.sync(path)
@@ -113,13 +131,13 @@ class StreamProjection:
             words=query.split()[:8]
             clauses.append('('+' OR '.join('instr(lower(r.payload),lower(?))>0' for _ in words)+')');args.extend(words)
         args.append(max(1,int(limit)))
-        return [json.loads(r[0]) for r in c.execute('SELECT r.payload FROM records r WHERE '+' AND '.join(clauses)+' ORDER BY r.offset DESC LIMIT ?',args)]
+        return [_safe_loads(r[0]) for r in c.execute('SELECT r.payload FROM records r WHERE '+' AND '.join(clauses)+' ORDER BY r.offset DESC LIMIT ?',args)]
 
     def work_item_rows(self, path, work_item_id):
         self.sync(path)
         c=get_connection(self.db)
         c.execute("CREATE INDEX IF NOT EXISTS records_work_item ON records(path,json_extract(payload,'$.work_item_id'),offset)")
-        return [json.loads(r[0]) for r in c.execute(
+        return [_safe_loads(r[0]) for r in c.execute(
             "SELECT payload FROM records WHERE path=? AND json_extract(payload,'$.work_item_id')=? ORDER BY offset DESC",
             (str(Path(path).resolve()),str(work_item_id)))]
 
