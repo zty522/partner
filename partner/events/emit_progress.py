@@ -71,6 +71,21 @@ def _userify(text, limit=140):
     return _clean(text, limit)
 
 
+def _recent_chat_for(ctx: Any, limit: int = 6, max_chars: int = 1500) -> str:
+    """Bounded recent chat history to ground message composition; never
+    fabricate, never exceed budget."""
+    try:
+        from partner.messaging.chat_context import recent_chat
+        return recent_chat(
+            str(getattr(ctx, "workspace", "")),
+            persona_hint=str(getattr(ctx, "instance_id", "") or ""),
+            sender_id=str(getattr(ctx, "sender_id", "") or ""),
+            limit=limit, max_chars=max_chars,
+        ) or "(暂无)"
+    except Exception:  # noqa: BLE001
+        return "(暂无)"
+
+
 def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Turn one verified runtime transition into a concise Chinese update."""
     phase = str(params.get("lifecycle_phase") or "event_completed")
@@ -147,7 +162,11 @@ def lifecycle_compose(_ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                     '只允许使用给定记录中的事实，禁止编造。'
                     '禁止出现：文件路径与文件名、哈希/签名、allowlist/verifier/审计、函数名、'
                     '“已完成相关数据文件记录”等空话、“累计动作签名”等机制术语、内部文档代号。'
-                    '消息读起来是给用户看的进展，不是开发日志。\n\n轮次记录：'
+                    '消息读起来是给用户看的进展，不是开发日志。'
+                    '若最近对话里已经向用户说过同样的结论，不要原样重复，只补充用户还不知道的新进展。'
+                    '\n\n最近对话：'
+                    + _recent_chat_for(ctx)
+                    + '\n\n轮次记录：'
                     + _json.dumps(facts_view, ensure_ascii=False)))
                 _narr = _userify(_raw, 280)
                 if _narr:

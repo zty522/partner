@@ -134,8 +134,18 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
                           node_id=str(facts.get("node_id") or ""),
                           is_child_flow=bool(facts.get("is_child_flow")),
                           flow_name=str(facts.get('flow_name') or facts.get('flow_type') or '')):
-        return {"ok": True, "suppressed": True, "mode": mode,
-                "reason": "notification density policy"}
+        # Heartbeat: long-running jobs must not stay silent for hours.  When
+        # no rule candidate fired but a phase just completed and nothing has
+        # been delivered for ~25 minutes, let the LLM gate decide whether to
+        # push a progress note.
+        from partner.messaging.publish_gate import last_push_ts
+        from datetime import datetime as _dt, timezone as _tz
+        if (lifecycle_phase in {"event_completed", "flow_started", "flow_completed", "flow_failed"}
+                and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) > 1500):
+            pass  # heartbeat candidate
+        else:
+            return {"ok": True, "suppressed": True, "mode": mode,
+                    "reason": "notification density policy"}
     token = uuid.uuid4().hex[:12]
     flow_id = f"notify_{getattr(ctx, 'job_id', 'job')}_{token}"
     base = {**facts, "lifecycle_phase": lifecycle_phase,
@@ -147,6 +157,19 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
                           flow_id=flow_id, node_id="compose", root_event_id=root_event_id)
     if not composed.get("ok"):
         return {"ok": False, "stage": "compose", "flow_id": flow_id, "output": composed}
+    # LLM publish gate: grounded in the real chat history, decide whether to
+    # actually send (dedupe / too-long-silent / too-frequent) and rewrite the
+    # candidate into plain user-facing Chinese.  Fails open (send).
+    from partner.messaging.publish_gate import publish_gate
+    gated = publish_gate(workspace=workspace, ctx=ctx,
+                         candidate=composed.get("message") or "",
+                         facts=base)
+    if not gated.get("send"):
+        return {"ok": True, "suppressed": True, "mode": mode, "stage": "gate",
+                "reason": f"llm publish gate: {gated.get('reason') or 'duplicate/too-frequent'}"}
+    if gated.get("message"):
+        composed["message"] = gated["message"]
+        composed["summary"] = gated["message"][:300]
     reviewed = _run_event(
         workspace=workspace, ctx=ctx, event_type="notification.lifecycle_critic",
         params={**base, "previous": composed, "message": composed.get("message")},
