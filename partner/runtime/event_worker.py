@@ -860,6 +860,11 @@ class EventWorker:
                 if hasattr(signal, name):
                     signal.signal(getattr(signal, name), self.stop)
         while not self._stopping:
+            # Engine control gate: honour stop/pause before pulling work.
+            blocker = await asyncio.to_thread(self._control_blocker)
+            if blocker:
+                await asyncio.sleep(poll_seconds)
+                continue
             # A slow filesystem must not block the asyncio control loop.
             # Await the single scan: never overlap claim attempts on this worker.
             job = await asyncio.to_thread(self.next_job)
@@ -875,6 +880,30 @@ class EventWorker:
                 await self._run_with_lease(job)
             finally:
                 self._release_claim()
+
+    def _control_blocker(self, job: JobRecord | None = None) -> str | None:
+        """Return 'stop'/'pause' when an unconsumed engine control applies.
+
+        Controls are written by the instance's message thread on user
+        instruction; they cross the process boundary to this worker.  When a
+        job is given, controls for that job's instance are preferred, falling
+        back to global controls (user-level stop/pause).
+        """
+        try:
+            from partner.messaging.control import active_controls
+            persona = ""
+            if job is not None:
+                persona = str(getattr(job, "assigned_instance", "") or getattr(job, "origin_instance", "") or "")
+            controls = active_controls(self.root, persona_hint=persona or None)
+            if not controls and persona:
+                controls = active_controls(self.root)
+        except Exception:  # noqa: BLE001
+            return None
+        for control in controls:
+            kind = str(control.get("kind") or "")
+            if kind in {"stop", "pause"}:
+                return kind
+        return None
 
     async def _run_with_lease(self, job):
         if not getattr(self, '_db_lease_owner', None):
@@ -914,6 +943,17 @@ class EventWorker:
         for _ in range(500):  # generous safety cap against runaway loops
             if self._stopping:
                 return  # A saved Event boundary is safe for graceful reload.
+            # Engine: honour stop/pause at safe node boundaries.  The job is
+            # paused (a recoverable state) so a later resume continues it.
+            blocker = self._control_blocker(job)
+            if blocker:
+                job.status = "paused"
+                job.error = f"engine_control:{blocker}"
+                try:
+                    self._save_job(job)
+                except Exception:  # noqa: BLE001
+                    pass
+                return
             try:
                 worked = await self.run_job_checkpoint(job)
             except Exception as exc:  # noqa: BLE001

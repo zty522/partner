@@ -80,6 +80,7 @@ class QQQfficialBridge:
         self._binding_file = state / "record" / "bot_id.json"
         self._lock_path = state / "qq_bridge.lock"; self._lock_handle = None
         self._bot: QQQfficialBot | None = None; self._running = False
+        self._message_agent = None
         self._stats = {"messages_received": 0, "messages_sent": 0, "errors": 0}
         self._seen = self._load_seen()
 
@@ -135,8 +136,26 @@ class QQQfficialBridge:
         self._bot.set_error_handler(self._handle_error)
         if self.config.outbound_delivery_enabled:
             self._start_notification_poller()
+        self._start_message_agent()
         try: self._bot.start()
         finally: self._running = False; self._write_delivery_state(False, "stopped")
+
+    def _start_message_agent(self) -> None:
+        """Start the asynchronous inbound message thread (chat / control /
+        task classification).  Failure must never take the QQ bridge down."""
+        try:
+            from partner.adapters.adapter import DirectAdapter
+            from partner.messaging.message_agent import MessageAgent
+            adapter = DirectAdapter(workspace_path=self.workspace)
+            agent = MessageAgent(
+                self.root, instance_id=self.instance_id,
+                workspace=self.workspace, adapter=adapter,
+            )
+            agent.start()
+            self._message_agent = agent
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("QQ message agent start failed")
+            self._message_agent = None
 
     def start_async(self) -> threading.Thread:
         thread = threading.Thread(target=self.start, daemon=True, name=f"qq-{self.instance_id}")
@@ -294,39 +313,45 @@ class QQQfficialBridge:
             if not self._reply(msg, special):
                 self._record_reply_failure(msg.msg_id, "special_reply")
             return
+        # ---------------------------------------------------------------
+        # Fast path: enqueue the message to the inbox and reply immediately.
+        # The MessageAgent thread classifies it (chat / control / task)
+        # with one flash call grounded in chat + runtime context, then
+        # replies / writes a control signal / submits a job.  The QQ event
+        # loop is never blocked on an LLM call.
+        # ---------------------------------------------------------------
         try:
-            sub_result = orchestrate_submit(
-                workspace_root=self.root,
-                text=text,
-                channel="qq",
-                sender_id=msg.sender_id,
-                sender_name=msg.sender_name or "QQ用户",
-                persona_hint=self.instance_id,
-                request_id="qq:" + str(msg.msg_id or msg.sender_id),
-                attachments=attachments,
-                attachments_signature=self._attachment_signature(attachments),
-                subject_allowed_instances=[self.instance_id],
-                subject_id=msg.sender_id,
+            from partner.messaging import write_message
+            write_message(
+                self.root, msg_id=str(msg.msg_id or ""), channel="qq",
+                sender_id=str(msg.sender_id or ""), sender_name=str(msg.sender_name or "用户"),
+                text=text, attachments=attachments, persona_hint=self.instance_id,
             )
-        except IdempotencyConflict as exc:
-            if not self._reply(msg, "请求内容与上一次不同（idempotency_conflict）：" + str(exc)):
-                self._record_reply_failure(msg.msg_id, "idempotency_conflict")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("QQ inbox enqueue failed")
+            if not self._reply(msg, "收到，但消息入队失败：" + str(exc)[:120]):
+                self._record_reply_failure(msg.msg_id, "inbox_failed")
             return
-        except OrchestratorInProgress as exc:
-            if not self._reply(msg, "请求正在处理中，请稍候查看结果：" + str(exc)):
-                self._record_reply_failure(msg.msg_id, "in_progress")
-            return
+        warm = self._fast_warm_reply(text, attachments)
+        if warm and not self._reply(msg, warm):
+            self._record_reply_failure(msg.msg_id, "fast_reply")
 
-        if sub_result.job_id:
-            self._record_submission_receipt(msg.msg_id, sub_result.job_id,
-                                              sub_result.assigned_instance)
-            # Acceptance and Flow-plan messages are queued by the dedicated
-            # notification compose -> critic -> delivery Events.  Sending a
-            # second hard-coded reply here made QQ disagree with Web and hid
-            # the actual Event plan.
-        else:
-            if not self._reply(msg, sub_result.message or "已收到"):
-                self._record_reply_failure(msg.msg_id, "direct_answer_reply")
+    @staticmethod
+    def _fast_warm_reply(text: str, attachments: list[dict]) -> str:
+        """Cheap, deterministic first acknowledgement so the user always
+        gets an immediate reaction; the MessageAgent follows up with the
+        real, classified answer."""
+        if re.search(r"https?://", text):
+            return "收到链接，正在读取。"
+        if any(k in text for k in ("停止", "暂停", "停下", "不要再", "别做了", "先别")):
+            return "好的，正在按你的要求处理。"
+        if any(k in text for k in ("继续", "接着", "下一步", "往下")):
+            return "收到，继续推进。"
+        if any(k in text for k in ("谢谢", "感谢", "辛苦", "多谢")):
+            return "不客气！"
+        if attachments:
+            return "收到附件，正在处理。"
+        return ""
 
     def _handle_special_command(self, text: str, _msg: QQMessage) -> str | None:
         command = text.strip()

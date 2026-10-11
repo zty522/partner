@@ -917,6 +917,7 @@ class PartnerApplicationService:
         mode: str = "",
         scope: str = "",
         preallocated_job_id: str = "",
+        intent_contract: Mapping | None = None,
     ) -> Submission:
         clean = str(text or "").replace("\x00", "").strip()
         incoming_constraints = dict(execution_constraints or {})
@@ -982,7 +983,29 @@ class PartnerApplicationService:
         ctx_for_llm.event_deadline = _time.monotonic() + 150  # 增加到 150 秒，给三个 intent 调用足够时间
         benchmark_requested = mode == "benchmark" or bool(
             incoming_constraints.get('benchmark_embedded'))
-        if benchmark_requested:
+        if intent_contract is not None:
+            # -----------------------------------------------------------
+            # 1b. Fast path: the message thread already classified the
+            # request with one flash call and supplies the intent contract.
+            # Skip the three LLM intent passes so the QQ event loop is
+            # never blocked waiting on model calls.
+            # -----------------------------------------------------------
+            explicit = dict(intent_contract)
+            explicit.setdefault("route", "project_iteration")
+            explicit.setdefault("dispatch_target", project_id or persona_hint or "project_iteration")
+            explicit.setdefault("warm_reply", "收到，正在处理。")
+            explicit.setdefault("goal", [clean[:500]])
+            explicit.setdefault("constraints", [])
+            explicit.setdefault("success_criteria", ["依据原始请求产生真实执行、证据、结算与交付终态"])
+            explicit.setdefault("workstream_type", "project_research")
+            explicit.setdefault("report_policy", report_policy or "milestone")
+            observe_out = {"ok": True, "status": "completed", "model_calls": 0,
+                           "semantic_output": explicit}
+            counter_out = {"ok": True, "status": "completed", "model_calls": 0,
+                           "semantic_output": explicit}
+            synth_out = {"ok": True, "status": "completed", "model_calls": 0,
+                         "semantic_output": explicit}
+        elif benchmark_requested:
             # A structured benchmark marker already freezes the route and
             # protocol. Running three open-ended intent calls here adds cost
             # and makes an explicit experiment depend on an unrelated model

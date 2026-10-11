@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 import json
+from pathlib import Path
 
 from partner.event_fabric.catalog import EventDefinition
 from ._llm import call_model, json_object
@@ -29,6 +30,48 @@ def _conditional_support_clause(request: str) -> bool:
         "出现问题时", "遇到问题时", "在机制失败时", "在知识不足时",
     ))
     return project_primary and support and conditional
+
+
+def _recent_chat_lines(root, persona_hint: str = "", limit: int = 10) -> str:
+    """Last N conversation turns (instance chat history first, then global),
+    real content only.  Injected so intent / direct-answer understand the
+    ongoing conversation instead of a single isolated message."""
+    root = Path(str(root))
+    candidates = []
+    if persona_hint:
+        candidates.append(root / "instances" / str(persona_hint) / "state" / "qq_chat_history.jsonl")
+    candidates.append(root / "state" / "qq_chat_history.jsonl")
+    candidates.append(root / "state" / "dialog_history.jsonl")
+    rows: list[dict] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if persona_hint and str(row.get("source") or "") and str(row.get("source")) != "qq":
+                        continue
+                    rows.append(row)
+        except OSError:
+            continue
+        if rows:
+            break
+    if not rows:
+        return "(暂无聊天记录)"
+    parts: list[str] = []
+    for row in rows[-limit:]:
+        role = str(row.get("role") or "user")
+        content = str(row.get("content") or "").replace("\n", " ")[:300]
+        if content:
+            parts.append(f"[{str(row.get('timestamp') or '')[:19]}] {role}: {content}")
+    return "\n".join(parts)
 
 
 def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
@@ -96,6 +139,10 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
         + json.dumps(params.get("available_projects") or [], ensure_ascii=False)[:4000]
         + "\n已有审议=" + json.dumps(prior, ensure_ascii=False)[:16000]
         + "\n运行器已读取的当前任务记录=" + json.dumps(status_context,ensure_ascii=False)[:14000]
+        + "\n近期聊天记录（真实只读，供理解对话语境，不得当作已执行证据）="
+        + json.dumps(_recent_chat_lines(getattr(ctx, "workspace", ""),
+                                        str(params.get("persona_hint") or getattr(ctx, "instance_id", ""))),
+                     ensure_ascii=False)[:6000]
         + "\n基准/候选/消融方法臂=" + json.dumps(params.get("method_arm") or "", ensure_ascii=False)
         + (("\n消融 drop=" + json.dumps((params.get("execution_constraints") or {}).get("ablation_drop") or "", ensure_ascii=False))
            if (params.get("method_arm") or "").startswith("ablation") else "")
@@ -164,6 +211,10 @@ def direct_answer(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "对话项目（仅供术语消歧，不代表已执行或已验证）：" + str(params.get('project_id') or '') + "\n用户原文："
         + str(params.get("request") or "")
         + "\n运行器已读取的真实任务记录=" + json.dumps(status_context,ensure_ascii=False)[:16000]
+        + "\n近期聊天记录（真实只读，供理解对话语境，不得当作已执行证据）="
+        + json.dumps(_recent_chat_lines(getattr(ctx, "workspace", ""),
+                                        str(params.get("persona_hint") or getattr(ctx, "instance_id", ""))),
+                     ensure_ascii=False)[:6000]
     ))
     return {"ok": True, "status": "completed", "answer": raw,
             "summary": raw[:500], "token_usage": usage,
