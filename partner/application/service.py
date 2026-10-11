@@ -1445,6 +1445,8 @@ class PartnerApplicationService:
             return Submission(True, job.job_id, dispatch_target, assigned,
                               job.status, flow_name, reply, "")
         except Exception as exc:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger(__name__).exception("submit dispatch failed for %s", received.event_id)
             return Submission(False, "", "", persona_hint, "rejected", flow_name,
                               f"派发失败：{type(exc).__name__}: {exc}", "")
 

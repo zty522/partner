@@ -44,10 +44,25 @@ class StreamProjection:
                     if not line or not line.endswith(b'\n'): break
                     offset = f.tell()
                     if not line.strip(): continue
-                    row = json.loads(line)
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        # Never let a malformed source row take the projection
+                        # down: skip it so json_extract indexes stay valid.
+                        continue
                     entity = str(row.get('record_id') or row.get('memory_id') or row.get('event_id') or '')
+                    # Strict JSON only: json_extract indexes (records_flow /
+                    # records_root / records_work_item) corrupt the table on
+                    # any payload that is not strict JSON (e.g. double-escaped
+                    # fragments). allow_nan=False makes dumps fail loudly, and
+                    # the json_valid guard skips rows that would still be bad.
+                    try:
+                        payload = json.dumps(row, ensure_ascii=False, allow_nan=False)
+                        json.loads(payload)  # final strictness check
+                    except (TypeError, ValueError):
+                        continue  # never project an invalid payload
                     c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?)',
-                        (key,begin,entity,str(row.get('project_id') or ''),str(row.get('record_kind') or ''),json.dumps(row,ensure_ascii=False)))
+                        (key,begin,entity,str(row.get('project_id') or ''),str(row.get('record_kind') or ''),payload))
                 c.execute('INSERT OR REPLACE INTO offsets VALUES (?,?,?)',(key,identity,offset))
             c.execute('COMMIT')
         except BaseException:
