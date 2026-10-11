@@ -27,8 +27,8 @@ def _outbound_name(ctx, params):
 
 
 def _delivery_channels(ctx: Any, params: dict[str, Any]) -> list[str]:
-    constraints = ((params.get("intent_contract") or {}).get(
-        "execution_constraints") or {})
+    _ec = (params.get("intent_contract") or {}).get("execution_constraints")
+    constraints = _ec if isinstance(_ec, dict) else {}
     declared = constraints.get("delivery_channels")
     if isinstance(declared, list):
         channels = [str(value) for value in declared
@@ -186,8 +186,8 @@ def _delivery_consistency_fix(ctx: Any, text: str) -> str:
 
 
 def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
-    if (((params.get('intent_contract') or {}).get('execution_constraints') or {})
-            .get('suppress_user_delivery') is True):
+    _ec = (params.get('intent_contract') or {}).get('execution_constraints')
+    if (isinstance(_ec, dict) and _ec.get('suppress_user_delivery') is True):
         return {'ok': True, 'status': 'completed', 'suppressed': True,
                 'delivered': False, 'summary': '父协调 Flow 统一负责最终用户消息'}
     prior = params.get("previous") if isinstance(params.get("previous"), dict) else {}
@@ -249,7 +249,7 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # stripping internal markers like [commitment]/settlement_class=.../bet=...
     # Fails open: on any model/parse error the sanitized text is sent as-is.
     if (text and channel in {"qq", "both", "web", "gui", "tui", "local"}
-            and not bool((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('suppress_user_delivery')):
+            and not (isinstance(_ec, dict) and _ec.get('suppress_user_delivery'))):
         try:
             from partner.messaging.publish_gate import publish_gate as _pg
             _gated = _pg(
@@ -266,7 +266,7 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})
     if decision.get('notify') is False:
         return {'ok':True,'status':'completed','suppressed':True,'delivered':False,'summary':'通知决策要求仅保存本地记录'}
-    if (((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('evolution_cycle')
+    if (isinstance(_ec, dict) and _ec.get('evolution_cycle')
             and not composed.get('ok') and not bool(params.get('message_reviewed'))):
         return {'ok':False,'status':'failed','error':'cycle message did not pass review; no transport request made'}
     if not text:

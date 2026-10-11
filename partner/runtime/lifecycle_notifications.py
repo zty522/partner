@@ -177,7 +177,8 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
     if not reviewed.get("ok"):
         return {"ok": False, "stage": "critic", "flow_id": flow_id, "output": reviewed}
     contract = dict(base.get("intent_contract") or {})
-    constraints = dict(contract.get("execution_constraints") or {})
+    _ec = contract.get("execution_constraints")
+    constraints = dict(_ec) if isinstance(_ec, dict) else {}
     # Preserve the delivery contract frozen at intake.  A Web-originated Job
     # may explicitly request both Web and QQ; replacing that list with
     # ``[web]`` silently dropped QQ from every lifecycle update.
