@@ -40,6 +40,12 @@ _GATE_PROMPT = """你负责决定一条发给项目负责人的消息该不该�
 3. 太频繁：短时间内（30 分钟内）已发过 2 条以上？
    - 是 → 不重复发；如果候选包含新信息，合并成一条最精简的。
 4. 用户可读性：候选里的内部词（event/flow/job/结算/边界/决策/effect=0.0 等）要改写成大白话。
+   内部标记必须清除或改写为普通人能懂的话，包括但不限于：
+   - 方括号内部标记：[commitment]、[流内草稿·未经裁决背书]、[路径已隐藏]、[数据量已隐藏]、[进度] 等
+   - 机器字段：settlement_class=...、improvement_over_基线结果=False、publish_eligible=...、
+     publish_blockers=...、bet=...、expectations_met=...、next_round_goal=... 等键值对
+   - 步骤计数：完成（25/32）、第 N 步、Round N 等
+   改写成"做了什么、得到什么、下一步做什么"的自然中文，语气像助理向老板汇报。
 5. 真实性：只允许使用给定信息中的事实，禁止编造；读取外部内容失败时如实说明，不虚构内容。
 
 【输出格式】严格 JSON，不要多余文字：
@@ -63,8 +69,13 @@ def publish_gate(
     ctx,
     candidate: str,
     facts: dict[str, Any],
+    rewrite_only: bool = False,
 ) -> dict[str, Any]:
     """Decide send/no-send and produce the final user-facing message.
+
+    ``rewrite_only=True`` keeps the LLM grounding (chat history, duplicate
+    awareness) but forces send=True and only rewrites the wording — used by the
+    delivery Event where deduplication was already decided upstream.
 
     Fails open: any model/parse failure returns send=True with the original
     candidate so a lifecycle update is never silently dropped.
@@ -84,8 +95,14 @@ def publish_gate(
         status = json.dumps(cc.get("runtime_status") or {}, ensure_ascii=False)[:1500]
         prompt = _GATE_PROMPT.format(
             chat=chat, recent_jobs=jobs, status=status, candidate=str(candidate or "")[:1500])
+        if rewrite_only:
+            prompt += (
+                "\n【模式】当前为改写模式：你只负责把候选消息改写成面向用户的自然中文。"
+                "send 恒为 true（发送与否由上层决定），message 必须非空。"
+                "即使内容与聊天记录重复，也必须输出改写后的 message（重复与否不在此模式判断）。"
+            )
         decision = _call_gate_llm(ctx, prompt)
-        send = bool(decision.get("send", True))
+        send = True if rewrite_only else bool(decision.get("send", True))
         message = str(decision.get("message") or "").strip()
         reason = str(decision.get("reason") or "")[:200]
         final = message if (send and message) else candidate

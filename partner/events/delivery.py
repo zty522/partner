@@ -242,6 +242,27 @@ def send_text(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     text = _delivery_consistency_fix(ctx, text)
     channel = str(params.get("channel") or getattr(ctx, "channel", "local"))
     channels = _delivery_channels(ctx, params)
+    # LLM user-readability gate: every user-facing message is rewritten into
+    # plain Chinese grounded in the real chat history (user hard requirement —
+    # no hardcoded keyword rules).  The wordlist sanitizer above is only a
+    # last-resort cleanup; the LLM gate owns the final wording, including
+    # stripping internal markers like [commitment]/settlement_class=.../bet=...
+    # Fails open: on any model/parse error the sanitized text is sent as-is.
+    if (text and channel in {"qq", "both", "web", "gui", "tui", "local"}
+            and not bool((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('suppress_user_delivery')):
+        try:
+            from partner.messaging.publish_gate import publish_gate as _pg
+            _gated = _pg(
+                workspace=str(getattr(ctx, "workspace", "")), ctx=ctx,
+                candidate=text,
+                facts={**params, "request": str(getattr(ctx, "request", ""))[:2000]},
+                rewrite_only=True,
+            )
+            _rewritten = str(_gated.get("message") or "").strip()
+            if _rewritten:
+                text = _rewritten
+        except Exception:  # noqa: BLE001 - fail open, never drop a message
+            pass
     decision=next((v for v in flow_outputs.values() if isinstance(v,dict) and 'notify' in v),{})
     if decision.get('notify') is False:
         return {'ok':True,'status':'completed','suppressed':True,'delivered':False,'summary':'通知决策要求仅保存本地记录'}
