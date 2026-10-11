@@ -65,15 +65,24 @@ class StreamProjection:
                     # Strict JSON only: json_extract indexes (records_flow /
                     # records_root / records_work_item) corrupt the table on
                     # any payload that is not strict JSON (e.g. double-escaped
-                    # fragments). allow_nan=False makes dumps fail loudly, and
-                    # the json_valid guard skips rows that would still be bad.
+                    # fragments, or surrogate bytes that would make SQLite
+                    # fail to decode the TEXT column). allow_nan=False makes
+                    # dumps fail loudly, ensure_ascii=True escapes every
+                    # non-ASCII byte (surrogates included) so the stored TEXT
+                    # is always valid UTF-8, and the json_valid guard skips
+                    # rows that would still be bad. The INSERT itself is also
+                    # guarded so a last-mile encoding failure skips the row
+                    # instead of crashing the worker.
                     try:
-                        payload = json.dumps(row, ensure_ascii=False, allow_nan=False)
+                        payload = json.dumps(row, ensure_ascii=True, allow_nan=False)
                         json.loads(payload)  # final strictness check
                     except (TypeError, ValueError):
                         continue  # never project an invalid payload
-                    c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?)',
-                        (key,begin,entity,str(row.get('project_id') or ''),str(row.get('record_kind') or ''),payload))
+                    try:
+                        c.execute('INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?)',
+                            (key,begin,entity,str(row.get('project_id') or ''),str(row.get('record_kind') or ''),payload))
+                    except (TypeError, ValueError, OverflowError):
+                        continue
                 c.execute('INSERT OR REPLACE INTO offsets VALUES (?,?,?)',(key,identity,offset))
             c.execute('COMMIT')
         except BaseException:

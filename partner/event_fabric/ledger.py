@@ -76,7 +76,7 @@ class EventLedger:
         row["previous_hash"] = previous
         row["record_hash"] = hashlib.sha256((previous + _canonical(row)).encode("utf-8")).hexdigest()
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(row, ensure_ascii=True, allow_nan=False) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
