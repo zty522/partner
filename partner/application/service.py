@@ -1229,8 +1229,13 @@ class PartnerApplicationService:
             key in incoming_constraints or key in synthesized_constraints
             for key in ('run_duration_seconds', 'run_until_epoch'))
         constraint_input = dict(synthesized_constraints)
+        # research_explain (summary/research/explain/recommend tasks) must
+        # never be pulled into the multi-round project cycle or self-evolution:
+        # it is a bounded, single-pass knowledge-explanation task.
+        _explain_only = str(synth_sem.get('workstream_type') or '') == 'research_explain'
         if (persona_hint in cycle_policy.get('instances', [])
-                and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}):
+                and dispatch_target not in {'browser_video_learning', 'xhs_authoring', 'direct_answer'}
+                and not _explain_only):
             defaults = {'evolution_cycle': True,
                         'evolution_apply': cycle_policy.get('apply') is True,
                         'action_seconds': cycle_policy.get('action_seconds', 300)}
@@ -1239,6 +1244,12 @@ class PartnerApplicationService:
             constraint_input = {**defaults, **constraint_input, **incoming_constraints}
         else:
             constraint_input = {**constraint_input, **incoming_constraints}
+        if _explain_only:
+            # Single-pass guarantee: an explain task never carries the cycle
+            # markers that would make downstream Events plan a continuation.
+            constraint_input = {k: v for k, v in constraint_input.items()
+                                if k not in {'evolution_cycle', 'evolution_apply',
+                                             'max_rounds', 'continuation_mode'}}
         intent_contract['execution_constraints'] = (
             dict(validate_constraints(constraint_input))
             if constraint_input else {}
@@ -1311,6 +1322,12 @@ class PartnerApplicationService:
             dispatch_target = 'partner_learning_improvement'
         elif intent_contract.get('workstream_type') == 'active_learning':
             flow_name = 'learning_improvement_cycle'
+        elif intent_contract.get('workstream_type') == 'research_explain':
+            # Explain/research/report tasks must never enter the project
+            # execution loop: they consume learned content and produce a
+            # user-facing explanation + optional PDF, not code/experiment work.
+            flow_name = 'research_explain'
+            dispatch_target = dispatch_target or 'research_explain'
         elif intent_contract.get('workstream_type') == 'self_improvement':
             flow_name = 'self_improvement_cycle'
         elif intent_contract.get('workstream_type') == 'mixed':
@@ -1332,7 +1349,8 @@ class PartnerApplicationService:
                 or cycle_constraints.get('continuation_mode') == 'until_deadline'
                 ) and mode in {'', 'project_iteration'}:
             if intent_contract.get('workstream_type') not in {
-                    'active_learning', 'self_improvement', 'mixed'}:
+                    'active_learning', 'self_improvement', 'mixed',
+                    'research_explain'}:
                 flow_name = ('project_research_cycle'
                              if intent_contract.get('workstream_type') == 'project_research'
                              else 'project_cycle')

@@ -20,6 +20,9 @@ from typing import Any
 
 _GATE_PROMPT = """你负责决定一条发给项目负责人的消息该不该发、怎么发。消息必须基于真实事实，面向用户可读。
 
+【当前任务】（用户要求，你汇报的内容必须围绕它，不得跑题）
+{goal}
+
 【聊天记录】（最近对话，含时间戳）
 {chat}
 
@@ -33,20 +36,22 @@ _GATE_PROMPT = """你负责决定一条发给项目负责人的消息该不该�
 {candidate}
 
 【判断规则】
-1. 重复检测：聊天记录里是否已经发过类似的信息（同一件事/同一个结果）？
+1. 相关性：候选消息必须服务于【当前任务】。若内容与用户要求无关（例如旧项目话术、验证流程细节），不要原样发；重写成与当前任务相关的表述；实在无关则 send=false。
+2. 重复检测：聊天记录里是否已经发过类似的信息（同一件事/同一个结果）？
    - 已发过 → 不发（send=false），除非候选里有用户还不知道的新信息，此时只讲增量。
-2. 太久没回复：用户最近问过进展或任务有进展，但距上次发送已超过 30 分钟？
-   - 是 → 补发一条，把用户关心的进展讲清楚（send=true）。
-3. 太频繁：短时间内（30 分钟内）已发过 2 条以上？
+3. 太久没回复：用户最近问过进展或任务有进展，但距上次发送已超过 10 分钟？
+   - 是 → 补发一条，把用户关心的进展讲清楚（send=true）。这保证长任务不沉默、用户能实时看到进度。
+4. 太频繁：短时间内（10 分钟内）已发过 2 条以上？
    - 是 → 不重复发；如果候选包含新信息，合并成一条最精简的。
-4. 用户可读性：候选里的内部词（event/flow/job/结算/边界/决策/effect=0.0 等）要改写成大白话。
+5. 用户可读性：候选里的内部词（event/flow/job/结算/边界/决策/effect=0.0/证据清单/哈希绑定/轮次 等）要改写成大白话。
    内部标记必须清除或改写为普通人能懂的话，包括但不限于：
    - 方括号内部标记：[commitment]、[流内草稿·未经裁决背书]、[路径已隐藏]、[数据量已隐藏]、[进度] 等
    - 机器字段：settlement_class=...、improvement_over_基线结果=False、publish_eligible=...、
      publish_blockers=...、bet=...、expectations_met=...、next_round_goal=... 等键值对
    - 步骤计数：完成（25/32）、第 N 步、Round N 等
    改写成"做了什么、得到什么、下一步做什么"的自然中文，语气像助理向老板汇报。
-5. 真实性：只允许使用给定信息中的事实，禁止编造；读取外部内容失败时如实说明，不虚构内容。
+6. 具体事实优先：进展消息要写清楚具体做了什么——读了哪几份资料（可列标题/主题）、找到了几个候选、测试结果如何、发现了什么——不要用"确定方案/整理资料/推进中"这类空话；没有具体事实可讲时如实说"目前在做××，还没有可汇报的结果"。
+7. 真实性：只允许使用给定信息中的事实，禁止编造；读取外部内容失败时如实说明，不虚构内容。
 
 【输出格式】严格 JSON，不要多余文字：
 {{"send": true 或 false, "message": "改写后的消息（send=false 时可留空）", "reason": "一句话说明判断理由"}}"""
@@ -93,7 +98,16 @@ def publish_gate(
         chat = str(cc.get("recent_chat") or "(暂无聊天记录)")[-4000:]
         jobs = str(cc.get("recent_jobs") or "")[:1500]
         status = json.dumps(cc.get("runtime_status") or {}, ensure_ascii=False)[:1500]
+        # Bind the publication to the task the user actually asked for: the
+        # gate must never let stale project-cycle prose leak into the reply.
+        contract = facts.get("intent_contract")
+        goal = ""
+        if isinstance(contract, dict):
+            goal = str(contract.get("original_request") or "")[:600]
+        if not goal:
+            goal = str(facts.get("request") or getattr(ctx, "request", "") or "")[:600]
         prompt = _GATE_PROMPT.format(
+            goal=goal or "(未提供任务原文，按候选消息内容判断)",
             chat=chat, recent_jobs=jobs, status=status, candidate=str(candidate or "")[:1500])
         if rewrite_only:
             prompt += (

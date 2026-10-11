@@ -19,6 +19,9 @@ _STANDARD_MILESTONE_NODES = {
     # staying silent for hours between acceptance and the final report.
     "assess", "benchmark_settle", "evolution_gate", "report_ack", "final_ack",
     "understand_3", "commitment", "execute", "settle",
+    # research_explain's synthesize is the whole point of an explain task: its
+    # completion always deserves a delivery decision.
+    "synthesize",
 }
 
 
@@ -48,14 +51,25 @@ def should_publish(*, mode: str, lifecycle_phase: str, node_id: str = "",
     if lifecycle_phase == "flow_planned":
         return False
     if lifecycle_phase == "flow_started":
-        return False
+        # Long runs must not start in silence: an explicit "starting now, will
+        # report at milestones" beats hours of nothing.  The LLM gate still
+        # decides the final wording and can merge with an accepted receipt.
+        return True
     if lifecycle_phase == "flow_completed":
         # Push a wrap-up for every user-visible flow: the research spine itself
         # plus each child round (cycle/learning/evolution), so users see what
         # finished even on multi-hour runs.
         return bool(flow_name in {'project_iteration', 'project_cycle_round',
-                                  'active_learning', 'autonomous_evolution'})
-    return lifecycle_phase == "event_completed" and node_id in _STANDARD_MILESTONE_NODES
+                                  'active_learning', 'autonomous_evolution',
+                                  'research_explain'})
+    if lifecycle_phase == "event_completed":
+        # Every completed Event is a publication candidate.  The LLM gate (not
+        # a node whitelist) decides whether to actually send, deduplicating
+        # against the chat history and respecting the heartbeat.  This is what
+        # makes progress visible without spamming: the model sees the
+        # conversation, the task goal and the elapsed silence.
+        return True
+    return False
 
 
 def _hash(value: Any) -> str:
@@ -141,7 +155,7 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
         from partner.messaging.publish_gate import last_push_ts
         from datetime import datetime as _dt, timezone as _tz
         if (lifecycle_phase in {"event_completed", "flow_started", "flow_completed", "flow_failed"}
-                and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) > 1500):
+                and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) > 600):
             pass  # heartbeat candidate
         else:
             return {"ok": True, "suppressed": True, "mode": mode,

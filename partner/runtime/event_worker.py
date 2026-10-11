@@ -47,6 +47,23 @@ def _agent_config(root: Path, instance_workspace: Path) -> dict[str, Any]:
     return {"backend": "hermes"}
 
 
+def _is_placeholder_job(job: JobRecord) -> bool:
+    """Heartbeat / status-answer placeholder jobs rank below real user tasks.
+
+    A placeholder is a message_delivery flow that only answers "what is
+    running" (the intent goal is a canned status script).  User tasks carry a
+    real original request and must always be claimed first.
+    """
+    if job.flow_type == "message_delivery":
+        return True
+    contract = getattr(job, "intent_contract", None) or {}
+    if isinstance(contract, dict):
+        goal = str(contract.get("original_request") or "").strip()
+        if goal.startswith("告诉用户当前任务尚在运行"):
+            return True
+    return False
+
+
 @dataclass
 class EventContext:
     workspace: str
@@ -328,7 +345,13 @@ class EventWorker:
                 if (job and job.status in {"queued", "dispatched", "running"}
                         and job.flow_id):
                     rows.append((job, path))
-            rows.sort(key=lambda pair: pair[0].created_at)
+            # User tasks outrank placeholder status-delivery jobs: a real
+            # request (any flow_type other than message_delivery, or one with
+            # an explicit intent goal) must never wait behind a heartbeat
+            # placeholder that only answers "what is running".
+            rows.sort(key=lambda pair: (
+                1 if _is_placeholder_job(pair[0]) else 0,
+                pair[0].created_at))
             for job, _path in rows:
                 # Claim before reading mutable Flow state.  On 9p/NTFS the
                 # writer's temporary-file replace can expose a brief missing
@@ -380,7 +403,8 @@ class EventWorker:
             if (job and job.assigned_instance == self.instance_id
                     and job.status in {"queued", "dispatched", "running"} and job.flow_id):
                 rows.append(job)
-        rows.sort(key=lambda value: value.created_at)
+        rows.sort(key=lambda value: (
+            1 if _is_placeholder_job(value) else 0, value.created_at))
         for job in rows:
             # Instance-bound workers use the same authoritative DB lease as
             # shared workers.  Returning an unclaimed row made the first
@@ -854,6 +878,48 @@ class EventWorker:
         self._save_job(job)
         return True
 
+    def _sweep_stale_jobs(self) -> bool:
+        """Fail jobs that look hung so the queue never deadlocks.
+
+        A running job whose job file has not been touched for
+        ``STALE_JOB_SECONDS`` is presumed to have lost its worker (crash,
+        network hang, orphaned lease).  Sweeping it to ``failed`` releases the
+        queue slot.  Only shared-mode workers sweep (instance-bound workers
+        own exactly their instance's jobs and the lease heartbeat is enough).
+        """
+        if not self.shared_mode:
+            return False
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc).timestamp()
+        threshold = float(os.environ.get("PARTNER_STALE_JOB_SECONDS", "1800"))
+        swept = False
+        for job, path in self._queue_jobs():
+            if not (job and job.status in {"queued", "dispatched", "running"}):
+                continue
+            updated = str(getattr(job, "updated_at", "") or "")
+            try:
+                updated_ts = _dt.fromisoformat(updated.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                updated_ts = 0.0
+            # Only sweep jobs older than the threshold and never a job we hold.
+            if updated_ts and (now - updated_ts) > threshold:
+                if self._lock_held == job.job_id:
+                    continue
+                try:
+                    if not self._try_acquire_lock(job.job_id):
+                        continue
+                    self._lock_held = job.job_id
+                    job.status = "failed"
+                    job.error = "stale_job_swept:no worker update for " + str(int(threshold)) + "s"
+                    self._save_job(job)
+                    logger.warning("stale job swept: %s (no update for %ss)", job.job_id, int(threshold))
+                    swept = True
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    self._release_claim()
+        return swept
+
     async def run_forever(self, poll_seconds: float = 1.0) -> None:
         if threading.current_thread() is threading.main_thread():
             for name in ("SIGTERM", "SIGINT"):
@@ -863,6 +929,14 @@ class EventWorker:
             # Engine control gate: honour stop/pause before pulling work.
             blocker = await asyncio.to_thread(self._control_blocker)
             if blocker:
+                await asyncio.sleep(poll_seconds)
+                continue
+            # Stale-job sweeper: a running job whose file has not been updated
+            # for STALE_JOB_SECONDS is treated as hung (worker died mid-run,
+            # network hang, no heartbeat).  Mark it failed so it stops blocking
+            # the queue in front of real user tasks.
+            stale = await asyncio.to_thread(self._sweep_stale_jobs)
+            if stale:
                 await asyncio.sleep(poll_seconds)
                 continue
             # A slow filesystem must not block the asyncio control loop.

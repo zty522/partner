@@ -107,12 +107,16 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
             "route 只能为 direct_answer 或 project_iteration：用户仅问概念、解释差别且无需读取当前外部材料时选 direct_answer；"
             "查询已有任务进展且下方已有运行器读取的真实记录时选 direct_answer，不为状态查询再开研究或取证迭代；缺失部分如实说尚不能确认。"
             "需要新的外部文件读取、检索、计算、修改或推进任务时选 project_iteration。"
-            "同时判断 workstream_type，只能是 project_research、active_learning、self_improvement、mixed："
-            "主要目标是推进用户项目选 project_research；主要目标是阅读外部/本地资料并形成可消费新知识选 active_learning；"
+            "同时判断 workstream_type，只能是 project_research、research_explain、active_learning、self_improvement、mixed："
+            "主要目标是推进用户项目（改代码、跑实验、改文件、落地产出）选 project_research；"
+            "主要目标是总结已学内容、调研某方向/资料、向用户讲解说明、输出学习报告或改进建议（不修改项目代码、以产出可消费的知识讲解为目标）选 research_explain；"
+            "主要目标是阅读外部/本地资料并形成可消费新知识（不讲解、不总结已有内容）选 active_learning；"
             "主要目标是检查、修复或改进 Partner 自身代码/Event/Flow/消息/报告机制选 self_improvement；"
             "原始请求明确同时要求项目推进、主动学习和 Partner 自身改进时选 mixed。"
             "若主动学习或自进化只出现在‘知识不足时/机制失败时/必要时’等条件从句中，它只是项目 Flow 的候选旁支，"
             "workstream_type 必须仍选 project_research；后续由证据门判断是否触发，不能提前选 mixed。"
+            "用户明确说“总结/讲解/调研/介绍一下/给我讲讲/说说/有什么收获/学到的内容/怎么改进/建议”时优先考虑 research_explain，"
+            "除非用户同时明确要求修改代码或执行落地操作。"
             "派发目标 dispatch_target 必须从下列候选中选一个：\n"
             "  - direct_answer：直接答，不入队\n"
             "  - browser_video_learning：用户想学一条具体视频（payload.url 必填）\n"
@@ -171,7 +175,8 @@ def _intent(ctx: Any, params: dict[str, Any], role: str) -> dict[str, Any]:
         if value.get('route') not in ('direct_answer', 'project_iteration'):
             raise ValueError('intent synthesize route remains invalid after one schema repair')
     if role == 'synthesize' and value.get('route') == 'project_iteration':
-        allowed = {'project_research', 'active_learning', 'self_improvement', 'mixed'}
+        allowed = {'project_research', 'research_explain', 'active_learning',
+                   'self_improvement', 'mixed'}
         if value.get('workstream_type') not in allowed:
             value['workstream_type'] = 'project_research'
             value['workstream_type_repaired'] = True

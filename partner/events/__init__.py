@@ -53,6 +53,7 @@ def builtin_definitions() -> list[EventDefinition]:
     from .system_evolution import DEFINITIONS as system_evolution
     from .supervision import DEFINITIONS as supervision
     from .notes import DEFINITIONS as notes
+    from .research_explain import DEFINITIONS as research_explain
     return [*orchestration, *interaction, *memory, *decision, *presentation, *project,
             *active_learning, *self_evolution, *delivery, *social_video,
             *figure_assets, *cross_cutting, *evolution_pipeline,
@@ -61,6 +62,7 @@ def builtin_definitions() -> list[EventDefinition]:
             *improvement, *acceptance, *local_learning, *commitment, *core_v1,
             *benchmark, *candidate, *loop_bench, *v4_benchmark, *v5_research,
             *meta_cycle, *system_evolution, *supervision, *notes,
+            *research_explain,
             long_run_controller_event, pdf_fact_adjudicator_event,
             corpus_eligibility_event, learning_source_recovery_event,
             evolution_candidate_merger_event, fair_scheduler_event,
