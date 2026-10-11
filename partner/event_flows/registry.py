@@ -4,6 +4,7 @@ from dataclasses import asdict
 from hashlib import sha256
 from typing import Iterable
 import json
+import os
 
 from partner.event_fabric.flows import EventFlowDefinition
 
@@ -73,7 +74,7 @@ class EventFlowRegistry:
         return sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
-def build_flow_registry() -> EventFlowRegistry:
+def build_flow_registry(workspace: str | None = None) -> EventFlowRegistry:
     from .builtins import DEFINITIONS, LEGACY_PRESENTATION_FLOWS
     registry = EventFlowRegistry(DEFINITIONS)
     from .research_explain import DEFINITIONS as explain_definitions
@@ -136,4 +137,21 @@ def build_flow_registry() -> EventFlowRegistry:
         registry._versions[(old.name, old.version)] = old
     for historical in LEGACY_PRESENTATION_FLOWS:
         registry._versions[(historical.name,historical.version)] = historical
+    # Durable soft-orchestration output: definitions written by a running
+    # orchestrator (state/event_flows/orchestrated/*.json) are loaded back so a
+    # restarted worker or a later job can reuse the LLM-designed graph.
+    # A brand-new flow name becomes a first-class flow; an orchestrated version
+    # of a known flow is pinned under its explicit version.
+    _workspace = workspace or os.environ.get("PARTNER_WORKSPACE") or ""
+    if _workspace:
+        try:
+            from partner.event_fabric.flows import EventFlowStore
+            store = EventFlowStore(_workspace)
+            for definition in store.load_orchestrated():
+                if definition.name in registry._flows:
+                    registry._versions[(definition.name, definition.version)] = definition
+                else:
+                    registry.register(definition)
+        except Exception:  # noqa: BLE001
+            pass
     return registry

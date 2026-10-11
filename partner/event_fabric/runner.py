@@ -367,6 +367,14 @@ class EventFlowRunner:
                         reason=f"orchestration:{action}",
                         decision=decision)
                     applied = True
+                    # Durable materialisation: a runtime-orchestrated graph is
+                    # written under state/event_flows/orchestrated/ so a later
+                    # job or a restarted worker can reuse it instead of losing
+                    # the LLM's design when the process exits.
+                    try:
+                        self.controller.store.persist_orchestrated(proposed)
+                    except Exception as _pe:  # noqa: BLE001
+                        history_row["persist_error"] = f"{type(_pe).__name__}: {_pe}"
         except Exception as exc:  # noqa: BLE001
             history_row["error"] = f"{type(exc).__name__}: {exc}"
         history_row["applied"] = applied

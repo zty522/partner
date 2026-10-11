@@ -76,6 +76,51 @@ class EventFlowDefinition:
         return cls(name, version, tuple(nodes), description, soft_orchestrated)
 
 
+def definition_to_dict(definition: EventFlowDefinition) -> dict[str, Any]:
+    """Serialise a definition (including orchestrated ones) to JSON-able dict."""
+    return {
+        "name": definition.name,
+        "version": definition.version,
+        "description": definition.description,
+        "soft_orchestrated": definition.soft_orchestrated,
+        "nodes": [{
+            "node_id": node.node_id, "event_type": node.event_type,
+            "depends_on": list(node.depends_on), "branch_id": node.branch_id,
+            "concurrency_key": node.concurrency_key,
+            "parameters": dict(node.parameters), "when_route": node.when_route,
+            "optional": node.optional, "continue_on_failure": node.continue_on_failure,
+            "when_output": node.when_output,
+        } for node in definition.nodes],
+    }
+
+
+def definition_from_dict(data: dict[str, Any]) -> EventFlowDefinition:
+    """Re-hydrate a definition dict into a legal EventFlowDefinition."""
+    nodes = tuple(
+        FlowNode(
+            node_id=str(row.get("node_id") or ""),
+            event_type=str(row.get("event_type") or ""),
+            depends_on=tuple(row.get("depends_on") or ()),
+            branch_id=str(row.get("branch_id") or "main"),
+            concurrency_key=str(row.get("concurrency_key") or ""),
+            parameters=dict(row.get("parameters") or {}),
+            when_route=str(row.get("when_route") or ""),
+            optional=bool(row.get("optional") or False),
+            continue_on_failure=bool(row.get("continue_on_failure") or False),
+            when_output=str(row.get("when_output") or ""),
+        )
+        for row in (data.get("nodes") or [])
+        if row.get("node_id") and row.get("event_type")
+    )
+    return EventFlowDefinition(
+        name=str(data.get("name") or ""),
+        version=str(data.get("version") or ""),
+        nodes=nodes,
+        description=str(data.get("description") or ""),
+        soft_orchestrated=bool(data.get("soft_orchestrated") or False),
+    )
+
+
 @dataclass
 class SuspendedFlow:
     flow_id: str
@@ -152,6 +197,37 @@ class EventFlowStore:
         value = json.loads(self.path(flow_id).read_text(encoding="utf-8"))
         value["suspended"] = [SuspendedFlow(**row) for row in value.get("suspended") or []]
         return EventFlowState(**value)
+
+    def persist_orchestrated(self, definition: EventFlowDefinition) -> Path:
+        """Durable materialisation of a runtime-orchestrated flow definition.
+
+        A soft-orchestrated redesign must survive the run: writing it here lets
+        later jobs (and restarted workers) reuse the LLM-designed graph instead
+        of losing it when the process exits.
+        """
+        directory = self.directory / "orchestrated"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{definition.name}@{definition.version}.json"
+        temporary = target.with_suffix(f".tmp.{os.getpid()}")
+        temporary.write_text(json.dumps(definition_to_dict(definition),
+                                        ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(target)
+        return target
+
+    def load_orchestrated(self) -> list[EventFlowDefinition]:
+        directory = self.directory / "orchestrated"
+        if not directory.is_dir():
+            return []
+        definitions: list[EventFlowDefinition] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                definition = definition_from_dict(data)
+            except Exception:  # noqa: BLE001
+                continue
+            if definition.name and definition.nodes:
+                definitions.append(definition)
+        return definitions
 
 
 class EventFlowController:

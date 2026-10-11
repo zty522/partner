@@ -121,7 +121,7 @@ class EventWorker:
             model=config.get("model"), provider=config.get("provider"),
         )
         self.catalog = build_catalog(workspace=self.root)
-        self.flows = build_flow_registry()
+        self.flows = build_flow_registry(workspace=self.root)
         self.store = EventFlowStore(self.root)
         self.controller = EventFlowController(self.store)
         self.ledger = EventLedger(self.root)

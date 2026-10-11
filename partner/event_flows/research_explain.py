@@ -15,6 +15,8 @@ RESEARCH_EXPLAIN = Flow('research_explain', '1.0.0', (
     Node('research', 'active_learning.source_retrieve', ('recall',)),
     Node('synthesize', 'research_explain.synthesize', ('research',)),
     Node('send', 'delivery.send_text', ('synthesize',)),
-), '总结已学内容 + 调研方向 + 生成面向用户的讲解与建议；单趟完成，不进入项目循环或续跑。')
+), '总结已学内容 + 调研方向 + 生成面向用户的讲解与建议；单趟完成，不进入项目循环或续跑。'
+   'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+   soft_orchestrated=True)
 
 DEFINITIONS = [RESEARCH_EXPLAIN]

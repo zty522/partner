@@ -1392,7 +1392,7 @@ class PartnerApplicationService:
             ))
             event_catalog = build_catalog(workspace=self.root)
             event_catalog.snapshot(self.root / "state/event_catalog" / f"catalog_{event_catalog.version}.json")
-            flow_definition = build_flow_registry().get(flow_name)
+            flow_definition = build_flow_registry(workspace=self.root).get(flow_name)
             flow_state = EventFlowController(EventFlowStore(self.root)).start(
                 flow_definition, catalog_version=event_catalog.version,
                 builtin_catalog_version=event_catalog.builtin_version,
@@ -1541,7 +1541,7 @@ class PartnerApplicationService:
             ))
             event_catalog = build_catalog(workspace=self.root)
             event_catalog.snapshot(self.root / "state/event_catalog" / f"catalog_{event_catalog.version}.json")
-            flow_definition = build_flow_registry().get(flow_name)
+            flow_definition = build_flow_registry(workspace=self.root).get(flow_name)
             if flow_definition is None:
                 return Submission(False, "", "", instance_id, "rejected", flow_name,
                                   f"未注册的续跑 flow：{flow_name}")

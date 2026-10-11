@@ -88,7 +88,9 @@ for _node in ROUND.nodes:
 ROUND_V3_5 = ROUND  # 历史版本别名
 _round_36_nodes = ROUND.nodes  # 节点序列不变，交接信息随 next_decide 输出传递
 ROUND = replace(ROUND, version='3.6.0', nodes=tuple(_round_36_nodes),
-                description='v3.6.0: iteration_next_decide 输出扩展 round_handoff 字段，实现内容级轮间传承；round_design 消费 next_decide 完整输出而非 budget_guard。')
+                description='v3.6.0: iteration_next_decide 输出扩展 round_handoff 字段，实现内容级轮间传承；round_design 消费 next_decide 完整输出而非 budget_guard。'
+                            'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+                soft_orchestrated=True)
 
 # Immutable recovery definitions for Jobs pinned before executable blueprints.
 ROUND_V3 = Flow('project_cycle_round', '3.0.0', (
@@ -305,7 +307,9 @@ _cycle_35_nodes[_narrative_index + 1:_narrative_index + 1] = [
     Node('semantic_claim_reaudit', 'cycle.semantic_claim_audit', ('semantic_claim_repair',)),
 ]
 CYCLE = replace(CYCLE, version='3.5.0', nodes=tuple(_cycle_35_nodes),
-                description='Audit and repair outward claims before delivery; then verify all rendered channels.')
+                description='Audit and repair outward claims before delivery; then verify all rendered channels. '
+                            'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+                soft_orchestrated=True)
 
 CYCLE_V3 = Flow('project_cycle', '3.0.0', (
     Node('initialize', 'cycle.initialize'),
@@ -351,7 +355,9 @@ PROJECT_RESEARCH_CYCLE_V1_1 = replace(
     description='Historical project research graph with benchmark after iteration.')
 PROJECT_RESEARCH_CYCLE = replace(
     CYCLE, name='project_research_cycle', version='1.5.0',
-    description='Project research with message sanitization, PDF fact adjudication, and token aggregation.')
+    description='Project research with message sanitization, PDF fact adjudication, and token aggregation. '
+                'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+    soft_orchestrated=True)
 META_CYCLE = Flow('meta_cycle', '2.0.0', (
     Node('meta_initialize', 'meta.initialize'),
     Node('coordinate', 'meta.coordinate', ('meta_initialize',)),
@@ -367,7 +373,9 @@ META_CYCLE = Flow('meta_cycle', '2.0.0', (
     Node('report_ack', 'cycle.delivery_settle', ('report',), continue_on_failure=True,
          when_output='meta_initialize.report_required'),
     Node('finish', 'meta.finish', ('report_ack',)),
-), 'Explicit coordinator that runs project, learning and evolution as separate child workstreams and merges terminal evidence.')
+), 'Explicit coordinator that runs project, learning and evolution as separate child workstreams and merges terminal evidence. '
+   'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+   soft_orchestrated=True)
 
 def evolution_flow(expanded=False, repair_tests=False, preflight_revision=False):
     nodes = []

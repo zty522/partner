@@ -163,7 +163,9 @@ PROJECT_ITERATION = Flow("project_iteration", "3.0.0", (
     Node("delivery_verify", "delivery.verify", ("send",)),
     Node("promote", "notes.promote", ("delivery_verify",), optional=True,
          parameters={"evidence_sources": ["verify", "reflect", "core_settlement"]}),
-), "Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route.")
+), "Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route. "
+   "Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.",
+   soft_orchestrated=True)
 
 
 ACTIVE_LEARNING_V1 = Flow("active_learning", "1.0.0", (
