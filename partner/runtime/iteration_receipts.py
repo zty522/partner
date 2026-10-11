@@ -14,13 +14,21 @@ def write_request_receipts(workspace, root_event_id):
         if row.get("event_type")=="delivery.channel_ack" and row.get("status")=="completed"}
     jobs=[]
     for path in (root/'state/application/jobs').glob('*.json'):
-        row=json.loads(path.read_text())
+        try:
+            row=json.loads(path.read_text())
+        except (OSError, ValueError, TypeError):
+            # A concurrent writer may replace the file mid-read; skip the
+            # transient half-written record instead of crashing the worker.
+            continue
         if row.get('root_event_id')==root_event_id: jobs.append(row)
     jobs.sort(key=lambda j:j['created_at'])
     rounds=[j for j in jobs if j.get('flow_type')=='project_iteration']
     for index,job in enumerate(rounds):
         if job['status'] not in ('completed','failed','cancelled'):continue
-        flow=json.loads((root/'state/event_flows'/f"{job['flow_id']}.json").read_text())
+        try:
+            flow=json.loads((root/'state/event_flows'/f"{job['flow_id']}.json").read_text())
+        except (OSError, ValueError, TypeError):
+            continue  # flow state missing/corrupt; receipt projection is best-effort
         verify=flow['node_outputs'].get('verify',{})
         attempted=list(dict.fromkeys(flow['completed_node_ids'] + flow.get('failed_node_ids', [])))
         if not attempted:
