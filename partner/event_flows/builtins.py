@@ -213,17 +213,21 @@ ACTIVE_LEARNING_V2_1 = Flow("active_learning", "2.1.0", (
     Node("resume", "core.route_next", ("remember", "core_settlement")),
 ), "Source-grounded learning freezes a candidate handoff; downstream project execution must prove improvement.")
 
-# 新版本 2.2.0：在 read 后插入 transfer_mapping；synthesize 后插入 notes.judge
+# 新版本 2.2.0：在 read 后插入 transfer_mapping；synthesize 后插入 notes.judge；
+# handoff 后新增用户汇报（learning_report → delivery.send_text）与真实落地路由（active_learning.route_next）
 ACTIVE_LEARNING = Flow("active_learning", "2.2.0", (
     *ACTIVE_LEARNING_V2.nodes[:-2],
     Node("transfer_mapping", "active_learning.transfer_mapping", ("read",)),
     Node("judge", "notes.judge", ("synthesize",)),
     Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve", "transfer_mapping")),
+    Node("report", "active_learning.learning_report", ("handoff",)),
+    Node("send", "delivery.send_text", ("report",),
+         parameters={"prepend_status": False}),
     Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
     Node("promote", "notes.promote", ("remember",), optional=True,
          parameters={"evidence_sources": ["matched", "core_settlement", "judge"]}),
-    Node("resume", "core.route_next", ("remember", "core_settlement")),
-), "Source-grounded learning with transfer mapping to executable project actions; freezes a candidate handoff with concrete action plan.")
+    Node("resume", "active_learning.route_next", ("remember", "core_settlement", "handoff")),
+), "Source-grounded learning with transfer mapping to executable project actions; freezes a candidate handoff with concrete action plan, reports to the user, and routes the frozen handoff into a real downstream project round for verified improvement.")
 
 
 

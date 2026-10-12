@@ -65,6 +65,30 @@ def _job_id_from_prompt(prompt: str) -> str:
     return match.group(1) if match else ''
 
 
+def _normalize_command(command: str) -> str:
+    """Canonical form for exact-duplicate detection (whitespace only)."""
+    return re.sub(r'\s+', ' ', str(command or '').strip())
+
+
+def _work_snapshot(root: Path) -> dict[str, tuple[int, int]]:
+    """size+mtime fingerprint of the owned work tree (excluding runtime audit)."""
+    if not root.exists():
+        return {}
+    value: dict[str, tuple[int, int]] = {}
+    try:
+        for path in root.rglob("*"):
+            if not path.is_file() or ".execution" in path.parts:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            value[str(path.resolve())] = (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        pass
+    return value
+
+
 def run_command(command: str, cwd: str, seconds: float, output_path: Path | None = None) -> dict:
     if seconds <= 0:
         return {'exit_code': None, 'timed_out': True, 'output': '', 'executed': False}
@@ -261,6 +285,9 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int | None
                                    'conversation':conversation, 'inflight':None})
             return raw
         results = []
+        done_commands = {_normalize_command(h.get('command') or '') for h in history
+                         if h.get('exit_code') == 0 and h.get('command')}
+        noop_penalties = 0
         for command in blocks:
             if _unbounded_workspace_scan(command, adapter.workspace):
                 conversation += (
@@ -304,12 +331,20 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int | None
                 conversation += '\n命令含模型协议残片，未执行。请重新输出干净的完整bash命令，不附模型边界标记。'
                 write_json(checkpoint, {'state':'running','commands':history,'conversation':conversation,'inflight':None})
                 continue
+            normalized = _normalize_command(command)
+            if normalized in done_commands:
+                conversation += ('\n此命令未执行：与已成功执行的命令完全重复。请直接推进到新的业务动作'
+                                 '（读取不同输入、产生新产物或修改状态），或输出最终结果；不要重跑相同命令。')
+                write_json(checkpoint, {'state':'running','commands':history,
+                                        'conversation':conversation,'inflight':None})
+                continue
             remaining = deadline - time.monotonic() - 3
             if remaining <= 0:
                 break
             index = len(history)
             write_json(checkpoint, {'state':'running', 'commands':history, 'conversation':conversation,
                        'inflight':{'index':index, 'command':command}})
+            before_snapshot = _work_snapshot(work)
             result = run_command(command, str(work), command_budget(command, command_seconds, remaining), audit / f"command_{index:03d}.log")
             result.update(command=command, index=index)
             history.append(result)
@@ -317,6 +352,20 @@ def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int | None
             results.append(json.dumps(result, ensure_ascii=False))
             # Persist immediately: completed side effects must never be replayed.
             conversation += '\n真实执行回执：\n' + results[-1]
+            if result.get('exit_code') == 0:
+                done_commands.add(normalized)
+                # No-op detection: a successful command that changed nothing in
+                # the owned work tree is empty motion (the observed production
+                # failure was a contract.json re-written 10x in one job).
+                if _work_snapshot(work) == before_snapshot:
+                    noop_penalties += 1
+                    conversation += ('\n运行时检查：该命令成功退出但工作目录没有任何变化'
+                                     '（未产生新产物、未修改任何文件）。若这是校验/回读/写同一文件类动作，'
+                                     '它没有推进业务状态，不要重复；请执行能产生真实变化的动作，或直接输出最终结果。')
+                    if noop_penalties >= 2:
+                        conversation += ('\n已连续多次出现无效果命令。现在必须停止这类空转：'
+                                         '要么执行一个能改变工作目录内容的真实动作，'
+                                         '要么如实输出已完成的最终结果和未完成部分。')
             if result.get('exit_code') and 'No such file or directory' in result.get('output',''):
                 missing={Path(p).name for p in re.findall(r"/[^\s'\"]+\.(?:json|jsonl|csv|pdb|pdbqt|sdf|md|py)",result['output'])}
                 index=work.parent/'verified_project_artifacts.json'

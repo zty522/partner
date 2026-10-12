@@ -1380,6 +1380,126 @@ def transfer_mapping(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "learning_delta": False, "token_usage": usage}
 
 
+def route_next(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Active-learning terminal gate: land the frozen handoff or explain why not.
+
+    The learning flow freezes a sourced adoption candidate; real improvement
+    requires a downstream project round that executes the action plan and is
+    verified.  ``core.route_next`` only reads benchmark settlements, so an
+    active-learning flow using it silently ended with no user message and no
+    execution (observed in job_ff3fbf78).  This gate:
+      - candidate_frozen + adoption event_type/hypothesis -> submit a new
+        project_cycle_round job carrying learning_handoff_refs, then report
+        continue_project_with_handoff;
+      - otherwise -> waiting_for_sources, still a completed node with an
+        honest summary (never silent).
+    """
+    handoff = _semantic(params, 'handoff')
+    ready = bool(handoff.get('ready')) or handoff.get('status') == 'candidate_frozen'
+    adoption = handoff.get('candidate') if isinstance(handoff.get('candidate'), dict) else {}
+    plan_ready = bool(adoption.get('event_type') and adoption.get('hypothesis'))
+    if ready and plan_ready:
+        job_id = str(getattr(ctx, 'job_id', '') or params.get('job_id') or '')
+        project_id = str(getattr(ctx, 'project_id', '') or params.get('project_id') or '')
+        request = (f'执行主动学习交接单的落地动作（{adoption.get("event_type")}：'
+                   f'{str(adoption.get("hypothesis"))[:200]}）。必须真实执行并用结果验证，'
+                   f'禁止只构造文档或契约回执。')
+        handoff_row = (params.get("flow_outputs") or {}).get("handoff")
+        refs = []
+        if isinstance(handoff_row, dict):
+            refs = [str(value) for value in
+                    (handoff_row.get("evidence_refs") or handoff_row.get("files") or [])]
+        landed = False
+        landed_note = ''
+        try:
+            from scripts.messaging.partner_submit import SubmitPayload, submit
+            import uuid as _uuid
+            sender_openid = str(getattr(ctx, 'sender_id', '') or '').strip()
+            instance = str(getattr(ctx, 'instance_id', '') or '01')
+            recipient_ref = f"inst{instance}_{sender_openid}" if sender_openid else f"inst{instance}"
+            payload = SubmitPayload(
+                instance=instance,
+                sender_id='system_learning',
+                sender_name='system_learning',
+                message=request,
+                project_id=project_id or 'default',
+                mode='',
+                reply_to=str(getattr(ctx, 'channel', 'qq')),
+                conversation_id=None,
+                scope=None,
+                request_id='al' + _uuid.uuid4().hex[:12],
+                recipient_ref=recipient_ref,
+                constraints_file=None,
+                execution_constraints={
+                    'learning_handoff_refs': refs,
+                    'learning_handoff_path': refs[0] if refs else '',
+                    'workstream_type': 'project_iteration',
+                    'notification_mode': 'standard',
+                },
+                subject_allowed_instances=[instance],
+                direct_answer=False,
+            )
+            res = submit(payload, str(getattr(ctx, 'workspace', '') or ''))
+            landed = bool(res.get('job_id'))
+            landed_note = str(res.get('job_id') or '') if landed else str(res)[:300]
+        except Exception as exc:
+            landed_note = f'{type(exc).__name__}: {exc}'
+        record = {
+            'primary_route': 'continue_project_with_handoff' if landed else 'handoff_queued_pending',
+            'learning_handoff_ready': ready,
+            'action_plan': {'event_type': adoption.get('event_type'),
+                            'hypothesis': str(adoption.get('hypothesis'))[:300]},
+            'downstream_job_submitted': landed,
+            'note': landed_note or 'learning handoff frozen; downstream project round must cite it and verify',
+        }
+        return {'ok': True, 'status': 'completed',
+                'summary': ('学习交接单已冻结并请求下游项目轮执行验证' if landed
+                            else '学习交接单已冻结；等待下游项目轮执行验证'),
+                'semantic_output': record, 'evidence_refs': refs}
+    record = {
+        'primary_route': 'waiting_for_sources',
+        'learning_handoff_ready': ready,
+        'reason': 'handoff lacks sourced reading + adoption candidate with event_type/hypothesis',
+    }
+    return {'ok': True, 'status': 'completed',
+            'summary': '本次主动学习未形成可执行候选：缺有来源的阅读或采用候选',
+            'semantic_output': record}
+
+
+def learning_report(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """User-readable narrative of what the learning round actually did.
+
+    Consumes handoff (source titles + core ideas), judge (landed/noted/dropped)
+    and adoption; the message is composed by the LLM from these facts so the
+    user sees "which sources were read, what they argued, what was adopted"
+    instead of raw node summaries.
+    """
+    handoff = _semantic(params, 'handoff')
+    judge = _semantic(params, 'judge')
+    adoption = handoff.get('candidate') if isinstance(handoff.get('candidate'), dict) else {}
+    source_ideas = handoff.get('source_ideas') or []
+    adoption_summary = ''
+    if adoption.get('event_type') and adoption.get('hypothesis'):
+        adoption_summary = (f"{adoption.get('event_type')}：{str(adoption.get('hypothesis'))[:240]}")
+    raw, usage = call_model(ctx, purpose='learning_user_report', prompt=(
+        '你是向用户汇报主动学习结果的助手。只能基于以下事实，用自然、平实的中文向用户说明：'
+        '①读了哪些外部资料、每份的核心观点；②其中哪些被采纳、哪些记入笔记、哪些被丢弃；'
+        '③建议如何落地（若有）。不要编造未列出的来源或观点，不要使用结算/判定/边界等内部术语，'
+        '不要输出结构化字段名。300字以内。\n\n'
+        '已读来源与核心观点（JSON）：\n' + json.dumps(source_ideas, ensure_ascii=False)[:8000] + '\n\n'
+        '采纳判定（JSON）：\n' + json.dumps(judge, ensure_ascii=False)[:4000] + '\n\n'
+        '采纳候选（若存在）：\n' + adoption_summary + '\n'))
+    text = str(raw or '').strip()
+    if not text:
+        titles = [str(item.get('title') or '') for item in source_ideas]
+        text = ('已学习外部资料' + (f"（{'、'.join(filter(None, titles[:5]))}）" if titles else '')
+                + '；核心观点与采纳判定已写入学习交接单，供后续项目轮执行验证。')
+    return {'ok': True, 'status': 'completed', 'message': text,
+            'human_message': text, 'summary': '主动学习汇报已生成',
+            'semantic_output': {'message': text, 'source_ideas': source_ideas,
+                                'adoption': adoption}}
+
+
 DEFINITIONS = [
     EventDefinition("active_learning.question_formulate", "active_learning", "形成会改变项目决策的学习问题", question_formulate, execution_method="llm"),
     EventDefinition("active_learning.source_plan", "active_learning", "规划论文、官方文档和代码多源检索", source_plan, execution_method="llm"),
@@ -1391,4 +1511,6 @@ DEFINITIONS = [
     EventDefinition("active_learning.matched_verify", "active_learning", "基线/候选匹配验证知识采用价值", matched_verify),
     EventDefinition("active_learning.handoff_freeze", "active_learning", "冻结有来源的采用候选并等待下游改善验证", handoff_freeze, reads_existing_artifact=True, produces_artifact=True),
     EventDefinition("active_learning.transfer_mapping", "active_learning", "将借鉴卡片映射为可执行项目动作", transfer_mapping, execution_method="llm"),
+    EventDefinition("active_learning.learning_report", "active_learning", "生成用户可读的主动学习结果汇报", learning_report, execution_method="llm"),
+    EventDefinition("active_learning.route_next", "active_learning", "主动学习终局路由：落地冻结交接单或如实等待", route_next),
 ]
