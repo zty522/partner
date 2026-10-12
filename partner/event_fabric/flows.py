@@ -319,7 +319,7 @@ class EventFlowController:
                         and planned.node_id not in state.skipped_node_ids
                         and planned.node_id not in state.failed_node_ids):
                     state.skipped_node_ids.append(planned.node_id)
-            prefix_ids = {"input_resolve", "input_eligibility",
+            prefix_ids = {"input_resolve", "input_eligibility", "round_plan",
                           "design", "design_critic"}
             materialized = [node.event_type for node in definition.nodes
                             if node.node_id in prefix_ids

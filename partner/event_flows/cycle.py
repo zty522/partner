@@ -105,6 +105,27 @@ ROUND = replace(ROUND, version='3.7.0', nodes=tuple(_round_37_nodes),
                             '规划把相关约束写进 round_goal/handoff 供后续执行 event 只读结构化上下文；'
                             'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
                 soft_orchestrated=True)
+ROUND_V3_7 = ROUND  # 历史版本别名（3.7.0 保留供已 pin 请求恢复）
+# 3.8.0（两层发动机架构，2026-10-13）：notes_recall 升级为 supervise.round_plan——
+# 读**完整** notes 账本（不只 limit=12 相关召回），LLM 规划本轮 flow 组合
+# （goal/flows/acceptance/stop_conditions），落盘本轮预期文档
+# （state/supervision/round_plans/<engine>/round_N.json）供外层 Supervisor 对照；
+# 规划输出注入 ctx，后续 design/plan/execute 只读结构化上下文。
+_round_38_nodes = []
+for _node in ROUND.nodes:
+    if _node.node_id == 'notes_recall':
+        # 3.8.0：notes_recall 被 round_plan 取代，不再出现在节点序列中
+        _round_38_nodes.append(Node('round_plan', 'supervise.round_plan',
+                                    ('input_eligibility',)))
+        continue
+    if _node.node_id == 'design':
+        _node = replace(_node, depends_on=('round_plan',))
+    _round_38_nodes.append(_node)
+ROUND = replace(ROUND, version='3.8.0', nodes=tuple(_round_38_nodes),
+                description='v3.8.0: 轮级规划节点 round_plan 替代 notes_recall（读完整 notes + LLM 规划本轮 flow 组合'
+                            ' + 落盘本轮预期文档供外层 Supervisor 对照）；后续设计/规划只读结构化上下文。'
+                            'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+                soft_orchestrated=True)
 
 # Immutable recovery definitions for Jobs pinned before executable blueprints.
 ROUND_V3 = Flow('project_cycle_round', '3.0.0', (

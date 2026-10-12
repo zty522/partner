@@ -484,6 +484,159 @@ def issue_select(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             "semantic_output": value}
 
 
+# ---------------------------------------------------------------------------
+# supervise.round_plan — 轮级规划：读完整 notes，LLM 规划本轮 flow 组合，
+# 落盘"本轮预期文档"供外层 Supervisor 对照（两层发动机架构，2026-10-13）
+# ---------------------------------------------------------------------------
+
+def round_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Round Planner: read the FULL note ledger, let the LLM plan this round's
+    flow combination, and persist a round expectation document.
+
+    This is the inner-layer planning anchor.  Unlike notes.recall (relevant
+    subset + inject), round_plan reads *every* non-dismissed note so the plan
+    carries the whole memory of habits/lessons/growth/pending into the round.
+    The persisted expectation document (round_plans/<engine_id>/round_N.json)
+    is the comparison baseline the outer Supervisor reads.
+
+    params: engine_id, round (int), mode, run_context (goal / previous
+    round_handoff), flow_pool_hint (available flow names)
+    """
+    ws = Path(str(getattr(ctx, "workspace", "") or getattr(ctx, "workspace_root", "")))
+    from partner.mind_lab.notes import NoteStore
+    store = NoteStore(ws)
+    all_notes = store.list_all()
+    active = [n for n in all_notes if (n.get("status") or "open") not in ("dismissed",)]
+    engine_id = str(params.get("engine_id") or "engine_default")
+    round_no = int(params.get("round") or 1)
+    mode = str(params.get("mode") or "self_improvement")
+    run_context = params.get("run_context") if isinstance(params.get("run_context"), dict) else {}
+    flow_pool = params.get("flow_pool_hint") or [
+        "self_evolution", "active_learning", "project_iteration", "learning_improvement_cycle"]
+    if isinstance(flow_pool, str):
+        flow_pool = [f.strip() for f in flow_pool.split(",") if f.strip()] or ["project_iteration"]
+    # 完整笔记的紧凑渲染：id/type/status/confidence/content(截断到合理长度)/source
+    rendered = []
+    for n in active:
+        rendered.append({
+            "id": n.get("id"), "type": n.get("type"), "status": n.get("status"),
+            "confidence": n.get("confidence"), "created_at": n.get("created_at"),
+            "content": str(n.get("content") or "")[:500],
+            "source": str(n.get("source") or "")[:200],
+        })
+    prompt = (
+        "你是 Partner 的轮级规划者（Round Planner）。在每一轮运行开始前，读取下方**完整笔记账本**"
+        "（习惯/经验/成长/待定项等全部非忽略笔记），结合上一轮交接与当前模式，规划**这一轮**"
+        "要运行的 flow 组合与验收标准。\n"
+        "规划要求：\n"
+        "1) 目标必须围绕用户核心目标（消息/PDF 用户可读、真实执行、LLM 实质参与、问题闭环修复）；\n"
+        "2) flows 从可用 flow 池中选择并给出顺序与每个 flow 的目标/验收；LLM 可判断是否需要组合多个 flow，"
+        "以及是否需要在后续运行中调整（软编排思想）；\n"
+        "3) 必须给出本轮整体验收标准与**理想停止条件**（LLM 判断什么情况下本轮可以结束）；\n"
+        "4) 笔记中未想清楚、需更多资料才能定的问题，列出到 deferred_questions，不强行下结论；\n"
+        "5) 输出必须是用户与后续事件都可读的：目标一段话讲清本轮要做什么、为什么。\n"
+        f"当前模式：{mode}\n"
+        f"可用 flow 池：{json.dumps(flow_pool, ensure_ascii=False)}\n"
+        f"上一轮交接：{json.dumps(run_context.get('round_handoff') or run_context.get('goal') or {}, ensure_ascii=False)[:1200]}\n"
+        "完整笔记账本（共 " + str(len(active)) + " 条）：\n"
+        + json.dumps(rendered, ensure_ascii=False)[:20000] +
+        "\n\n只输出一个 JSON 对象：\n"
+        "{\"round\": " + str(round_no) + ", \"mode\": \"" + mode + "\", "
+        "\"goal\": \"一段话：本轮核心目标（用户可读）\", "
+        "\"flows\": [{\"flow\": \"flow名\", \"goal\": \"该flow本轮目标\", "
+        "\"acceptance\": [\"验收标准\"], \"order\": 1}], "
+        "\"acceptance_criteria\": [\"本轮整体验收标准\"], "
+        "\"stop_conditions\": [\"理想停止条件（LLM判断）\"], "
+        "\"deferred_questions\": [\"笔记中未想清楚、待更多资料的问题\"], "
+        "\"notes_consumed\": [\"消费的关键笔记id\"], "
+        "\"expected_outputs\": [\"本轮应产出的用户可读成果\"]}"
+    )
+    raw, usage = call_model(ctx, purpose="round_plan", prompt=prompt)
+    try:
+        plan = json_object(raw)
+    except Exception:
+        plan = {"goal": "本轮规划解析失败: " + raw[:300], "flows": [], "acceptance_criteria": [],
+                "stop_conditions": [], "deferred_questions": [], "notes_consumed": [],
+                "expected_outputs": []}
+    plan.setdefault("round", round_no)
+    plan.setdefault("mode", mode)
+    plan.setdefault("notes_total", len(active))
+    plan.setdefault("planning_ts", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    plan["model_usage"] = usage or {}
+    # 落盘本轮预期文档（全局目录，供外层 Supervisor 读取对照）
+    plan_dir = ws / SUPERVISION_DIR / "round_plans" / engine_id
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    path = plan_dir / f"round_{round_no:03d}.json"
+    write_json(path, plan)
+    # 注入本轮计划到运行上下文，后续事件只读结构化上下文（不再重读全量笔记）
+    try:
+        ctx.round_plan = plan
+    except Exception:
+        pass
+    return {"ok": True, "status": "completed", "path": str(path), "files": [str(path)],
+            "summary": f"轮级规划完成（round {round_no}）：目标={str(plan.get('goal'))[:120]}；"
+                       f"规划 {len(plan.get('flows') or [])} 个 flow",
+            "semantic_output": plan}
+
+
+# ---------------------------------------------------------------------------
+# supervise.live_scan — 外层实时监督判定：输入运行快照，LLM 判问题/分级/建议修复
+# ---------------------------------------------------------------------------
+
+def live_scan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Outer-layer live supervision: judge the runtime snapshot collected by the
+    Supervisor process, produce a graded problem list with evidence and a
+    suggested fix for each, and decide whether each fix is auto-applicable or
+    needs the user.
+
+    params: snapshot (dict collected by partner.runtime.supervisor),
+    expectations_hint (optional short baseline summary)
+    """
+    snapshot = params.get("snapshot") if isinstance(params.get("snapshot"), dict) else {}
+    if not snapshot:
+        return {"ok": True, "status": "completed", "summary": "无运行快照，跳过监督",
+                "semantic_output": {"problems": [], "summary": "空快照"}}
+    prompt = (
+        "你是 Partner 系统最外层的**独立监督者**（Supervisor）。下面是一份真实运行快照"
+        "（实例状态/任务状态/节点卡死/轮级预期与实际轨迹/产出情况）。逐项检查运行是否符合预期：\n"
+        "1) 实例是否存活、Bot 是否就绪；\n"
+        "2) job 是否在推进、节点是否卡死/超时、是否零产出；\n"
+        "3) 对照每轮的**预期文档**（goal/flows/acceptance）看实际轨迹与产出是否符合预期；\n"
+        "4) 消息/PDF 是否生成、是否用户可读（叙事化、无内部术语）。\n"
+        "判定规则：\n"
+        "- 每个问题必须引用快照中的原文/状态/时间戳作为证据，禁止臆测；\n"
+        "- 分级：critical（实例挂/卡死/零产出）、major（产出不符预期/明显缺口）、"
+        "minor（可读性等质量细节）；\n"
+        "- 对每个问题给出 diagnosis（LLM 判断的问题）与 fix（建议修复动作：改哪个文件、"
+        "派发哪种模式 job、重启哪个实例）；\n"
+        "- auto_fix=true 仅当：方向明确、改动低风险、不需要用户拍板；方向类/大改/需用户判断"
+        "的写 auto_fix=false；\n"
+        "- 快照中带 supervisor_scan=True 标记的 job 属于监督派发的修复任务本身，不得再对它们"
+        "派发修复（防递归），只能记录。\n"
+        "运行快照：\n" + json.dumps(snapshot, ensure_ascii=False)[:24000] +
+        "\n\n只输出一个 JSON 对象：\n"
+        "{\"problems\": [{\"severity\": \"critical|major|minor\", \"target\": \"实例02|job_xxx|节点yyy|消息|PDF\", "
+        "\"evidence\": \"引用快照原文\", \"diagnosis\": \"LLM 判断的问题\", "
+        "\"fix\": \"建议修复动作\", \"auto_fix\": true|false}], "
+        "\"summary\": \"一段用户可读总结：这次扫描发现了什么、哪些已自动处理、哪些待用户确认\"}"
+    )
+    raw, usage = call_model(ctx, purpose="supervisor_inspect", prompt=prompt)
+    try:
+        value = json_object(raw)
+    except Exception:
+        value = {"problems": [{"severity": "major", "target": "监督响应",
+                               "evidence": raw[:200], "diagnosis": "监督模型响应不可解析",
+                               "fix": "重试或人工查看", "auto_fix": False}],
+                 "summary": "监督模型响应不可解析"}
+    value.setdefault("problems", [])
+    value.setdefault("summary", "")
+    value["scan_ts"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    value["model_usage"] = usage or {}
+    return {"ok": True, "status": "completed",
+            "summary": f"实时监督完成：{len(value['problems'])} 个问题",
+            "semantic_output": value}
+
+
 DEFINITIONS = [
     EventDefinition("supervise.expectations_load", "evolution",
                     "加载可动态更新的期望基线（看哪些方面、具体预期）", expectations_load),
@@ -504,4 +657,10 @@ DEFINITIONS = [
                     "按 LLM 组装路线投递监督子流程或决定内联修复/停止", route_dispatch, timeout_seconds=600),
     EventDefinition("supervise.issue_select", "evolution",
                     "把监督差距转为设计阶段 selected_issue（供修复）", issue_select, timeout_seconds=600),
+    EventDefinition("supervise.round_plan", "evolution",
+                    "轮级规划：读完整笔记，LLM 规划本轮 flow 组合并落盘本轮预期文档",
+                    round_plan, timeout_seconds=600),
+    EventDefinition("supervise.live_scan", "evolution",
+                    "外层实时监督：输入运行快照，LLM 判问题/分级/建议修复/是否自动派发",
+                    live_scan, timeout_seconds=600),
 ]

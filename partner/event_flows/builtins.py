@@ -1,6 +1,9 @@
 """Canonical flows for user work and the three distinct learning lines."""
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+
 from partner.event_fabric.flows import EventFlowDefinition as Flow, FlowNode as Node
 
 
@@ -166,6 +169,23 @@ PROJECT_ITERATION = Flow("project_iteration", "3.0.0", (
 ), "Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route. "
    "Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.",
    soft_orchestrated=True)
+PROJECT_ITERATION_V3_0 = PROJECT_ITERATION  # 3.0.0 保留供已 pin 请求恢复
+# v3.1.0 轮级规划：round_plan 插入 understand_3 之后（与 recall/notes_recall 并行，
+# 位于 notification gate 之前，避免自动升版逻辑对其附加 when_output 门控）
+_v31_nodes: list[Any] = []
+for _node in PROJECT_ITERATION_V3_0.nodes:
+    _v31_nodes.append(_node)
+    if _node.node_id == 'understand_3':
+        _v31_nodes.append(Node('round_plan', 'supervise.round_plan', ('understand_3',),
+                               parameters={'inject': True}))
+PROJECT_ITERATION = replace(
+    PROJECT_ITERATION_V3_0, version="3.1.0",
+    nodes=tuple(_v31_nodes),
+    description="Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route. "
+                "v3.1.0: 新增轮级规划节点 round_plan（读完整 notes，LLM 规划本轮 flow 组合并落盘本轮预期文档，"
+                "供外层 Supervisor 对照；后续规划/执行 event 只读结构化上下文）。"
+                "Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.",
+    soft_orchestrated=True)
 
 
 ACTIVE_LEARNING_V1 = Flow("active_learning", "1.0.0", (
@@ -441,7 +461,7 @@ PROJECT_ITERATION_V2_6 = _notification_gated_version(PROJECT_ITERATION_V2_5, "2.
 
 LEGACY_PRESENTATION_FLOWS = tuple(DEFINITIONS) + (
     DIRECT_ANSWER_V1, DIRECT_ANSWER_V1_1, PROJECT_ITERATION_V2_5,
-    PROJECT_ITERATION_V2_6,
+    PROJECT_ITERATION_V2_6, PROJECT_ITERATION_V3_0,
     ACTIVE_LEARNING_V1, ACTIVE_LEARNING_V2, SELF_EVOLUTION_V1,
     # The project_iteration entry above is captured *after* the commitment nodes were
     # added, so register the true pre-integration topology as well -- a request pinned
