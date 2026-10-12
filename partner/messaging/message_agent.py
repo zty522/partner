@@ -150,9 +150,15 @@ class MessageAgent:
         if intent == "task":
             submitted = self._submit_task(text, classification, sender_id=sender_id, msg=msg)
             self._stats["task"] += 1
-            warm = submitted or reply or "已收到，正在处理。"
-            self._send(sender_id, warm)
-            mark_done(self.root, msg_id, outcome="task", detail=warm)
+            # Double-receipt fix (2026-10-12): service.submit already delivered
+            # the "accepted" notice through publish_lifecycle (compose -> gate
+            # -> critic -> delivery.send_text).  Re-sending `submitted` here put
+            # the same acceptance on QQ twice within a second.  Only send a
+            # fallback when submission outright failed or returned nothing.
+            failed = (not submitted) or ("任务提交失败" in str(submitted))
+            if failed:
+                self._send(sender_id, submitted or reply or "已收到，正在处理。")
+            mark_done(self.root, msg_id, outcome="task", detail=str(submitted or reply or "task"))
             return
 
         # chat
