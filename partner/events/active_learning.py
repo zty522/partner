@@ -70,7 +70,10 @@ def source_plan(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "typed evaluator可审计性设计、JEV类决策接口的公开资料），不得因问题偏内部就清空primary_sources。"
         "URL必须是可直接读取的精确http(s) URL，不得是通配模式、搜索语法或需要再点击的列表页。"
         "本地路径只能来自本轮已验证的输入清单；禁止从记忆猜测历史job路径，禁止通配符。"
-        "download_plan可给出需要分步下载的URL，与primary_sources同样优先真实外部来源。")
+        "download_plan可给出需要分步下载的URL，与primary_sources同样优先真实外部来源。"
+        "必须遵守提示词顶部注入的用户偏好笔记（Mind Notes preference）：学习来源仅限学术文献类"
+        "（arXiv/期刊会议论文/GitHub/官方文档/权威技术资料）；禁止选择小红书（xiaohongshu.com）等"
+        "社交平台链接作为学习来源；若笔记注入包含其他来源约束，一并遵守。")
 
 
 def _classify_source_kind(url: str) -> str:

@@ -91,6 +91,20 @@ ROUND = replace(ROUND, version='3.6.0', nodes=tuple(_round_36_nodes),
                 description='v3.6.0: iteration_next_decide 输出扩展 round_handoff 字段，实现内容级轮间传承；round_design 消费 next_decide 完整输出而非 budget_guard。'
                             'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
                 soft_orchestrated=True)
+ROUND_V3_6 = ROUND
+_round_37_nodes = []
+for _node in ROUND.nodes:
+    if _node.node_id == 'design':
+        _round_37_nodes.append(Node(
+            'notes_recall', 'notes.recall', ('input_eligibility',),
+            parameters={'limit': 12}))
+        _node = replace(_node, depends_on=('notes_recall',))
+    _round_37_nodes.append(_node)
+ROUND = replace(ROUND, version='3.7.0', nodes=tuple(_round_37_nodes),
+                description='v3.7.0: round_design 前 notes.recall 仔细读笔记（偏好/待定/问题/习惯），'
+                            '规划把相关约束写进 round_goal/handoff 供后续执行 event 只读结构化上下文；'
+                            'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+                soft_orchestrated=True)
 
 # Immutable recovery definitions for Jobs pinned before executable blueprints.
 ROUND_V3 = Flow('project_cycle_round', '3.0.0', (
@@ -306,9 +320,19 @@ _cycle_35_nodes[_narrative_index + 1:_narrative_index + 1] = [
     Node('semantic_claim_repair', 'cycle.semantic_claim_repair', ('semantic_claim_audit',)),
     Node('semantic_claim_reaudit', 'cycle.semantic_claim_audit', ('semantic_claim_repair',)),
 ]
-CYCLE = replace(CYCLE, version='3.5.0', nodes=tuple(_cycle_35_nodes),
-                description='Audit and repair outward claims before delivery; then verify all rendered channels. '
-                            'Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
+_cycle_36_nodes = []
+for _node in _cycle_35_nodes:
+    if _node.node_id == 'iterate':
+        _cycle_36_nodes.append(Node(
+            'notes_recall', 'notes.recall', ('initialize',),
+            parameters={'limit': 12}))
+        _node = replace(_node, depends_on=('notes_recall',))
+    _cycle_36_nodes.append(_node)
+CYCLE_V3_5 = replace(CYCLE, version='3.5.0', nodes=tuple(_cycle_35_nodes),
+                     description='v3.5.0 历史版本别名（semantic claim audit/repair 后置）')
+CYCLE = replace(CYCLE, version='3.6.0', nodes=tuple(_cycle_36_nodes),
+                description='v3.6.0: 每轮循环开始前 notes.recall 仔细读笔记（偏好/待定/问题/习惯），'
+                            '约束经规划写进子轮蓝图；Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.',
                 soft_orchestrated=True)
 
 CYCLE_V3 = Flow('project_cycle', '3.0.0', (
@@ -569,6 +593,19 @@ AUTONOMOUS_EVOLUTION = replace(
                  'loop state under state/evolution_regression/engine/<engine_id>/engine_state.json. '
                  'Derived from v3.3.0 (live-supervision closed loop); v3.3.0 retained for pinned Jobs.'))
 
+AUTONOMOUS_EVOLUTION_V34 = AUTONOMOUS_EVOLUTION  # 3.4.0 别名（engine_continue 版）
+_v35_nodes = []
+for _node in AUTONOMOUS_EVOLUTION.nodes:
+    if _node.node_id == 'design':
+        _v35_nodes.append(Node('notes_recall', 'notes.recall', ('collect',),
+                               parameters={'limit': 12}))
+        _node = replace(_node, depends_on=tuple(list(_node.depends_on) + ['notes_recall']))
+    _v35_nodes.append(_node)
+AUTONOMOUS_EVOLUTION = replace(
+    AUTONOMOUS_EVOLUTION, version='3.5.0', nodes=tuple(_v35_nodes),
+    description=('v3.5.0: design（规划）前 notes.recall 仔细读笔记（偏好/约束/pending/问题/习惯），'
+                 '约束进入规划输出供后续执行 event 只读结构化上下文；3.4.0 保留给已 pinned Jobs。'))
+
 AUTONOMOUS_EVOLUTION_V32 = replace(
     AUTONOMOUS_EVOLUTION_V31,
     nodes=tuple(
@@ -601,7 +638,8 @@ def _improvement_flow_definitions(local_learning=True):
     # transitively downstream of it.
     self_nodes = (
         ("recall", "improvement.recall"),
-        ("observe_plan", "improvement.observe_plan", ("recall",)),
+        ("notes_recall", "notes.recall", ("recall",), {"limit": 12}),
+        ("observe_plan", "improvement.observe_plan", ("notes_recall",)),
         ("observe_execute", "improvement.observe_execute", ("observe_plan",)),
         ("evidence_seal", "improvement.evidence_seal", ("observe_execute",)),
         ("opportunity_assess", "improvement.opportunity_assess", ("evidence_seal",)),
@@ -623,7 +661,8 @@ def _improvement_flow_definitions(local_learning=True):
     # 02 learning_improvement: no observe steps; recall is the root.
     learning_nodes = (
         ("recall", "improvement.recall"),
-        ("evidence_seal", "improvement.evidence_seal", ("recall",)),
+        ("notes_recall", "notes.recall", ("recall",), {"limit": 12}),
+        ("evidence_seal", "improvement.evidence_seal", ("notes_recall",)),
         ("opportunity_assess", "improvement.opportunity_assess", ("evidence_seal",)),
         ("opportunity_select", "improvement.opportunity_select", ("opportunity_assess",)),
         ("experiment_request", "improvement.experiment_request", ("opportunity_select",)),
@@ -634,8 +673,8 @@ def _improvement_flow_definitions(local_learning=True):
 
     if local_learning:
         learning_nodes = (learning_nodes[0],
-            ('notes_recall','notes.recall'),
-            ('source_retrieve','active_learning.source_retrieve',('recall',)),
+            ('notes_recall','notes.recall',('recall',),{'limit':12}),
+            ('source_retrieve','active_learning.source_retrieve',('notes_recall',)),
             ('local_read','improvement.local_read',('source_retrieve',)),
             ('local_compare','improvement.local_compare',('local_read',)),
             ('local_ideas','improvement.local_idea_record',('local_compare',)),
@@ -644,7 +683,7 @@ def _improvement_flow_definitions(local_learning=True):
             ('learning_evaluate','improvement.learning_downstream_evaluate',('learning_commitment',)),
             ('learning_settlement','improvement.learning_settlement',('learning_evaluate',)),
             ('evidence_seal','improvement.evidence_seal',('learning_settlement',)),
-            *learning_nodes[2:-1],
+            *learning_nodes[3:-1],
             ('iterate_more','improvement.iteration_controller',('memory_consolidate',)),
             ('narrative','improvement.narrative',('iterate_more',)),
             ('send_message','delivery.send_text',('narrative',)),
@@ -710,7 +749,8 @@ def _resolved_definitions():
 DEFINITIONS = _resolved_definitions()
 DEFINITIONS_BY_VERSION = {'2.0.0': evolution_flow_v2()}
 HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
-              CYCLE_V1, CYCLE_V2, CYCLE_V3, CYCLE_V3_2, CYCLE_V3_3, CYCLE_V3_4,
+              CYCLE_V1, CYCLE_V2, CYCLE_V3, CYCLE_V3_2, CYCLE_V3_3, CYCLE_V3_4, CYCLE_V3_5,
+              ROUND_V3_5, ROUND_V3_6,
               replace(CYCLE_V3, name='project_research_cycle', version='1.0.0'),
               PROJECT_RESEARCH_CYCLE_V1_1,
               replace(CYCLE_V3_4, name='project_research_cycle', version='1.3.0'),
@@ -720,5 +760,6 @@ HISTORICAL = [ROUND_V1, ROUND_V2, ROUND_V3, ROUND_V3_2, ROUND_V3_3, ROUND_V3_4,
               AUTONOMOUS_EVOLUTION_V31,
               AUTONOMOUS_EVOLUTION_V32,
               AUTONOMOUS_EVOLUTION_V33,
+              AUTONOMOUS_EVOLUTION_V34,
               evolution_flow(), evolution_flow(expanded=True),
               evolution_flow(expanded=True, repair_tests=True), evolution_flow_v2()]

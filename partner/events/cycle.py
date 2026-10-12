@@ -513,6 +513,11 @@ def round_design(ctx, params):
         '但执行、核验、反思和结算不可省略。下一轮不得重复已否证动作。'
         '本轮蓝图只包含科研/项目动作；消息、PDF、Event/Flow图、记忆和Partner自进化由父Flow后续专门Event完成，'
         '不得写进round_goal、required_evidence或本轮成功条件。\n'
+        '【Mind Notes 消费】本轮开始前已仔细读取笔记库（flow_outputs.notes_recall.semantic_output 的 notes 与 '
+        'pending，以及提示词顶部注入的笔记全文）。必须逐条审视其中的用户偏好（如外部学习来源仅限学术文献、'
+        '禁止社交平台）、长期约束、待定改进（pending）、历史问题（issue_note）和习惯/经验。'
+        '凡与本轮目标或动作选择相关的偏好与约束，必须落实进 round_goal、hypothesis 或 required_evidence；'
+        '禁止只把笔记当背景信息。若本轮包含主动学习/外部读取，必须把来源约束写进规划供后续执行遵守。'
         '原始目标=' + str((params.get('intent_contract') or {}).get('original_request') or params.get('request') or '')[:12000]
         + '\n持续运行剩余时间=' + json.dumps(deadline, ensure_ascii=False)[:2400]
         + '\n已执行轮次与路线（不得重复相同动作）=' + json.dumps(history, ensure_ascii=False)[:20000]

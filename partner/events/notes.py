@@ -48,6 +48,15 @@ def notes_recall(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     """
     store = NoteStore(_workspace(ctx))
     query = str(params.get("query") or "")
+    if not query:
+        # Planner-context recall: when no explicit query is given, recall
+        # against the run goal so preferences/pending/issues relevant to this
+        # task surface into the planner prompt.
+        rc = params.get("run_context") or {}
+        if isinstance(rc, dict):
+            query = str(rc.get("goal") or rc.get("original_request") or "")[:200]
+        if not query:
+            query = str(params.get("request") or getattr(ctx, "request", "") or "")[:200]
     types = params.get("types") or None
     statuses = params.get("statuses") or None
     limit = max(1, min(12, int(params.get("limit") or 6)))

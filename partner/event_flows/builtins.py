@@ -185,7 +185,8 @@ ACTIVE_LEARNING_V1 = Flow("active_learning", "1.0.0", (
 
 ACTIVE_LEARNING_V2 = Flow("active_learning", "2.0.0", (
     Node("recall", "memory.context_recall"),
-    Node("question", "active_learning.question_formulate", ("recall",)),
+    Node("notes_recall", "notes.recall", ("recall",)),
+    Node("question", "active_learning.question_formulate", ("notes_recall",)),
     Node("source_plan", "active_learning.source_plan", ("question",)),
     Node("retrieve", "active_learning.source_retrieve", ("source_plan",)),
     Node("read", "active_learning.source_read", ("retrieve",)),
@@ -216,7 +217,6 @@ ACTIVE_LEARNING_V2_1 = Flow("active_learning", "2.1.0", (
 ACTIVE_LEARNING = Flow("active_learning", "2.2.0", (
     *ACTIVE_LEARNING_V2.nodes[:-2],
     Node("transfer_mapping", "active_learning.transfer_mapping", ("read",)),
-    Node("notes_recall", "notes.recall", ("recall",)),
     Node("judge", "notes.judge", ("synthesize",)),
     Node("handoff", "active_learning.handoff_freeze", ("core_settlement", "adoption", "read", "retrieve", "transfer_mapping")),
     Node("remember", "memory.belief_update", ("handoff", "core_settlement")),
