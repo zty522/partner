@@ -179,6 +179,89 @@ class EventRunLog:
 
         return project(safe, known_digest=digest)
 
+    def _flow_summary_append(self, *, flow_id: str, flow_type: str,
+                             node_id: str = "", event_type: str = "",
+                             phase: str = "", status: str = "",
+                             duration_ms: float | None = None,
+                             attempt: int = 1,
+                             inputs: Any = None, outputs: Any = None,
+                             flow_plan: Any = None, terminal: dict[str, Any] | None = None) -> None:
+        """Per-flow compact human-readable summary.
+
+        ``events.jsonl`` keeps the full redacted input/output projection;
+        this markdown gives one readable row per Event so a human can judge
+        at a glance whether each node succeeded.  Full detail lives next to
+        it (``flow_<id>_<version>.json`` snapshot + jsonl rows).
+        """
+        safe_flow = "".join(c for c in str(flow_id) if c.isalnum() or c in "_-.")
+        path = self.directory / f"flow_{safe_flow}_SUMMARY.md"
+        rows: list[str] = []
+        if flow_plan is not None:
+            if isinstance(flow_plan, Mapping):
+                node_list = flow_plan.get("nodes") or []
+                version = flow_plan.get("version", "")
+                name = flow_plan.get("name", "")
+            else:
+                node_list = list(flow_plan)
+                version, name = "", ""
+            names = [str(n.get("node_id")) for n in node_list if isinstance(n, Mapping)]
+            rows.append("## Flow 计划\n")
+            rows.append(f"- Flow：`{flow_type}`（`{flow_id}`）v{version}")
+            if names:
+                rows.append(f"- 节点序列：`{' → '.join(names)}`\n")
+
+        def _snapshot_summary(value: Any, *, limit: int) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, Mapping):
+                picked = {}
+                for key in ("request", "goal", "message", "original_request",
+                            "round_number", "current_round", "summary", "outcome",
+                            "headline", "verdict", "conclusion", "error", "status"):
+                    if key in value and value[key] is not None:
+                        picked[key] = value[key]
+                if picked:
+                    return json.dumps(sanitize(picked), ensure_ascii=False)[:limit]
+                return f"<{len(value)} keys, digest={_digest(value)}>"
+            if isinstance(value, (list, tuple)):
+                return f"<{len(value)} items>"
+            text = str(sanitize(value))
+            return text[:limit] + ("…" if len(text) > limit else "")
+
+        if terminal is not None:
+            rows.append("## Flow 终态\n")
+            rows.append(f"- 状态：`{terminal.get('status', '')}`\n")
+            rows.append(f"- 已完成：`{len(terminal.get('completed_node_ids') or [])}` 失败：`{len(terminal.get('failed_node_ids') or [])}` 跳过：`{len(terminal.get('skipped_node_ids') or [])}`")
+            if terminal.get("error"):
+                rows.append(f"- 错误：`{sanitize(terminal['error'])[:400]}`")
+            rows.append("")
+        elif node_id:
+            flag = {"completed": "[OK]", "failed": "[FAIL]", "waiting": "[WAIT]",
+                    "running": "[RUN]", "retry_scheduled": "[RETRY]",
+                    "cancelled": "[CANCEL]"}.get(status, f"[{status}]")
+            row = (f"### `{node_id}` {flag}  `{event_type}`  "
+                   f"phase=`{phase}` attempt={attempt}")
+            if duration_ms is not None:
+                row += f" 耗时={duration_ms:.0f}ms"
+            rows.append(row)
+            if inputs is not None:
+                rows.append(f"- 输入：{_snapshot_summary(inputs, limit=400)}")
+            if outputs is not None:
+                rows.append(f"- 输出：{_snapshot_summary(outputs, limit=600)}")
+            rows.append("")
+        if not rows:
+            return
+        with self.lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            new_file = not path.exists()
+            with path.open("a", encoding="utf-8") as handle:
+                if new_file:
+                    handle.write(f"# Flow 运行摘要：{safe_flow}\n\n"
+                                 f"> 每 Event 一行，输入/输出为摘要；全文与脱敏细节见 `events.jsonl`。\n\n")
+                handle.write("\n".join(rows))
+                handle.flush()
+                os.fsync(handle.fileno())
+
     def _append(self, row: Mapping[str, Any], markdown: str,
                 *, once_marker: Path | None = None) -> None:
         value = {"at": _now(), "job_id": self.job_id, **sanitize(dict(row))}
@@ -233,6 +316,8 @@ class EventRunLog:
                      f"## Flow 计划：{definition.name}\n\n"
                      f"- 原因：`{reason}`\n- Flow ID：`{flow_id}`\n- 版本：`{definition.version}`\n\n"
                      f"```json\n{json.dumps(sanitize(plan), ensure_ascii=False, indent=2)}\n```")
+        self._flow_summary_append(
+            flow_id=flow_id, flow_type=definition.name, flow_plan=plan)
 
     def event(self, *, phase: str, flow_id: str, flow_type: str, node_id: str,
               event_id: str, event_type: str, inputs: Any = None,
@@ -278,6 +363,13 @@ class EventRunLog:
             body.extend(["", "### 输出", "", "```json",
                          json.dumps(sanitize(payload["output"]), ensure_ascii=False, indent=2), "```"])
         self._append(payload, "\n".join(body))
+        if phase in {"started", "finished", "waiting", "retry_scheduled"}:
+            self._flow_summary_append(
+                flow_id=flow_id, flow_type=flow_type, node_id=node_id,
+                event_type=event_type, phase=phase, status=status,
+                duration_ms=duration_ms, attempt=attempt,
+                inputs=(inputs if phase in {"started", "waiting"} else None),
+                outputs=(outputs if phase in {"finished", "waiting", "retry_scheduled"} else None))
 
     def terminal(self, *, status: str, flow_id: str, flow_type: str,
                  error: str = "", completed_nodes: Any = None,
@@ -324,6 +416,12 @@ class EventRunLog:
         temporary.write_text(json.dumps({"status": status, "signature": signature,
                                          "at": _now()}, ensure_ascii=False), encoding="utf-8")
         os.replace(temporary, state_path)
+        self._flow_summary_append(
+            flow_id=flow_id, flow_type=flow_type,
+            terminal={"status": status, "error": error,
+                      "completed_node_ids": completed_nodes,
+                      "failed_node_ids": failed_nodes,
+                      "skipped_node_ids": skipped_nodes})
 
 
 def _read_terminal_state(path: Path) -> dict[str, Any]:
