@@ -15,6 +15,7 @@ class TriggerEvidence:
     executable_next_action: bool = False
     budget_remaining: bool = False
     repeated_falsified_route: bool = False
+    retry_execution: bool = False
     epistemic_gap: bool = False
     external_evidence_can_resolve: bool = False
     mechanism_defect: bool = False
@@ -59,11 +60,14 @@ def route_next(evidence: TriggerEvidence, judgment: TypedJudgment | None = None)
           and not evidence.mechanism_defect):
         chosen = Route.ACTIVE_LEARNING
         reason = "external evidence can resolve the identified epistemic gap"
-    elif (evidence.user_authorized and evidence.settled and evidence.new_evidence
+    elif (evidence.user_authorized and evidence.settled
           and evidence.executable_next_action and evidence.budget_remaining
-          and not evidence.repeated_falsified_route):
+          and not evidence.repeated_falsified_route
+          and (evidence.new_evidence or evidence.retry_execution)):
         chosen = Route.CONTINUE_PROJECT
-        reason = "settled evidence supports one bounded executable project iteration"
+        reason = ("settled evidence supports one bounded executable project iteration"
+                  if evidence.new_evidence else
+                  "previous iteration failed with a concrete next step; retry a bounded execution")
     else:
         chosen = Route.WAITING
         reason = "no deterministic trigger contract is fully satisfied"

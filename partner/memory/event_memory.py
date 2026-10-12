@@ -32,6 +32,37 @@ def _append(path: Path, row: Mapping[str, Any]) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+_CONFIDENCE_LABELS = {
+    "low": 0.25, "medium": 0.5, "medium-high": 0.6, "high": 0.75,
+    "very high": 0.9, "very_high": 0.9, "certain": 0.95,
+    "不确定": 0.4, "一般": 0.5, "较高": 0.7, "高": 0.8,
+}
+
+
+def _as_confidence(value: Any) -> float:
+    """Defensive confidence coercion.
+
+    LLM-produced memory records sometimes carry a qualitative label
+    (``low``/``medium``/``high``) instead of a float; a bare ``float()``
+    then crashes the whole growth/note projection (observed on 2026-10-12:
+    ``ValueError: could not convert string to float: 'low'``).
+    """
+    if isinstance(value, bool):
+        return 0.5
+    if isinstance(value, (int, float)):
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.5
+    text = str(value or "").strip().lower()
+    if text in _CONFIDENCE_LABELS:
+        return _CONFIDENCE_LABELS[text]
+    try:
+        return max(0.0, min(1.0, float(text)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 class EventMemory:
     """Append-only facts plus small versioned semantic projections.
 
@@ -76,7 +107,7 @@ class EventMemory:
         return {
             "content": content,
             "source": f"memory:{kind}",
-            "confidence": float(row.get("confidence") or 0.5),
+            "confidence": _as_confidence(row.get("confidence")),
             "evidence_refs": list(row.get("evidence_refs") or []),
             "project_id": str(row.get("project_id") or ""),
             "scope": str(row.get("scope") or ""),

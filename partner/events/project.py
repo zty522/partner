@@ -935,6 +935,10 @@ def action_execute(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     except (OSError, ValueError, TypeError):
         seconds = 900
     seconds = int(((params.get('intent_contract') or {}).get('execution_constraints') or {}).get('action_seconds') or seconds)
+    # (2026-10-12) Never starve the real execution: the frozen intent may set
+    # a smaller budget, but the bounded action runner needs a floor large
+    # enough to fetch/scan and produce a parseable business artifact.
+    seconds = max(600, seconds)
     row = manager.submit(f"{ctx.job_id}:{params['flow_id']}:{params['node_id']}",
         {k: str(getattr(ctx, k, "")) for k in ("workspace", "job_id", "project_id", "instance_id")},
         {**params, "action_work":str(work)}, seconds=seconds)

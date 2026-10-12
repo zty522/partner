@@ -253,12 +253,19 @@ def trigger_evidence(domain: str, output: Mapping[str, Any], *, supported: bool,
     })
     defect = domain == "self_evolution" or failure_class in {"mechanism", "system", "runtime"}
     epistemic = bool(combined.get("epistemic_gap") or combined.get("missing_external_evidence"))
+    objective_complete = bool(combined.get("objective_complete"))
+    # An execution that produced no verified delta is not "done": if the
+    # reflection gives a concrete bounded next step, the route may retry a
+    # further iteration instead of falling into WAITING and ending the job.
+    retry_execution = (not supported and not objective_complete and actionable
+                       and not bool(combined.get("repeated_falsified_route")))
     return TriggerEvidence(
         user_authorized=bool(params.get("request") or params.get("intent_contract")),
-        objective_complete=bool(combined.get("objective_complete")), settled=True,
+        objective_complete=objective_complete, settled=True,
         new_evidence=bool(output.get("evidence_refs") or supported),
         executable_next_action=actionable, budget_remaining=True,
         repeated_falsified_route=bool(combined.get("repeated_falsified_route")),
+        retry_execution=retry_execution,
         epistemic_gap=epistemic,
         external_evidence_can_resolve=bool(combined.get("source_query") or epistemic),
         mechanism_defect=defect,

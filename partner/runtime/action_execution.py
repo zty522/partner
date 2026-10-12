@@ -124,14 +124,16 @@ def run_command(command: str, cwd: str, seconds: float, output_path: Path | None
             'output_path':str(output_path) if output_path else '', 'output_truncated':total>24000}
 
 
-def execute(adapter, prompt: str, *, seconds: float = 240, max_turns: int | None = None,
+def execute(adapter, prompt: str, *, seconds: float = 480, max_turns: int | None = None,
             command_seconds: float = 180) -> str:
     # Four model turns were routinely consumed by input inspection and one
     # format repair before a scientific action began.  Scale the cognitive
     # allowance with the frozen wall budget while retaining a hard ceiling;
     # completed command receipts remain the actual replay boundary.
+    # (2026-10-12) A 6-turn default exhausted on literature/scan actions that
+    # needed fetch + parse + verify; raise the floor and tie turns to minutes.
     if max_turns is None:
-        max_turns = max(6, min(16, 3 + int(float(seconds) // 90)))
+        max_turns = max(10, min(24, 4 + int(float(seconds) // 60)))
     from partner.adapters import direct_api
     match = re.search(r'工作目录\s*[=:：]\s*([^\n]+)', prompt)
     work = Path(match.group(1) if match else adapter.workspace).resolve()

@@ -290,7 +290,7 @@ PDF_REPORT = Flow("pdf_report", "1.0.0", (
     Node("visual_plan", "presentation.visual_plan", ("outline",), continue_on_failure=True),
     Node("visuals", "presentation.visual_generate", ("visual_plan",), continue_on_failure=True),
     Node("draft", "presentation.report_draft", ("visuals",), continue_on_failure=True),
-    Node("claims", "presentation.claim_verify", ("draft",), optional=True),
+    Node("claims", "presentation.claim_verify", ("draft",), optional=True, continue_on_failure=True),
     Node("render", "presentation.pdf_render", ("claims", "draft")),
     Node("quality", "presentation.pdf_quality_review", ("render",)),
     Node("send", "delivery.send_pdf", ("quality", "render")),

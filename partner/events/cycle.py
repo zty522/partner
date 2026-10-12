@@ -2389,6 +2389,11 @@ def memory_update(ctx, params):
     value = json_object(raw)
     if 'content' not in value:
         value = {'content':value, 'schema_normalization':'preserved model object under required content field'}
+    # Normalize the LLM's confidence label before the note store coerces it;
+    # a qualitative 'low'/'medium' must not crash the growth projection.
+    from partner.memory.event_memory import _as_confidence
+    if 'confidence' in value:
+        value['confidence'] = _as_confidence(value.get('confidence'))
     value.update(project_id=params['project_id'], cycle_id=ctx.job_id,
                  status='candidate' if kind in ('growth','habit') else 'active',
                  production_effective=False, evidence_refs=evidence(ctx))

@@ -1605,6 +1605,14 @@ def claim_verify(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         # report instead of either publishing disputed prose or losing the
         # entire PDF because the model repeatedly reintroduced an overclaim.
         verified = value.get('verified_claims') or []
+        # (2026-10-12) The next-step wording below previously referenced an
+        # undefined ``has_uncertainty`` and crashed the whole PDF chain
+        # (NameError observed on job_045a439efcb94b18, claims node failed).
+        # Derive it from the reviewer verdict: pending disputes mean the
+        # uncertainty assessment has been performed and remains open.
+        has_uncertainty = bool(value.get('has_uncertainty')
+                               or value.get('unsupported_claims')
+                               or value.get('required_edits'))
         source_rows = (sources.get('semantic_output') or {}).get('sources') or []
         known_ids = {row.get('evidence_id') for row in source_rows}
         structured = _regression_evidence_report(
