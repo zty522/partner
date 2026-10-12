@@ -85,6 +85,6 @@ def synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 DEFINITIONS = [
-    EventDefinition('research_explain.synthesize', 'knowledge', '综合已学内容与调研结果生成用户讲解与建议',
+    EventDefinition('research_explain.synthesize', 'research_explain', '综合已学内容与调研结果生成用户讲解与建议',
                     synthesize, execution_method='llm', timeout_seconds=300),
 ]

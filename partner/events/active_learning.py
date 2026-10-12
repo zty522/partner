@@ -677,6 +677,14 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     query_texts = [str(row.get('text') or row.get('query') or '') if isinstance(row, dict)
                    else str(row) for row in queries]
     query_texts = [row for row in query_texts if row.strip()]
+    # Fallback: research/explain flows carry no source_plan node, but the user
+    # request itself is a legitimate retrieval intent ("调研/查/看看…文献").
+    # Deriving queries from the request turns an empty research pass into real
+    # external fetching instead of the "no sources, no queries" skip.
+    if not query_texts and not params.get('user_sources'):
+        request = str(params.get('request') or getattr(ctx, 'request', '') or '').strip()
+        if request:
+            query_texts = [request[:1200]]
     sources: list[dict[str, str]] = []
     # user_sources: URLs the user explicitly asked us to read, injected into
     # run_context by the intake router.  They are mandatory work, so they are
@@ -717,7 +725,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 if str(getattr(row,'url','')).startswith(('https://','http://')):
                     sources.append({'url':str(row.url),'title':str(row.title),'query':str(query),
                                     'source_kind': _classify_source_kind(str(row.url))})
-    if not local_value and not sources and hasattr(adapter, "execute_task") and queries:
+    if not local_value and not sources and hasattr(adapter, "execute_task") and query_texts:
         prompt = (
             "使用真实联网检索能力执行以下查询，优先论文原文、官方文档和源码仓库。"
             "不要凭模型记忆补 URL。只输出 JSON：{\"sources\":[{\"query\":\"\","

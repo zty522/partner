@@ -23,6 +23,8 @@ EVENT_SERIES = {
     # registered here or EventLedger.create rejects it at flow startup
     # (same failure class as case_05_event_series_unknown).
     "notes",
+    # Research-explain single-pass flow and soft-orchestration runtime series.
+    "research_explain", "orchestration",
 }
 TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 
