@@ -731,10 +731,43 @@ class EventWorker:
             state.run_context.pop("lifecycle_waiting_event", None)
             self.store.save(state)
         pending=asyncio.create_task(self.runner.run_ready_node(state,definition,node_id,ctx,initial))
+        # 节点级看门狗（修复④）：单个 Event 最久允许 event_timeout + 60s 宽限。
+        # 复盘实锤：01/02/03 的 LLM 节点（message_critic/plan_propose）running 后
+        # 5 小时无 finished，直到 job 级 stale sweep 才标记 failed，期间零产出。
+        # to_thread 的线程无法被 wait_for 真正取消，若 Hermes 子进程卡死会占满
+        # 线程池导致 worker 整体挂起——这里保证 worker 到点强制推进，绝不无限等。
+        watchdog = max(60, (int(event_def.timeout_seconds) if event_def else 300) + 60)
+        watch_started = time.time()
+        watch_fired = False
         while not pending.done():
-            done,_=await asyncio.wait({pending},timeout=30)
-            if not done: await dispatch_if_due(self,job,state,ctx)
-        result=await pending
+            try:
+                done, _ = await asyncio.wait({pending}, timeout=30)
+                if done:
+                    break
+                await dispatch_if_due(self, job, state, ctx)
+                if time.time() - watch_started > watchdog:
+                    pending.cancel()
+                    try:
+                        await pending
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    result = EventRunResult(state, node_id, "", {
+                        "ok": False, "status": "failed",
+                        "error": f"节点执行超过 {watchdog}s 仍未完成，按失败推进以避免 worker 挂起",
+                        "failure_class": "runtime",
+                        "mechanism": "node_watchdog_timeout",
+                        "semantic_output": {
+                            "node_id": node_id, "event_type": node_spec.event_type,
+                            "watchdog_seconds": watchdog,
+                            "reason": "node_watchdog_timeout",
+                        },
+                    })
+                    watch_fired = True
+                    break
+            except asyncio.CancelledError:
+                raise
+        if not watch_fired:
+            result = await pending
         next_description = ""
         for next_node_id in result.flow_state.ready_node_ids[:1]:
             try:

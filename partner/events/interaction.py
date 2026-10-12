@@ -205,6 +205,10 @@ def intent_synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
 def direct_answer(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     from partner.runtime.status_context import runtime_status
     status_context = runtime_status(ctx, params)
+    request = str(params.get("request") or "")
+    execution_intent = bool(re.search(
+        r"调研|文献|论文|讲解|分析|看看|查看|了解|改进|修复|运行|执行|扫描|检查|总结|报告|学习|研究|阅读",
+        request, re.I | re.S))
     raw, usage = call_model(ctx, purpose="direct_answer", prompt=(
         "直接回答用户问题。先根据整句语义判断问题的主语、谓语和比较对象，不能因局部词语改答另一个专业问题。"
         "只回答原命题，不擅自换成更强命题：数值按某公式计算，不等于该数值随时间守恒；记录分段数量，不等于知道它按场景还是固定时长切分。"
@@ -212,9 +216,16 @@ def direct_answer(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "不为显得专业而增加未经核实的反例、算法身份或必要/充分条件；短问答先清楚回答，再给一句成立的理由。"
         "用两三句普通中文回答，不展开数学证明或额外举例。"
         "回答任务进展时控制在180字以内，优先说具体内容、意义与尚未完成的环节，不报内部编号、文件名、哈希和处理日志；需要纠正上次答复就直接说明更正后的事实。"
-        "不得声称自己进行了新实验；可以依据下方运行器真实记录回答进展，计划不等于完成，未知不猜。表达自然、清楚、简洁。\n"
+        "不得声称自己进行了新实验；可以依据下方运行器真实记录回答进展，计划不等于完成，未知不猜。表达自然、清楚、简洁。"
+        "\n【禁止事项（必须遵守）】"
+        "1) 禁止把历史任务（其他 job/其他实例/历史对话）的执行记录当作本次任务的结论或证据；"
+        "历史记录只允许用来参考或解释，不得作为本次请求的最终答案，更不得据此回答\"做不了\"。"
+        "2) 历史任务记录中标注 is_current_job=false 的全部是参考信息；只有标注 is_current_job=true 的才是本次任务已完成的证据。"
+        "3) 若本次请求包含执行型意图（调研/文献/讲解/分析/查看/改进/修复/运行/学习等），"
+        "本条回答只能说明已收到并将真实执行，可简述计划与预计产出；不得在未真实执行前给出最终结论、结论性数字或\"无法完成\"的判定。"
+        "4) 若确实没有本次任务自身的执行证据，明确说\"尚未执行，将开始执行\"，而不是引用旧任务搪塞。\n"
         "对话项目（仅供术语消歧，不代表已执行或已验证）：" + str(params.get('project_id') or '') + "\n用户原文："
-        + str(params.get("request") or "")
+        + request
         + "\n运行器已读取的真实任务记录=" + json.dumps(status_context,ensure_ascii=False)[:16000]
         + "\n近期聊天记录（真实只读，供理解对话语境，不得当作已执行证据）="
         + json.dumps(_recent_chat_lines(getattr(ctx, "workspace", ""),

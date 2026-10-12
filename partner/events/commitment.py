@@ -973,6 +973,33 @@ def commitment_bet_execute(ctx, params):
         result = runner.abstain()
     else:
         result = runner.run()
+    # -- 执行真实性门（修复②：模板化自我结算空转）------------------------------
+    # 01 复盘实锤：任务为"调研文献"，bet_execute 却在 0.017s 内执行 cand_lowercase
+    # （文本小写）+ 文本统计指标并结算 supported -> CLOSED，与用户请求完全脱节。
+    # 这里对"supported" 结算强制要求真实执行证据：至少一个产物、至少一次动作/工具
+    # 调用、墙上时间 >= 2s。仅当**用户请求本身含执行型意图**（调研/文献/分析/改进
+    # 等）时拦截——否则纯 commitment 生命周期测试/自进化分子实验的快速 bet 是合法
+    # 功能，不应误伤。不满足即视为空转，按失败返回以触发续轮真实执行。
+    _noop = False
+    _noop_reason = ""
+    _request = str(getattr(ctx, "request", "") or params.get("request") or "")
+    _execution_intent = bool(re.search(
+        r"调研|文献|论文|讲解|分析|看看|查看|了解|改进|修复|运行|执行|扫描|检查|总结|报告|学习|研究|阅读|设计|开发|编写|部署|测试",
+        _request, re.I | re.S))
+    if _execution_intent and result.state == sm.CLOSED and result.settlement is not None \
+            and result.settlement.settlement_class == "supported":
+        receipt = getattr(result, "receipt", None)
+        if receipt is not None:
+            _budget = receipt.budget_consumed if isinstance(receipt.budget_consumed, dict) else {}
+            _wall = float(_budget.get("wall_clock_seconds") or 0)
+            _actions = int(_budget.get("actions") or 0)
+            _tool_calls = int(_budget.get("tool_calls") or 0)
+            _artifacts = list(getattr(receipt, "artifacts", None) or ())
+            if not (_artifacts and (_actions >= 1 or _tool_calls >= 1) and _wall >= 2.0):
+                _noop = True
+                _noop_reason = (f"execution_likely_noop: actions={_actions} tool_calls={_tool_calls} "
+                                f"wall={_wall:.3f}s artifacts={len(_artifacts)}; "
+                                f"执行型用户请求下，模板/空转动作不得结算 supported")
     settlement = result.settlement
     experience = result.experience
     noted = False
@@ -984,10 +1011,27 @@ def commitment_bet_execute(ctx, params):
                     "settlement_class": None if settlement is None else settlement.settlement_class,
                     "settlement_id": None if settlement is None else settlement.settlement_id,
                     "experience_id": None if experience is None else experience.experience_id,
-                    "run_id": spec["run_id"], "store": str(store.root)})
+                    "run_id": spec["run_id"], "store": str(store.root),
+                    "execution_noop": _noop, "noop_reason": _noop_reason})
         noted = True
     except Exception:  # noqa: BLE001
         noted = False
+    if _noop:
+        return {
+            "ok": False, "status": "execution_noop",
+            "summary": "execute 未产生真实执行证据（模板空转）即被判 supported；按失败处理，将触发真实执行续轮。"
+                       + _noop_reason,
+            "semantic_output": {
+                "bet_id": store.bet_id, "trace_token": token, "state": result.state,
+                "reason": result.reason, "run_id": spec["run_id"], "job_id": job_id,
+                "settlement_class": (None if settlement is None else settlement.settlement_class),
+                "execution_noop": True, "noop_reason": _noop_reason,
+                "receipt_id": None if result.receipt is None else result.receipt.receipt_id,
+                "artifacts": dict(result.paths), "store": str(store.root),
+            },
+            "files": [], "evidence_refs": [],
+            "token_usage": {},
+        }
     abstained = settlement is not None and settlement.settlement_class == "abstained"
     payload = {
         "ok": is_terminal(result.state), "status": result.state,

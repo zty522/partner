@@ -1124,6 +1124,22 @@ class PartnerApplicationService:
             return Submission(False, "", "", persona_hint, "rejected", "enqueue_work",
                               f"意图审议未给出有效 route：{route!r}")
 
+        # 路由兜底（修复③）：含执行型意图的消息绝不允许落到 direct_answer 同步
+        # 快速路径——01 复盘实锤：任务"调研文献"被切到 direct_answer flow，LLM 在
+        # 未执行前直接引用历史 job 结论回答"做不了"。纯问答/进展查询除外。
+        if route == "direct_answer" and not workstream_type:
+            _exe = re.search(
+                r"调研|文献|论文|讲解|分析|看看|查看|了解|改进|修复|运行|执行|扫描|检查|总结|报告|学习|研究|阅读|设计|开发|编写|部署|测试",
+                clean or "", re.I | re.S)
+            _pure_status = re.fullmatch(
+                r"\s*(?:现在|目前|当前|之前)?\s*(?:怎么样|咋样|情况|状态|进展|完成|好了|吗|什么|是谁|是什么|在哪|多少|为什么|怎么|行不行|可以吗|好不好)\s*[？?]?\s*",
+                clean or "", re.I | re.S)
+            if _exe and not _pure_status:
+                route = "project_iteration"
+                dispatch_target = (project_id or
+                                   (dispatch_target if dispatch_target not in {"", "direct_answer"} else "") or
+                                   persona_hint or "project_iteration")
+
         # ---------------------------------------------------------------
         # 2a. direct_answer: synchronously run direct_answer event, return text.
         # ---------------------------------------------------------------

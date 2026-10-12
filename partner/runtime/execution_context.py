@@ -23,17 +23,22 @@ def recent_execution_context(workspace, project_id, current_job_id):
         path=Path(item['path'])
         try:
             task=json.loads(path.read_text())
-            if task['job_id']==current_job_id or task['status'] not in ('completed','failed','cancelled','timed_out'):
+            # 只跳过非终态任务；**不再跳过当前 job**（否则 recent_execution 全是别的
+            # job 的历史记录，LLM 会把它误当成自己任务的执行证据）。
+            if task['status'] not in ('completed','failed','cancelled','timed_out'):
                 continue
             from partner.index.job_repository import init
             job=init(root).get_record(task['job_id']) or {}
             if not job:
                 job=json.loads((root/'state/application/jobs'/f"{task['job_id']}.json").read_text())
             if job['project_id']!=project_id:continue
-            rows.append((task['created_at'],path.parent,task))
+            is_current = task['job_id']==current_job_id
+            rows.append((task['created_at'], is_current, path.parent, task))
         except (OSError,ValueError,KeyError):continue
     result=[]
-    for _,folder,task in sorted(rows,reverse=True)[:2]:
+    # 排序：当前 job 的执行记录优先，其次按时间取最近 —— 且每条明确标注来源，
+    # 让 LLM 能区分"本次任务已做的"与"历史任务做过的"。
+    for _,is_current,folder,task in sorted(rows, key=lambda r:(r[1], r[0]), reverse=True)[:4]:
         work=Path(task['work'])
         checkpoint=work/'.execution/checkpoint.json'
         try: saved=json.loads(checkpoint.read_text())
@@ -41,7 +46,11 @@ def recent_execution_context(workspace, project_id, current_job_id):
         try: terminal=json.loads((folder/'result.json').read_text())
         except (OSError,ValueError):terminal={}
         commands=saved.get('commands') or []
-        result.append({'task_id':task['task_id'],'status':task['status'],
+        result.append({'task_id':task['task_id'],'job_id':task['job_id'],
+            'is_current_job':is_current,
+            'provenance':('当前任务自身最近执行记录' if is_current
+                          else f'历史任务 {task["job_id"]} 的执行记录（仅供参考，不代表当前任务已完成，也不等同于当前任务的结果）'),
+            'status':task['status'],
             'terminal_success':terminal.get('ok'),
             'terminal_outcome':str(terminal.get('outcome') or terminal.get('error') or '')[:1600],
             'result_receipt':str(folder/'result.json'),
@@ -51,7 +60,7 @@ def recent_execution_context(workspace, project_id, current_job_id):
             'command_results':[{'index':c['index'],'exit_code':c.get('exit_code'),
                 'command':c.get('command','')[:130], 'output_tail':c.get('output','')[-160:]}
                 for c in commands[-12:]],
-            'rule':'Terminal result is authoritative for final status; command errors may be repaired intermediate attempts. Use checkpoint receipts to recover partial work, not to overwrite the terminal result with an earlier failure.'})
+            'rule':'Terminal result is authoritative for final status; command errors may be repaired intermediate attempts. Use checkpoint receipts to recover partial work, not to overwrite the terminal result with an earlier failure. 只把 is_current_job=true 的记录当作本次任务已完成的证据，其余是历史参考。'})
     return result
 
 
