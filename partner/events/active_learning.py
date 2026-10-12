@@ -95,6 +95,62 @@ def _expand_arxiv_url(url: str) -> str:
     return url
 
 
+def _refine_search_queries(ctx: Any, request: str) -> list[str]:
+    """LLM-refine a free-form request into 1-3 concise search queries.
+
+    Research/explain flows have no source_plan node, so the raw user request
+    would otherwise be used verbatim as a query ("调研一下世界模型、自进化相关
+    的文献…") — useless for both arXiv and web search.  Refine it once; on any
+    LLM failure fall back to the trimmed request.
+    """
+    prompt = (
+        "把下面的用户请求提炼成 1-3 个用于文献/网页检索的简洁查询词（关键词式，"
+        "每个不超过 12 个词，可直接用于 arXiv 与搜索引擎）。"
+        "只输出 JSON：{\"queries\": [\"...\", \"...\"]}。\n请求="
+        + str(request)[:1500]
+    )
+    try:
+        from ._llm import call_model, json_object
+        raw, _usage = call_model(ctx, purpose="source_retrieve.query_refine", prompt=prompt)
+        value = json_object(raw)
+        rows = value.get("queries") or []
+        out = [str(q).strip() for q in rows if str(q).strip()]
+        return out[:3]
+    except Exception:
+        return []
+
+
+def _arxiv_search(query: str, max_results: int = 5) -> list[dict]:
+    """Key-less arXiv API relevance search; returns abs URL + title + snippet."""
+    import urllib.request
+    import urllib.parse
+    import re
+    import html as _html
+    q = urllib.parse.quote(str(query))
+    url = (f"http://export.arxiv.org/api/query?search_query=all:{q}"
+           f"&start=0&max_results={max_results}&sortBy=relevance")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Partner/0.1"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            xml = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    entries = re.findall(r"<entry>.*?</entry>", xml, flags=re.DOTALL)
+    rows: list[dict] = []
+    for entry in entries[:max_results]:
+        t = re.search(r"<title>(.*?)</title>", entry, flags=re.DOTALL)
+        ident = re.search(r"<id>(.*?)</id>", entry, flags=re.DOTALL)
+        s = re.search(r"<summary>(.*?)</summary>", entry, flags=re.DOTALL)
+        if not t or not ident:
+            continue
+        title = _html.unescape(re.sub(r"\s+", " ", t.group(1))).strip()
+        link = str(ident.group(1)).strip().replace("http://", "https://")
+        snippet = (_html.unescape(re.sub(r"\s+", " ", s.group(1))).strip()[:400]
+                   if s else "")
+        rows.append({"title": title, "url": link, "snippet": snippet})
+    return rows
+
+
 def _expand_github_url(url: str, directory: Path) -> list[dict]:
     """For GitHub repo URLs, fetch README + directory listing + key source files.
     Returns list of receipts (may be empty on failure)."""
@@ -684,7 +740,8 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     if not query_texts and not params.get('user_sources'):
         request = str(params.get('request') or getattr(ctx, 'request', '') or '').strip()
         if request:
-            query_texts = [request[:1200]]
+            refined = _refine_search_queries(ctx, request)
+            query_texts = refined or [request[:1200]]
     sources: list[dict[str, str]] = []
     # user_sources: URLs the user explicitly asked us to read, injected into
     # run_context by the intake router.  They are mandatory work, so they are
@@ -719,6 +776,17 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             if candidate.is_file():
                 local_proposed.append(candidate)
     local_proposed = list(dict.fromkeys(path.resolve() for path in local_proposed))
+    # arXiv API: key-less, stable literature search — the right backend for
+    # "调研/查文献" research passes.  DuckDuckGo Instant Answer (below) returns
+    # almost nothing for technical queries, which made research_explain fetch
+    # zero sources.  arXiv fills that gap deterministically.
+    if not local_value and not sources and query_texts:
+        for query in query_texts[:3]:
+            for row in _arxiv_search(query):
+                if str(row.get('url') or '').startswith(('https://', 'http://')):
+                    sources.append({'url': str(row['url']), 'title': str(row.get('title') or ''),
+                                    'query': str(query), 'snippet': str(row.get('snippet') or ''),
+                                    'source_kind': 'paper'})
     if not local_value and not sources and hasattr(adapter, "search_web"):
         for query in query_texts[:4]:
             for row in adapter.search_web(str(query))[:5]:
