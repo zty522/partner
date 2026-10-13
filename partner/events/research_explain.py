@@ -35,20 +35,24 @@ _PROMPT = """你是 Partner 的“学习总结与调研讲解”Event。用户�
 【已学内容/笔记召回】（memory.context_recall 输出，真实只读）
 {recall}
 
-【外部调研结果】（active_learning.source_retrieve 输出：检索到的来源与抓取正文摘要）
+【外部调研结果——来源元数据】（active_learning.source_retrieve 输出：本次检索/下载/展开的来源清单）
 {research}
+
+【来源正文——真实内容】（上面清单里各来源的**实际正文**，由系统从落盘文件读取；这是本次讲解最主要的依据）
+{source_body}
 
 【规则】
 1. 真实性：所有讲解必须基于上方材料中真实出现的内容；未读到的资料不得声称已读。来源缺失时如实说明“暂未找到/证据不足”。
-2. 讲解结构（面向用户，非机器报告）：
+2. **讲解必须讲“材料本身”**：
+   - 若用户指定了本地项目（来源正文中出现“本地项目：/mnt/…”），你必须从正文提炼：这个项目是什么、在做什么、用了什么技术/方法、目录与代码里有哪些关键模块，并引用正文里的具体内容（文件名、函数、README 表述等）。禁止用“仅确认文件存在/尚未获取到具体业务内容”这类空话敷衍——正文已经摆在你面前，请真正阅读并讲解。
    - 已学内容总结：读了/学了什么（列具体资料或主题）、核心观点是什么、有哪些关键方法或结论；
    - 调研讲解：调研了哪个方向、找到了什么（列具体来源标题）、这些来源讲了什么、与 Partner 的相关性；
-   - 改进建议：针对 Partner 自进化/主动学习/迭代/消息/报告，给出具体、可落地、有依据的建议；建议必须关联上述材料中的观点，不能空谈。
+   - 改进建议：针对 Partner 自进化/主动学习/迭代/消息/报告，给出具体、可落地、有依据的建议；建议必须关联上述材料中的观点（如正文中出现的项目做法、论文结论），不能空谈。
 3. 语言：全部用通俗中文，像助理向负责人汇报；禁止机器词（event/flow/job/结算/边界/证据清单/哈希/轮次编号等）。
 4. 不编造：对不确定的内容明确说“尚不确定/需进一步核实”。
 
 【输出格式】严格 JSON：
-{{"learned_summary": "已学内容总结（300-600字）", "research_summary": "调研讲解（300-600字）", "recommendations": ["建议1", "建议2", "建议3"], "message": "最终发给用户的消息（200-400字：第一句直接给出结论或最重要的发现，然后核心要点2-4条（每条一行，不要长段落），最后给出改进建议方向与‘详细分析见PDF报告’；自然口语、直接可读、无标题式铺陈）"}}"""
+{{"learned_summary": "已学内容总结（300-600字）", "research_summary": "调研讲解（300-600字，必须包含对来源正文具体内容的提炼）", "recommendations": ["建议1", "建议2", "建议3"], "message": "最终发给用户的消息（200-400字：第一句直接给出结论或最重要的发现——若指定了本地项目，第一句就要说明项目是什么/在做什么；然后核心要点2-4条（每条一行，引用正文里的具体内容）；最后给出改进建议方向与‘详细分析见PDF报告’；自然口语、直接可读、无标题式铺陈）"}}"""
 
 
 def _sources_text(research: dict) -> str:
@@ -71,6 +75,46 @@ def _sources_text(research: dict) -> str:
     return "\n".join(rows)
 
 
+def _source_body_text(research: dict, *, total_limit: int = 18000,
+                      per_source_local: int = 8000, per_source_remote: int = 2500) -> str:
+    """Return the actual fetched/expanded source BODIES for the LLM to read.
+
+    Receipts carry only metadata (url / bytes / sha256 / text_path); the real
+    content lives on disk at ``text_path``.  Previous synthesize calls only saw
+    the metadata, so the LLM reported "文件存在但未获取到业务内容" for a
+    local project that was fully expanded.  Reading the bodies back and
+    injecting them is what makes the explanation about the actual material.
+    """
+    sem = research.get("semantic_output") if isinstance(research, dict) else {}
+    parts: list[str] = []
+    for s in (sem.get("sources") or [])[:8]:
+        if not isinstance(s, dict):
+            continue
+        title = str(s.get("title") or s.get("url") or "")
+        kind = str(s.get("source_kind") or "")
+        body = ""
+        tp = str(s.get("text_path") or "")
+        if tp:
+            p = Path(tp)
+            if p.is_file():
+                try:
+                    body = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    body = ""
+        if not body.strip():
+            url = str(s.get("url") or "")
+            if url.startswith(("http://", "https://", "file-project://")):
+                body = f"（未获取到正文，仅来源链接：{url}）"
+            else:
+                continue
+        local = kind in {"local_project", "local_path", "declared_local_evidence"} \
+            or str(s.get("url") or "").startswith("file-project://")
+        limit = per_source_local if local else per_source_remote
+        parts.append(f"### 来源：{title}\n{body[:limit]}")
+    text = "\n\n".join(parts)
+    return text[:total_limit]
+
+
 _REPORT_PROMPT = """你是 Partner 的“调研与改进建议报告”Event。把下方材料整理成一份**简洁、面向用户**的中文报告 Markdown。读者只看这份报告就能明白：调研了什么、查到了什么（具体资料）、对 Partner 意味着什么、建议怎么改。
 
 【用户原始请求】
@@ -82,10 +126,13 @@ _REPORT_PROMPT = """你是 Partner 的“调研与改进建议报告”Event。�
 【本次调研的真实来源】
 {sources}
 
+【来源正文摘录——真实内容】
+{source_body}
+
 【硬规则】
-1. 结构：`# 标题` → `## 核心结论`（3-5 条，每条一行）→ `## 调研内容`（读了哪些资料、每条资料讲了什么核心观点，自然叙述）→ `## 改进建议`（3-5 条，可落地、有依据）→ `## 局限与下一步`。
+1. 结构：`# 标题` → `## 核心结论`（3-5 条，每条一行）→ `## 调研内容`（读了哪些资料、每条资料讲了什么核心观点，自然叙述；若调研了本地项目，必须写明项目是什么、在做什么、用到什么技术/方法）→ `## 改进建议`（3-5 条，可落地、有依据）→ `## 局限与下一步`。
 2. 全文 600-1000 汉字，纯文本 Markdown，禁止代码块、禁止表格以外的机器符号、禁止 LaTeX。
-3. 真实性：只写上方材料中出现的内容；没读到的资料不得声称已读；来源缺失时明确写“本次未获取到外部来源”。
+3. 真实性：只写上方材料中出现的内容；没读到的资料不得声称已读；来源缺失时明确写“本次未获取到外部来源”。正文摘录中出现过的项目名、文件名、技术点可以作为事实引用。
 4. 用户化：禁止机器词（event/flow/job/结算/边界/证据清单/哈希/轮次编号/内部文件名）；来源用自然语言叙述（如“根据 arXiv 论文《…》”）。
 5. 不生成图表占位、不生成附录、不生成证据索引。
 【输出】直接输出 Markdown 正文，不要 JSON 包裹。"""
@@ -110,6 +157,8 @@ def report_pdf(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         request=request,
         synthesize=synth_block[:6000],
         sources=_sources_text(research)[:4000],
+        source_body=_source_body_text(research, total_limit=8000,
+                                      per_source_local=4000, per_source_remote=1500),
     )
     raw, usage = call_model(ctx, purpose="research_explain.report_pdf", prompt=prompt)
     body = str(raw or "").strip()
@@ -132,10 +181,18 @@ def synthesize(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     recall = _semantic(flow_outputs, "recall") or _pick(flow_outputs, "recall")
     research = _semantic(flow_outputs, "research") or _pick(flow_outputs, "research")
     request = str(params.get("request") or getattr(ctx, "request", "") or "")[:4000]
+    # The LLM reads the REAL body of each fetched/expanded source (local
+    # projects, arXiv PDFs, GitHub repos…) from its on-disk text_path, not just
+    # receipt metadata.  This is what lets it explain "这个项目在做什么" instead
+    # of "确认文件存在".  Notes recall is trimmed so the source body gets the
+    # token budget.
+    source_body = _source_body_text(research, total_limit=18000,
+                                    per_source_local=8000, per_source_remote=2500)
     prompt = _PROMPT.format(
         request=request,
-        recall=json.dumps(recall, ensure_ascii=False)[:9000],
-        research=json.dumps(research, ensure_ascii=False)[:9000],
+        recall=json.dumps(recall, ensure_ascii=False)[:5000],
+        research=json.dumps(research, ensure_ascii=False)[:3500],
+        source_body=source_body or "（本次调研未获取到任何来源正文；以下分析只能基于内部笔记与运行经验，请如实说明。）",
     )
     raw, usage = call_model(ctx, purpose="research_explain.synthesize", prompt=prompt)
     value = json_object(raw)
