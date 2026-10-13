@@ -659,7 +659,7 @@ class EventWorker:
                             projected.setdefault(key, value)
                     state.node_outputs[node_id] = projected
                     self.controller.mark_terminal(
-                        state, definition, node_id, event_id=ev_id, summary=summary)
+                        state, definition, node_id, event_id=ev_id, summary=summary.to_dict())
                     state.waiting_task_id = ""
                     state.current_event_id = ""
                     self.store.save(state)
