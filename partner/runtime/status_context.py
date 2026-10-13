@@ -16,8 +16,11 @@ def runtime_status(ctx, params):
         pass
     rows = []
     from partner.index.resource_catalog import job_records, ResourceCatalog
-    for job in job_records(root,project_id=project,limit=50):
-        if job.get('job_id') == current or job.get('project_id') != project:
+    for job in job_records(root, project_id=project if project else None, limit=50):
+        # project/instance 过滤只在有明确值时生效：chat_context 的 stub ctx 无
+        # project_id（"现在在做什么"这类状态查询），若此处硬比 project 会过滤掉
+        # 全部任务，导致 LLM 回答"空闲"——不诚实。
+        if job.get('job_id') == current or (project and job.get('project_id') != project):
             continue
         if instance and (job.get('intake_instance_id') or job.get('origin_instance')) != instance:
             continue
@@ -38,7 +41,10 @@ def runtime_status(ctx, params):
         has_receipt = bool(outputs.get('execute') or checkpoint.get('commands') or any(k in outputs for k in ('capture', 'transcribe', 'vision', 'verify')))
         active_action = job.get('status') == 'running' and job.get('current_event_id') in {'execute','capture','transcribe','vision','synthesize'}
         if not has_receipt and not active_action:
-            continue
+            # running 但尚未到达执行节点的任务（受理/规划/前置 LLM 阶段）也要如实
+            # 显示为"刚受理/规划中"，否则用户问状态时会答"空闲"——与事实不符。
+            if job.get('status') != 'running':
+                continue
         rows.append({'job_id':job['job_id'], 'created_at':job.get('created_at',''),
             'request':(job.get('request') or '')[:1600], 'status':job.get('status'),
             'has_execution_receipt':has_receipt,
