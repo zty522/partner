@@ -929,7 +929,7 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     from partner.runtime.source_evidence import fetch
     import hashlib
     unique = {row["url"]: row for row in sources}
-    if not unique and not local_value and not local_proposed and not query_texts:
+    if not unique and not local_value and not local_proposed and not query_texts and not user_local_dirs:
         return {"ok": True, "status": "completed",
                 "semantic_output": {"sources": [], "empty": True,
                                     "reason": "no user sources, no queries, no local root"},
