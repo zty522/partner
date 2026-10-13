@@ -90,6 +90,10 @@ def _resolve_api_json(provider: str = "") -> dict:
         if b.endswith("/v1"):
             out["base_url"] = b[:-3]
         out["_provider"] = selected_name
+        # Per-instance model overrides (e.g. {"02": "qwen3.8-max"}) survive the
+        # whitelist so chat() can A/B different instances on flash vs pro.
+        if isinstance(primary.get("instance_models"), dict) and primary["instance_models"]:
+            out["instance_models"] = dict(primary["instance_models"])
         return out
     except Exception:
         return {}
