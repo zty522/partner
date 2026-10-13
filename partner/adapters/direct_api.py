@@ -290,6 +290,11 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
         cognitive_model = str(cfg.get('cognitive_model') or '').strip()
         if cognitive_model:
             payload['model'] = cognitive_model
+    # Per-instance override is final: it must survive cognitive-model routing
+    # above (project_plan_propose etc. would otherwise reset it to cognitive_model).
+    _inst_models = cfg.get("instance_models") or {}
+    if _instance and str(_instance) in _inst_models and _inst_models[str(_instance)]:
+        payload['model'] = str(_inst_models[str(_instance)])
     # Keep extended reasoning for investigation and initial causal design.
     # Code serialization and source-grounded contract checks use the output
     # budget directly; independent review remains a separate model call.
