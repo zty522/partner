@@ -151,6 +151,104 @@ def _arxiv_search(query: str, max_results: int = 5) -> list[dict]:
     return rows
 
 
+def _expand_local_project(root: Path, directory: Path) -> list[dict]:
+    """Expand a local project directory into receipts the research pass can read.
+
+    Produces one receipt containing README + a shallow directory tree + a few
+    key source files, so "看一看 /mnt/e/work/projects/tom" becomes real
+    project reading instead of an unreadable-path error.
+    """
+    import hashlib
+    from partner.runtime.action_execution import write_json
+    root = Path(root)
+    receipts: list[dict] = []
+    if not root.is_dir():
+        return receipts
+    readme = None
+    for name in ('README.md', 'readme.md', 'README', 'Readme.md', 'README.txt'):
+        candidate = root / name
+        if candidate.is_file() and candidate.stat().st_size <= 1_000_000:
+            readme = candidate
+            break
+    tree_lines: list[str] = []
+    try:
+        for level, entries in _walk_tree(root, max_depth=2, max_entries=60):
+            tree_lines.append(f'[{level}]')
+            tree_lines.extend(entries)
+    except Exception:
+        pass
+    suffixes = {'.py', '.ipynb', '.md', '.txt', '.json', '.yaml', '.yml',
+                '.toml', '.sh', '.c', '.cpp', '.h', '.r', '.jl', '.ts', '.js'}
+    key_files: list[Path] = []
+    try:
+        candidates = [p for p in root.rglob('*') if p.is_file()
+                      and p.suffix.lower() in suffixes
+                      and p.stat().st_size <= 400_000
+                      and '/.git/' not in str(p)
+                      and 'node_modules' not in str(p)
+                      and '__pycache__' not in str(p)]
+        candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+        key_files = candidates[:6]
+    except Exception:
+        pass
+    parts = [f'# 本地项目：{root}']
+    if readme:
+        parts.append('## README')
+        parts.append(readme.read_text(encoding='utf-8', errors='replace')[:6000])
+    if tree_lines:
+        parts.append('## 目录结构')
+        parts.append('\n'.join(tree_lines)[:4000])
+    if key_files:
+        parts.append('## 关键文件摘录')
+        for path in key_files:
+            rel = str(path.relative_to(root))
+            try:
+                text = path.read_text(encoding='utf-8', errors='replace')[:5000]
+            except OSError:
+                continue
+            parts.append(f'### {rel}\n{text}')
+    body = '\n\n'.join(parts)
+    if len(body.strip()) < 50:
+        return receipts
+    target = directory / ('local_' + hashlib.sha256(str(root).encode()).hexdigest()[:16])
+    target.mkdir(parents=True, exist_ok=True)
+    raw_path, text_path = target / 'source.bin', target / 'source.txt'
+    encoded = body.encode('utf-8')
+    raw_path.write_bytes(encoded)
+    text_path.write_text(body, encoding='utf-8')
+    receipt = {
+        'url': 'file-project://' + root.name,
+        'final_url': str(root.resolve()), 'content_type': 'text/markdown',
+        'bytes': len(encoded), 'raw_path': str(raw_path), 'text_path': str(text_path),
+        'sha256': hashlib.sha256(encoded).hexdigest(),
+        'text_sha256': hashlib.sha256(encoded).hexdigest(),
+        'text_chars': len(body), 'source_kind': 'local_project',
+        'local_project': str(root.resolve()),
+    }
+    write_json(target / 'receipt.json', receipt)
+    receipts.append(receipt)
+    return receipts
+
+
+def _walk_tree(root: Path, max_depth: int = 2, max_entries: int = 60) -> list[tuple[str, list[str]]]:
+    """Yield (level_header, entry_lines) pairs for a shallow directory tree."""
+    out: list[tuple[str, list[str]]] = []
+    for depth in range(1, max_depth + 1):
+        lines: list[str] = []
+        try:
+            entries = sorted(root.glob('*/' * depth + '*'),
+                             key=lambda p: (p.is_file(), p.name.lower()))
+        except Exception:
+            break
+        for path in entries[:max_entries]:
+            if path.name.startswith('.') or path.name in {'node_modules', '__pycache__'}:
+                continue
+            lines.append(('📄 ' if path.is_file() else '📁 ') + path.name + ('/' if path.is_dir() else ''))
+        if lines:
+            out.append((f'level{depth}', lines))
+    return out
+
+
 def _expand_github_url(url: str, directory: Path) -> list[dict]:
     """For GitHub repo URLs, fetch README + directory listing + key source files.
     Returns list of receipts (may be empty on failure)."""
@@ -747,6 +845,8 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     # run_context by the intake router.  They are mandatory work, so they are
     # fetched even when no source_plan / download_plan exists.
     user_sources = params.get('user_sources') or []
+    user_local_files: list[Path] = []
+    user_local_dirs: list[Path] = []
     if isinstance(user_sources, (str, list, tuple)):
         rows_iter = [user_sources] if isinstance(user_sources, str) else list(user_sources)
         for row in rows_iter:
@@ -756,6 +856,12 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
                 sources.append({'url': value,
                                 'source_kind': _classify_source_kind(value),
                                 'user_requested': True})
+            elif value.startswith('/') and '*' not in value:
+                candidate = Path(value).expanduser()
+                if candidate.is_file():
+                    user_local_files.append(candidate)
+                elif candidate.is_dir():
+                    user_local_dirs.append(candidate)
     proposed = list(previous.get('primary_sources') or params.get('sources') or [])
     download_plan = previous.get('download_plan') or []
     if isinstance(download_plan, dict):
@@ -776,6 +882,8 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
             if candidate.is_file():
                 local_proposed.append(candidate)
     local_proposed = list(dict.fromkeys(path.resolve() for path in local_proposed))
+    local_proposed.extend(Path(p).resolve() for p in user_local_files)
+    local_proposed = list(dict.fromkeys(local_proposed))
     # arXiv API: key-less, stable literature search — the right backend for
     # "调研/查文献" research passes.  DuckDuckGo Instant Answer (below) returns
     # almost nothing for technical queries, which made research_explain fetch
@@ -830,6 +938,18 @@ def source_retrieve(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     work = Path(getattr(ctx,'working_dir', '') or Path(ctx.workspace)/'state/event_runtime/work'/str(getattr(ctx,'job_id','learning')))
     directory = work / 'sources' / str(params.get('flow_id') or 'standalone')
     downloaded, failures = [], []
+    # Local project folders the user asked us to read ("看一看 /mnt/.../tom"):
+    # expand README + file tree + key source files into receipts so the
+    # research pass reasons about the actual project instead of reporting
+    # "unreadable / no permission" for a path that exists.
+    for proj in user_local_dirs:
+        try:
+            receipts = _expand_local_project(proj, directory)
+            downloaded.extend(receipts)
+        except Exception as exc:
+            failures.append({'url': str(proj),
+                             'error': f'local project expand failed: {str(exc)[:180]}',
+                             'source_kind': 'local_path'})
     if local_proposed and not local_value:
         # Context evidence files (e.g. handoff.json, input_consumption.json) are
         # provenance references, not a declared learning root.  Elevating them to

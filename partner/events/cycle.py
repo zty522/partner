@@ -315,6 +315,16 @@ def input_resolve(ctx, params):
         if path:
             candidates.append(str(path))
             explicit.append(str(path))
+    # user_sources: links AND local paths the intake router extracted from the
+    # request text.  Files are hash-bound inputs like any attachment; folders
+    # are expanded downstream by source_retrieve (local project browsing).
+    for row in params.get('user_sources') or []:
+        value = (row.get('url') or row.get('target') or '') if isinstance(row, dict) else str(row)
+        value = str(value).strip()
+        if value.startswith('/') and '*' not in value:
+            if Path(value).is_file():
+                candidates.append(value)
+                explicit.append(value)
     try:
         from partner.index.resource_catalog import ResourceCatalog
         catalog = ResourceCatalog(ctx.workspace)
@@ -374,6 +384,40 @@ def input_eligibility(ctx, params):
             except OSError:
                 pass
         samples.append({**row, 'preview': preview})
+    # Fast path: the frozen input set is identical to a previous eligibility run
+    # of this job and that run produced decisions — reuse them instead of paying
+    # another ~50s LLM call for an unchanged classification.
+    resolved_hashes = sorted(str(row.get('sha256') or '') for row in resolved)
+    reuse = None
+    try:
+        iterations = folder(ctx) / 'iterations'
+        last_files = sorted(iterations.glob('eligibility_*.json'))
+        if last_files:
+            last_elig = json.loads(last_files[-1].read_text(encoding='utf-8'))
+            last_sem = last_elig.get('semantic_output') or {}
+            last_hashes = sorted(str(x) for x in (last_elig.get('input_hashes') or []))
+            if last_hashes == resolved_hashes and last_sem.get('decisions'):
+                reuse = last_sem
+    except Exception:
+        reuse = None
+    if reuse is not None:
+        decisions = list(reuse.get('decisions') or [])
+        eligible = [row for row in decisions if row.get('eligible')]
+        value = {
+            'schema_version': 1, 'decisions': decisions,
+            'eligible_inputs': [next(item for item in resolved if item.get('path') == row.get('path'))
+                                for row in eligible if row.get('path')],
+            'eligible_count': len(eligible), 'rejected_count': len(decisions) - len(eligible),
+            'corpus_ready': bool(eligible),
+            'missing_inputs': reuse.get('missing_inputs') or [],
+            'reused': True,
+            'rule': 'only eligible_inputs may be presented to hypothesis design as research data',
+        }
+        number = int(params.get('round_number') or (params.get('intent_contract') or {}).get('round_number') or 1)
+        path = folder(ctx) / 'iterations' / f'eligibility_{number:04d}.json'
+        write_json(path, value)
+        return {**result(value, f'输入准入（复用）：{len(eligible)} 项合格，{value["rejected_count"]} 项拒绝', [str(path)]),
+                'token_usage': {}}
     raw, usage = call_model(ctx, purpose='cycle_input_eligibility', prompt=(
         '你是研究输入准入Event。逐个判断文件能否用于当前研究问题，不能因为文件可读就把项目说明、日志、'
         '临时产物或代码当作论文/实验数据。输出JSON：decisions，每项含path,eligible,role,reason,limitations；'
@@ -418,6 +462,7 @@ def input_eligibility(ctx, params):
         'corpus_ready': bool(eligible),
         'missing_inputs': [m for m in (judged.get('missing_inputs') or [])
                            if m != 'no eligible research input'],
+        'input_hashes': [str(row.get('sha256') or '') for row in resolved],
         'rule': 'only eligible_inputs may be presented to hypothesis design as research data',
     }
     number = int(params.get('round_number') or (params.get('intent_contract') or {}).get('round_number') or 1)

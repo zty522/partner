@@ -80,6 +80,9 @@ def build_flow_registry(workspace: str | None = None) -> EventFlowRegistry:
     from .research_explain import DEFINITIONS as explain_definitions
     for definition in explain_definitions:
         registry.register(definition)
+    from .research_explain import RESEARCH_EXPLAIN_V1_0
+    if RESEARCH_EXPLAIN_V1_0 is not None:
+        registry._versions[(RESEARCH_EXPLAIN_V1_0.name, RESEARCH_EXPLAIN_V1_0.version)] = RESEARCH_EXPLAIN_V1_0
     from .benchmark import DEFINITIONS as benchmark_definitions
     for definition in benchmark_definitions:
         registry.register(definition)
