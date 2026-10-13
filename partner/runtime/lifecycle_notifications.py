@@ -12,13 +12,13 @@ from partner.runtime.event_run_log import EventRunLog
 
 
 _STANDARD_MILESTONE_NODES = {
-    # Semantic boundaries rather than Event chatter: one message says what the
-    # research concluded, one reports benchmark/evolution settlement, and the
-    # ACK nodes close delivery. The understand/commitment/execute/settle nodes
-    # are added so long-running research jobs push phase progress instead of
-    # staying silent for hours between acceptance and the final report.
+    # Semantic boundaries that carry user-visible substance.  Internal phase
+    # nodes (understand_1..3, commitment, plan, inspect...) complete with
+    # nothing the user can act on; publishing them yields "收到/正在调研"
+    # spam.  Only nodes whose completion means real content is available
+    # (a research result, a settlement, a delivered report) publish.
     "assess", "benchmark_settle", "evolution_gate", "report_ack", "final_ack",
-    "understand_3", "commitment", "execute", "settle",
+    "execute", "settle",
     # research_explain's synthesize is the whole point of an explain task: its
     # completion always deserves a delivery decision.
     "synthesize",
@@ -51,10 +51,12 @@ def should_publish(*, mode: str, lifecycle_phase: str, node_id: str = "",
     if lifecycle_phase == "flow_planned":
         return False
     if lifecycle_phase == "flow_started":
-        # Long runs must not start in silence: an explicit "starting now, will
-        # report at milestones" beats hours of nothing.  The LLM gate still
-        # decides the final wording and can merge with an accepted receipt.
-        return True
+        # The acceptance receipt (message_agent "已收到您的任务") already covers
+        # the "received" acknowledgement.  Re-publishing flow_started produces
+        # a second near-identical "收到，正在调研" message that users read as
+        # spam.  Silent starts are safe: the heartbeat branch below still
+        # publishes a progress note once the run has been quiet >600s.
+        return False
     if lifecycle_phase == "flow_completed":
         # Push a wrap-up for every user-visible flow: the research spine itself
         # plus each child round (cycle/learning/evolution), so users see what
