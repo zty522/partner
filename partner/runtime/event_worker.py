@@ -598,6 +598,72 @@ class EventWorker:
             if receipt.exists():
                 state.waiting_task_id = task_id
                 self.store.save(state)
+        # Background-task terminal consumption: the execute Event submitted an
+        # async action; when its task reaches a terminal state, project the real
+        # result back into Flow state and complete the node. Without this
+        # closure a finished action would leave the job waiting on execute
+        # forever, so the user never sees the outcome.
+        if state.current_event_id and state.waiting_task_id:
+            from partner.runtime.background_actions import BackgroundActions, TERMINAL
+            bm = BackgroundActions(self.root)
+            task_state = bm.inspect(state.waiting_task_id)
+            if task_state.get("status") in TERMINAL:
+                ev_id = state.current_event_id
+                ev = self.ledger.get_event_history(ev_id)
+                node_id = str((ev or {}).get("node_id") or "")
+                folder = bm.directory / state.waiting_task_id
+                result: dict[str, Any] = {}
+                rp = folder / "result.json"
+                if rp.is_file():
+                    try:
+                        result = json.loads(rp.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        result = {}
+                if not result:
+                    result = {"ok": task_state.get("status") == "completed",
+                              "status": task_state.get("status"),
+                              "error": task_state.get("error", "")}
+                if not node_id:
+                    # Unknown node identity: clear the wait so recovery does not
+                    # get stuck, then let normal scheduling take over.
+                    state.waiting_task_id = ""
+                    self.store.save(state)
+                else:
+                    ok = bool(result.get("ok", task_state.get("status") == "completed"))
+                    terminal_status = "completed" if ok else "failed"
+                    artifacts = [{"path": str(x), "kind": "artifact"}
+                                 for x in (result.get("files") or [])]
+                    summary = EventSummary(
+                        event_id=ev_id, status=terminal_status,
+                        headline=str(result.get("summary") or result.get("error")
+                                     or "execute finished")[:500],
+                        outcome=str(result.get("outcome") or result.get("summary") or "")[:2000],
+                        semantic_output=(result if isinstance(result, dict) else {}),
+                        notification_kind="routine",
+                        evidence_refs=[str(x) for x in (result.get("evidence_refs") or [])],
+                        artifacts=artifacts,
+                        finished_at=task_state.get("finished_at", ""),
+                        output_hash=hashlib.sha256(json.dumps(
+                            result, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest(),
+                    )
+                    self.ledger.complete(ev_id, summary)
+                    projected = {"ok": ok, "status": terminal_status,
+                                 "summary": summary.headline,
+                                 "semantic_output": result,
+                                 "evidence_refs": summary.evidence_refs,
+                                 "files": [a["path"] for a in artifacts]}
+                    # Lift key result fields to the top level so downstream
+                    # verify/reflect nodes read them exactly like a sync output.
+                    if isinstance(result, dict):
+                        for key, value in result.items():
+                            projected.setdefault(key, value)
+                    state.node_outputs[node_id] = projected
+                    self.controller.mark_terminal(
+                        state, definition, node_id, event_id=ev_id, summary=summary)
+                    state.waiting_task_id = ""
+                    state.current_event_id = ""
+                    self.store.save(state)
+                    return True
         if state.current_event_id and not state.waiting_task_id:
             event_id = state.current_event_id
             summary = next((row for row in self.ledger.recent_summaries(

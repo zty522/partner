@@ -63,13 +63,18 @@ def should_publish(*, mode: str, lifecycle_phase: str, node_id: str = "",
                                   'active_learning', 'autonomous_evolution',
                                   'research_explain'})
     if lifecycle_phase == "event_completed":
-        # Every completed Event is a publication candidate.  The LLM gate (not
-        # a node whitelist) decides whether to actually send, deduplicating
-        # against the chat history and respecting the heartbeat.  This is what
-        # makes progress visible without spamming: the model sees the
-        # conversation, the task goal and the elapsed silence.
-        return True
+        # Semantic milestones always publish (execute/synthesize/settle etc.),
+        # so users see phase progress instead of hours of silence.  Routine
+        # event chatter ("收到，正在调研" repeated per node) is throttled
+        # deterministically in publish_lifecycle (PUSH_INTERVAL), otherwise the
+        # user receives 7 near-identical acknowledgements for a single task.
+        return node_id in _STANDARD_MILESTONE_NODES
     return False
+
+
+# Routine progress notes are throttled to one per interval; semantic
+# milestones and failures bypass the window.
+PUSH_INTERVAL = 300.0
 
 
 def _hash(value: Any) -> str:
@@ -148,12 +153,20 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
                           node_id=str(facts.get("node_id") or ""),
                           is_child_flow=bool(facts.get("is_child_flow")),
                           flow_name=str(facts.get('flow_name') or facts.get('flow_type') or '')):
+        # Deterministic throttle for routine event chatter: non-milestone
+        # event_completed updates publish at most once per PUSH_INTERVAL.
+        # Semantic milestones, failures and acceptance always pass.
+        from partner.messaging.publish_gate import last_push_ts
+        from datetime import datetime as _dt, timezone as _tz
+        if (lifecycle_phase == "event_completed"
+                and str(facts.get("node_id") or "") not in _STANDARD_MILESTONE_NODES
+                and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) <= PUSH_INTERVAL):
+            return {"ok": True, "suppressed": True, "mode": mode,
+                    "reason": f"routine event chatter throttled (PUSH_INTERVAL={PUSH_INTERVAL:.0f}s)"}
         # Heartbeat: long-running jobs must not stay silent for hours.  When
         # no rule candidate fired but a phase just completed and nothing has
         # been delivered for ~25 minutes, let the LLM gate decide whether to
         # push a progress note.
-        from partner.messaging.publish_gate import last_push_ts
-        from datetime import datetime as _dt, timezone as _tz
         if (lifecycle_phase in {"event_completed", "flow_started", "flow_completed", "flow_failed"}
                 and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) > 600):
             pass  # heartbeat candidate

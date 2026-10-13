@@ -986,8 +986,16 @@ def commitment_bet_execute(ctx, params):
     _execution_intent = bool(re.search(
         r"调研|文献|论文|讲解|分析|看看|查看|了解|改进|修复|运行|执行|扫描|检查|总结|报告|学习|研究|阅读|设计|开发|编写|部署|测试",
         _request, re.I | re.S))
+    # Background-task execute (project.action_execute) may have already done the
+    # real work in an async action whose result.json was projected back by the
+    # worker.  In that case the bet's own small measurement is only a settlement
+    # instrument and must not be treated as empty spinning.
+    _upstream_execute = (params.get("flow_outputs") or {}).get("execute") or {}
+    _exec_real_evidence = (isinstance(_upstream_execute, dict)
+                           and bool(_upstream_execute.get("files")
+                                    or _upstream_execute.get("evidence_refs")))
     if _execution_intent and result.state == sm.CLOSED and result.settlement is not None \
-            and result.settlement.settlement_class == "supported":
+            and result.settlement.settlement_class == "supported" and not _exec_real_evidence:
         receipt = getattr(result, "receipt", None)
         if receipt is not None:
             _budget = receipt.budget_consumed if isinstance(receipt.budget_consumed, dict) else {}
