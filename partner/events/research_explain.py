@@ -58,7 +58,11 @@ _PROMPT = """你是 Partner 的“学习总结与调研讲解”Event。用户�
 def _sources_text(research: dict) -> str:
     """Extract real source titles/urls from the research node output for the PDF."""
     rows = []
-    sem = research.get("semantic_output") if isinstance(research, dict) else {}
+    sem = research.get("semantic_output") if isinstance(research, dict) \
+        and isinstance(research.get("semantic_output"), dict) \
+        else (research if isinstance(research, dict) else {})
+    if not isinstance(sem, dict):
+        sem = {}
     if isinstance(sem, dict):
         for s in (sem.get("sources") or [])[:15]:
             if not isinstance(s, dict):
@@ -85,7 +89,11 @@ def _source_body_text(research: dict, *, total_limit: int = 18000,
     local project that was fully expanded.  Reading the bodies back and
     injecting them is what makes the explanation about the actual material.
     """
-    sem = research.get("semantic_output") if isinstance(research, dict) else {}
+    sem = research.get("semantic_output") if isinstance(research, dict) \
+        and isinstance(research.get("semantic_output"), dict) \
+        else (research if isinstance(research, dict) else {})
+    if not isinstance(sem, dict):
+        sem = {}
     parts: list[str] = []
     for s in (sem.get("sources") or [])[:8]:
         if not isinstance(s, dict):
