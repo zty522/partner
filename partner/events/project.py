@@ -156,7 +156,12 @@ def _deliberate(ctx: Any, params: dict[str, Any], purpose: str, instruction: str
         + "\n简洁回答，每个字段一两句话，完整 JSON 不超过2000汉字，不复述输入全文。只输出 JSON；不得把生成报告、发送消息或重复旧结果算作项目推进。\n"
     ))
     value = json_object(raw)
-    for usage_row in value.get('memory_usage') or []:
+    usage_rows = value.get('memory_usage') or []
+    if not isinstance(usage_rows, list):
+        usage_rows = []
+    for usage_row in usage_rows:
+        if not isinstance(usage_row, dict):
+            continue
         if usage_row.get('record_id') not in known or usage_row.get('status') not in ('applied','rejected'):
             raise ValueError('memory usage cites unavailable memory or invalid status')
         EventMemory(ctx.workspace).record_usage(event_id=params.get('event_id',params.get('node_id','')),

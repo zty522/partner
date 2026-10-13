@@ -988,14 +988,21 @@ def commitment_bet_execute(ctx, params):
         _request, re.I | re.S))
     # Background-task execute (project.action_execute) may have already done the
     # real work in an async action whose result.json was projected back by the
-    # worker.  In that case the bet's own small measurement is only a settlement
-    # instrument and must not be treated as empty spinning.
+    # worker.  The flow order is commitment -> commitment_execute -> ... ->
+    # execute: at commitment_execute time the direction bet is settled BEFORE
+    # the real execute runs, so the bet's own small measurement is only a
+    # settlement instrument and must not be treated as empty spinning.  Only
+    # when the execute node has already produced its output (a later settlement
+    # re-run, or a bet that truly wrapped the execution) does the noop check
+    # apply.
     _upstream_execute = (params.get("flow_outputs") or {}).get("execute") or {}
-    _exec_real_evidence = (isinstance(_upstream_execute, dict)
-                           and bool(_upstream_execute.get("files")
-                                    or _upstream_execute.get("evidence_refs")))
+    _execute_done = bool(isinstance(_upstream_execute, dict) and _upstream_execute)
+    _exec_has_evidence = (isinstance(_upstream_execute, dict)
+                          and bool(_upstream_execute.get("files")
+                                   or _upstream_execute.get("evidence_refs")))
     if _execution_intent and result.state == sm.CLOSED and result.settlement is not None \
-            and result.settlement.settlement_class == "supported" and not _exec_real_evidence:
+            and result.settlement.settlement_class == "supported" \
+            and _execute_done and not _exec_has_evidence:
         receipt = getattr(result, "receipt", None)
         if receipt is not None:
             _budget = receipt.budget_consumed if isinstance(receipt.budget_consumed, dict) else {}
