@@ -318,27 +318,39 @@ def notes_injection(ctx: Any) -> str:
             return ""
         notes = value.get("notes") or []
         pending = value.get("pending") or []
-        parts: list[str] = []
-        for n in notes[:6]:
-            line = f"[{n.get('type','note')}·{n.get('status','')}] {str(n.get('content',''))[:180]}"
+        # Group by role so the model knows what must be obeyed vs what is
+        # optional reference: preferences/constraints (hard), pending (resolve
+        # if this step can), experience/habits (soft guidance).
+        hard, soft = [], []
+        for n in notes[:10]:
+            t = str(n.get('type', 'note'))
+            line = f"[{t}·{n.get('status','')}] {str(n.get('content',''))[:180]}"
             if n.get("source"):
-                line += f"（来源={str(n.get('source'))[:60]}）"
-            parts.append(line)
-        for p in pending[:4]:
+                line += f"（来源={str(n.get('source'))[:50]}）"
+            (hard if t in ('preference', 'constraint', 'habit') else soft).append(line)
+        pend = []
+        for p in pending[:5]:
             line = f"[pending·{p.get('status','open')}] {str(p.get('content',''))[:180]}"
             if p.get("gap"):
-                line += f"（gap={str(p.get('gap'))[:60]}）"
+                line += f"（gap={str(p.get('gap'))[:50]}）"
             if p.get("trigger_signal"):
-                line += f"（trigger={str(p.get('trigger_signal'))[:60]}）"
-            parts.append(line)
-        if not parts:
+                line += f"（trigger={str(p.get('trigger_signal'))[:50]}）"
+            pend.append(line)
+        blocks = []
+        if hard:
+            blocks.append("【偏好与约束·必须遵守】\n" + "\n".join(hard))
+        if pend:
+            blocks.append("【待办与改进·可解决则落地】\n" + "\n".join(pend))
+        if soft:
+            blocks.append("【经验与习惯·参考】\n" + "\n".join(soft))
+        if not blocks:
             return ""
-        return ("【长期笔记参考】\n"
-                + "\n".join(parts)
-                + "\n请判断：1) 哪些记录直接指导当前步骤、怎么用；"
-                  "2) 哪些 open 的 pending 可被本次任务解决（是→转入落地链并更新状态）；"
-                  "3) 是否有需要新增/更新的记录（按写入契约输出："
-                  "{decision, note_type, content, confidence, gap, trigger_signal, evidence_refs, reason}）。"
-                  "注意：笔记不等于已验证事实，使用前核对 evidence_refs。\n")
+        return ("【长期笔记参考】这些是长期积累的记录，请真正用于当前步骤，不要当背景忽略：\n"
+                + "\n\n".join(blocks)
+                + "\n消费要求：在你的输出里体现——1) 与当前步骤相关的偏好/约束必须遵守并注明如何落实；"
+                  "2) 能被本次任务解决的 open pending 要落地（转入执行并更新状态）；"
+                  "3) 相关经验/习惯可参考借鉴；4) 若本次产生值得记录的新认识，按写入契约输出："
+                  "{decision, note_type, content, confidence, gap, trigger_signal, evidence_refs, reason}。"
+                  "笔记不等于已验证事实，使用前核对 evidence_refs；与当前步骤无关的略过。\n")
     except Exception:
         return ""

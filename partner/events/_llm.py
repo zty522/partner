@@ -211,7 +211,7 @@ def event_facts(params: dict, *, max_chars: int = 80000) -> str:
         'recent_execution':json.dumps(inspected.get('recent_execution', []), ensure_ascii=False)[:8000],
         'evidence_inputs':json.dumps(inspected.get('attached_evidence', []), ensure_ascii=False)[:6000]}
     # Latest execution/verification must survive the context budget.
-    for key in ('init','execute','verify','reflect','route','select','critic','hypothesis','understand_3','inspect','recall'):
+    for key in ('init','execute','verify','reflect','route','select','critic','hypothesis','understand_3','inspect','recall','synthesize'):
         if key == 'select':
             facts.update(context)  # Sources before planning, after real terminals.
         value = outputs.get(key)

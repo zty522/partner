@@ -147,8 +147,13 @@ def _deliberate(ctx: Any, params: dict[str, Any], purpose: str, instruction: str
     if guardrails:
         guardrails = "\n" + guardrails + "\n"
     raw, usage = call_model(ctx, purpose=purpose, prompt=(
-        focus + guardrails + instruction + f" 可引用的真实记忆(最多24条,kind+rid+snippet): {avail_json}. 使用记忆时输出memory_usage列表,每项含record_id(必须是上述rid之一)、effect、status(applied/rejected);没使用则空列表.不能声称读取未提供的记忆." + "\n简洁回答，每个字段一两句话，完整 JSON 不超过2000汉字，不复述输入全文。只输出 JSON；不得把生成报告、发送消息或重复旧结果算作项目推进。\n事实="
-        + event_facts(params)
+        "【先理解，再规划】开始前先完整阅读下方上下文：用户目标与约束（原始目标）、上一轮实际做了什么与结果（已执行与证据）、"
+        "已确认的缺口与禁止项（guardrails）、可引用的长期笔记（记忆）。理解清楚后，才按指令规划本轮最小可执行的单一动作；"
+        "规划必须直接服务原始目标，不重复已否证动作，不为耗时间空转。\n"
+        + "事实=" + event_facts(params)
+        + "\n\n【规划指令】" + focus + guardrails + instruction
+        + f"\n可引用的真实记忆(最多24条,kind+rid+snippet): {avail_json}. 使用记忆时输出memory_usage列表,每项含record_id(必须是上述rid之一)、effect、status(applied/rejected);没使用则空列表.不能声称读取未提供的记忆."
+        + "\n简洁回答，每个字段一两句话，完整 JSON 不超过2000汉字，不复述输入全文。只输出 JSON；不得把生成报告、发送消息或重复旧结果算作项目推进。\n"
     ))
     value = json_object(raw)
     for usage_row in value.get('memory_usage') or []:
