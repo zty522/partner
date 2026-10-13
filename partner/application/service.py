@@ -1353,6 +1353,16 @@ class PartnerApplicationService:
             # ("学习/读一读/借鉴…") keeps the learning path.
             flow_name = 'research_explain'
             dispatch_target = dispatch_target or 'research_explain'
+            # The flow is deterministic research_explain, so the intent metadata
+            # must match it: LLM synthesis may have stamped workstream_type=
+            # active_learning + evolution_cycle=True, which would make
+            # delivery.send_text reject the final message (evolution-cycle gate)
+            # and downstream events read the wrong contract.  Override the
+            # contract to what the routing actually decided.
+            if not isinstance(intent_contract.get('execution_constraints'), dict):
+                intent_contract['execution_constraints'] = {}
+            intent_contract['execution_constraints']['evolution_cycle'] = False
+            intent_contract['workstream_type'] = 'research_explain'
         elif mode == 'self_improvement':
             flow_name = 'self_improvement_cycle'
             dispatch_target = 'partner_self_improvement'
