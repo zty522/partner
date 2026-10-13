@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 import json
+import re
 
 from partner.event_fabric.catalog import EventDefinition
 from ._llm import call_model, json_object
@@ -82,6 +83,15 @@ def orchestration_assess(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         constraints_text = json.dumps(
             {k: v for k, v in contract_exec.items() if k in keep and v is not None},
             ensure_ascii=False)[:1200]
+    # Execution-type tasks must never be collapsed into a pure answer flow:
+    # the user asked for real work (调研/文献/分析/查看/改进/修复/运行/学习/设计/
+    # 开发/部署/测试…), so a direct_answer switch would skip execution and the
+    # settlement gate would fail it as empty spinning.  Only genuine Q&A /
+    # status-query goals may target direct_answer.
+    _goal_text = (goal or "") + " " + str(params.get("original_request") or "")
+    _execution_intent = bool(re.search(
+        r"调研|文献|论文|讲解|分析|看看|查看|了解|改进|修复|运行|执行|扫描|检查|总结|报告|学习|研究|阅读|设计|开发|编写|部署|测试",
+        _goal_text, re.I | re.S))
     prompt = (
         "你是 Partner 的运行时软编排器。当前 flow 是静态基线，你可以决定是否在运行时调整。"
         "你只能从下面的共享事件池白名单里选择事件（积木），按接口契约拼接；"
@@ -103,6 +113,10 @@ def orchestration_assess(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         "4. redesign：需要全新组合 → action=redesign，给 proposed_sequence（同 adjust）。\n"
         "约束：proposed_sequence 只含白名单 event_type；必须包含足以让运行可结算、可交付用户消息的收尾事件"
         "（如 delivery.send_text）；不得包含已完成的事件（已完成事件不可替换）。\n"
+        "【硬性禁止】本任务是执行型任务（包含调研/文献/分析/查看/了解/改进/修复/运行/学习/阅读/设计/开发/部署/测试等"
+        "执行意图）：绝对禁止 switch 或 redesign 成纯回答型 flow（direct_answer / 仅问答收尾），"
+        "禁止把剩余执行缩成一段同步回答就结束；必须保留真实执行、核验与交付链路。"
+        "只有纯问答/状态查询类任务才能选择 direct_answer。\n"
         "只输出一个 JSON 对象："
         '{"action": "keep|adjust|switch|redesign", "reason": "一句话理由", '
         '"proposed_sequence": ["event.type", ...], "target_flow": "flow_name_or_empty", '
@@ -122,7 +136,7 @@ def orchestration_assess(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         decision = {"action": "keep", "reason": "unparseable assess output"}
     action = str(decision.get("action") or "keep")
-    if action not in {"keep", "adjust", "switch", "redesign"}:
+    if action not in {"keep", "adjust", "redesign"}:
         action = "keep"
     proposed = [str(x) for x in (decision.get("proposed_sequence") or [])]
     proposed = [x for x in proposed if x in whitelist_types]
@@ -130,6 +144,16 @@ def orchestration_assess(ctx: Any, params: dict[str, Any]) -> dict[str, Any]:
         action = "keep"
         decision["reason"] = (str(decision.get("reason") or "") + "（序列为空，保持基线）")
     target_flow = str(decision.get("target_flow") or "")
+    # Deterministic guard (belt and braces): an execution-type goal may never
+    # be switched or redesigned into a pure-answer flow.
+    if _execution_intent and (
+            target_flow == "direct_answer"
+            or "direct_answer" in proposed
+            or "interaction.direct_answer" in proposed):
+        action = "keep"
+        target_flow = ""
+        decision["reason"] = (str(decision.get("reason") or "")
+                              + "（执行型任务禁止切换到 direct_answer，保持基线）")
     semantic = {
         "action": action,
         "reason": str(decision.get("reason") or "")[:400],

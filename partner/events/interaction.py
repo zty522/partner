@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 import json
+import re
 from pathlib import Path
 
 from partner.event_fabric.catalog import EventDefinition

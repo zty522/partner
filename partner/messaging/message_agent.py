@@ -44,6 +44,19 @@ CLASSIFY_SYSTEM = (
 )
 
 
+def _as_attachment_list(raw) -> list:
+    """Inbox files may carry attachments as a JSON string or a list."""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, list) else []
+        except (TypeError, ValueError):
+            return []
+    return []
+
+
 class MessageAgent:
     """One asynchronous consumer of the instance inbox."""
 
@@ -113,7 +126,7 @@ class MessageAgent:
     def _process(self, msg: dict) -> None:
         sender_id = str(msg.get("sender_id") or "")
         text = str(msg.get("text") or "")
-        attachments = list(msg.get("attachments") or [])
+        attachments = _as_attachment_list(msg.get("attachments"))
         msg_id = str(msg.get("msg_id") or "")
         self._stats["processed"] += 1
 
@@ -251,7 +264,9 @@ class MessageAgent:
                 sender_id=sender_id,
                 sender_name=str(msg.get("sender_name") or "用户"),
                 persona_hint=self.instance_id,
-                attachments=[a.get("path") or a.get("url") for a in (msg.get("attachments") or []) if (a.get("path") or a.get("url"))],
+                attachments=[a.get("path") or a.get("url")
+                             for a in _as_attachment_list(msg.get("attachments"))
+                             if (a.get("path") or a.get("url"))],
                 intent_contract=contract,
             )
             if getattr(submission, "accepted", False):
