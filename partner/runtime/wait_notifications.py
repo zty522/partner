@@ -9,6 +9,14 @@ from partner.runtime.action_execution import write_json
 
 
 def enqueue_if_due(worker,job,state,now=None):
+    # Disabled: this routine auto-created "任务还在运行中" message_delivery
+    # jobs every ~3-15 minutes, bypassing publish_gate and the lifecycle
+    # throttle, so users received repeated empty acknowledgements for a single
+    # task.  Progress reporting is owned by the lifecycle milestone nodes
+    # (execute/synthesize/settle/final_ack), which only publish when real
+    # content exists; the LLM publish_gate decides whether a catch-up note is
+    # warranted.  Only report-failure notices (enqueue_report_failure) remain.
+    return None
     now=time.time() if now is None else now
     if job.channel!='qq' or job.flow_type=='message_delivery': return None
     if job.flow_type in {'autonomous_evolution','project_cycle'}:

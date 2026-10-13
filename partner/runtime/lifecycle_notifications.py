@@ -165,16 +165,12 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
                 and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) <= PUSH_INTERVAL):
             return {"ok": True, "suppressed": True, "mode": mode,
                     "reason": f"routine event chatter throttled (PUSH_INTERVAL={PUSH_INTERVAL:.0f}s)"}
-        # Heartbeat: long-running jobs must not stay silent for hours.  When
-        # no rule candidate fired but a phase just completed and nothing has
-        # been delivered for ~25 minutes, let the LLM gate decide whether to
-        # push a progress note.
-        if (lifecycle_phase in {"event_completed", "flow_started", "flow_completed", "flow_failed"}
-                and (_dt.now(_tz.utc).timestamp() - last_push_ts(workspace)) > 600):
-            pass  # heartbeat candidate
-        else:
-            return {"ok": True, "suppressed": True, "mode": mode,
-                    "reason": "notification density policy"}
+        # Heartbeat removed: the auto catch-up note re-produced the same
+        # "已收到/正在调研" empty acknowledgement ~10min after acceptance,
+        # which users read as spam.  The LLM publish_gate alone decides
+        # whether a >25min silence with concrete new facts deserves a note.
+        return {"ok": True, "suppressed": True, "mode": mode,
+                "reason": "notification density policy"}
     token = uuid.uuid4().hex[:12]
     flow_id = f"notify_{getattr(ctx, 'job_id', 'job')}_{token}"
     base = {**facts, "lifecycle_phase": lifecycle_phase,
