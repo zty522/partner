@@ -2866,6 +2866,7 @@ class DirectAdapter(AgentAdapter):
         self.model = model
         # Empty means: resolve the single authoritative default in config/api.json.
         self.provider = provider or ""
+        self.instance_id = ""  # set by EventWorker per running job; enables per-instance model override
         self.last_usage = {}
     
     def name(self) -> str:
@@ -2922,7 +2923,7 @@ class DirectAdapter(AgentAdapter):
         budget = max_tokens if max_tokens is not None else _env_int("PARTNER_COGNITIVE_MAX_TOKENS", 8192)
         reply = direct_api.chat(message, max_tokens=budget, purpose=purpose,
                                 timeout=timeout, workspace=self.workspace,
-                                provider=self.provider,
+                                provider=self.provider, instance_id=getattr(self, "instance_id", ""),
                                 task_id=getattr(self,"task_id",""), project_id=getattr(self,"project_id",""),
                                 event_type=getattr(self,"event_type",purpose))
         self.last_usage = direct_api.get_last_usage()

@@ -653,6 +653,7 @@ class EventWorker:
         self.adapter.task_id = job.job_id
         self.adapter.project_id = job.project_id
         self.adapter.event_type = definition.node(node_id).event_type
+        self.adapter.instance_id = job.assigned_instance or job.origin_instance or self.instance_id
         ctx = EventContext(
             workspace=str(self.root), instance_workspace=str(self.root / 'instances' / (job.assigned_instance or job.origin_instance or self.instance_id)),
             instance_id=job.assigned_instance or job.origin_instance or self.instance_id, project_id=job.project_id,
