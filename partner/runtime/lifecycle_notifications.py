@@ -185,10 +185,16 @@ def publish_lifecycle(*, workspace, ctx, lifecycle_phase: str,
     # LLM publish gate: grounded in the real chat history, decide whether to
     # actually send (dedupe / too-long-silent / too-frequent) and rewrite the
     # candidate into plain user-facing Chinese.  Fails open (send).
+    # Acceptance receipts are mandatory user-facing acks: a user who just sent
+    # a message must see "已收到你的任务" exactly once per task.  The gate only
+    # rewrites their wording (rewrite_only) — the duplicate/too-frequent rules
+    # target proactive milestone chatter, not the ack that answers the user's
+    # own message.  Silently dropping the receipt reads as "没反应".
     from partner.messaging.publish_gate import publish_gate
     gated = publish_gate(workspace=workspace, ctx=ctx,
                          candidate=composed.get("message") or "",
-                         facts=base)
+                         facts=base,
+                         rewrite_only=(lifecycle_phase == "accepted"))
     if not gated.get("send"):
         return {"ok": True, "suppressed": True, "mode": mode, "stage": "gate",
                 "reason": f"llm publish gate: {gated.get('reason') or 'duplicate/too-frequent'}"}
