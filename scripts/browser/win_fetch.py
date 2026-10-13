@@ -75,7 +75,17 @@ def _main() -> int:
                                      "screenshot_path": "", "url": ""}, ensure_ascii=False))
         return 2
     url = sys.argv[1]
-    profile = os.environ.get("PARTNER_BROWSER_PROFILE", r"C:\Users\zty12\partner_profile")
+    # The dedicated logged-in profile was removed on purpose (xiaohongshu
+    # browsing disabled after account warnings; only literature fetching is
+    # allowed).  Without a profile the persistent-context launch would either
+    # fail or silently create a brand-new anonymous one — refuse explicitly.
+    profile = os.environ.get("PARTNER_BROWSER_PROFILE", "")
+    if not profile or not os.path.isdir(profile):
+        sys.stdout.write(json.dumps({"status": "fetch_failed",
+                                     "reason": "browser profile removed; xiaohongshu browsing disabled",
+                                     "title": "", "text": "", "media_urls": [],
+                                     "screenshot_path": "", "url": url}, ensure_ascii=False))
+        return 1
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # pragma: no cover
