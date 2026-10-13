@@ -225,6 +225,14 @@ def chat(prompt: str, max_tokens: int = 4096, temperature: float = 0.0,
     selected_provider = str(cfg.get("_provider") or provider or DEFAULT_PROVIDER).lower()
     api_key = cfg.get("api_key") or (API_KEY if selected_provider == "deepseek" else "")
     model, max_tokens = select_model_and_tokens(cfg, purpose, max_tokens)
+    # Per-instance model override (flash/pro A/B experiments).  api.json may
+    # declare e.g. {"instance_models": {"02": "qwen3.8-max"}} so instance 02
+    # runs its cognitive calls on the pro model while the rest stay on flash.
+    _instance = instance_id or _instance_from_workspace(workspace)
+    if _instance:
+        _inst_models = cfg.get("instance_models") or {}
+        if str(_instance) in _inst_models and _inst_models[str(_instance)]:
+            model = str(_inst_models[str(_instance)])
     api_base = (cfg.get("base_url") or (API_BASE if selected_provider == "deepseek" else "")).rstrip("/")
     if not api_key:
         logger.error("[DirectAPI] No API key found for provider=%s", selected_provider)
