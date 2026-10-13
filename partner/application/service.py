@@ -1338,6 +1338,21 @@ class PartnerApplicationService:
                          else 'benchmark_experiment')
         elif read_link_request:
             flow_name = 'content_read_reply'
+        elif (user_urls or user_local_paths) and re.search(
+                r'看一看|了解一下|讲解|介绍|调研|在做什么|干什么|是什么|总结一下',
+                clean or '') and not re.search(
+                r'学习|读一读|吸收|借鉴|采纳|改进|做成|实现',
+                clean or ''):
+            # Deterministic explain route: the user pointed at concrete sources
+            # (URLs or local paths) AND used an explain intent ("看一看/了解
+            # 一下/讲解/调研 X 在做什么").  LLM intent synthesis is unstable —
+            # the same request flips between research_explain and
+            # active_learning between runs — so do not let a probabilistic
+            # workstream_type send "看一下这个项目在做什么" into the
+            # 25-node learning_improvement_cycle.  An explicit learning intent
+            # ("学习/读一读/借鉴…") keeps the learning path.
+            flow_name = 'research_explain'
+            dispatch_target = dispatch_target or 'research_explain'
         elif mode == 'self_improvement':
             flow_name = 'self_improvement_cycle'
             dispatch_target = 'partner_self_improvement'
