@@ -556,8 +556,10 @@ def round_design(ctx, params):
         'required_evidence,event_sequence,learning_handoff_refs,stop_condition,why_new,input_hashes,target_artifact,'
         'executor,intervention,measurement。event_sequence必须是上述Event的有序子序列，'
         '但执行、核验、反思和结算不可省略。下一轮不得重复已否证动作。'
-        '本轮蓝图只包含科研/项目动作；消息、PDF、Event/Flow图、记忆和Partner自进化由父Flow后续专门Event完成，'
-        '不得写进round_goal、required_evidence或本轮成功条件。\n'
+        '本轮蓝图只包含科研/项目动作；消息、Event/Flow图、记忆和Partner自进化由父Flow后续专门Event完成，'
+        '不得写进round_goal、required_evidence或本轮成功条件。PDF是否生成由收尾report_decision事件'
+        '（LLM依据用户请求、结果质量与用户偏好判断）决定，规划者无需在蓝图中规划PDF；'
+        '若用户明确要求正式报告，可在本轮目标说明中标注"需要PDF报告交付"，report_decision会读取该意图。\n'
         '【Mind Notes 消费】本轮开始前已仔细读取笔记库（flow_outputs.notes_recall.semantic_output 的 notes 与 '
         'pending，以及提示词顶部注入的笔记全文）。必须逐条审视其中的用户偏好（如外部学习来源仅限学术文献、'
         '禁止社交平台）、长期约束、待定改进（pending）、历史问题（issue_note）和习惯/经验。'
@@ -2120,6 +2122,76 @@ def run_narrative(ctx, params):
             'message': narrative['milestone_message']}
 
 
+def report_decision(ctx, params):
+    """收尾交付决策：LLM 判断本轮任务是否需要生成 PDF 报告。
+
+    之前"是否生成 PDF"由固定的 report_policy 字段决定（worker 在 job
+    完成/暂停时无条件按 report_policy 触发 pdf_report 子 Flow）。本事件
+    把它改为收尾处的 LLM 判断：依据用户原始请求、本轮真实结果质量与
+    用户笔记偏好，输出 report_requested；worker 读取本节点输出决定是否
+    启动 pdf_report（PDF 仍是独立 Flow）。report_requested=False 时
+    覆盖固定 report_policy（即使 policy 非 none 也不生成）。
+    """
+    contract = params.get('intent_contract') if isinstance(params.get('intent_contract'), dict) else {}
+    original = str(contract.get('original_request') or params.get('request') or '')
+    outputs = params.get('flow_outputs') if isinstance(params.get('flow_outputs'), dict) else {}
+
+    def _row(name: str) -> str:
+        row = outputs.get(name)
+        if not isinstance(row, dict):
+            return ''
+        sem = row.get('semantic_output') if isinstance(row.get('semantic_output'), dict) else {}
+        if sem:
+            return json.dumps(sem, ensure_ascii=False)[:2500]
+        return str(row.get('summary') or '')[:800]
+
+    evidence_basis = {
+        'execute': _row('execute'),
+        'verify': _row('verify'),
+        'reflect': _row('reflect'),
+        'core_settlement': _row('core_settlement'),
+    }
+    notes_hint = ''
+    notes_row = outputs.get('notes_recall')
+    if isinstance(notes_row, dict):
+        sem = notes_row.get('semantic_output')
+        if isinstance(sem, dict):
+            notes_hint = str(sem.get('notes') or sem.get('summary') or '')[:2000]
+    prompt = (
+        '你是 Partner 的交付决策者。本轮任务已经执行到收尾阶段，请判断是否需要为这次任务'
+        '生成一份 PDF 报告（PDF 是独立 flow，由你的判断决定是否启动；不生成时用户只收消息）。\n'
+        '判断依据（综合判断，禁止只看单一条件）：\n'
+        '1) 用户原始请求是否明确要求正式报告/PDF/文档交付，或任务性质本身需要正式书面交付物'
+        '（如调研综述、复杂分析、多轮迭代的最终结论）；\n'
+        '2) 本轮真实结果是否有实质内容值得留存（多轮迭代结论、数据/代码产物、有来源的调研结果）；\n'
+        '3) 用户笔记偏好中若有"要 PDF/报告"或"不要 PDF"的明确习惯，偏好优先；\n'
+        '4) 简单问答、一段话总结已满足用户需求的，不要生成 PDF；\n'
+        '5) 若 execute 失败且没有任何实质结果，也不要生成。\n'
+        '用户原始请求=' + original[:8000]
+        + '\n本轮真实结果摘要（execute/verify/reflect/core_settlement）=' + json.dumps(evidence_basis, ensure_ascii=False)[:12000]
+        + '\n用户笔记偏好（与交付/报告相关）=' + notes_hint
+        + '\n只输出一个 JSON 对象：\n'
+        '{"report_requested": true|false, "reason": "一段用户可读的判断理由", '
+        '"report_scope": "要生成时：报告应覆盖的内容范围；不生成时：空字符串"}'
+    )
+    raw, usage = call_model(ctx, purpose='report_decision', prompt=prompt)
+    try:
+        value = json_object(raw)
+    except Exception:
+        value = {'report_requested': False, 'reason': '决策响应不可解析，默认不生成 PDF',
+                 'report_scope': ''}
+    value['report_requested'] = bool(value.get('report_requested'))
+    value['reason'] = str(value.get('reason') or '')[:1000]
+    value['report_scope'] = str(value.get('report_scope') or '')[:2000]
+    value['model_usage'] = usage or {}
+    if value['report_requested']:
+        summary = '收尾判断：本轮需要生成 PDF 报告。' + value['reason']
+    else:
+        summary = '收尾判断：本轮不需要生成 PDF 报告。' + value['reason']
+    return {'ok': True, 'status': 'completed', 'summary': summary,
+            'semantic_output': value}
+
+
 def report_request(ctx, params):
     if str(params.get('report_policy') or 'milestone') == 'none':
         return result({'requested': False, 'reason': 'report_policy_none'},
@@ -2985,11 +3057,11 @@ def finish(ctx, params):
 DEFINITIONS = [EventDefinition('cycle.' + name, 'project', description, fn,
     execution_method='llm' if name in ('assess','memory_update','research_preflight','input_eligibility',
                                         'round_design','round_blueprint_critic','problem_portfolio_update',
-                                        'round_settle','iteration_next_decide',
+                                        'round_settle','iteration_next_decide','report_decision',
                                         'partner_audit','semantic_claim_audit','semantic_claim_repair') else 'local',
     timeout_seconds=300 if name in ('assess','memory_update','research_preflight','input_eligibility',
                                      'round_design','round_blueprint_critic','problem_portfolio_update',
-                                     'round_settle','iteration_next_decide',
+                                     'round_settle','iteration_next_decide','report_decision',
                                      'partner_audit','semantic_claim_audit','semantic_claim_repair') else 100)
     for name, fn, description in (
         ('initialize', initialize, '初始化项目周期预算与职责边界'),
@@ -3014,6 +3086,7 @@ DEFINITIONS = [EventDefinition('cycle.' + name, 'project', description, fn,
         ('assess', assess, '综合所有已执行项目轮的真实推进与差距'),
         ('final_state_freeze', final_state_freeze, '解析冲突并冻结所有渠道唯一可用的最终事实'),
         ('run_narrative', run_narrative, '从确定性证据生成消息、Web和报告共享事实模型'),
+        ('report_decision', report_decision, '收尾交付决策：LLM 判断本轮是否需要生成 PDF 报告（PDF 为独立 flow，由决策启动）'),
         ('report_request', report_request, '请求现有PDF子Flow'),
         ('delivery_settle', delivery_settle, '等待本次真实渠道ACK或明确失败'),
         ('cross_channel_verify', cross_channel_verify, '核验消息、网页与PDF使用同一冻结事实版本'),

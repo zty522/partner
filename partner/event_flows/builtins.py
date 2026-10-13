@@ -178,12 +178,36 @@ for _node in PROJECT_ITERATION_V3_0.nodes:
     if _node.node_id == 'understand_3':
         _v31_nodes.append(Node('round_plan', 'supervise.round_plan', ('understand_3',),
                                parameters={'inject': True}))
-PROJECT_ITERATION = replace(
+PROJECT_ITERATION_V3_1 = replace(
     PROJECT_ITERATION_V3_0, version="3.1.0",
     nodes=tuple(_v31_nodes),
     description="Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route. "
                 "v3.1.0: 新增轮级规划节点 round_plan（读完整 notes，LLM 规划本轮 flow 组合并落盘本轮预期文档，"
                 "供外层 Supervisor 对照；后续规划/执行 event 只读结构化上下文）。"
+                "Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.",
+    soft_orchestrated=True)
+
+# v3.2.0 收尾交付决策：route 之后新增 report_decision 节点（LLM 依据用户请求、
+# 本轮真实结果质量与用户偏好判断是否生成 PDF 报告；PDF 为独立 flow，由 worker
+# 读取本节点输出后启动，不再由固定 report_policy 决定）。continuation 顺延依赖它，
+# 保证决策先于后续消息链。
+_v32_nodes: list[Any] = []
+for _node in PROJECT_ITERATION_V3_1.nodes:
+    _v32_nodes.append(_node)
+    if _node.node_id == 'route':
+        _v32_nodes.append(Node('report_decision', 'cycle.report_decision', ('route',)))
+PROJECT_ITERATION = replace(
+    PROJECT_ITERATION_V3_1, version="3.2.0",
+    nodes=tuple(
+        Node('continuation', 'project.continuation_propose', ('report_decision',),
+             when_route="continue_project", optional=True)
+        if _node.node_id == 'continuation' else _node
+        for _node in _v32_nodes
+    ),
+    description="Core v1 project spine: propose, forecast, typed judgment, freeze, execute, settle and route. "
+                "v3.1.0: 新增轮级规划节点 round_plan。"
+                "v3.2.0: 收尾新增 report_decision 节点（LLM 判断本轮是否需要生成 PDF 报告；"
+                "PDF 为独立 flow，由 worker 按决策启动，不再由固定 report_policy 决定）。"
                 "Soft-orchestrated: the LLM may adjust the remaining graph at runtime against the shared Event pool.",
     soft_orchestrated=True)
 

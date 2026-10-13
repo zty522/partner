@@ -473,8 +473,7 @@ class EventWorker:
             job.status = 'paused'
             job.error = '本次观察时段结束，停止新增业务动作；目标是否达成以已有证据为准。'
             self._save_job(job)
-            if job.report_policy != 'none':
-                self._maybe_start_report(job)
+            self._maybe_start_report(job)
             return True
         try:
             definition = self.flows.get(state.flow_type, version=state.definition_version)
@@ -1163,6 +1162,20 @@ class EventWorker:
             flow = self.store.load(job.flow_id)
         except Exception:
             return
+        # 收尾交付决策（LLM）优先：flow 内 report_decision 节点已由 LLM 判断
+        # 本轮是否需要 PDF 报告。report_requested=False → 明确不生成（覆盖固定
+        # report_policy）；report_requested=True → 生成；无该节点（旧版本 flow）
+        # → 按 job.report_policy 兜底。
+        try:
+            rd = (flow.node_outputs or {}).get('report_decision') or {}
+            rd_sem = rd.get('semantic_output') if isinstance(rd.get('semantic_output'), dict) else None
+        except Exception:
+            rd_sem = None
+        if rd_sem is not None:
+            if rd_sem.get('report_requested') is not True:
+                return None
+        elif job.report_policy == 'none':
+            return None
         # 从已完成的 project_iteration flow 收集证据文件
         evidence = [str(a.get("path") if isinstance(a, dict) else a) for a in job.attachments]
         inherited_evidence = []
@@ -1329,7 +1342,7 @@ class EventWorker:
             return
         if job.status == 'completed' and self.shared_mode and job.flow_type == 'browser_video_learning':
             flow = self.store.load(job.flow_id)
-            if not flow.failed_node_ids and job.report_policy != 'none':
+            if not flow.failed_node_ids:
                 self._maybe_start_report(job)
             return
         if job.status != "completed" or not self.shared_mode or job.flow_type not in {"project_iteration", "new_project"}:
@@ -1339,8 +1352,7 @@ class EventWorker:
         except Exception:
             return
         if flow.selected_route in {"complete", "report"}:
-            if job.report_policy != 'none':
-                self._maybe_start_report(job)
+            self._maybe_start_report(job)
             return
         # 只对 continue_project 推进；active_learning / self_evolution 当下停一轮，
         # 等那一轮真正执行完再由本函数重新评估，避免无限嵌套叙事。
@@ -1357,8 +1369,7 @@ class EventWorker:
         max_rounds = round_limit(job.intent_contract, max_rounds)
         if count >= max_rounds or expired(job.intent_contract):
             # 达到本次请求预算后报告真实进度，不将预算耗尽视为目标达成。
-            if job.report_policy != 'none':
-                self._maybe_start_report(job)
+            self._maybe_start_report(job)
             return
         import uuid
         from datetime import datetime, timezone
