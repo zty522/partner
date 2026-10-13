@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -591,7 +592,6 @@ class EventWorker:
         # interrupted non-idempotent Event is never replayed automatically,
         # because its external side effect may already have happened.
         if state.current_event_id and not state.waiting_task_id and 'execute' in state.ready_node_ids:
-            import hashlib
             key = f"{job.job_id}:{state.flow_id}:execute"
             task_id = 'action_' + hashlib.sha256(key.encode()).hexdigest()[:24]
             receipt = self.root / 'state/event_runtime/background' / task_id / 'task.json'
@@ -1238,7 +1238,6 @@ class EventWorker:
             except OSError:
                 continue
             filtered.append(x)
-        import hashlib
         indexed = []
         seen_hashes = set()
         for raw in filtered:
